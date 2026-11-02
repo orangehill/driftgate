@@ -35,6 +35,15 @@ and `driftgate.yaml` is at the project root
 Flags go before or after the positional arguments: `driftgate compare
 before --only 'get-*'` works.
 
+Baselines have names, and the default name is `local`: `setup` and the
+first `run` make the baseline `local`, and `run`, `capture`, `compare`,
+`allowlist check` and `bisect` (before there is a comparison) use it
+unless told otherwise. A baseline
+with another name (`run --baseline release`) has to be named in every
+command that uses it: `--baseline <name>`, or `--against <name>` for
+`compare`. `accept` and `review` work on the last comparison and its
+baseline; `verify` checks every baseline unless `--baseline` names one.
+
 ## Interrupts and the local store
 
 Ctrl-C or SIGTERM (a cancelled CI job, `docker stop`) stops a long-running
