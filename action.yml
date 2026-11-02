@@ -1,5 +1,5 @@
-name: DriftGate
-description: Regression gate for HTTP APIs — capture the responses of the running application and compare them with the committed baseline.
+name: DriftGate API Regression Gate
+description: Capture the responses of the running application and compare them with the committed baseline.
 branding:
   icon: shield
   color: orange
