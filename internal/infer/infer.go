@@ -133,9 +133,18 @@ func Pattern(values []string) string {
 	}
 	var b strings.Builder
 	if shared {
-		for j, t := range toks[0] {
+		for j := 0; j < len(toks[0]); j++ {
+			t := toks[0][j]
 			if !t.run {
 				b.WriteString(regexp.QuoteMeta(t.text))
+				continue
+			}
+			// A UUID is any UUID: its groups are hex by chance digits only
+			// (0308), so a format built from the samples would reject the
+			// next one.
+			if uuidAt(toks, j) {
+				b.WriteString(uuidFormat)
+				j += 8 // five runs and the four dashes between them
 				continue
 			}
 			parts := make([]string, len(toks))
@@ -221,6 +230,29 @@ var (
 	integer  = lazy.Regexp(`^-?\d+$`)
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
 )
+
+// uuidFormat matches any UUID, in either case.
+const uuidFormat = `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`
+
+var uuid = lazy.Regexp(`^` + uuidFormat + `$`)
+
+// uuidAt reports a UUID in every value at token j: five runs with dashes
+// between them. The caller has checked that the values share their tokens.
+func uuidAt(toks [][]token, j int) bool {
+	for _, t := range toks {
+		if j+9 > len(t) {
+			return false
+		}
+		var s strings.Builder
+		for _, x := range t[j : j+9] {
+			s.WriteString(x.text)
+		}
+		if !uuid().MatchString(s.String()) {
+			return false
+		}
+	}
+	return true
+}
 
 var calendarWord = lazy.Regexp(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$`)
 
