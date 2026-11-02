@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/orangehill/driftgate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/orangehill/driftgate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/orangehill/driftgate)](https://github.com/orangehill/driftgate/releases/latest)
+[![Coverage](https://coveralls.io/repos/github/orangehill/driftgate/badge.svg?branch=main)](https://coveralls.io/github/orangehill/driftgate?branch=main)
 [![Go Reference](https://pkg.go.dev/badge/github.com/orangehill/driftgate.svg)](https://pkg.go.dev/github.com/orangehill/driftgate)
 [![License](https://img.shields.io/github/license/orangehill/driftgate)](LICENSE)
 
