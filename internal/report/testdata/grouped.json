@@ -1,0 +1,709 @@
+{
+ "version": 1,
+ "tag": "run",
+ "against": "baseline:local",
+ "compared": 7,
+ "passed": 0,
+ "drifted": 7,
+ "skipped": 0,
+ "observed": 0,
+ "results": [
+  {
+   "id": "home",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "home",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "302"
+    },
+    {
+     "request": "home",
+     "kind": "header-extra",
+     "where": "header:location",
+     "current": "[\"/login\"]"
+    },
+    {
+     "request": "home",
+     "kind": "header-missing",
+     "where": "header:vary",
+     "baseline": "[\"Accept-Encoding\"]"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>head>meta[0]",
+     "current": "meta"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>head>meta[1]",
+     "current": "meta"
+    },
+    {
+     "request": "home",
+     "kind": "text",
+     "where": "html>head>title",
+     "baseline": "\"Home\"",
+     "current": "\"Redirecting to /login\""
+    },
+    {
+     "request": "home",
+     "kind": "text",
+     "where": "html>body",
+     "baseline": "\"<h1> <p>\"",
+     "current": "\"Redirecting to <a> .\""
+    },
+    {
+     "request": "home",
+     "kind": "element-missing",
+     "where": "html>body>h1",
+     "baseline": "h1"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>body>a",
+     "current": "a"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "302",
+    "location": "/login"
+   },
+   "collapsed": 7
+  },
+  {
+   "id": "about",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "about",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "302"
+    },
+    {
+     "request": "about",
+     "kind": "header-extra",
+     "where": "header:location",
+     "current": "[\"/login\"]"
+    },
+    {
+     "request": "about",
+     "kind": "header-missing",
+     "where": "header:vary",
+     "baseline": "[\"Accept-Encoding\"]"
+    },
+    {
+     "request": "about",
+     "kind": "element-extra",
+     "where": "html>head>meta[0]",
+     "current": "meta"
+    },
+    {
+     "request": "about",
+     "kind": "element-extra",
+     "where": "html>head>meta[1]",
+     "current": "meta"
+    },
+    {
+     "request": "about",
+     "kind": "text",
+     "where": "html>head>title",
+     "baseline": "\"Home\"",
+     "current": "\"Redirecting to /login\""
+    },
+    {
+     "request": "about",
+     "kind": "text",
+     "where": "html>body",
+     "baseline": "\"<h1> <p>\"",
+     "current": "\"Redirecting to <a> .\""
+    },
+    {
+     "request": "about",
+     "kind": "element-missing",
+     "where": "html>body>h1",
+     "baseline": "h1"
+    },
+    {
+     "request": "about",
+     "kind": "element-extra",
+     "where": "html>body>a",
+     "current": "a"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "302",
+    "location": "/login"
+   },
+   "collapsed": 7
+  },
+  {
+   "id": "contact",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "contact",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "302"
+    },
+    {
+     "request": "contact",
+     "kind": "header-extra",
+     "where": "header:location",
+     "current": "[\"/login\"]"
+    },
+    {
+     "request": "contact",
+     "kind": "header-missing",
+     "where": "header:vary",
+     "baseline": "[\"Accept-Encoding\"]"
+    },
+    {
+     "request": "contact",
+     "kind": "element-extra",
+     "where": "html>head>meta[0]",
+     "current": "meta"
+    },
+    {
+     "request": "contact",
+     "kind": "element-extra",
+     "where": "html>head>meta[1]",
+     "current": "meta"
+    },
+    {
+     "request": "contact",
+     "kind": "text",
+     "where": "html>head>title",
+     "baseline": "\"Home\"",
+     "current": "\"Redirecting to /login\""
+    },
+    {
+     "request": "contact",
+     "kind": "text",
+     "where": "html>body",
+     "baseline": "\"<h1> <p>\"",
+     "current": "\"Redirecting to <a> .\""
+    },
+    {
+     "request": "contact",
+     "kind": "element-missing",
+     "where": "html>body>h1",
+     "baseline": "h1"
+    },
+    {
+     "request": "contact",
+     "kind": "element-extra",
+     "where": "html>body>a",
+     "current": "a"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "302",
+    "location": "/login"
+   },
+   "collapsed": 7
+  },
+  {
+   "id": "admin",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "admin",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "302"
+    },
+    {
+     "request": "admin",
+     "kind": "header-extra",
+     "where": "header:location",
+     "current": "[\"http://localhost:8080/\"]"
+    },
+    {
+     "request": "admin",
+     "kind": "header-missing",
+     "where": "header:vary",
+     "baseline": "[\"Accept-Encoding\"]"
+    },
+    {
+     "request": "admin",
+     "kind": "element-extra",
+     "where": "html>head>meta[0]",
+     "current": "meta"
+    },
+    {
+     "request": "admin",
+     "kind": "element-extra",
+     "where": "html>head>meta[1]",
+     "current": "meta"
+    },
+    {
+     "request": "admin",
+     "kind": "text",
+     "where": "html>head>title",
+     "baseline": "\"Home\"",
+     "current": "\"Redirecting to http://localhost:8080/\""
+    },
+    {
+     "request": "admin",
+     "kind": "text",
+     "where": "html>body",
+     "baseline": "\"<h1> <p>\"",
+     "current": "\"Redirecting to <a> .\""
+    },
+    {
+     "request": "admin",
+     "kind": "element-missing",
+     "where": "html>body>h1",
+     "baseline": "h1"
+    },
+    {
+     "request": "admin",
+     "kind": "element-extra",
+     "where": "html>body>a",
+     "current": "a"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "302",
+    "location": "http://localhost:8080/"
+   },
+   "collapsed": 7
+  },
+  {
+   "id": "api-news",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "api-news",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "500"
+    },
+    {
+     "request": "api-news",
+     "kind": "header-value",
+     "where": "header:content-type",
+     "baseline": "[\"application/json\"]",
+     "current": "[\"application/problem+json\"]"
+    },
+    {
+     "request": "api-news",
+     "kind": "header-missing",
+     "where": "header:x-total",
+     "baseline": "[\"3\"]"
+    },
+    {
+     "request": "api-news",
+     "kind": "key-missing",
+     "where": "$.data",
+     "baseline": "data"
+    },
+    {
+     "request": "api-news",
+     "kind": "key-extra",
+     "where": "$.message",
+     "current": "message"
+    },
+    {
+     "request": "api-news",
+     "kind": "key-extra",
+     "where": "$.exception",
+     "current": "exception"
+    },
+    {
+     "request": "api-news",
+     "kind": "value",
+     "where": "$.status",
+     "baseline": "\"ok\"",
+     "current": "\"error\""
+    },
+    {
+     "request": "api-news",
+     "kind": "encoding",
+     "where": "$",
+     "baseline": "layout",
+     "current": "layout"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "500"
+   },
+   "collapsed": 6
+  },
+  {
+   "id": "api-faq",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "api-faq",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "500"
+    },
+    {
+     "request": "api-faq",
+     "kind": "header-value",
+     "where": "header:content-type",
+     "baseline": "[\"application/json\"]",
+     "current": "[\"application/problem+json\"]"
+    },
+    {
+     "request": "api-faq",
+     "kind": "header-missing",
+     "where": "header:x-total",
+     "baseline": "[\"3\"]"
+    },
+    {
+     "request": "api-faq",
+     "kind": "key-missing",
+     "where": "$.data",
+     "baseline": "data"
+    },
+    {
+     "request": "api-faq",
+     "kind": "key-extra",
+     "where": "$.message",
+     "current": "message"
+    },
+    {
+     "request": "api-faq",
+     "kind": "key-extra",
+     "where": "$.exception",
+     "current": "exception"
+    },
+    {
+     "request": "api-faq",
+     "kind": "value",
+     "where": "$.status",
+     "baseline": "\"ok\"",
+     "current": "\"error\""
+    },
+    {
+     "request": "api-faq",
+     "kind": "encoding",
+     "where": "$",
+     "baseline": "layout",
+     "current": "layout"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "500"
+   },
+   "collapsed": 6
+  },
+  {
+   "id": "news-0",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "news-0",
+     "kind": "type",
+     "where": "$.data[0].id",
+     "baseline": "int",
+     "current": "string"
+    },
+    {
+     "request": "news-0",
+     "kind": "header-missing",
+     "where": "header:x-total",
+     "baseline": "[\"3\"]"
+    },
+    {
+     "request": "news-0",
+     "kind": "header-value",
+     "where": "header:content-type",
+     "baseline": "[\"application/json\"]",
+     "current": "[\"text/html\"]"
+    },
+    {
+     "request": "news-0",
+     "kind": "value",
+     "where": "$.title",
+     "baseline": "\"Notes\"",
+     "current": "\"Notes news-0\""
+    }
+   ]
+  }
+ ],
+ "groups": [
+  {
+   "n": 1,
+   "signature": "status ",
+   "requests": 6,
+   "drifts": 6,
+   "example": {
+    "request": "home",
+    "kind": "status",
+    "where": "",
+    "baseline": "200",
+    "current": "302"
+   },
+   "explanation": "6 drifts in 6 requests: status changed (for example 200 → 302)"
+  },
+  {
+   "n": 2,
+   "signature": "element-extra html>head>meta[*]",
+   "requests": 4,
+   "drifts": 8,
+   "example": {
+    "request": "home",
+    "kind": "element-extra",
+    "where": "html>head>meta[0]",
+    "current": "meta"
+   },
+   "explanation": "8 drifts in 4 requests: element html>head>meta[*] is new"
+  },
+  {
+   "n": 3,
+   "signature": "element-extra html>body>a",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "element-extra",
+    "where": "html>body>a",
+    "current": "a"
+   },
+   "explanation": "4 drifts in 4 requests: element html>body>a is new"
+  },
+  {
+   "n": 4,
+   "signature": "element-missing html>body>h1",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "element-missing",
+    "where": "html>body>h1",
+    "baseline": "h1"
+   },
+   "explanation": "4 drifts in 4 requests: element html>body>h1 is missing"
+  },
+  {
+   "n": 5,
+   "signature": "header-extra header:location",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "header-extra",
+    "where": "header:location",
+    "current": "[\"/login\"]"
+   },
+   "explanation": "4 drifts in 4 requests: header location is new"
+  },
+  {
+   "n": 6,
+   "signature": "header-missing header:vary",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "header-missing",
+    "where": "header:vary",
+    "baseline": "[\"Accept-Encoding\"]"
+   },
+   "explanation": "4 drifts in 4 requests: header vary is missing"
+  },
+  {
+   "n": 7,
+   "signature": "text html>body",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "text",
+    "where": "html>body",
+    "baseline": "\"<h1> <p>\"",
+    "current": "\"Redirecting to <a> .\""
+   },
+   "explanation": "4 drifts in 4 requests: text of html>body changed (\"<h1> <p>\" → \"Redirecting to <a> .\")"
+  },
+  {
+   "n": 8,
+   "signature": "text html>head>title",
+   "requests": 4,
+   "drifts": 4,
+   "example": {
+    "request": "home",
+    "kind": "text",
+    "where": "html>head>title",
+    "baseline": "\"Home\"",
+    "current": "\"Redirecting to /login\""
+   },
+   "explanation": "4 drifts in 4 requests: text of html>head>title changed (for example \"Home\" → \"Redirecting to /login\")"
+  },
+  {
+   "n": 9,
+   "signature": "header-missing header:x-total",
+   "requests": 3,
+   "drifts": 3,
+   "example": {
+    "request": "api-news",
+    "kind": "header-missing",
+    "where": "header:x-total",
+    "baseline": "[\"3\"]"
+   },
+   "explanation": "3 drifts in 3 requests: header x-total is missing"
+  },
+  {
+   "n": 10,
+   "signature": "header-value header:content-type",
+   "requests": 3,
+   "drifts": 3,
+   "example": {
+    "request": "api-news",
+    "kind": "header-value",
+    "where": "header:content-type",
+    "baseline": "[\"application/json\"]",
+    "current": "[\"application/problem+json\"]"
+   },
+   "explanation": "3 drifts in 3 requests: header content-type changed value (for example [\"application/json\"] → [\"application/problem+json\"])"
+  },
+  {
+   "n": 11,
+   "signature": "encoding $",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "api-news",
+    "kind": "encoding",
+    "where": "$",
+    "baseline": "layout",
+    "current": "layout"
+   },
+   "explanation": "2 drifts in 2 requests: the same values with a different layout of whitespace"
+  },
+  {
+   "n": 12,
+   "signature": "key-extra $.exception",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "api-news",
+    "kind": "key-extra",
+    "where": "$.exception",
+    "current": "exception"
+   },
+   "explanation": "2 drifts in 2 requests: $.exception is new"
+  },
+  {
+   "n": 13,
+   "signature": "key-extra $.message",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "api-news",
+    "kind": "key-extra",
+    "where": "$.message",
+    "current": "message"
+   },
+   "explanation": "2 drifts in 2 requests: $.message is new"
+  },
+  {
+   "n": 14,
+   "signature": "key-missing $.data",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "api-news",
+    "kind": "key-missing",
+    "where": "$.data",
+    "baseline": "data"
+   },
+   "explanation": "2 drifts in 2 requests: $.data is missing"
+  },
+  {
+   "n": 15,
+   "signature": "value $.status",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "api-news",
+    "kind": "value",
+    "where": "$.status",
+    "baseline": "\"ok\"",
+    "current": "\"error\""
+   },
+   "explanation": "2 drifts in 2 requests: $.status changed value (\"ok\" → \"error\")"
+  },
+  {
+   "n": 16,
+   "signature": "type $.data[*].id int→string",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "news-0",
+    "kind": "type",
+    "where": "$.data[0].id",
+    "baseline": "int",
+    "current": "string"
+   },
+   "explanation": "1 drift in 1 request: $.data[*].id changed type int → string"
+  },
+  {
+   "n": 17,
+   "signature": "value $.title",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "news-0",
+    "kind": "value",
+    "where": "$.title",
+    "baseline": "\"Notes\"",
+    "current": "\"Notes news-0\""
+   },
+   "explanation": "1 drift in 1 request: $.title changed value (\"Notes\" → \"Notes news-0\")"
+  }
+ ],
+ "status_changes": [
+  {
+   "from": "200",
+   "to": "302",
+   "location": "/login",
+   "requests": [
+    "home",
+    "about",
+    "contact"
+   ]
+  },
+  {
+   "from": "200",
+   "to": "500",
+   "requests": [
+    "api-news",
+    "api-faq"
+   ]
+  },
+  {
+   "from": "200",
+   "to": "302",
+   "location": "http://localhost:8080/",
+   "requests": [
+    "admin"
+   ]
+  }
+ ],
+ "level": "values",
+ "mode": "evolve",
+ "created": "2026-10-30T10:00:00Z"
+}

@@ -1,0 +1,4 @@
+version: 1
+routes:
+  - route: POST /admin/reset
+    reason: Test hook of the demo, used as the restore command.

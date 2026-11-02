@@ -1,0 +1,155 @@
+{
+ "version": 1,
+ "tag": "run",
+ "against": "baseline:local",
+ "compared": 3,
+ "passed": 1,
+ "drifted": 2,
+ "skipped": 1,
+ "observed": 1,
+ "results": [
+  {
+   "id": "news-0",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "news-0",
+     "kind": "type",
+     "where": "$.data[0].id",
+     "baseline": "int",
+     "current": "string"
+    },
+    {
+     "request": "news-0",
+     "kind": "header-missing",
+     "where": "header:x-total",
+     "baseline": "[\"3\"]"
+    },
+    {
+     "request": "news-0",
+     "kind": "header-value",
+     "where": "header:content-type",
+     "baseline": "[\"application/json\"]",
+     "current": "[\"text/html\"]"
+    },
+    {
+     "request": "news-0",
+     "kind": "value",
+     "where": "$.title",
+     "baseline": "\"Notes\"",
+     "current": "\"Notes news-0\""
+    }
+   ]
+  },
+  {
+   "id": "news-1",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "news-1",
+     "kind": "type",
+     "where": "$.data[0].id",
+     "baseline": "int",
+     "current": "string"
+    },
+    {
+     "request": "news-1",
+     "kind": "header-missing",
+     "where": "header:x-total",
+     "baseline": "[\"3\"]"
+    },
+    {
+     "request": "news-1",
+     "kind": "header-value",
+     "where": "header:content-type",
+     "baseline": "[\"application/json\"]",
+     "current": "[\"text/html\"]"
+    },
+    {
+     "request": "news-1",
+     "kind": "value",
+     "where": "$.title",
+     "baseline": "\"Notes\"",
+     "current": "\"Notes news-1\""
+    }
+   ]
+  },
+  {
+   "id": "ok",
+   "outcome": "pass"
+  },
+  {
+   "id": "new",
+   "outcome": "skipped",
+   "note": "no baseline"
+  },
+  {
+   "id": "up",
+   "outcome": "observed",
+   "note": "200, 2 bytes → 200, 3 bytes"
+  }
+ ],
+ "groups": [
+  {
+   "n": 1,
+   "signature": "header-missing header:x-total",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "news-0",
+    "kind": "header-missing",
+    "where": "header:x-total",
+    "baseline": "[\"3\"]"
+   },
+   "explanation": "2 drifts in 2 requests: header x-total is missing"
+  },
+  {
+   "n": 2,
+   "signature": "header-value header:content-type",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "news-0",
+    "kind": "header-value",
+    "where": "header:content-type",
+    "baseline": "[\"application/json\"]",
+    "current": "[\"text/html\"]"
+   },
+   "explanation": "2 drifts in 2 requests: header content-type changed value ([\"application/json\"] → [\"text/html\"])"
+  },
+  {
+   "n": 3,
+   "signature": "type $.data[*].id int→string",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "news-0",
+    "kind": "type",
+    "where": "$.data[0].id",
+    "baseline": "int",
+    "current": "string"
+   },
+   "explanation": "2 drifts in 2 requests: $.data[*].id changed type int → string"
+  },
+  {
+   "n": 4,
+   "signature": "value $.title",
+   "requests": 2,
+   "drifts": 2,
+   "example": {
+    "request": "news-0",
+    "kind": "value",
+    "where": "$.title",
+    "baseline": "\"Notes\"",
+    "current": "\"Notes news-0\""
+   },
+   "explanation": "2 drifts in 2 requests: $.title changed value (for example \"Notes\" → \"Notes news-0\")"
+  }
+ ],
+ "level": "values",
+ "mode": "evolve",
+ "created": "2026-10-30T10:00:00Z",
+ "no_baseline": [
+  "new"
+ ]
+}

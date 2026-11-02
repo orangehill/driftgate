@@ -1,0 +1,28 @@
+{
+ "version": 1,
+ "id": "post-api-faq",
+ "status": 201,
+ "headers": [
+  [
+   "connection",
+   "close"
+  ],
+  [
+   "content-length",
+   "54"
+  ],
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "date",
+   "Sun, 01 Nov 2026 00:07:32 GMT"
+  ]
+ ],
+ "body": {
+  "sha256": "9c238a9e01e7ccd4fde1fca24442fc6cd18782782d35a492c5118fcf3effbe56",
+  "storage": "public",
+  "size": 54
+ }
+}

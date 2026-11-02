@@ -1,0 +1,12 @@
+DRIFT  home
+         status 200 → 302, redirects to http://localhost:8080
+         header-extra    header:location   → ["http://localhost:8080"]
+         body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report
+
+Groups:
+  [4] 1 drift in 1 request: header location is new
+  [6] 1 drift in 1 request: status changed (200 → 302)
+      1 request: 200 → 302 to http://localhost:8080 (home)
+  … 6 more groups only in requests whose status changed, summarized there (driftgate review lists them)
+
+run against baseline:local: 2 compared, 1 passed, 1 drifted, 0 skipped, 0 observed

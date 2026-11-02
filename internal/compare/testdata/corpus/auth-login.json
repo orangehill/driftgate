@@ -1,0 +1,1 @@
+{"data":{"token":{"token":"aaa.bbb.ccc","ttl":3600},"user":{"id":1,"email":"test@example.test","first_name":"Test","last_name":"User","last_login":"2026-10-28T10:08:35+00:00","roles":[{"id":1,"name":"admin","permissions":["read","write"]}],"settings":{},"deleted_at":null}}}

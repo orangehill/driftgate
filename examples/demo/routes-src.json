@@ -1,0 +1,6 @@
+[
+ {"method":"GET","path":"/api/news"},
+ {"method":"GET","path":"/api/news/{id}"},
+ {"method":"POST","path":"/api/faq","body":{"q":"?"}},
+ {"method":"POST","path":"/admin/reset"}
+]

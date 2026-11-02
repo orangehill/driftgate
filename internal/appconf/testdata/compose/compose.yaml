@@ -1,0 +1,17 @@
+services:
+  web:
+    image: nginx:1.27
+    ports:
+      - "8089:80"
+  db:
+    image: postgres:16-alpine
+    env_file:
+      - ./docker/db.env
+      - path: ./docker/missing.env
+        required: false
+    environment:
+      POSTGRES_DB: ${PG_DB:-shop}
+    ports:
+      - target: 5432
+        published: "${PG_PORT}"
+        host_ip: 127.0.0.1

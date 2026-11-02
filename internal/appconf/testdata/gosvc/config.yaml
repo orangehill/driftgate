@@ -1,0 +1,9 @@
+server:
+  addr: ":8085"
+database:
+  driver: postgres
+  host: localhost
+  port: 5434
+  user: svc
+  password: S3cr-go-yaml
+  name: svc

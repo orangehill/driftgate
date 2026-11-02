@@ -1,0 +1,11 @@
++--------+----------+------------------------+------------------+-------------------------------------------------------+--------------+
+| Domain | Method   | URI                    | Name             | Action                                                | Middleware   |
++--------+----------+------------------------+------------------+-------------------------------------------------------+--------------+
+|        | GET|HEAD | /                      |                  | Closure                                               | web          |
+|        | GET|HEAD | api/news               | news.index       | App\Http\Controllers\NewsController@index             | api,lang     |
+|        | GET|HEAD | api/news/{id}          | news.show        | App\Http\Controllers\NewsController@show              | api,lang     |
+|        | POST     | api/faq                | faq.store        | App\Http\Controllers\FaqController@store              | api          |
+|        |          |                        |                  |                                                       | jwt.auth     |
+|        | PUT|PATCH| api/faq/{id}           | faq.update       | App\Http\Controllers\FaqController@update             | api,jwt.auth |
+|        | GET|HEAD | api/search/{term?}     |                  | App\Http\Controllers\SearchController@index           | api          |
++--------+----------+------------------------+------------------+-------------------------------------------------------+--------------+

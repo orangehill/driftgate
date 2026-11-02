@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Orders</title>
+  <link rel="stylesheet" href="/assets/app.3f9a1c.css">
+  <style>
+    body { margin: 0 }
+  </style>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Acme","sameAs":["https://example.com/a","https://example.com/b"]}</script>
+</head>
+<body class="page">
+  <header id="top"><nav><a href="/">Home</a> | <a href="/orders" class="active">Orders</a></nav></header>
+  <div id="app">
+    <h1>Orders <small>(3)</small></h1>
+    <ul class="orders">
+      <li data-id="1">First <b>open</b></li>
+      <li data-id="2">Second</li>
+      <li data-id="3" hidden>Third</li>
+    </ul>
+    <table>
+      <thead><tr><th>Item</th><th>Qty</th></tr></thead>
+      <tbody><tr><td>Pen</td><td>2</td></tr><tr><td>Ink</td><td>1</td></tr></tbody>
+    </table>
+    <form method="post" action="/orders">
+      <input type="hidden" name="_token" value="abc">
+      <label>Note <textarea name="note">  keep
+  this</textarea></label>
+      <select name="s"><option value="1" selected>One</option><option value="2">Two</option></select>
+      <button type="submit">Save</button>
+    </form>
+    <pre>line 1
+   line 2</pre>
+    <svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>
+  </div>
+  <footer><p>Rendered in 12 ms</p></footer>
+  <script id="config" type="application/json">{"api":"/api","features":{"beta":false,"limit":10}}</script>
+  <script>window.app = { started: true };</script>
+</body>
+</html>

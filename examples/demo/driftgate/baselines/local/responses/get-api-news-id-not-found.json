@@ -1,0 +1,28 @@
+{
+ "version": 1,
+ "id": "get-api-news-id-not-found",
+ "status": 404,
+ "headers": [
+  [
+   "connection",
+   "close"
+  ],
+  [
+   "content-length",
+   "25"
+  ],
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "date",
+   "Sun, 01 Nov 2026 00:07:32 GMT"
+  ]
+ ],
+ "body": {
+  "sha256": "f5002da54683e275afcd1773c890df7f852d2eacd1a1460ddeb781200743742a",
+  "storage": "public",
+  "size": 25
+ }
+}

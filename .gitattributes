@@ -1,0 +1,5 @@
+# Compared byte for byte (golden files, corpora, the example's baseline
+# and its manifest): git must not change their line endings on checkout
+# (core.autocrlf, which Git for Windows and the Windows CI runner turn on).
+**/testdata/** -text
+examples/**/baselines/** -text

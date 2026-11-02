@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0">
+ <testsuite name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0" timestamp="2026-10-30T10:00:00">
+  <properties>
+   <property name="tag" value="run"></property>
+   <property name="against" value="baseline:local"></property>
+   <property name="level" value="values"></property>
+   <property name="mode" value="evolve"></property>
+  </properties>
+  <testcase name="home" classname="driftgate" time="0">
+   <failure message="9 drifts: status  200 → 302; header-extra header:location   → [&#34;http://localhost:8080&#34;]; header-missing header:vary  [&#34;Accept-Encoding&#34;] → ; element-extra html&gt;head&gt;meta[0]   → meta; element-extra html&gt;head&gt;meta[1]   → meta; text html&gt;head&gt;title  &#34;Home&#34; → &#34;Redirecting to http://localhost:8080&#34;; text html&gt;body  &#34;&lt;h1&gt; &lt;p&gt;&#34; → &#34;Redirecting to &lt;a&gt; .&#34;; element-missing html&gt;body&gt;h1  h1 → ; element-extra html&gt;body&gt;a   → a" type="drift">status  200 → 302&#xA;header-extra header:location   → [&#34;http://localhost:8080&#34;]&#xA;header-missing header:vary  [&#34;Accept-Encoding&#34;] → &#xA;element-extra html&gt;head&gt;meta[0]   → meta&#xA;element-extra html&gt;head&gt;meta[1]   → meta&#xA;text html&gt;head&gt;title  &#34;Home&#34; → &#34;Redirecting to http://localhost:8080&#34;&#xA;text html&gt;body  &#34;&lt;h1&gt; &lt;p&gt;&#34; → &#34;Redirecting to &lt;a&gt; .&#34;&#xA;element-missing html&gt;body&gt;h1  h1 → &#xA;element-extra html&gt;body&gt;a   → a</failure>
+  </testcase>
+  <testcase name="ok" classname="driftgate" time="0"></testcase>
+ </testsuite>
+</testsuites>

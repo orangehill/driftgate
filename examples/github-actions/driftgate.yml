@@ -1,0 +1,108 @@
+# DriftGate in GitHub Actions for a typical application: a Laravel API on
+# MariaDB. Copy to .github/workflows/driftgate.yml and adjust the marked
+# places. The repository holds driftgate.yaml and the driftgate/ folder with
+# the committed baseline (made locally with `driftgate run`).
+#
+# A pull request can change every command DriftGate runs (seed, hooks,
+# adapters, params sql), and they run with this job's environment: keep the
+# trigger pull_request (never pull_request_target), and keep production
+# secrets and the project key (DRIFTGATE_KEY) out of this job. Actions are
+# pinned by commit SHA, the version in a comment.
+name: driftgate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write # the report as a pull request comment
+
+concurrency:
+  group: driftgate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  driftgate:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        # The same server and version the baseline was made on: state
+        # fingerprints are compared only on the same server version.
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: dg
+          MARIADB_DATABASE: app
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-retries=20
+    env:
+      # The application.
+      APP_ENV: testing
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_DATABASE: app
+      DB_USERNAME: root
+      DB_PASSWORD: dg
+      # driftgate.yaml: state.db.dsn: { env: DG_DB_DSN }, working: app
+      DG_DB_DSN: mysql://root:dg@127.0.0.1:3306/
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+
+      - name: Install
+        run: |
+          composer install --no-interaction --no-progress
+          cp .env.example .env
+          php artisan key:generate
+
+      # The data is loaded by the seed commands in driftgate.yaml (e.g.
+      # php artisan migrate:fresh --seed), run by the action.
+      - name: Start the application
+        run: |
+          nohup php artisan serve --host=127.0.0.1 --port=8000 >"$RUNNER_TEMP/app.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/ && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/app.log"
+          exit 1
+
+      - name: DriftGate
+        id: driftgate
+        # Pin a release tag or a commit SHA.
+        uses: orangehill/driftgate@v1.0.1
+        with:
+          junit: driftgate-junit.xml
+          # Private bodies (personal data) never leave the machine that
+          # captured them, so private requests cannot be compared here and
+          # the run exits 3 (incomplete). Until the test data is anonymized,
+          # accept a check of the public requests:
+          # args: --skip-private
+          # Pristine database cache: the seed runs only when one of these
+          # files (or the server image) changes; otherwise the dump made
+          # after the last seed is loaded. Remove these five lines to seed
+          # every time.
+          pristine-cache-files: |
+            database/migrations/**
+            database/seeders/**
+            database/factories/**
+            driftgate.yaml
+          pristine-cache-key: mariadb-11.4
+          pristine-dump: >-
+            docker exec ${{ job.services.db.id }}
+            mariadb-dump -uroot -pdg --single-transaction --routines --triggers --databases app
+            > "$DRIFTGATE_PRISTINE_DIR/app.sql"
+          pristine-load: >-
+            docker exec -i ${{ job.services.db.id }} mariadb -uroot -pdg
+            < "$DRIFTGATE_PRISTINE_DIR/app.sql"
+
+      - name: Application log
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/app.log"

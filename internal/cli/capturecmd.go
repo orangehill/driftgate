@@ -1,0 +1,660 @@
+package cli
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/orangehill/driftgate/internal/allowlist"
+	"github.com/orangehill/driftgate/internal/capture"
+	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/compare"
+	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/infer"
+	"github.com/orangehill/driftgate/internal/lazy"
+	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/snapshot"
+)
+
+func captureCmd(args []string, out, errOut io.Writer) (int, error) {
+	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
+	cfg := fs.String("config", "", "")
+	only := fs.String("only", "", "")
+	force := fs.Bool("force", false, "")
+	remote := fs.Bool("allow-remote", false, "")
+	remoteMut := fs.Bool("allow-remote-mutations", false, "")
+	noRestore := fs.Bool("allow-mutating-without-restore", false, "")
+	restore := fs.String("restore", "once", "")
+	repeat := fs.Int("repeat", 1, "")
+	baseline := fs.String("baseline", "local", "")
+	skipFP := fs.Bool("skip-fingerprint-check", false, "")
+	quiet := fs.Bool("quiet", false, "")
+	calibrate := fs.Bool("calibrate", false, "")
+	targets := targetFlag(fs)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return 0, err
+	}
+	if len(pos) != 1 {
+		return 0, usageErr("capture")
+	}
+	if *repeat < 1 {
+		return 0, configErr("--repeat must be at least 1")
+	}
+	if *calibrate {
+		if *only != "" {
+			return 0, configErr("--calibrate measures the whole catalog; it takes no --only")
+		}
+		// The setting is compared with a sequential capture, which must
+		// first agree with itself.
+		*repeat = max(*repeat, 2)
+	}
+	p, cat, allow, err := loadProject(*cfg)
+	if err != nil {
+		return 0, err
+	}
+	sel, err := selectTargets(p, targets)
+	if err != nil {
+		return 0, err
+	}
+	ctx, stop := signalContext(errOut)
+	defer stop()
+	unlock, err := lockStore(ctx, p, errOut)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	return captureSet(ctx, p, sel.requests(cat), allow, pos[0], captureOptions{only: *only, force: *force, allowRemote: *remote,
+		allowRemoteMutations: *remoteMut, noRestore: *noRestore, restore: *restore, repeat: *repeat, baseline: *baseline,
+		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate}, out, errOut)
+}
+
+// captureOptions are the flags of capture.
+type captureOptions struct {
+	only                 string
+	force                bool
+	allowRemote          bool
+	allowRemoteMutations bool
+	noRestore            bool
+	restore              string
+	repeat               int
+	baseline             string
+	skipFingerprint      bool
+	quiet                bool
+	calibrate            bool // decide concurrency: auto (after the repeats agree)
+}
+
+// captureSet captures the catalog under tag, repeated as the options say,
+// prints the outcome and returns its exit code.
+func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tag string, o captureOptions, out, errOut io.Writer) (int, error) {
+	base, err := p.Baseline(o.baseline)
+	if err != nil {
+		return 0, failed(err)
+	}
+	if base.Exists() {
+		if err := checkBaseline(p, base, o.baseline); err != nil {
+			return 0, err
+		}
+	}
+	progress := out
+	if o.quiet {
+		progress = io.Discard
+	}
+	// Services with concurrency: auto capture as the baseline decided, and
+	// one at a time while it is being decided.
+	auto := autoServices(p, cat)
+	if o.calibrate && len(auto) == 0 {
+		return 0, configErr("--calibrate needs a service with concurrency: auto")
+	}
+	var used map[string]int
+	if o.calibrate {
+		for _, name := range auto {
+			fmt.Fprintf(out, "%s: 1 for now (auto: decided after the sequential captures)\n", concurrencyOf(name))
+		}
+	} else if used, err = recordedConcurrency(out, base, o.baseline, auto); err != nil {
+		return 0, err
+	}
+
+	byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+
+	tags := []string{tag}
+	for i := 2; i <= o.repeat; i++ {
+		tags = append(tags, fmt.Sprintf("%s.repeat-%d", tag, i))
+	}
+	// The extra runs only serve the comparison, also when one of them fails.
+	defer func() {
+		for _, tag := range tags[1:] {
+			if set, err := p.Capture(tag); err == nil {
+				os.RemoveAll(set.Dir)
+			}
+		}
+	}()
+	code := ExitClean
+	var first *capture.Summary
+	for i, tag := range tags {
+		if len(tags) > 1 {
+			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
+		}
+		opt := capture.Options{Tag: tag, Only: o.only, Force: o.force || i > 0, AllowRemote: o.allowRemote,
+			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
+			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used}
+		sum, err := capture.Run(ctx, p, cat, opt)
+		if err != nil {
+			return 0, failed(err)
+		}
+		if back, err := fallBack(p, out, base, o.baseline, used, sum); err != nil {
+			return 0, err
+		} else if back {
+			used, opt.Concurrency, opt.Force = nil, nil, true
+			if sum, err = capture.Run(ctx, p, cat, opt); err != nil {
+				return 0, failed(err)
+			}
+		}
+		if i == 0 {
+			first = sum
+			code = summarize(out, errOut, tag, sum)
+			if len(sum.Failed) > 0 {
+				// More runs would only fail the same way.
+				if len(sum.Failed) == sum.Requests {
+					notAnswering(p, errOut)
+				}
+				return code, nil
+			}
+		}
+	}
+	if len(tags) > 1 {
+		c, err := repeatReport(out, p, cat, allow, tags)
+		if err != nil {
+			return 0, err
+		}
+		code = max(code, c)
+	}
+	if o.calibrate {
+		if code != ExitClean {
+			fmt.Fprintln(out, "concurrency: auto stays undecided until the sequential captures agree")
+			return code, nil
+		}
+		if err := calibrate(ctx, p, cat, allow, tags[0], first, auto, base, o, out, errOut); err != nil {
+			return 0, err
+		}
+	}
+	return code, nil
+}
+
+// byMethodNote names the requests that change data only by their method
+// (the catalog does not say mutates), once per command: they run one at a
+// time after the read-only requests, each on what the writes before it
+// left, so a search sent as POST that only reads sees data the other
+// requests changed. A catalog of an earlier release has many.
+func byMethodNote(out io.Writer, ids []string, restore string) {
+	if len(ids) == 0 {
+		return
+	}
+	on := "the data the requests before it changed (--restore once)"
+	if restore == "each" {
+		on = "a restored state (--restore each)"
+	}
+	fmt.Fprintf(out, "%d %s data only by their method, as the catalog does not say mutates: %s\n"+
+		"  each runs one at a time after the read-only requests, on %s;\n"+
+		"  write \"mutates\": false on those that only read (a search sent as POST), \"mutates\": true on the others\n",
+		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
+}
+
+// summarize prints the outcome of a capture and returns its exit code.
+func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
+	fmt.Fprintf(out, "\ncaptured %d requests into %s\n", sum.Requests, tag)
+	if t := sum.Time; t.Fingerprints > 0 {
+		fmt.Fprintf(out, "time %s: state fingerprints %s (%d, %d of them unnecessary after a check of the write counters), restores %s, the rest requests\n",
+			t.Total.Round(time.Millisecond), t.Fingerprint.Round(time.Millisecond), t.Fingerprints, t.Reused, t.Restore.Round(time.Millisecond))
+	}
+	code := ExitClean
+	if len(sum.Writers) > 0 {
+		ids := make([]string, 0, len(sum.Writers))
+		for id := range sum.Writers {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		what := "read-only requests change"
+		if len(ids) == 1 {
+			what = "read-only request changes"
+		}
+		fmt.Fprintf(out, "\n%d %s data (recorded as side effects):\n", len(ids), what)
+		for _, id := range ids {
+			fmt.Fprintf(out, "  %s → %s\n", id, strings.Join(sum.Writers[id], ", "))
+		}
+		fmt.Fprintln(out, "mark them mutates: true in the catalog, so they run one at a time on a known state")
+	}
+	if len(sum.Unattributed) > 0 {
+		fmt.Fprintf(out, "\nread-only requests changed %s, but no single request does it alone (an order effect or background work)\n", strings.Join(sum.Unattributed, ", "))
+	}
+	if len(sum.Personal) > 0 {
+		ids := make([]string, 0, len(sum.Personal))
+		for id := range sum.Personal {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		fmt.Fprintf(errOut, "\npersonal data or credentials found in %d responses marked public; they were stored as private (encrypted, not in git):\n", len(ids))
+		for _, id := range ids {
+			f := sum.Personal[id][0]
+			fmt.Fprintf(errOut, "  %s: %s at %s (%s)", id, f.Kind, report.Printable(f.Where), report.Printable(f.Sample))
+			if n := len(sum.Personal[id]); n > 1 {
+				fmt.Fprintf(errOut, " and %d more", n-1)
+			}
+			fmt.Fprintln(errOut)
+		}
+		fmt.Fprintln(errOut, "mark them storage: private in the catalog, or allow the values in pii.allow if they are public")
+		code = ExitConfig
+	}
+	if len(sum.Unscanned) > 0 {
+		ids := make([]string, 0, len(sum.Unscanned))
+		for id := range sum.Unscanned {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		fmt.Fprintf(errOut, "\n%d responses marked public cannot be scanned for personal data; they were stored as private (encrypted, not in git):\n", len(ids))
+		for _, id := range ids {
+			fmt.Fprintf(errOut, "  %s: %s\n", id, report.Printable(sum.Unscanned[id]))
+		}
+		fmt.Fprintln(errOut, "mark them storage: private in the catalog")
+	}
+	if len(sum.Failed) > 0 {
+		fmt.Fprintf(errOut, "\n%d requests failed (connection, timeout or host not allowed): %v\n", len(sum.Failed), sum.Failed)
+		code = ExitEnv
+	}
+	return code
+}
+
+// notAnswering says how to start the application when no request of a
+// capture got an answer.
+func notAnswering(p *config.Project, errOut io.Writer) {
+	var urls []string
+	for _, name := range p.TargetNames() {
+		if t, err := p.TargetFor(name); err == nil {
+			urls = append(urls, t.BaseURL)
+		}
+	}
+	d, _ := detect(p.Root, p.Project, nil)
+	fmt.Fprintf(errOut, "nothing answered: is the application running at %s? %s, or set the address in %s; then run again\n",
+		strings.Join(urls, ", "), startHint(p.Root, d.kinds), rel(p.Root, p.Layout.Config))
+}
+
+// repeatReport compares every repeated run with the first one. Values that
+// changed although the state was the same are not deterministic: for each,
+// it proposes an allowlist entry with a format that matches every value seen.
+func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tags []string) (int, error) {
+	first, err := p.Capture(tags[0])
+	if err != nil {
+		return 0, failed(err)
+	}
+	first.CacheRecords()
+	values := map[key][]string{}
+	var keys []key
+	headers := map[string][][]string{} // name → values at each position, over all runs
+	var headerNames []string
+	var other []compare.Drift
+	for _, tag := range tags[1:] {
+		set, err := p.Capture(tag)
+		if err != nil {
+			return 0, failed(err)
+		}
+		set.CacheRecords()
+		// The requests are compared in parallel; their results are taken
+		// below in catalog order.
+		results := make([]report.Result, len(cat.Requests))
+		size := func(i int) int64 {
+			var n int64
+			for _, s := range []*snapshot.Set{first, set} {
+				if r, _ := s.Record(cat.Requests[i].ID); r != nil {
+					n += r.Body.Size
+				}
+			}
+			return n
+		}
+		if err := parallel(len(cat.Requests), size, func(i int) error {
+			var err error
+			results[i], err = compareOne(cat.Requests[i], first, set, nil, allow, compare.LevelValues, true) // infer needs the values; it prints formats only
+			return err
+		}); err != nil {
+			return 0, err
+		}
+		for ri, req := range cat.Requests {
+			res := results[ri]
+			hidden := res.Drifts
+			if rec, err := first.Record(req.ID); err == nil && isPrivate(rec) {
+				hidden = append([]compare.Drift{}, res.Drifts...)
+				hidePrivateValues(hidden)
+			}
+			for i, d := range res.Drifts {
+				switch {
+				case d.Kind == compare.KindHeaderValue && len(d.Values[0]) == len(d.Values[1]):
+					// Values are matched by position: the n-th Set-Cookie of
+					// one run with the n-th of the other.
+					name := strings.TrimPrefix(d.Where, "header:")
+					if _, ok := headers[name]; !ok {
+						headerNames = append(headerNames, name)
+						headers[name] = make([][]string, len(d.Values[0]))
+						for i, v := range d.Values[0] {
+							headers[name][i] = []string{v}
+						}
+					}
+					for i, v := range d.Values[1] {
+						if i < len(headers[name]) {
+							headers[name][i] = append(headers[name][i], v)
+						}
+					}
+				case (d.Kind == compare.KindValue || d.Kind == compare.KindText || d.Kind == compare.KindAttributeValue || d.Kind == compare.KindCell) && d.Texts != [2]string{}:
+					k := key{d.Request, indexes().ReplaceAllString(d.Where, "[*]")}
+					if _, ok := values[k]; !ok {
+						keys = append(keys, k)
+					}
+					values[k] = append(values[k], d.Texts[0], d.Texts[1])
+				default:
+					other = append(other, hidden[i])
+				}
+			}
+		}
+	}
+	if len(keys) == 0 && len(headerNames) == 0 && len(other) == 0 {
+		fmt.Fprintf(out, "\n%d runs on the same state gave the same responses ✓\n", len(tags))
+		return ExitClean, nil
+	}
+	fmt.Fprintf(out, "\n%d runs on the same state gave different responses.\n", len(tags))
+	mutating := false
+	for _, r := range cat.Requests {
+		mutating = mutating || r.Mutating()
+	}
+	if mutating && len(p.State) == 0 {
+		fmt.Fprintln(out, "Warning: requests change data and no state is restored between the runs, so some differences may come from the data, not from the application. Configure state: (a restore command) before trusting these proposals.")
+	}
+	if len(keys) > 0 || len(headerNames) > 0 {
+		fmt.Fprintln(out, "Proposed allowlist entries (check every format and write the reason):")
+		const reason = "    reason: TODO — differs between captures of the same state"
+		if len(headerNames) > 0 {
+			fmt.Fprintln(out, "headers:")
+			for _, n := range headerNames {
+				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(headers[n]))), reason)
+			}
+		}
+		if len(keys) > 0 {
+			fmt.Fprintln(out, "body:")
+			for _, r := range mergeRules(cat, keys, values) {
+				fmt.Fprintf(out, "  - request: %s\n    path: %s\n    format: %s\n%s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), report.Printable(yamlQuote(r.format)), reason)
+			}
+		}
+	}
+	if len(other) > 0 {
+		fmt.Fprintf(out, "\nDifferences without a proposal (structure, types, side effects or a body that is neither JSON nor HTML):\n")
+		for _, d := range other {
+			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(short(d.Baseline)), report.Printable(short(d.Current)))
+		}
+		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
+	}
+	return ExitDrift, nil
+}
+
+var indexes = lazy.Regexp(`\[\d+\]`)
+
+type rule struct{ request, path, format string }
+
+// key is a proposal: one request and one body path.
+type key struct{ request, path string }
+
+// mergeRules turns per-request proposals into rules. Requests with the same
+// path and format share one rule when a glob over their common ID prefix
+// matches exactly them in the catalog, never more.
+func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rule {
+	type group struct {
+		path, format string
+		requests     []string
+	}
+	var groups []*group
+	index := map[[2]string]*group{}
+	for _, k := range keys {
+		f := infer.Pattern(values[k])
+		g := index[[2]string{k.path, f}]
+		if g == nil {
+			g = &group{path: k.path, format: f}
+			index[[2]string{k.path, f}] = g
+			groups = append(groups, g)
+		}
+		g.requests = append(g.requests, k.request)
+	}
+	var out []rule
+	for _, g := range groups {
+		if len(g.requests) > 1 {
+			prefix := g.requests[0]
+			for _, r := range g.requests[1:] {
+				for !strings.HasPrefix(r, prefix) {
+					prefix = prefix[:len(prefix)-1]
+				}
+			}
+			members := map[string]bool{}
+			for _, r := range g.requests {
+				members[r] = true
+			}
+			exact := len(prefix) >= 3
+			for _, req := range cat.Requests {
+				if strings.HasPrefix(req.ID, prefix) && !members[req.ID] {
+					exact = false
+				}
+			}
+			if exact {
+				out = append(out, rule{prefix + "*", g.path, g.format})
+				continue
+			}
+		}
+		for _, r := range g.requests {
+			out = append(out, rule{r, g.path, g.format})
+		}
+	}
+	return out
+}
+
+// headerFormat is one format for every value of a header: a pattern per
+// position, joined with | when they differ (one cookie name per position).
+func headerFormat(positions [][]string) string {
+	var parts []string
+	seen := map[string]bool{}
+	for _, vals := range positions {
+		p := infer.Pattern(vals)
+		if p == "" {
+			p = regexp.QuoteMeta(vals[0]) // this one did not change
+		}
+		if !seen[p] {
+			seen[p] = true
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "|")
+}
+
+// short keeps long values readable in a list.
+func short(s string) string {
+	if len(s) <= 100 {
+		return s
+	}
+	return s[:60] + " … " + s[len(s)-30:]
+}
+
+func yamlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+func seedCmd(args []string, out, errOut io.Writer) error {
+	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
+	cfg := fs.String("config", "", "")
+	skip := fs.Bool("skip-commands", false, "")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 0 {
+		return usageErr("seed")
+	}
+	p, err := config.Load(*cfg)
+	if err != nil {
+		return configErr("%v", err)
+	}
+	ctx, stop := signalContext(errOut)
+	defer stop()
+	unlock, err := lockStore(ctx, p, errOut)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	err = capture.Seed(ctx, p, capture.SeedOptions{Out: out, Log: errOut, SkipCommands: *skip})
+	if err != nil {
+		return failed(err)
+	}
+	return nil
+}
+
+const initConfig = `# DriftGate configuration (driftgate help lists the commands).
+version: 1
+project: %s
+mode: freeze            # freeze: every drift fails; evolve: drifts may be accepted with a reason
+level: values           # status | shape | types | values
+%s
+target:
+  base_url: http://localhost:8080
+  # allow_hosts: [localhost, 10.0.0.0/8]   # default: localhost and private addresses
+  # user_agent: driftgate/1
+  # timeout: 60s
+  # concurrency: 1                          # parallel read-only requests; auto: measured once, with the first baseline
+  # follow_redirects: false
+  # rate_limits:
+  #   - match: "/api/throttled/*"
+  #     per_minute: 50
+
+# tokens:                                   # JSON object {"<identity>": "<token>"}
+#   command: ["php", "artisan", "driftgate:tokens"]
+#   file: ~/secrets/tokens.json
+# identities:
+#   admin: { env: DG_TOKEN_ADMIN }
+
+# state:                                    # restored at the start and before requests that change data
+#   db:
+#     driver: mysql                         # or postgres
+#     dsn: { env: DG_DB_DSN }               # mysql://user:pass@host:3306/ (never written here)
+#     working: app                          # the database the application uses
+#     pristine: app_pristine                # its pristine copy, made by driftgate seed
+#     exclude: [sessions, cache, jobs]
+#     row_tracking: [faq]                   # also record which rows change
+#     # allow_remote: true                  # only for a copy on a host outside allow_hosts
+#   redis:
+#     restore: ["redis-cli", "FLUSHALL"]
+#     fingerprint: ["redis-cli", "DBSIZE"]
+# seed:                                     # loads the data into the working database
+#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql app"]
+# prepare:                                  # after every restore
+#   - ["php", "artisan", "migrate", "--force"]
+
+# guards:                                   # must succeed before requests that change data
+#   - name: mail driver is log
+#     command: ["sh", "-c", "grep -q '^MAIL_MAILER=log' .env"]
+
+# pii:
+#   allow: ['[a-z.]+@example\.com']         # values allowed in public bodies
+
+# bisect:                                   # driftgate bisect <good> <bad>: the first commit of each drift group
+#   # puts the application on the commit checked out in $DRIFTGATE_BISECT_DIR (a separate worktree)
+#   checkout: ["sh", "-c", "cd \"$DRIFTGATE_BISECT_DIR\" && make restart"]
+#   ready: ["curl", "-sf", "http://localhost:8080/"]   # repeated until the application answers
+#   finish: ["make", "restart"]             # at the end: back on this checkout
+`
+
+func initCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	cfg := fs.String("config", "", "")
+	project := fs.String("project", "", "")
+	mode := fs.String("baselines", "", "")
+	var only names
+	fs.Var(&only, "service", "")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	if *cfg == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			if _, main := config.MainWorktreeProject(cwd); main != "" {
+				return configErr("this is a worktree of a project whose main worktree has its DriftGate project (%s): run driftgate setup here, which takes it with its baselines and key, rather than starting an empty one (--config makes a separate project)", main)
+			}
+		}
+	}
+	dr, err := newDraft(*cfg, *project, *mode, only)
+	if err != nil {
+		return err
+	}
+	// init asks nothing: the best of what the settings give, to check in
+	// the file.
+	if len(dr.dbs) > 0 {
+		dr.db = &dr.dbs[0]
+	}
+	if len(dr.urls) > 0 {
+		dr.url, dr.urlFrom = dr.urls[0].URL, dr.urls[0].File
+	}
+	if err := dr.write(); err != nil {
+		return err
+	}
+	root, l, d := dr.p.Root, dr.p.Layout, dr.d
+	found := "no known project type found; add routes under discover: or write the catalog by hand"
+	if len(d.kinds) > 0 {
+		found = "found " + strings.Join(d.kinds, ", ") + "; routes come from discover: in " + rel(root, l.Config)
+	}
+	if len(d.unchecked) > 0 {
+		found += "\n" + strings.Join(d.unchecked, ", ") + ": recognised, but DriftGate has not been checked on such a project yet; check the discover: entry"
+	}
+	if len(d.found) > 1 && len(only) == 0 {
+		found += "\nevery run checks all of them; init --service <name> (repeatable) keeps only the services you name"
+	}
+	if dr.db != nil {
+		found += "\nstate: db " + describe(*dr.db) + ", commented out in " + rel(root, l.Config) + ": driftgate setup turns it on (it asks before it creates the pristine copy), or uncomment it"
+		if len(dr.dbs) > 1 {
+			found += fmt.Sprintf(" (%d database settings found; the others are listed above state:)", len(dr.dbs))
+		}
+	}
+	if dr.urlFrom != "" && d.targets == "" {
+		found += "\nbase_url " + dr.url + " from " + dr.urlFrom
+	}
+	fmt.Fprintf(out, `created %s, %s and %s
+%s
+
+Next steps:
+  1. driftgate key create   (key for private bodies; DRIFTGATE_KEY takes precedence)
+  2. check target.base_url and start the application
+  3. driftgate run          (routes, catalog and the first baseline; later runs compare with it)
+`, rel(root, l.Config), rel(root, l.Catalog), rel(root, l.Allowlist), found)
+	if l.Committed() {
+		fmt.Fprintf(out, `
+Protect the baselines with a CODEOWNERS entry, so every change to them needs
+your review:
+
+  /%s/  @<your-github-user>
+`, filepath.ToSlash(rel(root, l.Baselines)))
+	} else {
+		fmt.Fprintf(out, "\nEverything DriftGate keeps is in %s/, which git ignores (.gitignore).\n", rel(root, l.Dir))
+	}
+	return nil
+}
+
+// rel is path relative to root, for messages.
+func rel(root, path string) string {
+	if r, err := filepath.Rel(root, path); err == nil {
+		return r
+	}
+	return path
+}
+
+// initAllowlist allows the Date header, which every response carries and
+// which changes every second.
+const initAllowlist = `version: 1
+headers:
+  - name: date
+    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    reason: Time of the response; changes with every request.
+body: []
+`

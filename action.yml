@@ -1,0 +1,242 @@
+name: DriftGate
+description: Regression gate for HTTP APIs — capture the responses of the running application and compare them with the committed baseline.
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  version:
+    description: >-
+      Which driftgate to use: "source" builds it from this action's own source
+      (the ref in `uses: …@<ref>`, needs Go, set up by the action), a
+      release tag such as "v1.0.1", or "latest", downloaded from this
+      action's repository. A downloaded binary is installed only when its
+      SHA-256 matches the release's SHA256SUMS and the Sigstore signature of
+      SHA256SUMS names the repository's release workflow at that tag (cosign
+      is set up by the action).
+    default: source
+  binary:
+    description: Path to a driftgate binary already on the runner; when set, version is ignored.
+    default: ""
+  working-directory:
+    description: Directory driftgate runs in; config, junit and the commands are relative to it.
+    default: .
+  config:
+    description: Path to driftgate.yaml.
+    default: driftgate.yaml
+  baseline:
+    description: Name of the committed baseline to compare with (driftgate/baselines/<name>).
+    default: local
+  require-baseline:
+    description: >-
+      Stop with exit 2 when the baseline is not committed. Without a baseline,
+      `driftgate run` makes one from the code under test and passes.
+    default: "true"
+  args:
+    description: >-
+      Extra arguments for `driftgate run`, e.g. "--target api", separated by
+      whitespace. Quotes and backslashes are not interpreted (an argument
+      cannot hold a space); args that contain them stop the run with exit 2.
+      "--skip-private" accepts a partial check: private requests (whose
+      bodies never leave the machine that captured them) are reported as
+      skipped instead of making the result incomplete (exit 3).
+    default: ""
+  store:
+    description: >-
+      Local store (DRIFTGATE_STORE). Empty: a new folder in RUNNER_TEMP for
+      every job, with a random encryption key unless DRIFTGATE_KEY is set.
+    default: ""
+  comment:
+    description: >-
+      Pull request comment with the markdown report: "always" (create or
+      update), "changes" (create only when the run is not clean; an existing
+      comment is always updated), or "off". Needs `permissions:
+      pull-requests: write`; a fork's read-only token only gives a warning.
+    default: always
+  comment-id:
+    description: Tells comments of several jobs (a matrix) apart; each job updates only its own.
+    default: default
+  pr-number:
+    description: Pull request to comment on when the event is not pull_request (e.g. workflow_run).
+    default: ""
+  github-token:
+    description: Token for comments and release downloads.
+    default: ${{ github.token }}
+  junit:
+    description: Also copy the JUnit report to this path (for test reporters).
+    default: ""
+  summary:
+    description: Append the markdown report to the job summary.
+    default: "true"
+  upload:
+    description: Upload the reports and the log as a workflow artifact.
+    default: "true"
+  artifact-name:
+    description: Name of that artifact (must differ between jobs of a matrix).
+    default: driftgate-report
+  pristine-cache-files:
+    description: >-
+      Enables the pristine database cache. Newline-separated globs, relative
+      to the repository root, of everything the seed depends on (migrations,
+      seeders, dump files, driftgate.yaml). The cache key is their hash.
+    default: ""
+  pristine-cache-key:
+    description: >-
+      Extra text in the cache key: whatever else the dump depends on, above
+      all the database server image (e.g. "mariadb:11.4").
+    default: ""
+  pristine-dump:
+    description: >-
+      Shell command, run right after `driftgate seed` on a cache miss, that
+      dumps the working database(s) into $DRIFTGATE_PRISTINE_DIR.
+    default: ""
+  pristine-load:
+    description: >-
+      Shell command, run on a cache hit, that loads the dump(s) from
+      $DRIFTGATE_PRISTINE_DIR into the working database(s); then
+      `driftgate seed --skip-commands` makes the pristine copies from them.
+    default: ""
+
+outputs:
+  exit-code:
+    description: >-
+      Exit code of driftgate — 0 clean, 1 drift, 2 configuration error, 3
+      environment error or incomplete (private requests not compared here).
+    value: ${{ steps.report.outputs.exit-code }}
+  result:
+    description: clean, drift, config-error, environment-error or incomplete.
+    value: ${{ steps.report.outputs.result }}
+  report:
+    description: Path of the markdown report.
+    value: ${{ steps.report.outputs.report }}
+  junit:
+    description: Path of the JUnit report.
+    value: ${{ steps.report.outputs.junit }}
+  pristine-cache-hit:
+    description: Whether the pristine databases came from the cache.
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # GITHUB_ACTION_PATH is reliable in a run step; github.action_path in the
+    # with: of a nested action is not.
+    - name: Locate the action
+      id: action
+      shell: bash
+      run: echo "path=$GITHUB_ACTION_PATH" >>"$GITHUB_OUTPUT"
+
+    - name: Set up Go
+      if: inputs.binary == '' && inputs.version == 'source'
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: ${{ steps.action.outputs.path }}/go.mod
+        cache-dependency-path: ${{ steps.action.outputs.path }}/go.sum
+
+    # cosign verifies the signature of a release's SHA256SUMS before the
+    # downloaded binary is trusted.
+    - name: Set up cosign
+      if: inputs.binary == '' && inputs.version != 'source'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.0.6
+
+    - name: Install driftgate
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY: ${{ inputs.binary }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        ACTION_PATH: ${{ steps.action.outputs.path }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" install'
+
+    - name: Prepare
+      shell: bash
+      env:
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_REQUIRE_BASELINE: ${{ inputs.require-baseline }}
+        INPUT_STORE: ${{ inputs.store }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" prepare'
+
+    - name: Restore the pristine databases
+      id: cache
+      if: inputs.pristine-cache-files != ''
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/driftgate-pristine
+        key: driftgate-pristine-v1-${{ runner.os }}-${{ inputs.pristine-cache-key }}-${{ hashFiles(inputs.pristine-cache-files) }}
+
+    - name: Seed
+      id: seed
+      if: inputs.pristine-cache-files != ''
+      shell: bash
+      env:
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_PRISTINE_DUMP: ${{ inputs.pristine-dump }}
+        INPUT_PRISTINE_LOAD: ${{ inputs.pristine-load }}
+        PRISTINE_DIR: ${{ runner.temp }}/driftgate-pristine
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        CACHE_KEY: ${{ steps.cache.outputs.cache-primary-key }}
+        CACHE_FILES_HASH: ${{ hashFiles(inputs.pristine-cache-files) }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" seed'
+
+    - name: Save the pristine databases
+      if: steps.seed.outputs.save == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/driftgate-pristine
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    - name: Run
+      shell: bash
+      env:
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" run'
+
+    - name: Report
+      id: report
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_JUNIT: ${{ inputs.junit }}
+        INPUT_SUMMARY: ${{ inputs.summary }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" report'
+
+    - name: Comment on the pull request
+      if: ${{ !cancelled() && inputs.comment != 'off' }}
+      shell: bash
+      env:
+        INPUT_COMMENT: ${{ inputs.comment }}
+        INPUT_COMMENT_ID: ${{ inputs.comment-id }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" comment'
+
+    - name: Upload the report
+      if: ${{ !cancelled() && inputs.upload == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ runner.temp }}/driftgate/report.md
+          ${{ runner.temp }}/driftgate/junit.xml
+          ${{ runner.temp }}/driftgate/run.log
+        if-no-files-found: ignore
+
+    - name: Result
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/action/driftgate.sh" finish'

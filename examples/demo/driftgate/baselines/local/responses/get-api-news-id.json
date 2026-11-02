@@ -1,0 +1,28 @@
+{
+ "version": 1,
+ "id": "get-api-news-id",
+ "status": 200,
+ "headers": [
+  [
+   "connection",
+   "close"
+  ],
+  [
+   "content-length",
+   "94"
+  ],
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "date",
+   "Sun, 01 Nov 2026 00:07:32 GMT"
+  ]
+ ],
+ "body": {
+  "sha256": "1ee7db56115b2bd2587f0a5fca7d00f1796745535036a987f80f68467f1c8eca",
+  "storage": "public",
+  "size": 94
+ }
+}

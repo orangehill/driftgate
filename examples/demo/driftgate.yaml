@@ -1,0 +1,25 @@
+# The DriftGate demo API (tools/demoserver) as a project, for the action
+# self-test (.github/workflows/action-selftest.yml):
+#
+#   go run ./tools/demoserver -addr 127.0.0.1:8873 -version v1   # v2 plants drift
+#   driftgate run --config examples/demo/driftgate.yaml
+#
+# The data is in memory; the demo's reset hook is the restore command.
+version: 1
+project: driftgate-demo
+mode: freeze
+level: values
+target:
+  base_url: http://127.0.0.1:8873
+state:
+  api:
+    restore: ["curl", "-sf", "-X", "POST", "http://127.0.0.1:8873/admin/reset"]
+discover:
+  - adapter: command
+    command: ["cat", "routes-src.json"]
+templates: [ok, not-found]
+params:
+  - name: id
+    value: "12"
+storage:
+  public: ["*"]

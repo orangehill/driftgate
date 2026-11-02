@@ -1,0 +1,10 @@
+       Prefix Verb         URI Pattern               Controller#Action
+       blorgh              /blog                     Blorgh::Engine
+              GET|POST     /both(.:format)           home#both
+              GET|PROPFIND /dav(.:format)            dav#index
+   sidekiq_web             /sidekiq                  #<Sidekiq::Web:0x0000000107a3b2c8>
+         root GET          /                         home#index
+
+Routes for Blorgh::Engine:
+     articles GET          /articles(.:format)       blorgh/articles#index
+         root GET          /                         blorgh/articles#index

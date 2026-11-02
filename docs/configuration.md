@@ -1,0 +1,1347 @@
+# Configuration
+
+DriftGate reads one configuration file and a few files beside it. Where
+they are is set by [`baselines`](#baselines). A new project (`driftgate
+init`) keeps all of them in the project's own `.driftgate/` folder, which
+git ignores (`baselines: local`):
+
+```
+.driftgate/
+  driftgate.yaml               the configuration (this page)
+  routes.json                  route inventory, written by discover --write
+  catalog.json                 request catalog, written by generate, edited by hand
+  allowlist.yaml               values that may change, each with a format and a reason
+  exclusions.yaml              routes deliberately not checked, each with a reason
+  classify.yaml                column rules of the data module
+  baselines/<name>/            baselines; change only through driftgate accept
+  store/                       the local store: captures, private bodies, pristine metadata
+  key                          the project key (driftgate key create), open to its owner only
+```
+
+With `baselines: git` (the layout of an earlier release, and of every
+`driftgate.yaml` at the project root without a `baselines:` key) the
+configuration and the files are committed to the repository, and the local
+store is outside it (`~/.driftgate/<project>/`, see [`store`](#store)):
+
+```
+driftgate.yaml                 the configuration
+driftgate/
+  routes.json, catalog.json, allowlist.yaml, exclusions.yaml, classify.yaml
+  baselines/<name>/
+```
+
+Commands find the project from any folder inside it: the nearest folder
+(up to the top of the git work tree) that has `.driftgate/driftgate.yaml`
+or `driftgate.yaml`. A folder with both (as after checking out a branch
+from before a switch of `baselines`) is refused with the commands that
+settle it; `.driftgate/` holds the store and the key, so it is moved aside,
+never deleted. `--config <path>` names the file instead.
+
+Every file has a `version` field (now `1`); a newer version is refused. In
+the YAML files an unknown key is an error, not a warning, and so is a second
+document after `---` in `driftgate.yaml` and `exclusions.yaml` (it would be
+ignored).
+
+Contents: [driftgate.yaml](#driftgateyaml) ·
+[allowlist.yaml](#allowlistyaml) · [exclusions.yaml](#exclusionsyaml) ·
+[catalog.json](#catalogjson) · [classify.yaml](#classifyyaml)
+
+---
+
+## driftgate.yaml
+
+A complete example of a Laravel API on MySQL with Redis:
+
+<!-- check: config -->
+```yaml
+version: 1
+project: shop
+mode: freeze
+level: values
+
+target:
+  base_url: http://localhost:8000
+  concurrency: 4
+  rate_limits:
+    - match: "/api/search*"
+      per_minute: 50
+
+identities:
+  admin: { env: DG_TOKEN_ADMIN }
+  user: { op: "op://Shop/driftgate-user/token" }
+
+state:
+  db:
+    driver: mysql
+    dsn: { env: DG_DB_DSN }
+    working: shop
+    exclude: [sessions, cache, jobs, failed_jobs]
+    row_tracking: [orders]
+  redis:
+    restore: ["redis-cli", "FLUSHALL"]
+    fingerprint: ["redis-cli", "DBSIZE"]
+seed:
+  - ["php", "artisan", "migrate:fresh", "--seed", "--force"]
+prepare:
+  - ["php", "artisan", "cache:clear"]
+guards:
+  - name: mail goes to the log
+    command: ["sh", "-c", "grep -q '^MAIL_MAILER=log' .env"]
+
+discover:
+  - adapter: laravel
+    command: ["php", "artisan", "route:list", "--json"]
+    php: ["php"]
+templates: [ok, not-found, anonymous, json]
+generate:
+  identity: admin
+params:
+  - name: product
+    sql: "SELECT id FROM products WHERE active = 1 ORDER BY id LIMIT 3"
+    foreach: true
+  - name: order
+    from: { request: post-api-orders, path: $.data.id }
+storage:
+  public: ["get-api-products*"]
+observe:
+  - match: "GET /api/stats"
+    reason: Counts requests of the last minute.
+```
+
+### Top-level keys
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `version` | int | required | `1` |
+| `project` | string | required | a simple name (letters, digits, `. _ -`); names the local store and the Keychain entry |
+| `mode` | `freeze` \| `evolve` | `freeze` | `freeze`: every drift fails and `accept` is refused; `evolve`: drifts may be accepted with a reason |
+| `level` | `status` \| `shape` \| `types` \| `values` | `values` | how far comparison goes: status only; + keys, order and nesting; + the type of every value; + exact values. A catalog entry can set its own level; `compare --level` can only make it stricter |
+| [`baselines`](#baselines) | `local` \| `git` | where `driftgate.yaml` is | where the project's files, the store and the key are |
+| [`store`](#store) | path | `.driftgate/store` (local), `~/.driftgate/<project>` (git) | local store |
+| [`key`](#key) | `{env}` \| `{op}` | `DRIFTGATE_KEY`, then `.driftgate/key` (local) or the Keychain (git) | source of the project key |
+| [`target`](#target-and-targets) | mapping | | the application (one service) |
+| [`targets`](#target-and-targets) | map of name → target | | several services; not together with `target` |
+| [`identities`](#identities-and-tokens) | map of name → `{env}` \| `{op}` | | users and where their tokens come from |
+| [`tokens`](#identities-and-tokens) | `{command}` \| `{file}` | | a source of all tokens as one JSON object |
+| [`state`](#state) | map of name → component | | what is restored before captures |
+| [`seed`](#seed-prepare-guards) | list of commands | | load the data; `driftgate seed` then keeps the pristine copy |
+| [`prepare`](#seed-prepare-guards) | list of commands | | run after every restore |
+| [`guards`](#seed-prepare-guards) | list | | must succeed before any request that changes data |
+| [`discover`](#discover) | list of adapters | | where the routes come from |
+| [`templates`](#templates-generate-params) | list | `[ok]` | request variants `generate` makes per route |
+| [`generate`](#templates-generate-params) | `{identity}` | | identity for routes that need authentication |
+| [`params`](#templates-generate-params) | list | | values of route parameters |
+| [`storage`](#storage-and-pii) | `{default, public}` | private | whether generated requests store bodies as public or private |
+| [`pii`](#storage-and-pii) | `{allow}` | | values the personal-data detector lets through in public bodies |
+| [`observe`](#observe) | list | | generated requests that are measured but never compared |
+| [`uploads`](#uploads) | `{dir}` | | folder of real files that catalog requests upload |
+| [`bisect`](#bisect) | mapping | | hooks of `driftgate bisect` |
+| [`data`](#data) | mapping | | the data module (`driftgate data …`) |
+
+Commands (`seed`, `prepare`, guards, restore and fingerprint, `tokens.command`,
+adapters, bisect hooks) are lists: the program and its arguments, run
+without a shell, from the project folder. A shell is written explicitly
+(`["sh", "-c", "…"]`) and shows in the diff. Commands never receive
+`DRIFTGATE_KEY` or the variable named by `key.env`.
+
+### baselines
+
+Where the project's files are: `local` or `git`.
+
+| | `local` | `git` |
+|---|---|---|
+| `driftgate.yaml` | `.driftgate/driftgate.yaml` | `driftgate.yaml` at the project root |
+| catalog, allowlist, routes, exclusions, baselines | `.driftgate/` | `driftgate/`, committed |
+| local store | `.driftgate/store/` | `~/.driftgate/<project>/` |
+| key without `key:` | `DRIFTGATE_KEY`, then `.driftgate/key` | `DRIFTGATE_KEY`, then the macOS Keychain |
+| for | checks on this machine before a pull request | baselines shared through git, CI |
+
+The place of `driftgate.yaml` is the mode: without the key, a file in
+`.driftgate/` is `local` and one at the project root is `git`, so a
+configuration of an earlier release stays as it was. A `baselines:` value that
+disagrees with the place of the file is refused (exit 2); [`driftgate
+baselines local|git`](commands.md#baselines) moves the files. `driftgate init` makes a `local`
+project (`--baselines git` for the other).
+
+With `local` nothing DriftGate writes leaves the project folder, and
+nothing of it enters git:
+
+- `init` adds `.driftgate/` to `.gitignore` (made when missing) and to
+  `.dockerignore` when there is one, or a `Dockerfile` or compose file that
+  would copy the folder into an image; in a monorepo also every folder up
+  to the top of the work tree with Docker files, by its path from there
+  (`api/.driftgate/`). A file that has the entry already (as git, or
+  Docker, reads its lines: git keeps leading spaces) is left as it is; its
+  line endings are kept.
+- Before a command writes the store (captures, private bodies, the last
+  comparison), DriftGate makes sure git ignores `.driftgate/` when the
+  project is in a git work tree: the project's `.gitignore` (or, at the top
+  of the work tree, `.git/info/exclude`) has the entry and no negation
+  (`!…`) that could take any of it back; otherwise it asks `git
+  check-ignore` about the folder, the key, the store and the baselines,
+  each. `key create` and `driftgate baselines` always ask git, which also
+  finds files of the folder that git tracks. If git does not ignore one of
+  them, the command stops (exit 2) and says what to add, take out or
+  untrack.
+- Every worktree of the repository has its own `.driftgate/`: its own
+  baselines, store and key. Git does not carry the folder, so a worktree
+  added with `git worktree add` (one per change) starts without one. Its
+  commands then name the main worktree's project, and `driftgate setup`
+  there takes the configuration, catalog, allowlist, routes, exclusions,
+  baselines with their acceptance logs, the key, and the private bodies
+  those baselines name from the main worktree. Not its captures or
+  pristine records: the worktree's runs compare its changed code with the
+  main worktree's baseline, never with a baseline made from that code.
+  `state:` is copied as it is: a worktree that runs on another database
+  must name it there. When the worktree's own settings (its `.env`) name
+  another database than `working`, setup offers (`--yes`: does) to make
+  it `working:` and `pristine:` in the copied file (and the worktree's
+  `APP_URL` its `base_url`), comments kept, and makes that database's
+  pristine copy. A worktree whose settings name the
+  main worktree's database, or none, stops setup before it takes
+  anything: its runs would restore the main worktree's database.
+
+Scanning for personal data, encryption of private bodies and the state
+fingerprint work the same in both modes.
+
+### store
+
+The local store holds captures, encrypted private bodies and pristine
+metadata. Precedence: `DRIFTGATE_STORE`, then `store:`, then
+`.driftgate/store` (`baselines: local`) or `~/.driftgate/<project>`
+(`baselines: git`). A relative `store:` is relative to the project folder
+(not to where driftgate runs); `~/` is the home folder.
+`store:` may not point anywhere inside the git repository of the project,
+also when `driftgate.yaml` is in a subfolder (it is refused, exit 2):
+private bodies never enter git, not even encrypted. Folders DriftGate
+creates are open to their owner only.
+
+### key
+
+The project key (32 bytes, base64) encrypts private bodies (AES-256-GCM) and
+names them by a keyed hash (HMAC).
+
+| Form | Source |
+|---|---|
+| no `key:`, `baselines: local` | `DRIFTGATE_KEY`, then `.driftgate/key` (`driftgate key create`) |
+| no `key:`, `baselines: git` | `DRIFTGATE_KEY`, then the macOS Keychain (`driftgate key create`) |
+| `key: { env: NAME }` | the environment variable `NAME` |
+| `key: { op: "op://vault/item/field" }` | 1Password, through `op read` |
+
+<!-- check: config-fragment -->
+```yaml
+key:
+  op: "op://Shop/driftgate-key/password"
+```
+
+The key file `.driftgate/key` holds the key in base64 and is open to its
+owner only (mode `600`); a file others can read is refused. Windows has no
+such mode: there the check is not made, and the folder's access list is
+what protects the file. Without a key,
+capturing or comparing private bodies stops with exit 3.
+Changing the key is not supported: bodies encrypted with the old key become
+unreadable.
+
+### target and targets
+
+`target:` describes the application. With several services (an API, a
+frontend, microservices) use `targets:` with one entry per service name
+instead; see [several services](guides/multi-service.md).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `base_url` | URL | | where requests go; the request path is appended |
+| `allow_hosts` | list of host names, IPs or CIDR ranges | `localhost` and local and private addresses (`127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) | hosts requests may go to. A list replaces the default. A host name in the list may resolve anywhere; any other name must resolve only to allowed addresses. Redirects are checked too |
+| `user_agent` | string | `driftgate/1` | the `User-Agent` header of every request |
+| `timeout` | duration (`30s`) | `60s` | per request; `0` is the default, a negative one is refused |
+| `concurrency` | int, or `auto` | `1` | read-only requests sent in parallel; `auto`: measured once and recorded in the baseline (see [capture](commands.md#capture), `--calibrate`) |
+| `follow_redirects` | bool | `false` | follow redirects instead of recording them (at most 10). A redirect from `https` to `http` is refused (the request fails); one to another host or port keeps only `User-Agent`, `Accept`, `Accept-Encoding` and `Accept-Language`, not the identity's token nor the catalog's headers |
+| `rate_limits` | list of `{match, per_minute}` | | spaces requests whose path (or `METHOD path`) matches the glob; `per_minute` must be positive |
+| `aliases` | list of origins | | other origins under which the application writes its own URLs (`APP_URL`, a second host name) |
+
+<!-- check: config-fragment -->
+```yaml
+targets:
+  api:
+    base_url: http://localhost:8001
+    concurrency: 4
+  web:
+    base_url: http://localhost:3001
+    allow_hosts: [localhost, web.internal.example]
+```
+
+A capture records the origin of every service's `base_url` (`scheme://host[:port]`,
+lower case, without a default port) in its `meta.json`. When the two compared
+sets were captured from different origins, `compare` (also `run` and `bisect`)
+takes both origins and the `aliases` as one: before comparing, they are
+replaced by a neutral origin on both sides, in memory only, and a drift shows
+each side's real URL. This lets a copy of the stack on another port, or a CI
+runner, be compared with a baseline without a drift for every absolute URL
+the application builds from the request's `Host`. It applies to
+
+- `<origin>` followed by anything that does not continue the host or port
+  (`/`, `?`, `#`, a quote, the end…), also escaped as in JSON (`http:\/\/…`);
+- `//host[:port]` (a scheme-relative URL, or another scheme such as `ws://`:
+  the scheme is kept, so `http` → `https` is still a drift);
+- a bare `host:port`, only when the origin has a port: a bare host name is too
+  common a word (an e-mail domain, a database host).
+
+`localhost:80801`, `a.localhost:8080` and `localhost:8080@evil.test` are not
+the origin `http://localhost:8080`; a URL of any other host, port, scheme or
+path is compared as it is. Bodies are rewritten for the comparison only:
+stored captures, baselines and private bodies are never changed. Nothing is
+replaced when the origins are the same or a service was captured on one
+side only. A set that records no origin at all is not compared with one that does: `compare` stops (exit 3) and names the
+command that captures it again. The report says when the origins were
+taken as the same:
+
+```text
+origins: http://localhost:8080 ≙ http://localhost:8081 (own URLs compared as the same)
+```
+
+<!-- check: config-fragment -->
+```yaml
+target:
+  base_url: http://localhost:8081   # a second copy of the application
+  aliases: [http://app.test]
+```
+
+A target outside `allow_hosts` needs `capture --allow-remote`; requests that
+change data need `--allow-remote-mutations` as well.
+
+### identities and tokens
+
+A request with `"identity": "admin"` is sent with `Authorization: Bearer
+<token>`. Tokens come from one of:
+
+| Key | Meaning |
+|---|---|
+| `identities.<name>: { env: NAME }` | the environment variable `NAME` |
+| `identities.<name>: { op: "op://…" }` | 1Password |
+| `tokens: { command: [...] }` | a command that prints a JSON object `{"<identity>": "<token>"}` (e.g. an artisan command that logs the test users in) |
+| `tokens: { file: path }` | a file with that JSON object; `~/` is the home folder, a relative path is relative to the project. Keep it out of the repository |
+
+`tokens` takes `command` or `file`, not both. An identity's own `env` or `op`
+takes precedence over `tokens`. A catalog request whose identity has no
+token stops the capture.
+
+<!-- check: config-fragment -->
+```yaml
+tokens:
+  command: ["php", "artisan", "driftgate:tokens"]
+identities:
+  admin: {}
+  editor: {}
+  auditor: { env: DG_TOKEN_AUDITOR }
+```
+
+### state
+
+Every capture starts from the same data. Each entry under `state:` is a
+component, named by a simple name: a database with a built-in driver, or
+anything else through commands.
+
+**A database** (MySQL, MariaDB or PostgreSQL):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `mysql` (also MariaDB; `mariadb` is accepted) \| `postgres` | |
+| `dsn` | `{env}` \| `{op}` \| a file of the project | the server, never written in the file: `mysql://user:pass@host:3306/` (or the driver's `user:pass@tcp(host:3306)/`), `postgres://user:pass@host:5432/`, or where the project keeps it (`{ dotenv: .env }`); see [database DSNs](#database-dsns) |
+| `working` | string, required | the database the application uses |
+| `pristine` | string | its pristine copy; default `<working>_pristine`; must differ from `working` (MySQL/MariaDB: also in letter case) |
+| `exclude` | list of globs | tables never fingerprinted or restored (sessions, caches, logs) |
+| `row_tracking` | list of tables | also record which rows and columns each request changes (without values); not an excluded table |
+| `allow_remote` | bool | allow a database host that is neither local nor named in some target's `allow_hosts` |
+
+- `driftgate seed` (or the first `run`) copies `working` to `pristine` and
+  records its fingerprint. A capture restores `working` from `pristine`
+  (MySQL/MariaDB: only the tables that changed, with their counters,
+  triggers and views; PostgreSQL: the whole database from the pristine one
+  as a template), checks it against the fingerprint, and stops with exit 3
+  when the data differ from the data the baseline was captured from.
+- `seed` replaces only a pristine database it made itself: it marks the one
+  it makes (MySQL/MariaDB: a table `driftgate_pristine`, never fingerprinted
+  or restored; PostgreSQL: the database's comment). A database under the
+  `pristine` name that has objects and no mark is not dropped; seed stops
+  and names it. (A pristine database made by an earlier release has no
+  mark; it is replaced when DriftGate's record of it names it.) The record
+  of the pristine fingerprint is removed right before the old pristine
+  database is dropped or swapped out, so a seed that fails or is
+  interrupted after that leaves no half-made copy that a capture would
+  trust: the capture asks for `driftgate seed` (`run` seeds by itself). A
+  seed that fails before (no working database, a copy that cannot be made)
+  leaves the old copy and its record as they were.
+- PostgreSQL: a restore or seed makes the new database under the name
+  `<name>__driftgate_new` and swaps it in only when the copy is complete,
+  so a failed or interrupted restore leaves the working database as it
+  was. The old database is renamed `<name>__driftgate_old` and dropped
+  while the capture goes on (from PostgreSQL 15 a drop forces a
+  checkpoint); for that moment the server holds a third copy, so keep room
+  for it. A working database that is missing is restored in full.
+- PostgreSQL: the copy keeps what a copy of a template does not: the
+  working database's owner, its settings (`ALTER DATABASE … SET`, `ALTER
+  ROLE … IN DATABASE … SET`), privileges (`GRANT … ON DATABASE`), comment
+  and connection limit, read from the working database before every
+  restore. The application's role thus keeps its rights (from PostgreSQL 15
+  the schema `public` belongs to the database's owner) and its sessions
+  their `timezone` or `search_path`. The DSN's user needs the rights to
+  give them (a superuser, or a member of the owner's role).
+- MySQL/MariaDB: restores and seeds stay out of the binary log
+  (`sql_log_bin = 0` for DriftGate's sessions; MySQL 8 logs by default and a
+  restore would otherwise log every row it copies). The user needs
+  `SESSION_VARIABLES_ADMIN` (MySQL) or `BINLOG ADMIN` (MariaDB) for
+  it; without it the copies are logged as before, with one note in the log.
+- Replicas: when something reads the server's binary log, restores and
+  seeds are logged, so a replica gets them too (an application that reads
+  from a replica would otherwise see old rows, and later replication may
+  break). DriftGate checks once per command: a replica (`SHOW REPLICAS`, or
+  `SHOW SLAVE HOSTS`), another client reading the log (a `Binlog Dump`
+  thread, such as a change-data-capture tool), a Galera node or group
+  replication. When the user may not list replicas (MySQL: `REPLICATION
+  SLAVE`; MariaDB: `REPLICATION MASTER ADMIN`, before 10.5 `REPLICATION
+  SLAVE`), it cannot tell, and the copies are logged; the log says why. A
+  replica that is disconnected at that moment is not seen: stop it from
+  replicating the state databases (`replicate-ignore-db`) or give the user
+  no rights to list replicas.
+- Versions tested in CI: MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
+  PostgreSQL 13, 16 and 17. On MariaDB a table with a generated column is
+  fingerprinted from its rows (MariaDB's own table checksum of such a table
+  changes without a change of data); on MariaDB 10.3 and 10.4 a table with
+  a `VIRTUAL` column is restored whole, not by chunks (the chunked restore
+  made those versions crash now and then). PostgreSQL before 15 has no file copy of a
+  database; restores use the default copy.
+- The database must be on this machine (a local address or a socket) or on a
+  host some target's `allow_hosts` names; a private address is not enough.
+  Every host the driver may connect to is checked (PostgreSQL `host=`,
+  several hosts, `PG*` variables), and every connection on the address it
+  goes to. Otherwise set `allow_remote: true`.
+- Give the DSN a user limited to the working and pristine databases (for
+  PostgreSQL with `CREATEDB`), not a superuser and not one with MySQL's
+  `FILE` privilege. The one exception is a disposable database in a local
+  container (a compose service on this machine), whose root or
+  `POSTGRES_USER` may be used, as `driftgate setup` does when the
+  application's setting names that service; on a shared server, always a
+  limited user. PostgreSQL restore ends the application's sessions on the
+  working database.
+- MySQL/MariaDB: the global `PROCESS` privilege is optional. With it, a
+  fingerprint after a request re-reads only the tables written to (per-table
+  counters: MariaDB `userstat`, MySQL `performance_schema`), as it can see
+  through `SHOW ENGINE INNODB STATUS` whether a transaction is still open.
+  Without it the result is the same, but every fingerprint checksums all
+  tables, which is slower on a large database.
+- Fingerprints are comparable only on the same database server version.
+  They cover tables (definition and rows), views, triggers and sequences;
+  triggers and views with the collation they were made with, which a
+  restore keeps (MySQL/MariaDB). PostgreSQL also: functions and procedures,
+  enum types with their values in order, domains, schemas, materialized
+  views with their rows, row security and policies (objects of extensions
+  are left out). A request that changes one of them is a side effect, and
+  the next restore brings it back.
+- Triggers and views (MySQL/MariaDB) and the PostgreSQL objects above are
+  fingerprinted in the current format. A pristine copy or a baseline whose
+  fingerprint has an older format keeps working while none of them differs;
+  otherwise the capture stops with exit 3 and says so: run `driftgate
+  seed`, and when the message names the baseline, `driftgate verify
+  --baseline <name> --migrate-state` (see [verify](commands.md#verify)).
+
+#### Database DSNs
+
+The DSNs of `state:` and `data:` hold the password, so they come from the
+environment, 1Password or the project's own settings file, and no error
+message shows them. Percent-encode
+special characters (`@ : / ? # %`) in the user name and password. The
+database named in the URL is ignored (`working`, `pristine` and
+`database` name it). A `mysql://` (or `mariadb://`) URL takes these
+parameters; any other stops with an error instead of being ignored:
+
+| Parameter | Meaning |
+|---|---|
+| `tls` | `true` (verify the certificate and the host name), `skip-verify` (encrypt without verifying), `preferred` (encrypt when the server can), `false` |
+| `ssl-mode` | as the `mysql` client: `DISABLED`, `PREFERRED`, `REQUIRED` (encrypt without verifying), `VERIFY_CA` and `VERIFY_IDENTITY` (both verify the certificate and the host name) |
+| `ssl-ca` | a PEM file of the certificate authorities to verify the server with; implies verification |
+| `timeout`, `readTimeout`, `writeTimeout` | durations such as `10s` |
+
+`mysql://app:secret@db.internal:3306/?tls=true` connects only over
+verified TLS. The driver's own form (`user:pass@tcp(host:3306)/?tls=true`)
+takes the driver's parameters. A `postgres://` URL takes PostgreSQL's
+(`sslmode`, `sslrootcert`, …).
+
+An `env` or `op` DSN may also be a JDBC URL (`jdbc:mysql://…`,
+`jdbc:postgresql://…?user=…&password=…`), an ADO.NET connection string
+(`Server=…;Port=…;Database=…;Uid=…;Pwd=…`, Npgsql's
+`Host=…;Username=…;Password=…`), as .NET reads `ConnectionStrings__Default`
+from the environment, or libpq's keyword form (`host=… dbname=… user=…
+password=…`); it is converted as below. A connection string that names no
+server (`Server=`, `Host=`) is refused rather than taken for a local one:
+a `;` in a password would otherwise cut it short. A `key=value;…` string
+that names a server is read as a connection string before anything else,
+also when its password holds `://`, `@/` or `@tcp(`.
+
+**From the project's own settings.** Instead of a copy of the DSN,
+`dsn:` can name the file where the application keeps its database
+settings (`driftgate init` and `driftgate setup` write it from what they
+find). DriftGate reads it each time a command runs, so the password
+stays where it is and a change of the file is followed. The file is
+relative to the project root and must be inside it (`\` is taken for `/`),
+also past symbolic links: a link that leads outside the project folder
+(also a compose `env_file`) is refused. Nothing of the project runs: PHP,
+Python and ERB are read as text. When the setting names a database, it
+must be `working`: a command that finds another one (`DB_DATABASE`
+changed in a worktree) stops with exit 2 and names both, rather than
+restore a database the application no longer runs on.
+
+| Source | Reads | `key` |
+|---|---|---|
+| `dotenv: .env` | a `.env` file: without `key`, Laravel's `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_SOCKET` (MySQL only; 5.5 and later), with `DB_URL` (11 and later) or `DATABASE_URL` (5.8 to 10) over them when set, as Laravel merges them; with `key`, the URL in that variable (`DATABASE_URL`, `DB_URL`, Prisma's). `MYSQL_ATTR_SSL_CA` turns on TLS verified with that CA, as Laravel's `PDO::MYSQL_ATTR_SSL_CA` does. A key it reads that the file sets twice to different values is an error naming the lines: Laravel 5.5 to 5.7 take the first, later versions the last. `init` and `setup` offer the files the framework reads: Laravel (`artisan`) only `.env`, or `.env.<APP_ENV>` when `APP_ENV` is set in the environment; Symfony (`bin/console`) `.env.<APP_ENV>.local`, `.env.<APP_ENV>`, `.env.local` (not for `test`) and `.env` (`APP_ENV` from the environment, else the files, else `dev`); others `.env.development.local`, `.env.local`, `.env.development` and `.env`. Files that name different databases stop `setup --yes` | optional |
+| `appsettings: src/Api/Api.csproj` | ASP.NET: for a `.csproj`, `appsettings.json`, then `appsettings.<environment>.json` (`ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`, default `Development`) and, in Development, the project's user secrets (`UserSecretsId`; `~/.microsoft/usersecrets/…`, on Windows `%APPDATA%\Microsoft\UserSecrets\…`); for `appsettings.Development.json`, that file over `appsettings.json`. For a `.csproj`, the launch profile `dotnet run` takes (`Properties/launchSettings.json`, the first with `commandName: Project`) sets the environment and its `ConnectionStrings__*` over the files. Comments and trailing commas are allowed | required: `ConnectionStrings:Default` (case does not matter) |
+| `properties: src/main/resources/application.properties` | Spring (`spring.datasource.url`, `username`, `password`), Quarkus (`quarkus.datasource.jdbc.url`, …; `%dev.` keys win) and Micronaut (`datasources.default.*`), `.properties` or `.yml`, as Spring Boot reads them: `application.*` in the file's folder, then `application-<profile>.*` for each active profile (`SPRING_PROFILES_ACTIVE`, else `spring.profiles.active`) with the profile of the named file last; `.properties` wins over `.yml`; a document with `spring.config.activate.on-profile` (YAML, or a `.properties` part after a `#---` or `!---` line) counts when its profile is active; `init` and `setup` offer only `application.*` and the files of the active profiles. `${NAME}` and `${NAME:default}` take the properties, then the environment | optional: the prefix, default the first of `spring.datasource`, `quarkus.datasource`, `datasources.default`, `spring.r2dbc` the files set |
+| `yaml: config/database.yml` | Rails' `database.yml` (with `<<: *default`; `DATABASE_URL` of the environment over it, as Rails merges it; in ERB only `ENV['X']`, `ENV.fetch('X')`, `ENV.fetch('X', default)`, `ENV.fetch('X') { default }` and `ENV['X'] \|\| default`), or a Go service's `config.yaml`: a URL, or `adapter`/`driver`, `host`, `port`, `database`/`name`/`dbname`, `username`/`user`, `password`, `socket` | default `development` for `database.yml`, else the first of `database`, `db`, `datasource`, `mysql`, `postgres`, `postgresql`; dots separate levels (`development.primary`) |
+| `php: app/etc/env.php` | Magento: the array the file returns (`host`, also `host:port`, `dbname`, `username`, `password`) | default `db.connection.default` |
+| `python: shop/settings.py` | Django: the literal `DATABASES = {…}` (`ENGINE`, `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT`) | default `default` |
+| `compose: compose.yaml` | a MySQL, MariaDB or PostgreSQL service (by its image) of a compose file with its override: the port it publishes on this machine and its user from `MYSQL_*`/`MARIADB_*`/`POSTGRES_*` (also through `env_file` and `${VAR}` from the environment and the `.env` next to the file). MySQL and MariaDB: `root` when the root password is set, as DriftGate creates the pristine database | required: the service name |
+
+- `host: 127.0.0.1:3307` replaces the setting's host and port: the address
+  of the database from this machine. `host: /path/to/mysqld.sock` (or a
+  PostgreSQL socket folder) takes a socket instead. `host: compose:mysql`
+  names a service of the project's compose file: the setting's host is
+  that service (`DB_HOST=mysql`), reached at the port it publishes on this
+  machine, read when a command runs, so a changed `FORWARD_DB_PORT` is
+  followed.
+- MySQL's `localhost` or no host, and PostgreSQL's no host, are the local
+  socket for PDO, mysql2, mysqlclient and libpq, and TCP for others:
+  DriftGate does not guess. A `dotenv`, `yaml`, `php` or `python` setting
+  with such a host needs `host:` (`127.0.0.1:3306`, or the socket's
+  path); without it a command stops and says what to add, and `setup
+  --yes` stops with the exact `dsn:` to write (at a terminal it asks).
+  JDBC, .NET and compose settings are TCP, and Laravel's missing
+  `DB_HOST` is `127.0.0.1`, as its `config/database.php` says.
+- The setting becomes a DSN as above, and so does its TLS, in any form
+  (`sslmode`, `SslMode`, `SSL Mode`, JDBC `useSSL`/`requireSSL`/
+  `verifyServerCertificate`/`sslMode`, pgJDBC `ssl=true` as
+  `verify-full`, Prisma's `sslaccept=strict` as `verify-full` and
+  `accept_invalid_certs` as `require` (its `sslcert` being the CA),
+  `sslca`/`sslrootcert`; `sslcert`/`sslkey` for PostgreSQL only; Prisma's
+  `sslidentity` is refused). Prisma's MySQL `?socket=` is the socket. A TLS setting DriftGate cannot pass on is an error,
+  never left out. Other parameters (`charset`, `serverVersion`, Prisma's
+  `schema`) are left out, except PostgreSQL's `application_name`,
+  `connect_timeout` and `target_session_attrs`; so is the database
+  (`working` and `database` name it).
+- A file that names another database (SQL Server, SQLite) or a driver
+  other than the component's is an error, as is a value only code
+  computes (`os.environ[...]` in `settings.py`, other Ruby in ERB): put the
+  DSN in a variable and use `{ env: NAME }`.
+- `.env` files are read as phpdotenv, Node's dotenv and godotenv agree:
+  `export`, `'…'` literal, `"…"` with `\n` `\"` `\$` escapes, values over
+  several lines in quotes, `#` comments after a space, `${NAME}`,
+  `${NAME:-default}` from earlier lines or the environment; a `$` without
+  a closed `${…}` is kept (`pa$word`, `pa${ss`). The file's value counts, also when the
+  environment sets the same name: for that, use `{ env: NAME }`.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { dotenv: .env, host: "compose:mysql" }   # Laravel Sail: DB_HOST=mysql
+    working: shop
+  reports:
+    driver: postgres
+    dsn: { appsettings: src/Shop.Api/Shop.Api.csproj, key: "ConnectionStrings:Reports" }
+    working: reports
+```
+
+**Anything else** (Redis, files, a search index): `restore` (required) and
+optionally `fingerprint`, a command whose output must be the same after
+every restore. `dsn`, `working`, `pristine`, `exclude` and `row_tracking`
+need a driver.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: postgres
+    dsn: { env: DG_PG_DSN }
+    working: app
+    pristine: app_pristine
+  files:
+    restore: ["rsync", "-a", "--delete", "storage-pristine/", "storage/app/"]
+    fingerprint: ["sh", "-c", "find storage/app -type f | sort | xargs shasum"]
+```
+
+A catalog with requests that change data needs at least one component with
+a restore; otherwise `capture` and `run` refuse it (exit 2) unless
+`--allow-mutating-without-restore`.
+
+### seed, prepare, guards
+
+| Key | Meaning |
+|---|---|
+| `seed` | commands that load the data into the working databases (migrations and seeders, a dump import). `driftgate seed` runs them and keeps the pristine copy; `seed --skip-commands` takes the data already loaded |
+| `prepare` | commands run after every restore |
+| `guards` | `{name, command}`: each must succeed before the first request that changes data, or the capture stops before it (e.g. mail goes to a log, not to people) |
+
+<!-- check: config-fragment -->
+```yaml
+seed:
+  - ["sh", "-c", "gunzip -c ~/Data/shop.sql.gz | mysql shop"]
+  - ["php", "artisan", "migrate", "--force"]
+prepare:
+  - ["php", "artisan", "cache:clear"]
+guards:
+  - name: queue is sync
+    command: ["sh", "-c", "grep -q '^QUEUE_CONNECTION=sync' .env"]
+```
+
+### discover
+
+Adapters that find the routes. `driftgate init` writes them; the order of
+adapters does not change the result.
+
+| Adapter | Required | Reads |
+|---|---|---|
+| `laravel` | `command` | `route:list --json` (or the table of Laravel before 8). With `php: ["php"]` it also reads the validation rules of form request classes and builds request bodies from them |
+| `symfony` | | `bin/console debug:router --format=json` |
+| `rails` | | `bin/rails routes` |
+| `django` | | a script run through `manage.py shell` (the `.venv` Python when there is one) |
+| `spring` | | `/actuator/mappings` of the running application (needs the actuator `mappings` endpoint exposed) |
+| `nextjs` | | the files of the app and pages routers |
+| `nuxt` | | the files of `pages`, `server/api` and `server/routes` |
+| `openapi` | `file` or `url` (one) | an OpenAPI 3 or Swagger 2 description, from a file (JSON or YAML) or from the running application |
+| `command` | `command` | any command that prints a JSON list of routes |
+
+Common keys:
+
+| Key | Meaning |
+|---|---|
+| `command` | `laravel`: the `route:list` command; `command`: the command that prints routes |
+| `php` | `laravel`: how to run PHP inside the application (for validation rules) |
+| `file` | `openapi`: path of the description |
+| `url` | `openapi`: a path on the target (`/openapi.json`) or a full URL, read only from allowed hosts |
+| `identity` | `openapi` with `url`, `spring`: read the description as this identity (some applications describe only what the caller may use) |
+| `target` | the service these routes belong to (required with several targets) |
+| `dir` | the folder of the service: commands run there and files are found there (default the project root) |
+| `base_path` | a prefix of every path (Next.js `basePath`, an API prefix); starts with `/`, does not end with one |
+
+The `command` adapter's output is a JSON list; each entry has `path` and
+`method` (or `methods`), and optionally `name`, `auth` (needs an identity),
+`body` (a sample request body) and `file` (source file of the handler):
+
+```json
+[
+  {"method": "GET", "path": "/api/news/{id}", "file": "src/news.go:42"},
+  {"methods": ["PUT", "PATCH"], "path": "/api/news/{id}", "auth": true, "body": {"title": "x"}}
+]
+```
+
+Paths name parameters in braces: `{id}` is required, `{id?}` optional,
+`{slug*}` takes the rest of the path and `{slug*?}` the rest or nothing.
+Every path must start with `/`.
+
+<!-- check: config-fragment -->
+```yaml
+discover:
+  - adapter: openapi
+    url: /v3/api-docs
+    identity: admin
+  - adapter: spring
+  - adapter: command
+    command: ["./scripts/routes.sh"]
+    dir: services/billing
+    base_path: /billing
+```
+
+### templates, generate, params
+
+`templates:` lists the variants `generate` makes for every route method
+(default `[ok]`; `init` usually writes `[ok, not-found, json]`):
+
+| Template | Request |
+|---|---|
+| `ok` | the route with its parameter values (one per value with `foreach`) |
+| `not-found` | every required path parameter set to `999999999` (optional ones left out) |
+| `invalid-param` | every required path parameter set to `driftgate-invalid` |
+| `anonymous` | a route that needs authentication, without an identity |
+| `identities` | a route that needs authentication, once per other identity |
+| `json` | with `Accept: application/json` |
+| `empty-body` | a route that takes a body, with `{}` |
+
+`generate.identity` is the identity used for routes that need
+authentication; it must be under `identities:` or come from `tokens:`.
+
+`params:` gives route parameters their values. Each entry has a `name`, an
+optional `route` (a glob over route paths; empty: every route with that
+parameter), an optional `target`, and exactly one source:
+
+| Source | Meaning |
+|---|---|
+| `value: "12"` | a fixed value |
+| `values: ["a", "b"]` | a list; the first value, or every value with `foreach: true` |
+| `sql: "SELECT … ORDER BY …"` | a query on the pristine database (`state:` names the component when there are several). One `SELECT` (or `WITH … SELECT`), checked before it is sent and run in a read-only transaction; `ORDER BY` is required so the catalog is the same every time. `foreach: true` makes a request per row |
+| `from: { request: <id>, path: $.data.id }` | a value from the response of an earlier request in the same capture (`generate` puts both in a sequence); not with `foreach` |
+
+<!-- check: config-fragment -->
+```yaml
+params:
+  - name: slug
+    route: "/blog/*"
+    values: ["hello-world", "pricing"]
+    foreach: true
+  - name: id
+    value: "12"
+```
+
+The `sql` check is a guard against mistakes, not a security boundary: the
+DSN user's privileges are (see [security](security.md)).
+
+### storage and pii
+
+Generated requests store their bodies as **private** (encrypted in the
+local store, never in the repository) unless `storage.public` names them by
+a glob over the request ID, or `storage.default: public`.
+
+<!-- check: config-fragment -->
+```yaml
+storage:
+  default: private
+  public: ["get-api-news*", "get-api-faq*"]
+pii:
+  allow: ['[a-z.]+@example\.com']
+```
+
+Every public body is scanned by the personal-data detector (e-mail, phone,
+Serbian personal ID number with its check digit, card number by Luhn,
+IBAN). When it finds something, the body is stored as private, the finding
+is reported with a masked value, and the capture exits 2. `pii.allow` lists
+regular expressions of values that may appear in public bodies (a shared
+support address). A catalog entry has its own `storage`.
+
+### observe
+
+Generated requests whose outcome depends on timing or a cache: they are
+measured (status, time, size) but never fail the check. `match` is a glob
+over `METHOD /route/path`, `/route/path` or the request ID; `target`
+limits it to one service.
+
+<!-- check: config-fragment -->
+```yaml
+observe:
+  - match: "GET /up"
+    reason: Health check; reports the current time.
+```
+
+### uploads
+
+A catalog request can upload a real file, named by its path in an uploads
+folder outside the repository. `uploads.dir` (`~/` is the home folder; a
+relative path is relative to the folder of `driftgate.yaml`) or
+`DRIFTGATE_UPLOADS` names the folder; a folder anywhere inside the git
+repository of the project is refused, also through a symbolic link. See [catalog.json, multipart](#multipart).
+
+<!-- check: config-fragment -->
+```yaml
+uploads:
+  dir: ~/Data/shop-uploads
+```
+
+### bisect
+
+Hooks of [`driftgate bisect`](guides/bisect.md). They run without a shell,
+from the project folder, with `DRIFTGATE_BISECT_DIR` (the worktree of the
+commit under test) and `DRIFTGATE_BISECT_COMMIT` set.
+
+| Key | Meaning |
+|---|---|
+| `checkout` | required for bisect: builds or restarts the application from `$DRIFTGATE_BISECT_DIR`; failing skips the commit |
+| `ready` | repeated until it succeeds; failing within `ready_timeout` skips the commit |
+| `finish` | once at the end, e.g. to start the application from your checkout again |
+| `timeout` | limit of `checkout` (default `10m`) |
+| `ready_timeout` | default `1m` |
+
+<!-- check: config-fragment -->
+```yaml
+bisect:
+  checkout: ["sh", "-c", "cd \"$DRIFTGATE_BISECT_DIR\" && make restart"]
+  ready: ["curl", "-sf", "http://localhost:8000/up"]
+  finish: ["make", "restart"]
+  timeout: 5m
+```
+
+### data
+
+The data module (`driftgate data …`) makes a copy of a database with
+personal values replaced. See [anonymized test data](guides/test-data.md).
+
+| Key | Meaning |
+|---|---|
+| `driver` | `mysql` (also MariaDB) or `postgres` |
+| `source` | `{dsn, database}`: the database that is read (a copy of production data); never written |
+| `target` | `{dsn, database}`: the database that receives the copy; `dsn` defaults to the source's; must be another database than the source |
+| `allow_remote` | allow a target host outside `target.allow_hosts`; the target is dropped and created again, so it must be a copy |
+| `key` | `{env}` \| `{op}`: the key that replaces values deterministically; default the project key |
+| `files` | `{source, target}`: the folder of uploaded files and the folder that receives their placeholders (both or neither; relative to the project). The target must be outside the source and empty |
+
+The copy has the tables, views, triggers and sequences of the source;
+MySQL/MariaDB also its stored functions, procedures and events (without
+their `DEFINER`, with the SQL mode and collation they were made with; an
+event keeps its status, so with the event scheduler on it runs on the
+copy). Reading a routine's definition needs `SHOW_ROUTINE` (MySQL),
+`SELECT` on `mysql.proc` (MariaDB) or being its definer; without it the
+run stops and names the routine. A MySQL/MariaDB target's
+`max_allowed_packet` bounds every `INSERT`: a row that does not fit in one
+stops the run, naming its table and column.
+
+<!-- check: config-fragment -->
+```yaml
+data:
+  driver: mysql
+  source: { dsn: { env: DG_PROD_COPY_DSN }, database: shop_prod_copy }
+  target: { database: shop_anon }
+  files:
+    source: ~/Data/shop-storage
+    target: ~/Data/shop-storage-anon
+```
+
+---
+
+## allowlist.yaml
+
+`.driftgate/allowlist.yaml` (`driftgate/` with `baselines: git`) lists the values that may change between
+captures: the time of the response, a session cookie, a token. A value on
+the allowlist may differ, but it must still match its format, and every
+entry has a reason. Nothing else is hidden: a difference in escaping or
+whitespace next to an allowed value is still reported.
+
+A rule judges only a value that changed. A value equal to the baseline's
+is never a drift, also when it does not match the format: it is the
+accepted baseline, and the verdict must not depend on whether something
+else in the same response changed. This holds for JSON values, texts and
+attributes of a page, cells and header values.
+
+A JSON body whose whitespace layout changed (compact and pretty-printed,
+another indentation, line ends, spaces around `:` and after `,`) is an
+`encoding` drift at `$`; the same encoder's output that only nests deeper
+is not.
+
+<!-- check: allowlist -->
+```yaml
+version: 1
+headers:
+  - name: date
+    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    reason: Time of the response; changes with every request.
+  - name: set-cookie
+    request: post-api-auth-login
+    format: 'session=[0-9a-f]{40}; Path=/; HttpOnly'
+    reason: A new session id on every login.
+  - name: content-type
+    ignore_case: true
+    reason: Charset names are case-insensitive (RFC 9110); a framework upgrade writes utf-8 for UTF-8.
+body:
+  - path: $.meta.generated_at
+    format: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z'
+    reason: Time the response was built.
+  - request: get-api-feed
+    path: $.items
+    any_length: true
+    reason: The feed shows entries of the last hour.
+  - target: web
+    path: html*
+    format: '/_next/static/(?:[\w~-]+/)*[\w~-][\w.~-]*'
+    parts: true
+    reason: Asset URLs carry a build hash; the rest of the page is still compared.
+  - request: post-login-invalid
+    path: $raw
+    format: '(?s)<!DOCTYPE html>\n<html>\n    <head>\n.*<meta http-equiv="refresh" content="0;url=''?http://localhost:\d+''?" />.*</html>'
+    reason: Symfony 7 quotes the meta refresh URL of its redirect page; status and Location are still compared.
+  - request: get-api-users-export
+    path: xlsx:Users!A1
+    format: 'Exported \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}'
+    reason: The export writes its own time in the header cell.
+  - path: xlsx:*!F*
+    format: '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    reason: Column F of every worksheet is a generated id.
+arrays:
+  - request: get-api-users
+    path: $.data
+    key: id
+    reason: Users are listed newest first; a new user is one new item.
+```
+
+**Header rules**
+
+| Key | Meaning |
+|---|---|
+| `name` | header name (case-insensitive), required |
+| `format` | regular expression the whole value must match; required unless `ignore_case` |
+| `ignore_case` | the value may change only in letter case (compared lower-cased); not with `format` |
+| `reason` | required |
+| `request` | glob over request IDs; empty: every request |
+| `target` | only requests of this service |
+
+**Body rules**
+
+| Key | Meaning |
+|---|---|
+| `path` | a glob over body paths, required: a JSON path (`$.token`, `$.items[*].id`), a path into an HTML page (`html>body>p@class`, `html>body>script#__NEXT_DATA__$.buildId`), into the Next.js RSC payload (`self.__next_f$.0.b`), a cell of an exported spreadsheet (`xlsx:Users!A1`, `csv!A1`, below), or `$raw` for the whole body (below). A path that starts with `$` and goes on with anything but `.`, `[` or a wildcard names no place and is refused |
+| `format` | regular expression the whole value must match; required unless `any_length` |
+| `any_length` | arrays at this path may change length (JSON paths only; not with a cell path). It says nothing about values: without a `format` every value the path reaches is still compared (`$.items*` with `any_length` lets the list grow, not a price inside it change) |
+| `parts` | the format matches parts of the value; only those parts may change, the rest of the value is still compared. Needs `format`, not with `any_length`, and the format must not match an empty text |
+| `reason` | required |
+| `request` | glob over request IDs; empty: every request |
+| `target` | only requests of this service |
+
+**Whole body (`path: $raw`).** A rule with the path `$raw` (taken
+literally, never matched by a wildcard path) covers the whole body of a
+response that is not JSON, such as a framework's redirect page. When the
+bytes of the two bodies differ and neither of them is JSON, the current
+body as text must match the format (the whole text, as every format);
+then the body is not compared further. When it does not match, the body
+is compared as usual, so the report still lists what changed. Two JSON
+bodies are always compared value by value: name the values that may
+change instead. A JSON body that is not JSON now (an HTML error page), or
+the other way round, is always a `body` drift, whatever `$raw` rules
+there are. A `$raw` rule without `request` applies to every request; give it a `request`
+when only some responses are such pages. The format is matched against the body as served,
+with its own origin, also when the two sides were captured from different
+origins (`localhost:\d+` covers both). Status, headers and side effects
+are still compared. A `$raw` rule needs a `format` and takes neither
+`any_length` nor `parts`.
+
+**Cells (`path: xlsx:<worksheet>!<cell>`, `csv!<cell>`).** An XLSX or CSV
+response is compared cell by cell, and a drift names the cell:
+`xlsx:Users!B2` (the worksheet by the name the workbook gives it) or
+`csv!B2`. A body rule whose path starts with `xlsx:` or `csv!` applies to
+those cells as `format` applies to a JSON value: the current value must
+match the whole format, and then it may differ from the baseline; a value
+that does not match is a `format` drift, and an emptied cell is the value
+`""`. `parts: true` works as for other values; `any_length` does not apply.
+Rules apply at the `values` level. Only paths that start with `xlsx:` or
+`csv!` reach cells: a rule such as `path: '*'` stays with JSON and HTML.
+
+An XLSX cell has more than its text, and all of it is compared: its type
+(number, string, bool, error, date; a shared, inline and formula string
+are all `string`) at the `types` level as a `type` drift (the number `1`
+that became the text `"1"`), and its number format (`cell-format`, also
+another style of the cell: font, fill, borders) and formula
+(`cell-formula`) at the `values` level. An empty cell with a formula or
+a style of its own is compared too (a sum that came out empty, a fill on
+an empty cell), and so is the formatting of the runs of a rich text (a
+bold or colored part of a shared or inline string, `cell-format`). A cell
+rule lets only the value change, never the type, format or formula. The rest of the workbook
+(styles, column widths, merged cells, row heights, the worksheets'
+settings) is compared too, as a `body` drift at `xlsx` that names the
+first part that differs; that holds also when a rule let a cell change.
+Not compared: the document properties (`docProps/`: creation time,
+author, application) and how the ZIP archive is written. Rows and cells
+without their optional reference (`r`) are placed where the standard puts
+them. In a CSV, quoting and line ends that differ while the cells are the
+same are a `body` drift; when a rule let a cell change, the line ends and
+the byte order mark are still compared.
+
+- The worksheet is written as in the report: a name of letters, digits,
+  `_` and `.` as it is (`Users`, `Članovi`); any other in single
+  quotes, a quote doubled (`'Q1 2026'`, `'Hi!'`, `'O''Brien'`). A
+  workbook whose `xl/workbook.xml` (or its relationships) is missing or
+  cannot be read has its worksheets named after their part in brackets
+  (`xlsx:[sheet1]!A1`), which no workbook name can be.
+- The cell is a reference in capitals (`A1`) or a glob over one: `B*` is
+  column B, `*1` row 1, `xlsx:*!A1` cell A1 of every worksheet, `xlsx:*`
+  every cell. A glob's column and row are matched apart: the column is
+  the cell's part up to its last letter, the row the rest (with no letter,
+  the column is what comes before the first digit), and `*` and `?` match
+  letters in the column and digits in the row only. So `*1` is row 1 and
+  not A11, `B*` column B and not BA, `B?` B1 to B9, `B*1` the rows of
+  column B that end in 1, `*` every cell. `driftgate allowlist check` uses
+  the same meaning.
+- A path that no cell can have is refused when the allowlist is read:
+  `xlsx:Users` (a whole worksheet), `b2`, `2B`, `B`, `A0`, `??` (no
+  letter or digit to tell the column from the row), an unquoted
+  `xlsx:Q1 2026!A1` or a needlessly quoted `xlsx:'Users'!A1`.
+- A worksheet named by its bare part (`xlsx:sheet1!B2`) is refused in a
+  rule, with the message to write the name from a report (usually
+  `xlsx:Sheet1!B2`); a worksheet the workbook names `sheet1` is written
+  `xlsx:'sheet1'!B2`.
+
+**Arrays paired by key (`arrays:`).** The items of a JSON array are
+compared by position: one item inserted at the front of a list makes every
+item after it differ. An array rule pairs the items of the arrays its path
+reaches by a key instead, a member every item has (`id`) or a path into
+the item (`user.id`):
+
+- an item only the baseline has is `key-missing`, an item only the current
+  response has `key-extra`, both at the item's path with its key:
+  `$.data[id=42]` (a string key is quoted: `$.data[slug="a-b"]`; a key
+  name other than letters, digits, `_`, `$` and `-` joined by dots is
+  quoted too: `$.data["@id"=42]`). An
+  `any_length` body rule for the array lets items come and go (they are
+  then not reported); there is no `array-length` drift for a keyed array;
+- the items both have are compared as usual at `$.data[id=42].name`; a key
+  that is `42` on one side and `"42"` on the other pairs, and the `type`
+  drift is reported at `$.data[id=42].id`;
+- a changed order of the items both have is one `item-order` drift at the
+  array, listing the keys (at most 20) in both orders; `any_order: true`
+  allows it. Nothing else is ever hidden by an array rule.
+- when an item has no key, its key is not an integer or a string, or two
+  items share a key (on either side), the array is compared by position
+  as without the rule, and the report notes it (`notes` of the request in
+  JSON, a `note:` line in text and markdown).
+
+Body rules reach keyed items with a glob as before (`$.data[*].updated_at`
+matches `$.data[id=42].updated_at`); a rule written with an index
+(`$.data[0].x`) no longer matches an array paired by key. Drifts of one
+key path across items are grouped as one (`$.data[*].name`). In a private
+body the key of an item is hidden in the report (`$.data[id=(private)]`,
+`$.data["@id"=(private)]`).
+
+| Key | Meaning |
+|---|---|
+| `path` | a glob over JSON paths of arrays (in a body, in JSON embedded in a page, in the RSC payload), required; the first array rule that matches an array pairs its items |
+| `key` | the member that identifies an item, or member names joined by dots (`user.id`), required |
+| `any_order` | the items may come in any order |
+| `reason` | required |
+| `request` | glob over request IDs; empty: every request |
+| `target` | only requests of this service |
+
+`capture --repeat 2` and the first `run` propose entries with a ready format
+for values that differ between two captures on the same state; you add the
+reason.
+
+`driftgate allowlist check` finds rules that apply to no request, reach
+nothing in the baseline, are broader than a value or never decide because
+an earlier rule does ([commands](commands.md#allowlist-check)).
+
+---
+
+## exclusions.yaml
+
+`.driftgate/exclusions.yaml` (`driftgate/` with `baselines: git`) lists routes that are deliberately not checked,
+each with a reason. `coverage` counts them as excluded, `generate` makes no
+requests for them, and an exclusion that matches no route is reported as
+stale.
+
+<!-- check: exclusions -->
+```yaml
+version: 1
+routes:
+  - route: '/telescope/*'
+    reason: 'Laravel Telescope: a development tool.'
+  - route: 'DELETE /api/account'
+    reason: Deletes the logged-in user; checked by hand before each release.
+  - target: web
+    route: '/api/draft/*'
+    reason: Preview mode of the CMS.
+```
+
+| Key | Meaning |
+|---|---|
+| `route` | `METHOD /path` glob; without a method it matches every method. Required |
+| `reason` | required |
+| `target` | only routes of this service; empty: every service |
+
+---
+
+## catalog.json
+
+`.driftgate/catalog.json` (`driftgate/` with `baselines: git`) is the list of requests. `generate` writes entries
+with a `source.template`; it never touches entries written by hand or
+imported (without a template). Variants of one route are separate entries
+with their own ID.
+
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {
+   "id": "get-api-news-id",
+   "method": "GET",
+   "path": "/api/news/{id}",
+   "params": {"id": "12"},
+   "headers": [["accept", "application/json"]],
+   "storage": "public"
+  },
+  {
+   "id": "post-api-auth-login",
+   "method": "POST",
+   "path": "/api/auth/login",
+   "body": {"email": "admin@example.com", "password": "secret"},
+   "mutates": true,
+   "storage": "private"
+  },
+  {
+   "id": "get-api-me",
+   "method": "GET",
+   "path": "/api/me",
+   "identity": "admin",
+   "level": "types",
+   "storage": "private"
+  }
+ ],
+ "sequences": [
+  {"id": "login", "restore": "before", "requests": ["post-api-auth-login", "get-api-me"]}
+ ]
+}
+```
+
+**Request fields**
+
+| Field | Meaning |
+|---|---|
+| `id` | unique, also ignoring case (it names a file, and macOS and Windows ignore case); letters, digits, `. _ -`, starting with a letter or digit, not ending with `.`, and not a device name Windows reserves (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, also with an extension) |
+| `method`, `path` | the request; `method` is an HTTP method (written in upper case; `post` is read as `POST`; none is `GET`), `path` starts with `/` and may hold `{name}` parameters and a query string |
+| `target` | the service, with several targets |
+| `params` | values of the path parameters |
+| `params_from` | `{"<param>": {"request": "<id>", "path": "$.data.id"}}`: a value from the response of a request earlier in the same sequence |
+| `headers` | list of `[name, value]` pairs, sent in this order; the first of a name replaces DriftGate's own (`User-Agent`, `Accept-Encoding: identity`), more of that name are sent too |
+| `body` | a JSON body |
+| `identity` | send with this identity's token |
+| `mutates` | the request changes data: it runs after the read-only ones, one at a time, and needs a state with a restore command. With `capture --restore once` (the default, and `run`) the state is restored once before these requests, so each runs on the data the ones before it left; `--restore each` restores before every one. Without `mutates`, every method other than `GET`, `HEAD` and `OPTIONS` changes data, and capture lists such requests; write `"mutates": false` for one that only reads (a search sent as `POST`), so it runs with the read-only requests on the restored data |
+| `storage` | `public` or `private`, required |
+| `level` | comparison level of this request |
+| `observe` | measured, never compared |
+| `source` | where the entry came from (`route`, `template`, `import`); written by the tool |
+| `multipart` | a `multipart/form-data` body (below); not with `body` |
+| `repeat` | send the request N times (1 to 10000) |
+| `command`, `output`, `output_ignore` | a command step instead of a request (below) |
+
+**Sequences** run their requests in order, together. `restore: "before"`
+restores the state before the sequence (`capture --restore each` does that
+for every sequence). A request is in at most one sequence.
+
+### multipart
+
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {
+   "id": "import-xlsx",
+   "method": "POST",
+   "path": "/api/imports",
+   "identity": "admin",
+   "mutates": true,
+   "storage": "private",
+   "multipart": {
+    "fields": [["kind", "orders"]],
+    "files": [{"field": "file", "path": "orders/2025.xlsx", "ref": "…"}]
+   }
+  },
+  {
+   "id": "import-synthetic",
+   "method": "POST",
+   "path": "/api/imports",
+   "identity": "admin",
+   "mutates": true,
+   "storage": "public",
+   "multipart": {
+    "fields": [["kind", "orders"]],
+    "files": [{"field": "file", "synthetic": "xlsx"}]
+   }
+  }
+ ]
+}
+```
+
+Each file has a `field` and either:
+
+- `path`: a real file, relative to the [uploads folder](#uploads), without
+  `.` or `..`. The content never enters the repository; `ref` is a keyed
+  hash of it. Leave `ref` out the first time: the capture stops (exit 2) and
+  prints the value to set after you checked it is the right file. A changed
+  file stops the capture as a configuration change (exit 2), a missing one as
+  an environment error (exit 3). The file is checked before anything is
+  sent and read again only when its request is sent, so the files of a
+  capture are not all held in memory; a file that changes during the
+  capture fails its request. A request with a real file must be
+  `private`, and so is every response after it until the next restore. It
+  runs after the read-only requests, one at a time, like a request that
+  changes data (also without `mutates`), and needs a state with a restore.
+- `synthetic`: a minimal valid file of a kind (`csv`, `gif`, `jpeg`, `json`,
+  `pdf`, `png`, `txt`, `xlsx`), always the same bytes.
+
+Optional: `name` (the file name sent; default the base name of `path`, or
+`upload.<ext>`) and `type` (the part's content type). The multipart boundary
+is derived from the content, so the same request is the same bytes every
+time.
+
+### repeat
+
+`"repeat": 61` sends the request 61 times in a row and compares the last
+response together with the statuses of all (`200×60, 429×1`). The sends skip
+`rate_limits`, and the request runs on a freshly restored state. On a target
+outside its `allow_hosts` (`capture --allow-remote`) a repeated request needs
+`--allow-remote-mutations`, like one that changes data, and keeps
+`rate_limits`.
+
+### command steps
+
+A command step runs a program instead of sending a request, e.g. a queue
+worker inside a sequence. It has no `method`, `path`, body, headers,
+parameters or identity, and is not repeated. Its exit code and side effects
+are compared like a request's; its standard output only with
+`"output": true`, with the text the `output_ignore` regular expressions
+match removed first (here, timestamps). When a step fails, the log shows
+the last lines it wrote to standard error, never its standard output: that
+is its body, private, or public but not yet scanned for personal data.
+
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {"id": "import-csv", "method": "POST", "path": "/api/imports", "mutates": true, "storage": "public",
+   "multipart": {"fields": [["kind", "orders"]], "files": [{"field": "file", "synthetic": "csv"}]}},
+  {"id": "queue-work", "command": ["php", "artisan", "queue:work", "--stop-when-empty"],
+   "output": true, "output_ignore": ["\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"], "storage": "public"},
+  {"id": "orders", "method": "GET", "path": "/api/orders", "storage": "public"},
+  {"id": "like-throttle", "method": "PUT", "path": "/api/posts/12/like", "repeat": 61, "storage": "public"}
+ ],
+ "sequences": [
+  {"id": "imports", "requests": ["import-csv", "queue-work", "orders"]}
+ ]
+}
+```
+
+---
+
+## classify.yaml
+
+`.driftgate/classify.yaml` (`driftgate/` with `baselines: git`) holds a rule for every column of every table of
+the data module's source database. `driftgate data classify --write`
+proposes rules (marked `proposed: true`); a person checks each and removes
+the mark. A column without a rule, a rule still proposed, or a rule for a
+table or column that no longer exists stops `anonymize` and `subset`.
+
+<!-- check: classify -->
+```yaml
+version: 1
+tables:
+  users:
+    columns:
+      id: keep
+      name: universal
+      email: email
+      password: password
+      remember_token: token
+      bio: free-text
+      settings:
+        kind: personal
+        strategy: json
+        paths:
+          $.phone: universal
+          $.theme: keep
+        other: free-text
+      avatar: file
+      created_at: keep
+  sessions:
+    action: empty
+    reason: Sessions of real users; the application makes new ones.
+  cache:
+    columns:
+      key: keep
+      value:
+        kind: serialized-php
+        action: empty-table
+  telescope_entries:
+    action: skip
+    reason: Development tool data.
+schema:
+  view vip_customers: [email]
+  table users:
+    kinds: [email]
+    reason: The column default is the shared support address.
+```
+
+**Tables**
+
+| Key | Meaning |
+|---|---|
+| `action` | `copy` (default): rows are copied, each column by its rule; `empty`: the structure without rows; `skip`: the table is left out |
+| `columns` | column name → rule |
+| `reason` | why |
+| `proposed` | written by `data classify`; remove it once checked |
+
+**Column rules.** One word for the plain cases (`keep`, `file`,
+`serialized-php`, or a strategy name, which means `kind: personal`), or a
+mapping:
+
+| Key | Meaning |
+|---|---|
+| `kind` | `keep` (copied as is), `personal` (replaced by a strategy), `serialized-php` (PHP `serialize()` output), `file` (a path to an uploaded file; the file gets a placeholder) |
+| `strategy` | for `personal`: `universal`, `email`, `password`, `token`, `free-text`, `html`, `json`, `null`, `empty` |
+| `paths` | for `json`: JSON path glob (starting with `$`) → strategy or `keep` |
+| `other` | for `json`: strings under no path, `free-text` (default) or `keep` |
+| `action` | for `serialized-php`: `empty-table` (default) or `null` (the column) |
+| `reason`, `proposed` | as for tables |
+
+Strategies:
+
+| Strategy | Replacement |
+|---|---|
+| `universal` | a letter by a letter of the same script (Latin with Serbian diacritics, Cyrillic), a digit by a digit; length and punctuation kept |
+| `email` | an address at an `.invalid` domain |
+| `password` | a hash of the known test password `driftgate` |
+| `token` | a token of the same length |
+| `free-text`, `html` | only the personal parts of the text change (names, e-mails, phone numbers) |
+| `json` | by path, as `paths` and `other` say |
+| `null`, `empty` | `NULL` or an empty value |
+
+The same value gets the same stand-in everywhere (deterministic under the
+key), so references and uniqueness hold. A bare `null` in YAML is the
+strategy `null`.
+
+**schema** confirms what the detector finds in schema objects (comments,
+defaults, views, triggers, functions, checks), which are copied as they
+are. The key is the object as `data classify` names it (`view vip`, `table
+users`); the value is a list of kinds (`email`, `phone`, `jmbg`, `card`,
+`iban`) or a mapping with `kinds`, `reason` and `proposed`. Any other
+finding stops the run.
+
+### subset
+
+`data subset` copies a sample: the rows `subset:` chooses as roots, the
+rows that follow them, and every row they reference, transitively, so the
+copy has no dangling reference.
+
+<!-- check: classify -->
+```yaml
+version: 1
+tables:
+  users: { columns: { id: keep, email: email } }
+subset:
+  nullable: pull
+  tables:
+    countries: all
+    audit_log: none
+    users:
+      rows: 200
+      order: latest
+    orders:
+      follow: [users]
+      per_parent: 5
+    news:
+      where: "published = 1"
+      percent: 10
+  references:
+    - from: comments(commentable_id)
+      to: posts(id)
+      when: { commentable_type: 'App\Models\Post' }
+    - from: orders(coupon_id)
+      nullable: "null"
+```
+
+| Key | Meaning |
+|---|---|
+| `nullable` | for a nullable reference whose row is outside the sample: `pull` (default, take the row in) or `null` (set the reference to NULL) |
+| `tables.<t>` | `all`, `none`, or a mapping. A table not listed has only the rows other kept rows reference |
+| `rows` | at most this many roots |
+| `percent` | roots: this share of the rows (above 0, at most 100), chosen by a hash of the primary key |
+| `where` | roots: rows matching this SQL condition |
+| `order` | `latest` (default, highest primary key first) or `first` |
+| `follow` | parent tables: rows of this table that reference kept rows of those tables are kept too |
+| `per_parent` | with `follow`: at most this many rows per parent (by `order`); 0 is all |
+| `references` | references the database does not declare (applications without foreign keys, polymorphic columns), written `table(column, …)`. `to` omitted: `from` is a foreign key of the database whose `nullable` rule changes. `when` limits a declared reference to rows whose columns have these values |
+
+A table rule needs `rows`, `percent`, `where` or `follow` (or `all` /
+`none`).

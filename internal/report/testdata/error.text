@@ -1,0 +1,12 @@
+DRIFT  api-news
+         status 200 → 500
+         header-value    header:content-type  ["application/json"] → ["application/problem+json"]
+         body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report
+
+Groups:
+  [3] 1 drift in 1 request: header content-type changed value (["application/json"] → ["application/problem+json"])
+  [7] 1 drift in 1 request: status changed (200 → 500)
+      1 request: 200 → 500 (api-news)
+  … 6 more groups only in requests whose status changed, summarized there (driftgate review lists them)
+
+run against baseline:local: 2 compared, 1 passed, 1 drifted, 0 skipped, 0 observed

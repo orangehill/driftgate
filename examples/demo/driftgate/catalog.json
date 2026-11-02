@@ -1,0 +1,55 @@
+{
+ "version": 1,
+ "requests": [
+  {
+   "id": "post-api-faq",
+   "method": "POST",
+   "path": "/api/faq",
+   "body": {
+    "q": "?"
+   },
+   "mutates": true,
+   "storage": "public",
+   "source": {
+    "route": "POST /api/faq",
+    "template": "ok"
+   }
+  },
+  {
+   "id": "get-api-news",
+   "method": "GET",
+   "path": "/api/news",
+   "storage": "public",
+   "source": {
+    "route": "GET /api/news",
+    "template": "ok"
+   }
+  },
+  {
+   "id": "get-api-news-id",
+   "method": "GET",
+   "path": "/api/news/{id}",
+   "params": {
+    "id": "12"
+   },
+   "storage": "public",
+   "source": {
+    "route": "GET /api/news/{id}",
+    "template": "ok"
+   }
+  },
+  {
+   "id": "get-api-news-id-not-found",
+   "method": "GET",
+   "path": "/api/news/{id}",
+   "params": {
+    "id": "999999999"
+   },
+   "storage": "public",
+   "source": {
+    "route": "GET /api/news/{id}",
+    "template": "not-found"
+   }
+  }
+ ]
+}

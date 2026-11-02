@@ -1,0 +1,1 @@
+{"error":"validation","errors":{"question":{"rule":"required","message":"The question field is required."},"answer":{"rule":"required","message":"The answer field is required."}},"code":422}

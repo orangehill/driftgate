@@ -1,0 +1,47 @@
+openapi: 3.0.3
+info: {title: Demo, version: "1"}
+servers:
+  - url: https://api.example.test/v1
+security:
+  - bearer: []
+paths:
+  /news:
+    get:
+      operationId: listNews
+      security: []
+  /news/{id}:
+    get:
+      operationId: showNews
+      security: []
+    delete:
+      operationId: deleteNews
+  /faq:
+    post:
+      operationId: createFaq
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Faq'
+  /login:
+    post:
+      security: []
+      requestBody:
+        content:
+          application/json:
+            example: {email: a@example.test, password: secret, since: 2026-01-02, count: 3}
+components:
+  schemas:
+    Faq:
+      type: object
+      required: [question, kind, tags, author]
+      properties:
+        question: {type: string}
+        kind: {type: string, enum: [general, billing]}
+        votes: {type: integer}
+        tags: {type: array, items: {type: string, format: email}}
+        author:
+          type: object
+          required: [id]
+          properties:
+            id: {type: integer}

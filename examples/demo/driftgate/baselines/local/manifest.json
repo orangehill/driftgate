@@ -1,0 +1,19 @@
+{
+ "version": 1,
+ "files": {
+  "bodies/1ee7db56115b2bd2587f0a5fca7d00f1796745535036a987f80f68467f1c8eca": "1ee7db56115b2bd2587f0a5fca7d00f1796745535036a987f80f68467f1c8eca",
+  "bodies/9c238a9e01e7ccd4fde1fca24442fc6cd18782782d35a492c5118fcf3effbe56": "9c238a9e01e7ccd4fde1fca24442fc6cd18782782d35a492c5118fcf3effbe56",
+  "bodies/e8e04c9bf2a398f553310296c9b4c23119a5992c41d73e37a238e031c02a3044": "e8e04c9bf2a398f553310296c9b4c23119a5992c41d73e37a238e031c02a3044",
+  "bodies/f5002da54683e275afcd1773c890df7f852d2eacd1a1460ddeb781200743742a": "f5002da54683e275afcd1773c890df7f852d2eacd1a1460ddeb781200743742a",
+  "meta.json": "6f55d9510b49d9f4dd309b0301c0257aba15d0c8e77395e54ebaf3b03322f7ef",
+  "responses/get-api-news-id-not-found.json": "45e2566244444e596a09ed5a981222ebb40b74d52931e56e9c3371813e7fe5f0",
+  "responses/get-api-news-id.json": "2b13328e2928e4063b2bcd3a73b6c364f803cfe8ac7e45e3f797a79f4d7d28a4",
+  "responses/get-api-news.json": "a1c97d38b330f26997d3bc1ad32d0e2d83c1c009ecd67e29df50c96e19049e9f",
+  "responses/post-api-faq.json": "8da41023498a4c821f7baff663fe7ab204664a47e0d542b013d30f26f1dbe84e",
+  "timings.json": "bf4a89bcf357b1b0ca87fbed69c3eb8df9f6b559c038cabba355705b0dcb5a72"
+ },
+ "acceptances": {
+  "lines": 0,
+  "last": ""
+ }
+}

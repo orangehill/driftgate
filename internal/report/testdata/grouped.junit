@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="driftgate run against baseline:local" tests="7" failures="7" errors="0" skipped="0" time="0">
+ <testsuite name="driftgate run against baseline:local" tests="7" failures="7" errors="0" skipped="0" time="0" timestamp="2026-10-30T10:00:00">
+  <properties>
+   <property name="tag" value="run"></property>
+   <property name="against" value="baseline:local"></property>
+   <property name="level" value="values"></property>
+   <property name="mode" value="evolve"></property>
+  </properties>
+  <testcase name="home" classname="driftgate" time="0">
+   <failure message="9 drifts: status 200 → 302, redirects to /login; header-extra header:location   → [&#34;/login&#34;]; body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 302, redirects to /login&#xA;header-extra header:location   → [&#34;/login&#34;]&#xA;body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="about" classname="driftgate" time="0">
+   <failure message="9 drifts: status 200 → 302, redirects to /login; header-extra header:location   → [&#34;/login&#34;]; body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 302, redirects to /login&#xA;header-extra header:location   → [&#34;/login&#34;]&#xA;body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="contact" classname="driftgate" time="0">
+   <failure message="9 drifts: status 200 → 302, redirects to /login; header-extra header:location   → [&#34;/login&#34;]; body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 302, redirects to /login&#xA;header-extra header:location   → [&#34;/login&#34;]&#xA;body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="admin" classname="driftgate" time="0">
+   <failure message="9 drifts: status 200 → 302, redirects to http://localhost:8080/; header-extra header:location   → [&#34;http://localhost:8080/&#34;]; body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 302, redirects to http://localhost:8080/&#xA;header-extra header:location   → [&#34;http://localhost:8080/&#34;]&#xA;body differs: 6 html drifts; 1 other header differs (vary); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="api-news" classname="driftgate" time="0">
+   <failure message="8 drifts: status 200 → 500; header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]; body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 500&#xA;header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]&#xA;body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="api-faq" classname="driftgate" time="0">
+   <failure message="8 drifts: status 200 → 500; header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]; body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 500&#xA;header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]&#xA;body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="news-0" classname="driftgate" time="0">
+   <failure message="4 drifts: type $.data[0].id  int → string; header-missing header:x-total  [&#34;3&#34;] → ; header-value header:content-type  [&#34;application/json&#34;] → [&#34;text/html&#34;]; value $.title  &#34;Notes&#34; → &#34;Notes news-0&#34;" type="drift">type $.data[0].id  int → string&#xA;header-missing header:x-total  [&#34;3&#34;] → &#xA;header-value header:content-type  [&#34;application/json&#34;] → [&#34;text/html&#34;]&#xA;value $.title  &#34;Notes&#34; → &#34;Notes news-0&#34;</failure>
+  </testcase>
+ </testsuite>
+</testsuites>

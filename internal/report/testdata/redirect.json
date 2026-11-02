@@ -1,0 +1,207 @@
+{
+ "version": 1,
+ "tag": "run",
+ "against": "baseline:local",
+ "compared": 2,
+ "passed": 1,
+ "drifted": 1,
+ "skipped": 0,
+ "observed": 0,
+ "results": [
+  {
+   "id": "home",
+   "outcome": "drift",
+   "drifts": [
+    {
+     "request": "home",
+     "kind": "status",
+     "where": "",
+     "baseline": "200",
+     "current": "302"
+    },
+    {
+     "request": "home",
+     "kind": "header-extra",
+     "where": "header:location",
+     "current": "[\"http://localhost:8080\"]"
+    },
+    {
+     "request": "home",
+     "kind": "header-missing",
+     "where": "header:vary",
+     "baseline": "[\"Accept-Encoding\"]"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>head>meta[0]",
+     "current": "meta"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>head>meta[1]",
+     "current": "meta"
+    },
+    {
+     "request": "home",
+     "kind": "text",
+     "where": "html>head>title",
+     "baseline": "\"Home\"",
+     "current": "\"Redirecting to http://localhost:8080\""
+    },
+    {
+     "request": "home",
+     "kind": "text",
+     "where": "html>body",
+     "baseline": "\"<h1> <p>\"",
+     "current": "\"Redirecting to <a> .\""
+    },
+    {
+     "request": "home",
+     "kind": "element-missing",
+     "where": "html>body>h1",
+     "baseline": "h1"
+    },
+    {
+     "request": "home",
+     "kind": "element-extra",
+     "where": "html>body>a",
+     "current": "a"
+    }
+   ],
+   "status_change": {
+    "from": "200",
+    "to": "302",
+    "location": "http://localhost:8080"
+   },
+   "collapsed": 7
+  },
+  {
+   "id": "ok",
+   "outcome": "pass"
+  }
+ ],
+ "groups": [
+  {
+   "n": 1,
+   "signature": "element-extra html>head>meta[*]",
+   "requests": 1,
+   "drifts": 2,
+   "example": {
+    "request": "home",
+    "kind": "element-extra",
+    "where": "html>head>meta[0]",
+    "current": "meta"
+   },
+   "explanation": "2 drifts in 1 request: element html>head>meta[*] is new"
+  },
+  {
+   "n": 2,
+   "signature": "element-extra html>body>a",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "element-extra",
+    "where": "html>body>a",
+    "current": "a"
+   },
+   "explanation": "1 drift in 1 request: element html>body>a is new"
+  },
+  {
+   "n": 3,
+   "signature": "element-missing html>body>h1",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "element-missing",
+    "where": "html>body>h1",
+    "baseline": "h1"
+   },
+   "explanation": "1 drift in 1 request: element html>body>h1 is missing"
+  },
+  {
+   "n": 4,
+   "signature": "header-extra header:location",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "header-extra",
+    "where": "header:location",
+    "current": "[\"http://localhost:8080\"]"
+   },
+   "explanation": "1 drift in 1 request: header location is new"
+  },
+  {
+   "n": 5,
+   "signature": "header-missing header:vary",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "header-missing",
+    "where": "header:vary",
+    "baseline": "[\"Accept-Encoding\"]"
+   },
+   "explanation": "1 drift in 1 request: header vary is missing"
+  },
+  {
+   "n": 6,
+   "signature": "status ",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "status",
+    "where": "",
+    "baseline": "200",
+    "current": "302"
+   },
+   "explanation": "1 drift in 1 request: status changed (200 → 302)"
+  },
+  {
+   "n": 7,
+   "signature": "text html>body",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "text",
+    "where": "html>body",
+    "baseline": "\"<h1> <p>\"",
+    "current": "\"Redirecting to <a> .\""
+   },
+   "explanation": "1 drift in 1 request: text of html>body changed (\"<h1> <p>\" → \"Redirecting to <a> .\")"
+  },
+  {
+   "n": 8,
+   "signature": "text html>head>title",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "home",
+    "kind": "text",
+    "where": "html>head>title",
+    "baseline": "\"Home\"",
+    "current": "\"Redirecting to http://localhost:8080\""
+   },
+   "explanation": "1 drift in 1 request: text of html>head>title changed (\"Home\" → \"Redirecting to http://localhost:8080\")"
+  }
+ ],
+ "status_changes": [
+  {
+   "from": "200",
+   "to": "302",
+   "location": "http://localhost:8080",
+   "requests": [
+    "home"
+   ]
+  }
+ ],
+ "level": "values",
+ "mode": "evolve",
+ "created": "2026-10-30T10:00:00Z"
+}

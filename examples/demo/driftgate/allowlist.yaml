@@ -1,0 +1,10 @@
+version: 1
+headers:
+  - name: date
+    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    reason: Time of the response.
+body:
+  - request: post-api-faq
+    path: $.entry.created_at
+    format: '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+    reason: Time of creation.

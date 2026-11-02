@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0">
+ <testsuite name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0" timestamp="2026-10-30T10:00:00">
+  <properties>
+   <property name="tag" value="run"></property>
+   <property name="against" value="baseline:local"></property>
+   <property name="level" value="values"></property>
+   <property name="mode" value="evolve"></property>
+  </properties>
+  <testcase name="api-news" classname="driftgate" time="0">
+   <failure message="8 drifts: status  200 → 500; header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]; header-missing header:x-total  [&#34;3&#34;] → ; key-missing $.data  data → ; key-extra $.message   → message; key-extra $.exception   → exception; value $.status  &#34;ok&#34; → &#34;error&#34;; encoding $  layout → layout" type="drift">status  200 → 500&#xA;header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]&#xA;header-missing header:x-total  [&#34;3&#34;] → &#xA;key-missing $.data  data → &#xA;key-extra $.message   → message&#xA;key-extra $.exception   → exception&#xA;value $.status  &#34;ok&#34; → &#34;error&#34;&#xA;encoding $  layout → layout</failure>
+  </testcase>
+  <testcase name="ok" classname="driftgate" time="0"></testcase>
+ </testsuite>
+</testsuites>

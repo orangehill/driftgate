@@ -1,0 +1,10 @@
+micronaut:
+  application:
+    name: shop
+datasources:
+  default:
+    url: jdbc:postgresql://localhost:5432/shop
+    driver-class-name: org.postgresql.Driver
+    username: shop
+    password: 'S3cr-micronaut'
+    dialect: POSTGRES

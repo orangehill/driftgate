@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0">
+ <testsuite name="driftgate run against baseline:local" tests="2" failures="1" errors="0" skipped="0" time="0" timestamp="2026-10-30T10:00:00">
+  <properties>
+   <property name="tag" value="run"></property>
+   <property name="against" value="baseline:local"></property>
+   <property name="level" value="values"></property>
+   <property name="mode" value="evolve"></property>
+  </properties>
+  <testcase name="api-news" classname="driftgate" time="0">
+   <failure message="8 drifts: status 200 → 500; header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]; body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report" type="drift">status 200 → 500&#xA;header-value header:content-type  [&#34;application/json&#34;] → [&#34;application/problem+json&#34;]&#xA;body differs: 5 drifts, mostly json; 1 other header differs (x-total); listed with --max-drifts N and in the JSON report</failure>
+  </testcase>
+  <testcase name="ok" classname="driftgate" time="0"></testcase>
+ </testsuite>
+</testsuites>

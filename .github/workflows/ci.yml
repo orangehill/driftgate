@@ -1,0 +1,236 @@
+name: ci
+
+# Changes to documents alone run nothing. Branches are checked with the local
+# tests; CI runs on main and development, on pull requests and by hand. The
+# release workflow runs these same jobs (workflow_call), so a release passes
+# exactly the checks of CI.
+on:
+  push:
+    branches: [main, development]
+    paths-ignore: ["docs/**", "**.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**.md"]
+  # Nightly on main: the database images of the databases job move on
+  # (patch releases) without a push here.
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      mariadb-userstat:
+        description: on turns on MariaDB's per-table counters; off tests the fallback without them
+        type: string
+        default: "on"
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run still going. Called by the
+# release workflow, github.workflow is "release": its checks never cancel a
+# CI run of the same branch, nor share the release's own group.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: dg
+        ports: ["33071:3306"]
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-retries=20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: dg
+        ports: ["33081:3306"]
+        options: --health-cmd="mysqladmin ping -pdg" --health-interval=5s --health-retries=20
+      # The state tests check that nothing was written between two
+      # fingerprints: they get servers no other test writes to.
+      mariadb-state:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: dg
+        ports: ["33072:3306"]
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-retries=20
+      mysql-state:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: dg
+        ports: ["33082:3306"]
+        options: --health-cmd="mysqladmin ping -pdg" --health-interval=5s --health-retries=20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: dg
+        ports: ["54371:5432"]
+        options: --health-cmd=pg_isready --health-interval=5s --health-retries=20
+    env:
+      DRIFTGATE_TEST_MYSQL: mysql://root:dg@127.0.0.1:33071/,mysql://root:dg@127.0.0.1:33081/
+      DRIFTGATE_TEST_MYSQL_STATE: mysql://root:dg@127.0.0.1:33072/,mysql://root:dg@127.0.0.1:33082/
+      DRIFTGATE_TEST_POSTGRES: postgres://postgres:dg@127.0.0.1:54371/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # Service containers take no command line: MariaDB's per-table counters
+      # (userstat) are turned on here. The tests also run without them (the
+      # release runs them so, to test the fallback path).
+      - name: MariaDB userstat
+        if: inputs.mariadb-userstat != 'off'
+        run: |
+          docker exec ${{ job.services.mariadb.id }} mariadb -uroot -pdg -e "SET GLOBAL userstat = 1"
+          docker exec ${{ job.services.mariadb-state.id }} mariadb -uroot -pdg -e "SET GLOBAL userstat = 1"
+      - name: Format
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: Test
+        run: go test -race ./...
+      # Allocations of the comparison's hot paths, against budgets: the
+      # same on every run, unlike timings on a shared runner. The race
+      # detector allocates on its own, so they run without it.
+      - name: Allocation budgets
+        run: go test -count=1 -run=Budget ./internal/compare/ ./internal/jsonx/
+      - name: Fuzz the JSON parser
+        run: go test -run='^$' -fuzz=FuzzParse -fuzztime=60s ./internal/jsonx/
+      - name: Vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # Database versions users run besides the ones of test: MariaDB 10.3
+  # (oldest supported; its query cache and plans differ), 10.6,
+  # MySQL 8.0, PostgreSQL 13 and 16; and the end-to-end and whole crash
+  # matrix (tools/e2e) on the versions of test. The state, data, capture
+  # and command tests on each, without -race (test has it). Not for pull
+  # requests: four more database stacks for every push of a branch; on
+  # main and development, nightly and by hand they catch what a version
+  # does differently before a release (which runs them too).
+  databases:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: "MariaDB 10.3, PostgreSQL 13", mysql: "mariadb:10.3", postgres: "postgres:13", packages: "./internal/state/ ./internal/data/ ./internal/capture/ ./internal/cli/ ./internal/dbx/ ./tools/e2e/"}
+          - {name: "MariaDB 10.6, PostgreSQL 16", mysql: "mariadb:10.6", postgres: "postgres:16", packages: "./internal/state/ ./internal/data/ ./internal/capture/ ./internal/cli/ ./internal/dbx/ ./tools/e2e/"}
+          - {name: "MySQL 8.0", mysql: "mysql:8.0", postgres: "postgres:17", packages: "./internal/state/ ./internal/data/ ./internal/capture/ ./internal/cli/ ./internal/dbx/ ./tools/e2e/"}
+          - {name: "end to end, MariaDB 11.4, PostgreSQL 17", mysql: "mariadb:11.4", postgres: "postgres:17", packages: "./tools/e2e/"}
+    name: databases (${{ matrix.name }})
+    services:
+      mysql:
+        image: ${{ matrix.mysql }}
+        env:
+          MARIADB_ROOT_PASSWORD: dg
+          MYSQL_ROOT_PASSWORD: dg
+        ports: ["33071:3306"]
+      mysql-state:
+        image: ${{ matrix.mysql }}
+        env:
+          MARIADB_ROOT_PASSWORD: dg
+          MYSQL_ROOT_PASSWORD: dg
+        ports: ["33072:3306"]
+      postgres:
+        image: ${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: dg
+        ports: ["54371:5432"]
+        options: --health-cmd=pg_isready --health-interval=5s --health-retries=20
+    env:
+      DRIFTGATE_TEST_MYSQL: mysql://root:dg@127.0.0.1:33071/
+      DRIFTGATE_TEST_MYSQL_STATE: mysql://root:dg@127.0.0.1:33072/
+      DRIFTGATE_TEST_POSTGRES: postgres://postgres:dg@127.0.0.1:54371/postgres
+      DRIFTGATE_E2E: "1"
+      DRIFTGATE_CHAOS: full
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # The images differ in their client's name and health check: ready is
+      # a query over TCP (the first start of an image serves only a socket).
+      - name: Wait for the databases
+        env:
+          USERSTAT: ${{ inputs.mariadb-userstat != 'off' && 'SET GLOBAL userstat = 1' || 'SELECT 1' }}
+        run: |
+          for id in ${{ job.services.mysql.id }} ${{ job.services.mysql-state.id }}; do
+            for i in $(seq 90); do
+              docker exec $id sh -c 'for c in mariadb mysql; do command -v $c >/dev/null && exec $c -h127.0.0.1 -uroot -pdg -e "SELECT 1"; done' >/dev/null 2>&1 && break
+              sleep 2
+            done
+            # MariaDB's userstat as in the job above: off when the caller
+            # (release) tests the fallback without it.
+            docker exec -e USERSTAT="$USERSTAT" $id sh -c 'for c in mariadb mysql; do command -v $c >/dev/null && exec $c -h127.0.0.1 -uroot -pdg -e "SELECT VERSION(); $USERSTAT" ; done' 2>/dev/null || true
+          done
+      - name: Test
+        run: go test -count=1 ${{ matrix.packages }}
+
+  # Windows: the packages that need no database, and the parts written for
+  # it (the store lock, process groups). A cross-compiled build (build)
+  # does not run a test.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        shell: bash
+        run: |
+          go test -count=1 ./internal/storelock/ ./internal/procx/ ./internal/snapshot/ ./internal/config/ ./internal/compare/ \
+            ./internal/allowlist/ ./internal/catalog/ ./internal/glob/ ./internal/jsonx/ ./internal/pii/ ./internal/scan/ \
+            ./internal/secret/ ./internal/report/ ./internal/baseline/ ./internal/httpx/ ./internal/har/ ./internal/sheet/ ./internal/upload/
+          go test -count=1 -run 'TestHelp|TestClassify|TestUsageErrors|TestCompareNamesAreConfiguration|TestImportAndCompare|TestReport|TestHidePrivateValues|TestLockStoreSweep' ./internal/cli/
+
+  # The six platforms, also for pull requests: the size and package gate
+  # below must fail before a merge, not on main or in a release.
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w" -o driftgate-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/driftgate
+      # The binary stays light: a dependency that adds megabytes, or a package
+      # that keeps every method linked (text/template, html/template) or adds
+      # debug endpoints (net/http/pprof, expvar), fails here, not in a release.
+      - name: Size
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          size=$(wc -c < driftgate-$GOOS-$GOARCH)
+          echo "driftgate-$GOOS-$GOARCH: $size bytes"
+          test "$size" -le $((18 << 20))
+          if go list -deps ./cmd/driftgate | grep -Ex 'text/template|html/template|net/http/pprof|expvar|plugin'; then
+            exit 1
+          fi

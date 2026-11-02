@@ -1,0 +1,37 @@
+{
+ "version": 1,
+ "routes": [
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/admin/reset",
+   "source": "command"
+  },
+  {
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/faq",
+   "body": {
+    "q": "?"
+   },
+   "body_source": "command",
+   "source": "command"
+  },
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/news",
+   "source": "command"
+  },
+  {
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/news/{id}",
+   "source": "command"
+  }
+ ]
+}

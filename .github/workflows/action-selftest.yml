@@ -1,0 +1,78 @@
+name: action-selftest
+
+# Runs the DriftGate action of this repository (uses: ./) against the demo API
+# (tools/demoserver) and the committed demo project (examples/demo). Only by
+# hand: green by default, red with break=true (the demo starts as v2, with
+# planted drift). With pr set, the report is also posted on that pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      break:
+        description: Plant drift (demo API v2); the run must end red with exit 1
+        type: boolean
+        default: false
+      pr:
+        description: Pull request number to comment on (empty for no comment)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false # the action builds from the workspace and never pushes
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Start the demo API
+        env:
+          BREAK: ${{ inputs.break }}
+        run: |
+          go build -o "$RUNNER_TEMP/demoserver" ./tools/demoserver
+          version=v1
+          if [ "$BREAK" = true ]; then version=v2; fi
+          nohup "$RUNNER_TEMP/demoserver" -addr 127.0.0.1:8873 -version "$version" >"$RUNNER_TEMP/demoserver.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8873/api/news; then echo "demo API $version is up"; exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/demoserver.log"
+          exit 1
+      - name: DriftGate
+        id: driftgate
+        uses: ./
+        with:
+          version: source
+          working-directory: examples/demo
+          junit: driftgate-junit.xml
+          comment: ${{ inputs.pr != '' && 'always' || 'off' }}
+          pr-number: ${{ inputs.pr }}
+          comment-id: selftest
+          artifact-name: driftgate-selftest
+      # The job is red when the action is; this step says whether it is red
+      # for the expected reason (drift, exit 1), not for a broken setup.
+      - name: Expected outcome
+        if: ${{ !cancelled() }}
+        env:
+          BREAK: ${{ inputs.break }}
+          CODE: ${{ steps.driftgate.outputs.exit-code }}
+          RESULT: ${{ steps.driftgate.outputs.result }}
+          REPORT: ${{ steps.driftgate.outputs.report }}
+          JUNIT: ${{ steps.driftgate.outputs.junit }}
+        run: |
+          want=0
+          if [ "$BREAK" = true ]; then want=1; fi
+          echo "exit code $CODE ($RESULT), expected $want"
+          test -s "$REPORT" || { echo "::error::no markdown report"; exit 1; }
+          test -s "$JUNIT" || { echo "::error::no JUnit report"; exit 1; }
+          if [ "$CODE" != "$want" ]; then
+            echo "::error::DriftGate ended with exit $CODE ($RESULT), expected $want"
+            exit 1
+          fi
+          echo "as expected"
