@@ -592,6 +592,12 @@ guards:
     command: ["sh", "-c", "grep -q '^QUEUE_CONNECTION=sync' .env"]
 ```
 
+A restore resets only what `state:` restores (the databases, and any
+component you add), not the application's files. A step whose effect lives
+in files, such as building a view or configuration cache, belongs before the
+capture, not in `prepare`: `prepare` runs after every restore, so its time
+is multiplied by the number of restores.
+
 ### discover
 
 Adapters that find the routes. `driftgate init` writes them; the order of
