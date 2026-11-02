@@ -71,3 +71,17 @@ func TestPatternUUIDSame(t *testing.T) {
 		t.Errorf("%q matches %q, another tenant", got, v)
 	}
 }
+
+// The same UUID in another case is still the same UUID, in either case.
+func TestPatternUUIDSameFold(t *testing.T) {
+	got := Pattern([]string{"x/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/1", "x/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E/2"})
+	re := regexp.MustCompile("^(?:" + got + ")$")
+	for _, v := range []string{"x/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/3", "x/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E/3"} {
+		if !re.MatchString(v) {
+			t.Errorf("%q does not match %q", got, v)
+		}
+	}
+	if v := "x/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d/3"; re.MatchString(v) {
+		t.Errorf("%q matches %q, another UUID", got, v)
+	}
+}

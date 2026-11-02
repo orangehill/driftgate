@@ -144,9 +144,12 @@ func Pattern(values []string) string {
 			// from the samples would reject the next one. One that is the
 			// same everywhere (a tenant) stays as it is.
 			if ids := uuidAt(toks, j); ids != nil {
-				if allEqual(ids) {
+				switch {
+				case allEqual(ids):
 					b.WriteString(regexp.QuoteMeta(ids[0]))
-				} else {
+				case equalFold(ids):
+					b.WriteString(`(?i:` + regexp.QuoteMeta(ids[0]) + `)`)
+				default:
 					b.WriteString(uuidFormat(ids))
 				}
 				j += 8 // five runs and the four dashes between them
@@ -276,6 +279,15 @@ func uuidAt(toks [][]token, j int) []string {
 		ids[i] = s.String()
 	}
 	return ids
+}
+
+func equalFold(s []string) bool {
+	for _, v := range s {
+		if !strings.EqualFold(v, s[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 func allEqual(s []string) bool {
