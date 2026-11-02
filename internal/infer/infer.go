@@ -139,11 +139,16 @@ func Pattern(values []string) string {
 				b.WriteString(regexp.QuoteMeta(t.text))
 				continue
 			}
-			// A UUID is any UUID: its groups are hex by chance digits only
-			// (0308), so a format built from the samples would reject the
-			// next one.
-			if uuidAt(toks, j) {
-				b.WriteString(uuidFormat)
+			// A UUID that changes is any UUID of the samples' case: its
+			// groups are hex by chance digits only (0308), so a format built
+			// from the samples would reject the next one. One that is the
+			// same everywhere (a tenant) stays as it is.
+			if ids := uuidAt(toks, j); ids != nil {
+				if allEqual(ids) {
+					b.WriteString(regexp.QuoteMeta(ids[0]))
+				} else {
+					b.WriteString(uuidFormat(ids))
+				}
 				j += 8 // five runs and the four dashes between them
 				continue
 			}
@@ -231,23 +236,51 @@ var (
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
 )
 
-// uuidFormat matches any UUID, in either case.
-const uuidFormat = `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`
+var uuid = lazy.Regexp(`^(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-var uuid = lazy.Regexp(`^` + uuidFormat + `$`)
+// uuidFormat matches any UUID with the letters' case of the samples: a
+// serializer that changes the case changes the contract. Samples without
+// letters get lowercase.
+func uuidFormat(ids []string) string {
+	lower, upper := false, false
+	for _, id := range ids {
+		lower = lower || strings.ContainsAny(id, "abcdef")
+		upper = upper || strings.ContainsAny(id, "ABCDEF")
+	}
+	c := `[0-9a-f]`
+	switch {
+	case lower && upper:
+		c = `[0-9a-fA-F]`
+	case upper:
+		c = `[0-9A-F]`
+	}
+	return fmt.Sprintf(`%[1]s{8}-%[1]s{4}-%[1]s{4}-%[1]s{4}-%[1]s{12}`, c)
+}
 
-// uuidAt reports a UUID in every value at token j: five runs with dashes
-// between them. The caller has checked that the values share their tokens.
-func uuidAt(toks [][]token, j int) bool {
-	for _, t := range toks {
+// uuidAt returns the UUID of every value at token j (five runs with dashes
+// between them), or nil when one value has none there. The caller has
+// checked that the values share their tokens.
+func uuidAt(toks [][]token, j int) []string {
+	ids := make([]string, len(toks))
+	for i, t := range toks {
 		if j+9 > len(t) {
-			return false
+			return nil
 		}
 		var s strings.Builder
 		for _, x := range t[j : j+9] {
 			s.WriteString(x.text)
 		}
 		if !uuid().MatchString(s.String()) {
+			return nil
+		}
+		ids[i] = s.String()
+	}
+	return ids
+}
+
+func allEqual(s []string) bool {
+	for _, v := range s {
+		if v != s[0] {
 			return false
 		}
 	}
