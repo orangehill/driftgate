@@ -1,6 +1,12 @@
 # DriftGate
 
-A regression gate for HTTP APIs.
+[![CI](https://github.com/orangehill/driftgate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/orangehill/driftgate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/orangehill/driftgate)](https://github.com/orangehill/driftgate/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/orangehill/driftgate.svg)](https://pkg.go.dev/github.com/orangehill/driftgate)
+[![License](https://img.shields.io/github/license/orangehill/driftgate)](LICENSE)
+
+A regression gate for HTTP APIs: prove that every route still returns the
+same response after a framework upgrade, a refactoring or a new feature.
 
 DriftGate records how a running application responds (the baseline). After
 every change (a framework or language upgrade, a refactoring, a new feature)
