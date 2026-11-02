@@ -8,6 +8,8 @@
 A regression gate for HTTP APIs: prove that every route still returns the
 same response after a framework upgrade, a refactoring or a new feature.
 
+![DriftGate records a baseline, then reports drift after the API changes](docs/demo.gif)
+
 DriftGate records how a running application responds (the baseline). After
 every change (a framework or language upgrade, a refactoring, a new feature)
 it restores the same data, sends the same requests and compares the responses
