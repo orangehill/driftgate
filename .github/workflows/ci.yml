@@ -93,8 +93,17 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      # Coverage of the whole module (-coverpkg), with the databases of this
+      # job; the report goes to Coveralls on pushes, never failing the job.
       - name: Test
-        run: go test -race ./...
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+      - name: Coverage report
+        if: github.event_name == 'push' && github.workflow == 'ci'
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          file: coverage.out
+          format: golang
+          fail-on-error: false
       # Allocations of the comparison's hot paths, against budgets: the
       # same on every run, unlike timings on a shared runner. The race
       # detector allocates on its own, so they run without it.
