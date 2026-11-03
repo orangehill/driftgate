@@ -394,6 +394,9 @@ func (s *SQLServer) checkPristine(ctx context.Context, db string) error {
 	if d.AG {
 		return d.refuse(s.o.Name)
 	}
+	if d.State == "RESTORING" {
+		return fmt.Errorf("state %s: database %s is RESTORING, so DriftGate cannot see whether it made it; drop it yourself (DROP DATABASE %s)", s.o.Name, db, qms(db))
+	}
 	if d.State != "ONLINE" {
 		return fmt.Errorf("state %s: database %s is %s, so DriftGate cannot see whether it made it; bring it online or drop it yourself", s.o.Name, db, d.State)
 	}

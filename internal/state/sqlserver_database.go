@@ -35,6 +35,11 @@ import (
 // copied back only when the working database was restored since, and
 // dropped otherwise.
 
+// sqlServerCleanup bounds what a restore or seed that failed or was
+// stopped does to leave the databases usable: it runs on a context of its
+// own, the caller's may be done.
+var sqlServerCleanup = 30 * time.Second
+
 // ssPaths are the server's default directories (no trailing separator
 // needed: ssJoin adds the server's own).
 type ssPaths struct{ data, log, backup string }
@@ -713,17 +718,28 @@ func ssSavedColumns(ctx context.Context, c *sql.Conn, dgx string, n int) ([]stri
 
 // sameFamily reports whether a database is a copy a seed restored of the
 // working database: the same family GUID (it can be read while the copy
-// is restoring)
+// is restoring) or, for one a RESTORE that was stopped left restoring
+// without it, owned by this login;
 func (s *SQLServer) sameFamily(ctx context.Context, db string) bool {
 	c, err := s.conn(ctx, "")
 	if err != nil {
 		return false
 	}
 	defer c.Close()
-	var rows, families int
-	err = c.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT family_guid) FROM sys.database_recovery_status
-		WHERE database_id IN (DB_ID(@p1), DB_ID(@p2)) AND family_guid IS NOT NULL`, db, s.o.Working).Scan(&rows, &families)
-	if err != nil || rows != 2 || families != 1 {
+	var state string
+	var own bool
+	var family, working sql.NullString
+	err = c.QueryRowContext(ctx, `SELECT d.state_desc, CAST(CASE WHEN d.owner_sid = SUSER_SID() THEN 1 ELSE 0 END AS bit), CONVERT(nvarchar(36), r.family_guid),
+		(SELECT CONVERT(nvarchar(36), family_guid) FROM sys.database_recovery_status WHERE database_id = DB_ID(@p2))
+		FROM sys.databases d LEFT JOIN sys.database_recovery_status r ON r.database_id = d.database_id WHERE d.name = @p1`, db, s.o.Working).Scan(&state, &own, &family, &working)
+	switch {
+	case err != nil:
+		return false
+	case family.Valid:
+		if !working.Valid || !strings.EqualFold(family.String, working.String) {
+			return false
+		}
+	case state != "RESTORING" || !own:
 		return false
 	}
 	// and every file has a name a seed gives (dg_<8 hex>_<file id>).

@@ -518,6 +518,90 @@ func TestSQLServerRestoreExcluded(t *testing.T) {
 	}
 }
 
+// TestSQLServerSeedStopped: a seed stopped during the RESTORE of the new
+// copy drops what that RESTORE left; one left restoring by a RESTORE that
+// was cut off (the process killed) is dropped by the next seed.
+func TestSQLServerSeedStopped(t *testing.T) {
+	s, _, _ := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE b (id int IDENTITY PRIMARY KEY, v char(4000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO b (v) SELECT TOP 60000 'y' FROM sys.all_columns a CROSS JOIN sys.all_columns c")
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	newDB := s.o.Pristine + "_dgnew"
+	// during calls stop once a RESTORE of newDB runs.
+	during := func(after time.Duration, stop func(session int)) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range 2000 {
+				var session int
+				err := master.QueryRow(`SELECT TOP (1) r.session_id FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) x
+					WHERE r.command LIKE N'RESTORE%' AND CHARINDEX(N'RESTORE DATABASE ' + QUOTENAME(@p1) + N' ', x.text) > 0`, newDB).Scan(&session)
+				if err == nil {
+					time.Sleep(after) // past the start: it leaves the database restoring
+					stop(session)
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}()
+		return done
+	}
+	state := func() string {
+		var st sql.NullString
+		master.QueryRow("SELECT state_desc FROM sys.databases WHERE name = @p1", newDB).Scan(&st)
+		return st.String
+	}
+
+	// The seed's context ends.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := during(150*time.Millisecond, func(int) { cancel() })
+	err := s.Seed(ctx)
+	<-done
+	if err == nil {
+		t.Skip("the RESTORE ended before it could be stopped")
+	}
+	if st := state(); st != "" {
+		t.Fatalf("a seed stopped during its RESTORE (%v) left %s %s", err, newDB, st)
+	}
+
+	// The RESTORE is cut off by the server, as when the process is
+	// killed: the next seed drops what it left.
+	c, err := s.conn(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := s.paths(context.Background(), c)
+	c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bak := ssJoin(paths.backup, "finfix_stopped.bak")
+	sqlServerExec(t, master, "BACKUP DATABASE "+qms(s.o.Working)+" TO DISK = "+sqlServerString(bak)+" WITH COPY_ONLY, INIT, FORMAT")
+	t.Cleanup(func() { master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(bak)) })
+	// When the cut comes too early nothing is left, too late the
+	// database is online: another try.
+	for _, after := range []time.Duration{150, 300, 80, 450, 600} {
+		done = during(after*time.Millisecond, func(session int) { master.Exec(fmt.Sprintf("KILL %d", session)) })
+		tag := strings.TrimPrefix(sqlServerTestName(), "dgt_ss_") // a file a RESTORE cut off early leaves keeps its name
+		master.Exec("RESTORE DATABASE " + qms(newDB) + " FROM DISK = " + sqlServerString(bak) + " WITH RECOVERY, MOVE N'" + s.o.Working +
+			"' TO " + sqlServerString(ssJoin(paths.data, "dg_"+tag+"_1.mdf")) + ", MOVE N'" + s.o.Working + "_log' TO " + sqlServerString(ssJoin(paths.log, "dg_"+tag+"_2.ldf")))
+		<-done
+		if state() == "RESTORING" {
+			break
+		}
+		dropSQLServerDatabase(master, newDB)
+	}
+	if st := state(); st != "RESTORING" {
+		t.Skipf("the RESTORE was not cut off halfway (%q)", st)
+	}
+	if err := s.Seed(context.Background()); err != nil {
+		t.Fatalf("seed after a RESTORE that was cut off: %v", err)
+	}
+	if st := state(); st != "" {
+		t.Fatalf("%s left %s", newDB, st)
+	}
+}
+
 // TestSQLServerRestoreNothing: a restore of nothing, or of everything
 // when nothing differs, changes nothing; one without a pristine copy, or
 // with one of another working database, says so.

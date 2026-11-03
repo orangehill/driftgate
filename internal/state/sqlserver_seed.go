@@ -124,15 +124,22 @@ func (s *SQLServer) Seed(ctx context.Context) error {
 		}
 		return err
 	}
+	// The copy goes again when the seed fails or is stopped (ctx), on a
+	// context of its own: a RESTORE stopped halfway leaves it restoring.
+	drop := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
+		defer cancel()
+		s.dropLeft(ctx, newDB, true)
+	}
 	if _, err := m.ExecContext(ctx, restore); err != nil {
-		s.dropLeft(context.Background(), newDB, true)
+		drop()
 		return fmt.Errorf("state %s: restore of %s as %s: %w", s.o.Name, s.o.Working, newDB, sqlServerFirst(err))
 	}
 	chaos.Point("state.sqlserver.seed.restored")
 	ok := false
 	defer func() {
 		if !ok {
-			s.dropLeft(context.Background(), newDB, true)
+			drop()
 		}
 	}()
 	if err := s.leaveOutExcluded(ctx, newDB); err != nil {
