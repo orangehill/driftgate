@@ -100,11 +100,14 @@ const sqliteNew = ".driftgate-new"
 
 // sqliteSeparate refuses a pristine file that is the working file, or one
 // of the files that belong to either: a seed replaces the pristine file and
-// removes what SQLite left next to it.
+// removes what SQLite left next to it and next to its new copy. A working
+// file whose name starts with the pristine file's (in any letter case) is
+// refused too, whatever follows: every file a seed makes or removes is
+// named so.
 func sqliteSeparate(working, pristine string) error {
-	own := []string{pristine, pristine + sqliteNew, pristine + sqliteNew + "-journal"}
+	own := []string{pristine, pristine + sqliteNew}
 	for _, suf := range sqliteSidecars {
-		own = append(own, pristine+suf)
+		own = append(own, pristine+suf, pristine+sqliteNew+suf)
 	}
 	for _, p := range own {
 		if samePath(p, working) {
@@ -115,6 +118,9 @@ func sqliteSeparate(working, pristine string) error {
 		if samePath(pristine, working+suf) {
 			return fmt.Errorf("the pristine file %s is the working database's %s file", pristine, suf)
 		}
+	}
+	if len(working) >= len(pristine) && strings.EqualFold(working[:len(pristine)], pristine) {
+		return fmt.Errorf("the working database file %s is named like the pristine file %s or a file a seed makes or removes next to it; name another pristine file", working, pristine)
 	}
 	return nil
 }

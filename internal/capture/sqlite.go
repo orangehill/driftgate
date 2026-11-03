@@ -49,6 +49,11 @@ var sqliteSidecars = []string{"", "-wal", "-shm", "-journal"}
 // case (macOS and Windows), and by identity for the files that exist (a
 // hard link). Stat only: a file SQLite may have open is never opened here.
 func sqliteOverlap(working, pristine string) bool {
+	// A seed makes and removes files named after the pristine file
+	// (.driftgate-new, its -wal and -shm): working is never one.
+	if len(working) >= len(pristine) && strings.EqualFold(working[:len(pristine)], pristine) {
+		return true
+	}
 	p, perr := os.Stat(pristine)
 	for _, s := range sqliteSidecars {
 		if strings.EqualFold(pristine, working+s) || strings.EqualFold(working, pristine+s) {

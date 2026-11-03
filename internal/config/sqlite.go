@@ -52,6 +52,10 @@ func (c Component) validateSQLite() error {
 			return fmt.Errorf("pristine must not be working's %s file", s)
 		}
 	}
+	// A seed makes and removes files named after the pristine file.
+	if len(w) >= len(p) && strings.EqualFold(w[:len(p)], p) {
+		return errors.New("working must not be named like pristine or a file a seed makes or removes next to it (pristine and anything after it); name another pristine file")
+	}
 	return nil
 }
 

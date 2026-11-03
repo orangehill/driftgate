@@ -667,6 +667,9 @@ func TestNewSQLite(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "empty.sqlite"), nil, 0o644)
 	os.Symlink(work, filepath.Join(dir, "link.sqlite"))
 	pristine := filepath.Join(dir, "pristine.sqlite")
+	newWAL := pristine + ".driftgate-new-wal"
+	mustExec(t, sqliteApp(t, newWAL), "CREATE TABLE precious (id INTEGER PRIMARY KEY)")
+	mustExec(t, sqliteApp(t, filepath.Join(dir, "P.sqlite.driftgate-new-shm")), "CREATE TABLE precious (id INTEGER PRIMARY KEY)")
 	for _, c := range []struct {
 		working, pristine, want string
 	}{
@@ -678,7 +681,11 @@ func TestNewSQLite(t *testing.T) {
 		{work, filepath.Join(dir, "link.sqlite"), "is the working database file"},
 		{work, work + "-wal", "-wal"},
 		{work, work + "-journal", "-journal"},
-		{pristine + "-journal", pristine, "next to it"},
+		{pristine + "-journal", pristine, "named like the pristine file"},
+		// A seed removes the -wal and -shm files of its new copy: a working
+		// file named so would be deleted.
+		{newWAL, pristine, "named like the pristine file"},
+		{filepath.Join(dir, "P.sqlite.driftgate-new-shm"), filepath.Join(dir, "p.sqlite"), "named like the pristine file"},
 		{"app.sqlite", pristine, "absolute"},
 	} {
 		s, err := NewSQLite(Options{Name: "db", Working: c.working, Pristine: c.pristine})

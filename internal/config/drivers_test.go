@@ -34,6 +34,8 @@ func TestSQLiteAndSQLServerValidation(t *testing.T) {
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Pristine: "DB.sqlite"}, err: "another file than working"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Pristine: "db.sqlite-wal"}, err: "-wal file"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Pristine: "db.sqlite-journal"}, err: "-journal file"},
+		{comp: Component{Driver: "sqlite", Working: "var/p.sqlite.driftgate-new-wal", Pristine: "var/p.sqlite"}, err: "named like pristine"},
+		{comp: Component{Driver: "sqlite", Working: "var/P.sqlite-shm", Pristine: "var/p.sqlite"}, err: "named like pristine"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", AllowRemote: true}, err: "allow_remote"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Restore: []string{"x"}}, err: "without a driver"},
 		{comp: Component{Driver: "sqlite", DSN: Secret{Env: "X", Key: "k"}, Working: "db.sqlite"}, err: "dsn: "},

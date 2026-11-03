@@ -136,7 +136,8 @@ func TestSQLiteFiles(t *testing.T) {
 		}
 	}
 	// The reverse: working is a sidecar of the pristine copy.
-	if !sqliteOverlap("/p/db.sqlite-wal", "/p/db.sqlite") || sqliteOverlap("/p/db.sqlite", "/p/db2.sqlite") {
+	if !sqliteOverlap("/p/db.sqlite-wal", "/p/db.sqlite") || sqliteOverlap("/p/db.sqlite", "/p/db2.sqlite") ||
+		!sqliteOverlap("/p/DB.sqlite.driftgate-new-wal", "/p/db.sqlite") {
 		t.Error("sqliteOverlap by path")
 	}
 	// A hard link to working's -wal file.
