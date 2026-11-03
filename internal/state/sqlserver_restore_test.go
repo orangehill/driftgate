@@ -3,8 +3,11 @@ package state
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -515,6 +518,162 @@ func TestSQLServerRestoreExcluded(t *testing.T) {
 	}
 	if d, err := s.database(ctx, s.excludedDB()); err != nil || d != nil {
 		t.Fatalf("%s left: %v", s.excludedDB(), err)
+	}
+}
+
+// TestSQLServerRestoreWholeWritten: an application that writes to
+// excluded tables all through a restore of the whole database loses none
+// of its rows when its login is not privileged (it is kept out meanwhile),
+// keeps the rows its privileged login writes after the RESTORE, and gets
+// no duplicate key from an identity set back below rows copied back.
+func TestSQLServerRestoreWholeWritten(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions", "tokens"}},
+		"CREATE TABLE users (id int IDENTITY PRIMARY KEY, name nvarchar(20) NULL)",
+		"INSERT INTO users (name) VALUES (N'a')",
+		"CREATE TABLE sessions (id int IDENTITY PRIMARY KEY, v nvarchar(40) NOT NULL)",
+		"CREATE TABLE tokens (id uniqueidentifier PRIMARY KEY, v int NOT NULL)",
+		"CREATE VIEW v AS SELECT id FROM users",
+		"INSERT INTO sessions (v) VALUES (N'before the seed')")
+	b := make([]byte, 4)
+	rand.Read(b)
+	login, password := "dgt_app_"+hex.EncodeToString(b), "Dg-"+hex.EncodeToString(b)+"-app"
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, master, "CREATE LOGIN "+qms(login)+" WITH PASSWORD = "+sqlServerString(password)+", CHECK_POLICY = OFF")
+	t.Cleanup(func() { master.Exec("DROP LOGIN " + qms(login)) })
+	sqlServerExec(t, db, "CREATE USER "+qms(login)+" FOR LOGIN "+qms(login), "GRANT SELECT, INSERT ON sessions TO "+qms(login))
+	if err := s.Seed(context.Background()); err != nil { // with the user
+		t.Fatal(err)
+	}
+	p := pristineSQLServer(t, s)
+	u, _ := url.Parse(s.o.DSN)
+	u.User = url.UserPassword(login, password)
+	q := u.Query()
+	q.Set("database", s.o.Working)
+	u.RawQuery = q.Encode()
+	app, err := sql.Open("sqlserver", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	sqlServerExec(t, db, "INSERT INTO sessions (v) VALUES (N'after the seed')")
+
+	// The application: its own login writes sessions, a privileged one
+	// (the test's) tokens, each every 5 ms; what committed is noted.
+	var mu sync.Mutex
+	var sessions []int64
+	var tokens []string
+	ctx, stop := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			var id int64
+			if app.QueryRowContext(ctx, "INSERT INTO sessions (v) OUTPUT inserted.id VALUES (N'app')").Scan(&id) == nil {
+				mu.Lock()
+				sessions = append(sessions, id)
+				mu.Unlock()
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for n := 0; ctx.Err() == nil; n++ {
+			var id string
+			if db.QueryRowContext(ctx, "INSERT INTO tokens OUTPUT CONVERT(nvarchar(36), inserted.id) VALUES (NEWID(), @p1)", n).Scan(&id) == nil {
+				mu.Lock()
+				tokens = append(tokens, id)
+				mu.Unlock()
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	sqlServerExec(t, db, "ALTER VIEW v AS SELECT id, name FROM users")
+	mu.Lock()
+	before := len(tokens)
+	mu.Unlock()
+	whole := restoreSQLServer(t, s, nil, log, p)
+	mu.Lock()
+	after := len(tokens)
+	mu.Unlock()
+	time.Sleep(200 * time.Millisecond)
+	stop()
+	wg.Wait()
+	if !whole {
+		t.Fatal("restored item by item")
+	}
+
+	have := map[string]bool{}
+	rows, err := db.Query("SELECT CONCAT(N's', id) FROM sessions UNION ALL SELECT CONCAT(N't', CONVERT(nvarchar(36), id)) FROM tokens")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var k string
+		rows.Scan(&k)
+		have[k] = true
+	}
+	rows.Close()
+	for _, id := range sessions {
+		if !have[fmt.Sprintf("s%d", id)] {
+			t.Errorf("session %d the application's login wrote is gone (%d written)", id, len(sessions))
+		}
+	}
+	lost := 0
+	for i, id := range tokens {
+		if !have["t"+strings.ToLower(id)] && !have["t"+strings.ToUpper(id)] {
+			if i < before || i >= after {
+				t.Errorf("token %d of %d, written before or after the restore, is gone", i, len(tokens))
+			}
+			lost++
+		}
+	}
+	t.Logf("%d sessions, %d tokens written (%d during the restore, %d of them lost)", len(sessions), len(tokens), after-before, lost)
+	if len(sessions) == 0 || after == before {
+		t.Fatal("the application wrote nothing")
+	}
+	// The identity is past every row: no duplicate key.
+	for range 20 {
+		var id int64
+		if err := app.QueryRow("INSERT INTO sessions (v) OUTPUT inserted.id VALUES (N'after')").Scan(&id); err != nil {
+			t.Fatalf("insert after the restore: %v", err)
+		}
+	}
+	if a := sqlServerInt(t, master, "SELECT CASE WHEN user_access_desc = N'MULTI_USER' THEN 1 ELSE 0 END FROM sys.databases WHERE name = "+sqlServerString(s.o.Working)); a != 1 {
+		t.Fatal("the working database is not MULTI_USER after the restore")
+	}
+}
+
+// TestSQLServerNoDBCreator: a login without dbcreator is told what it
+// lacks when it seeds, and when it restores from a copy another login
+// made; the server's error stays in the message (setup matches it).
+func TestSQLServerNoDBCreator(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE t (id int PRIMARY KEY)")
+	b := make([]byte, 4)
+	rand.Read(b)
+	login, password := "dgt_login_"+hex.EncodeToString(b), "Dg-"+hex.EncodeToString(b)+"-owner"
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, master, "CREATE LOGIN "+qms(login)+" WITH PASSWORD = "+sqlServerString(password)+", CHECK_POLICY = OFF")
+	t.Cleanup(func() { master.Exec("DROP LOGIN " + qms(login)) })
+	sqlServerExec(t, db, "CREATE USER "+qms(login)+" FOR LOGIN "+qms(login), "ALTER ROLE db_owner ADD MEMBER "+qms(login))
+	u, _ := url.Parse(s.o.DSN)
+	u.User = url.UserPassword(login, password)
+	o := s.o
+	o.DSN = u.String()
+	l, err := NewSQLServer(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	sqlServerExec(t, db, "INSERT INTO t VALUES (1)")
+	if err := l.Restore(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "needs the server role dbcreator") || !strings.Contains(err.Error(), "(916)") {
+		t.Fatalf("restore from a copy another login made: %v", err)
+	}
+	dropSQLServerDatabase(master, s.o.Pristine)
+	if err := l.Seed(context.Background()); err == nil || !strings.Contains(err.Error(), "needs the server role dbcreator") || !strings.Contains(err.Error(), "(262)") {
+		t.Fatalf("seed without dbcreator: %v", err)
 	}
 }
 

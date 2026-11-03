@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -193,7 +194,7 @@ func (s *SQLServer) fallbackFile(ctx context.Context, c *sql.Conn, mark *sqlServ
 
 // restoreDatabase brings the whole working database w back from the
 // backup of the pristine copy (see above).
-func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) error {
+func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
 	s.forget()
 	defer s.forget()
 	info, err := s.server(ctx)
@@ -252,6 +253,14 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 		return err
 	}
 	if saved {
+		// The application stays out until the rows are copied back
+		// (saveExcluded); a restore that fails lets it in again.
+		restore += ", RESTRICTED_USER"
+		defer func() {
+			if err != nil {
+				s.letIn()
+			}
+		}()
 		chaos.Point("state.sqlserver.restore.saved")
 	}
 	s.closePool(s.o.Working)
@@ -270,9 +279,11 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 		// A RESTORE that failed before it began leaves the database
 		// offline; one that stopped halfway, restoring, and the next
 		// restore runs it again.
-		if d, derr := s.database(context.Background(), s.o.Working); derr == nil && d != nil && d.State == "OFFLINE" {
-			m.ExecContext(context.Background(), "ALTER DATABASE "+qms(s.o.Working)+" SET ONLINE")
+		cctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
+		if d, derr := s.database(cctx, s.o.Working); derr == nil && d != nil && d.State == "OFFLINE" {
+			m.ExecContext(cctx, "ALTER DATABASE "+qms(s.o.Working)+" SET ONLINE")
 		}
+		cancel()
 		return fmt.Errorf("state %s: restore of %s from %s: %w (the database is unusable until a restore completes; run the restore again)", s.o.Name, s.o.Working, path, sqlServerFirst(err))
 	}
 	chaos.Point("state.sqlserver.restore.restored")
@@ -363,6 +374,11 @@ func (s *SQLServer) leftSave(ctx context.Context, w *sqlServerDatabase) (bool, e
 			return true, nil
 		}
 	}
+	// The restore that made it stopped before it let the logins in again
+	// (saveExcluded).
+	if err := s.letIn(); err != nil {
+		return false, err
+	}
 	return false, s.dropLeft(ctx, dgx, false)
 }
 
@@ -439,7 +455,16 @@ func (s *SQLServer) excludedDefs(ctx context.Context, c *sql.Conn) (map[string]s
 // database w, with where their identity columns stand, and the excluded
 // sequences, into <pristine>_dgx; false when there is nothing to save. A
 // complete save a stopped restore left is used as it is.
-func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (bool, error) {
+//
+// From before the rows are read until they are copied back the working
+// database is RESTRICTED_USER (keepOut): what the application writes to
+// an excluded table meanwhile would be lost or, after the RESTORE, collide
+// with the rows copied back. A login that is a member of db_owner,
+// dbcreator or sysadmin still gets in: of what it writes in that time,
+// rows committed after the rows are read and before the database goes
+// offline are lost, and rows written after the RESTORE are kept, except
+// those whose primary key a saved row has (copyBack).
+func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (saved bool, err error) {
 	left, err := s.leftSave(ctx, w)
 	if err != nil || left || w.State != "ONLINE" {
 		return left, err
@@ -448,7 +473,11 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
+	defer func() {
+		if c != nil {
+			c.Close()
+		}
+	}()
 	inv, err := s.catalog(ctx, c)
 	if err != nil {
 		return false, err
@@ -529,6 +558,23 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 		_, err := m.ExecContext(ctx, "INSERT INTO "+manifest+" VALUES (@p1, @p2, @p3, @p4, @p5)", n, kind, item, a, b)
 		return err
 	}
+	if len(tables) > 0 || len(seqs) > 0 {
+		// With <pristine>_dgx made: a restore that stops from here on
+		// lets the logins in again (leftSave, copyBack).
+		c.Close()
+		c = nil
+		defer func() {
+			if err != nil {
+				s.letIn()
+			}
+		}()
+		if err := s.keepOut(ctx, m, w); err != nil {
+			return false, err
+		}
+		if c, err = s.conn(ctx, s.o.Working); err != nil {
+			return false, err
+		}
+	}
 	for i, t := range tables {
 		var exprs []string
 		for _, col := range ssInsertColumns(t) {
@@ -538,18 +584,36 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 			}
 			exprs = append(exprs, e)
 		}
-		q := fmt.Sprintf("SELECT %s INTO %s.dbo.%s FROM %s", strings.Join(exprs, ", "), qms(dgx), qms(fmt.Sprintf("t%d", i+1)), t.qname())
+		saved := qms(dgx) + ".dbo." + qms(fmt.Sprintf("t%d", i+1))
+		q := fmt.Sprintf("SELECT %s INTO %s FROM %s", strings.Join(exprs, ", "), saved, t.qname())
 		if _, err := c.ExecContext(ctx, q); err != nil {
 			return false, fmt.Errorf("state %s: saving the rows of excluded table %s.%s: %w", s.o.Name, t.Schema, t.Name, err)
 		}
 		var a, b any
 		if t.Identity != nil {
-			a, b = t.Identity.Last.String, t.Identity.Current
-			if !t.Identity.Last.Valid {
-				a = "NULL"
+			// Where it stands now, after the rows were read: at least as
+			// far as every saved row (unless it was reseeded below one).
+			var last, current string
+			err := c.QueryRowContext(ctx, `SELECT ISNULL(CONVERT(nvarchar(40), CASE WHEN c.last_value IS NULL THEN NULL
+					WHEN IDENT_INCR(@p1) > 0 AND x.hi > CAST(c.last_value AS numeric(38, 0)) THEN x.hi
+					WHEN IDENT_INCR(@p1) < 0 AND x.lo < CAST(c.last_value AS numeric(38, 0)) THEN x.lo
+					ELSE CAST(c.last_value AS numeric(38, 0)) END), N'NULL'),
+				CASE WHEN c.last_value IS NULL THEN ISNULL(CONVERT(nvarchar(40), IDENT_CURRENT(@p1)), N'') ELSE N'' END
+				FROM sys.identity_columns c
+				CROSS JOIN (SELECT MAX(CAST(`+qms(t.Identity.Column)+` AS numeric(38, 0))) AS hi, MIN(CAST(`+qms(t.Identity.Column)+` AS numeric(38, 0))) AS lo FROM `+saved+`) x
+				WHERE c.object_id = OBJECT_ID(@p1)`, t.qname()).Scan(&last, &current)
+			if err != nil {
+				return false, fmt.Errorf("state %s: reading the identity of excluded table %s.%s: %w", s.o.Name, t.Schema, t.Name, err)
 			}
+			a, b = last, current
 		}
 		if err := add(i+1, "table", t.Item, a, b); err != nil {
+			return false, err
+		}
+	}
+	// The sequences as they stand now, after the rows.
+	if len(seqs) > 0 {
+		if seqs, err = s.excludedSequences(ctx, c); err != nil {
 			return false, err
 		}
 	}
@@ -559,6 +623,42 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 		}
 	}
 	return true, add(0, "complete", fork, nil, nil)
+}
+
+// keepOut keeps every login that is not a member of db_owner, dbcreator
+// or sysadmin out of the working database w (RESTRICTED_USER), ending its
+// sessions; it ends DriftGate's own first (sysadmin: every other one too),
+// which saves the ~3 s ROLLBACK IMMEDIATE waits for each.
+func (s *SQLServer) keepOut(ctx context.Context, m *sql.Conn, w *sqlServerDatabase) error {
+	if w.UserAccess != "MULTI_USER" {
+		return nil // RESTRICTED_USER already, or SINGLE_USER: the user's choice
+	}
+	s.closePool(s.o.Working)
+	if s.info.Sysadmin {
+		s.endSessions(ctx, m, w.ID)
+	}
+	if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qms(s.o.Working)+" SET RESTRICTED_USER WITH ROLLBACK IMMEDIATE"); err != nil {
+		return fmt.Errorf("state %s: keeping the application out of %s while the rows of excluded tables are saved: %w", s.o.Name, s.o.Working, err)
+	}
+	return nil
+}
+
+// letIn lets every login into the working database again (MULTI_USER)
+// when keepOut or the RESTORE kept them out, on a context of
+// its own (the caller's may be done).
+func (s *SQLServer) letIn() error {
+	ctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
+	defer cancel()
+	m, err := s.conn(ctx, "")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	_, err = m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET MULTI_USER", s.o.Working)
+	if err != nil {
+		return fmt.Errorf("state %s: letting the application into %s again (ALTER DATABASE … SET MULTI_USER): %w", s.o.Name, s.o.Working, err)
+	}
+	return nil
 }
 
 // ssMemoryExcluded refuses an excluded memory-optimized table whose rows
@@ -571,9 +671,13 @@ func ssMemoryExcluded(component string, t *ssTable) error {
 
 // copyBack copies the saved rows of excluded tables and the saved
 // sequences into the working database, as they were before the restore,
-// and drops <pristine>_dgx. Triggers do not fire and cascades do not run;
-// a foreign key of an excluded table whose rows now refer to rows the
-// restore removed stays on but no longer trusted.
+// lets the logins in again (saveExcluded) and drops <pristine>_dgx.
+// Triggers do not fire and cascades do not run; a foreign key of an
+// excluded table whose rows now refer to rows the restore removed stays
+// on but no longer trusted. Rows a login that got in wrote after the
+// RESTORE (the pristine copy has none) are kept, in a table with a
+// primary key: a saved row with the key of one of them is not copied
+// back, and the identity goes no further back than where it stood.
 func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 	dgx := s.excludedDB()
 	c, err := s.conn(ctx, s.o.Working)
@@ -649,6 +753,7 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 		if err != nil {
 			return err
 		}
+		merge := s.mergeable(ctx, c, t, cols)
 		clear, reseed := "DELETE", ""
 		if t.Identity != nil {
 			target := &ssIdentity{Seed: t.Identity.Seed, Last: sql.NullString{String: e.a.String, Valid: e.a.String != "NULL"}, Current: e.b.String}
@@ -662,8 +767,29 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 		if t.MemoryOptimized && clear == "TRUNCATE" {
 			clear = "DELETE"
 		}
-		fmt.Fprintf(&body, "%s;\n", ssClearSQL(clear, t))
 		list := strings.Join(cols, ", ")
+		if merge != "" {
+			// The table lock holds until COMMIT: no row comes in between.
+			fmt.Fprintf(&body, "IF EXISTS (SELECT 1 FROM %s WITH (TABLOCKX, HOLDLOCK))\nBEGIN\n", t.qname())
+			if t.Identity != nil {
+				fmt.Fprintf(&body, "SET IDENTITY_INSERT %s ON;\n", t.qname())
+			}
+			fmt.Fprintf(&body, "INSERT INTO %s (%s) SELECT %s FROM %s s WHERE NOT EXISTS (SELECT 1 FROM %s x WHERE %s);\n",
+				t.qname(), list, "s."+strings.Join(cols, ", s."), src, t.qname(), merge)
+			if t.Identity != nil {
+				fmt.Fprintf(&body, "SET IDENTITY_INSERT %s OFF;\n", t.qname())
+				if last := e.a.String; e.a.Valid && last != "NULL" {
+					if !ssInteger.MatchString(last) {
+						return fmt.Errorf("state %s: the saved identity value of %s cannot be read", s.o.Name, e.item)
+					}
+					name := sqlServerString(t.qname())
+					fmt.Fprintf(&body, "IF (IDENT_INCR(%s) > 0 AND IDENT_CURRENT(%s) < %s) OR (IDENT_INCR(%s) < 0 AND IDENT_CURRENT(%s) > %s)\n  DBCC CHECKIDENT (%s, RESEED, %s) WITH NO_INFOMSGS;\n",
+						name, name, last, name, name, last, name, last)
+				}
+			}
+			body.WriteString("END\nELSE\nBEGIN\n")
+		}
+		fmt.Fprintf(&body, "%s;\n", ssClearSQL(clear, t))
 		if t.Identity != nil {
 			fmt.Fprintf(&body, "SET IDENTITY_INSERT %s ON;\n", t.qname())
 		}
@@ -676,6 +802,9 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 				}
 				fmt.Fprintf(&body, "DBCC CHECKIDENT (%s, RESEED, %s) WITH NO_INFOMSGS;\n", sqlServerString(t.qname()), reseed)
 			}
+		}
+		if merge != "" {
+			body.WriteString("END;\n")
 		}
 	}
 	fmt.Fprintf(&body, "DELETE FROM %s.dbo.driftgate_saved WHERE kind = N'complete';\n", qms(dgx))
@@ -691,7 +820,35 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 		return fmt.Errorf("state %s: copying back the rows of excluded tables: %w", s.o.Name, err)
 	}
 	done = true
+	if err := s.letIn(); err != nil {
+		return err
+	}
 	return s.dropLeft(ctx, dgx, false)
+}
+
+// mergeable is, for an excluded table whose rows written after the RESTORE
+// copyBack keeps, how a saved row and a row of the table match by primary
+// key ("s" the saved row, "x" the table's); "" when none are kept: the
+// table has no primary key, one of its columns is not saved (computed),
+// it is memory-optimized, or the pristine copy has rows in it (excluded
+// after the seed: those rows are not the application's).
+func (s *SQLServer) mergeable(ctx context.Context, c *sql.Conn, t *ssTable, cols []string) string {
+	if len(t.Key) == 0 || t.MemoryOptimized {
+		return ""
+	}
+	var on []string
+	for _, k := range t.Key {
+		if !slices.Contains(cols, qms(k)) {
+			return ""
+		}
+		on = append(on, "x."+qms(k)+" = s."+qms(k))
+	}
+	var rows int
+	err := c.QueryRowContext(ctx, "SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS n FROM "+qms(s.o.Pristine)+"."+t.qname()+") p").Scan(&rows)
+	if err != nil || rows > 0 {
+		return "" // not known: as with rows
+	}
+	return strings.Join(on, " AND ")
 }
 
 // ssSavedColumns lists the columns of a saved table, quoted.
