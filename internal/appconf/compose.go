@@ -351,7 +351,8 @@ func (cp *composeProject) environment(root, name string, env Lookup) (map[string
 }
 
 // imageDriver is the database an image runs: mysql, mariadb, percona,
-// postgres, postgis and timescaledb images (official or not).
+// postgres, postgis and timescaledb images (official or not), and SQL
+// Server's (sqlServerImage).
 func imageDriver(image string) string {
 	repo := image
 	if i := strings.IndexByte(repo, '@'); i >= 0 {
@@ -370,6 +371,9 @@ func imageDriver(image string) string {
 		if strings.Contains(repo, w) {
 			return Postgres
 		}
+	}
+	if sqlServerImage(repo) {
+		return SQLServer
 	}
 	return ""
 }
@@ -450,6 +454,9 @@ func (cp *composeProject) database(root, name string, env Lookup) (parts, error)
 	driver := imageDriver(image)
 	if driver == "" {
 		return parts{}, fmt.Errorf("%s: service %s runs no MySQL, MariaDB or PostgreSQL image", cp.file, printableName(name))
+	}
+	if driver == SQLServer {
+		return cp.sqlServerDatabase(root, name, env)
 	}
 	e, err := cp.environment(root, name, env)
 	if err != nil {

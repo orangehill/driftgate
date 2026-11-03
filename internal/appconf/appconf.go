@@ -57,10 +57,11 @@ func (r Ref) IsZero() bool { return r == Ref{} }
 
 // Database is a database setting Find found. It never holds the password.
 type Database struct {
-	Driver string // mysql (also MariaDB) or postgres; empty when unknown (Note says why)
+	Driver string // mysql (also MariaDB), postgres, sqlite or sqlserver; empty when unknown (Note says why)
 	Host   string // as this machine reaches it (Ref.Host applied)
 	Port   string
 	Name   string // the database the application uses: the working database
+	Path   string // SQLite: the database file, relative to the project root with /; working
 	User   string
 	File   string // where it was found: a file relative to the root with /, or the variable
 	Key    string
@@ -227,7 +228,8 @@ func (r Ref) DSN(root, driver string, env Lookup) (string, error) {
 }
 
 // Read is DSN that also returns the database the setting names (the one
-// the application runs on), "" when it names none.
+// the application runs on), "" when it names none; for SQLite its file,
+// relative to the project root with /.
 func (r Ref) Read(root, driver string, env Lookup) (dsn, database string, err error) {
 	p, err := r.read(root, env)
 	if err != nil {
@@ -237,6 +239,9 @@ func (r Ref) Read(root, driver string, env Lookup) (dsn, database string, err er
 		return "", "", fmt.Errorf("%s: %s", r.where(), hostNeededText(p, hp))
 	}
 	dsn, err = p.dsn(driver, r.where())
+	if p.driver == SQLite {
+		return dsn, p.file, err
+	}
 	return dsn, p.name, err
 }
 
@@ -333,6 +338,12 @@ func (r Ref) read(root string, env Lookup) (parts, error) {
 		}
 		return parts{}, fmt.Errorf("%s: %w", r.where(), err)
 	}
+	if p.driver == SQLite {
+		if r.Host != "" {
+			return parts{}, fmt.Errorf("%s: host: an SQLite database is a file, on no host", r.where())
+		}
+		return resolveSQLite(root, r, p)
+	}
 	host := r.Host
 	if svc, ok := strings.CutPrefix(host, ComposeHost); ok {
 		if host, err = composeAddress(root, svc, p, env); err != nil {
@@ -374,10 +385,7 @@ func composeAddress(root, svc string, p parts, env Lookup) (string, error) {
 		driver = imageDriver(image)
 	}
 	if target == "" {
-		target = "3306"
-		if driver == Postgres {
-			target = "5432"
-		}
+		target = defaultPort(driver)
 	}
 	addr, published, err := cp.published(svc, target)
 	if err != nil {

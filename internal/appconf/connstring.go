@@ -95,25 +95,15 @@ func parseConnString(s string) (fields, error) {
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
 
-// fromConnString reads the keys of MySqlConnector, MySql.Data and Npgsql.
-// The keys only SQL Server and SQLite take mark those; the driver is left
-// unset.
+// fromConnString reads the keys of MySqlConnector, MySql.Data and Npgsql;
+// a connection string with the keys or the server forms only SQL Server or
+// SQLite take is read as theirs (sqlServerConnString, sqliteConnString).
 func fromConnString(kv fields) (parts, error) {
-	for _, k := range []string{"trustedconnection", "multipleactiveresultsets", "attachdbfilename"} {
-		if _, ok := kv[k]; ok {
-			return parts{other: "SQL Server"}, nil
-		}
+	if p, ok, err := sqlServerConnString(kv); ok {
+		return p, err
 	}
-	if _, ok := kv["filename"]; ok {
-		return parts{other: "SQLite"}, nil
-	}
-	server, _ := kv.get(hostKeys)
-	ls := strings.ToLower(server)
-	switch {
-	case strings.HasPrefix(ls, "tcp:"), strings.HasPrefix(ls, "(localdb)"), strings.HasPrefix(ls, "np:"), strings.Contains(ls, `\`):
-		return parts{other: "SQL Server"}, nil
-	case ls == ":memory:", strings.HasSuffix(ls, ".db"), strings.HasSuffix(ls, ".sqlite"), strings.HasSuffix(ls, ".sqlite3"):
-		return parts{other: "SQLite"}, nil
+	if p, ok, err := sqliteConnString(kv); ok {
+		return p, err
 	}
 	if _, ok := kv.get(hostKeys); !ok {
 		return parts{}, errNoServer

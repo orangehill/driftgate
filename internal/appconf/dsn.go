@@ -12,14 +12,42 @@ import (
 
 // Drivers.
 const (
-	MySQL    = "mysql" // MySQL and MariaDB
-	Postgres = "postgres"
+	MySQL     = "mysql" // MySQL and MariaDB
+	Postgres  = "postgres"
+	SQLite    = "sqlite"
+	SQLServer = "sqlserver"
 )
+
+// detected is the driver and other (driverName) for a database of a
+// DriftGate driver: the driver when appconf reads that database's
+// settings (sqliteReady, sqlServerReady), else other, so the setting is
+// noted as one DriftGate cannot use.
+func detected(driver string) (string, string) {
+	switch {
+	case driver == SQLite && !sqliteReady:
+		return "", "SQLite"
+	case driver == SQLServer && !sqlServerReady:
+		return "", "SQL Server"
+	}
+	return driver, ""
+}
+
+// defaultPort is the port a driver's server listens on by default.
+func defaultPort(driver string) string {
+	switch driver {
+	case Postgres:
+		return "5432"
+	case SQLServer:
+		return "1433"
+	}
+	return "3306"
+}
 
 // parts is a database setting taken apart.
 type parts struct {
-	driver   string // MySQL, Postgres, or "" when the setting does not say
-	other    string // another kind of database the setting names (SQL Server, SQLite, …)
+	driver   string // MySQL, Postgres, SQLite, SQLServer, or "" when the setting does not say
+	other    string // another kind of database the setting names (Oracle, …)
+	file     string // SQLite: the database file, relative to the project root with / (resolveSQLite)
 	host     string
 	port     string
 	socket   string
@@ -28,11 +56,15 @@ type parts struct {
 	password string
 	opts     options // TLS and the like
 	form     string  // a DSN in the MySQL driver's own form, used as it is
+	// raw holds the keys of a setting given as separate values or as a
+	// connection string (fromFields), for a driver that takes settings
+	// the shared ones leave out (SQL Server's Encrypt).
+	raw fields
 }
 
 // database is p without the password.
 func (p parts) database() Database {
-	return Database{Driver: p.driver, Host: p.host, Port: p.port, Name: p.name, User: p.user}
+	return Database{Driver: p.driver, Host: p.host, Port: p.port, Name: p.name, User: p.user, Path: p.file}
 }
 
 // driverName maps the name a framework gives a database (a URL scheme, a
@@ -56,9 +88,9 @@ func driverName(name string) (driver, other string) {
 	case "":
 		return "", ""
 	case "sqlite", "sqlite3", "spatialite", "file":
-		return "", "SQLite"
+		return detected(SQLite)
 	case "sqlsrv", "sqlserver", "mssql", "dblib":
-		return "", "SQL Server"
+		return detected(SQLServer)
 	case "oracle", "oci", "oci8":
 		return "", "Oracle"
 	}
@@ -69,11 +101,11 @@ func driverName(name string) (driver, other string) {
 	case strings.Contains(n, "postgres"):
 		return Postgres, ""
 	case strings.Contains(n, "sqlserver"):
-		return "", "SQL Server"
+		return detected(SQLServer)
 	case strings.Contains(n, "h2"), strings.Contains(n, "hsqldb"), strings.Contains(n, "derby"):
 		return "", "an in-memory Java database"
 	case strings.Contains(n, "sqlite"):
-		return "", "SQLite"
+		return detected(SQLite)
 	case strings.Contains(n, "oracle"):
 		return "", "Oracle"
 	}
@@ -120,6 +152,9 @@ func fromValue(v string) (parts, error) {
 	v = strings.TrimPrefix(v, "jdbc:")
 	v = strings.TrimPrefix(v, "vertx-reactive:")
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "r2dbc:"), "pool:")
+	if p, ok, err := sqlServerValue(v); ok {
+		return p, err
+	}
 	switch {
 	case connString(v):
 		kv, _ := parseConnString(v)
@@ -167,8 +202,8 @@ func fromValue(v string) (parts, error) {
 			err = errNoServer
 		}
 		return parts{}, err
-	case strings.HasPrefix(v, "sqlite:") || strings.HasSuffix(v, ".db") || strings.HasSuffix(v, ".sqlite") || strings.HasSuffix(v, ".sqlite3"):
-		return parts{other: "SQLite"}, nil
+	case isSQLiteValue(v):
+		return fromSQLiteValue(v)
 	}
 	return parts{}, errors.New("not a database URL, a MySQL DSN or a connection string (the value is not shown)")
 }
@@ -220,8 +255,13 @@ func fromURL(v string) (parts, error) {
 	if p.driver == "" && p.other == "" {
 		return parts{}, fmt.Errorf("a %s:// URL names no database DriftGate knows (mysql, postgres)", printable(u.Scheme))
 	}
-	if p.driver == "" {
+	switch p.driver {
+	case "":
 		return p, nil
+	case SQLite:
+		return fromSQLiteURL(v)
+	case SQLServer:
+		return fromSQLServerURL(v)
 	}
 	p.host, p.port = u.Hostname(), u.Port()
 	p.user = u.User.Username()
@@ -309,12 +349,13 @@ func (f fields) get(keys []string) (string, bool) {
 // comes first, and the values fill in what it leaves out (Spring's url,
 // username and password).
 func fromFields(f fields) (parts, error) {
-	var p parts
+	p := parts{raw: f}
 	if v, ok := f.get(urlKeys); ok && strings.TrimSpace(v) != "" {
 		var err error
 		if p, err = fromValue(v); err != nil {
 			return parts{}, err
 		}
+		p.raw = f
 	}
 	for _, k := range driverKeys { // Magento's engine is innodb, its model mysql4
 		if v, ok := f[k]; ok && p.driver == "" && p.other == "" {
@@ -429,6 +470,12 @@ func (p parts) dsn(driver, where string) (string, error) {
 	case driver == "":
 		driver = p.driver
 	}
+	switch driver {
+	case SQLite:
+		return p.sqliteDSN(where)
+	case SQLServer:
+		return p.sqlServerDSN(where)
+	}
 	if driver == MySQL && p.form != "" {
 		return p.form, nil
 	}
@@ -454,10 +501,7 @@ func (p parts) dsn(driver, where string) (string, error) {
 		host = "127.0.0.1"
 	}
 	if port == "" {
-		port = "3306"
-		if driver == Postgres {
-			port = "5432"
-		}
+		port = defaultPort(driver)
 	}
 	u := url.URL{Scheme: driver, User: userinfo(p.user, p.password), Host: net.JoinHostPort(host, port), Path: "/", RawQuery: q.Encode()}
 	return u.String(), nil
