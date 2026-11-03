@@ -12,6 +12,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,14 +30,16 @@ import (
 //     the schema version is the same, the file is the same, its size and
 //     time (and its -wal file's) are too, and DriftGate did not restore
 //     since, the last fingerprint is returned as it was.
-//  2. Page digest: a table whose pages (every page of its b-tree, read
-//     through dbstat and sqlite_dbpage) hash to what they hashed to when its
-//     rows were last read, with the same CREATE statement, has the same
-//     rows: its row hash is kept. A changed digest only means a new read,
-//     never a missed change. This is what keeps a fingerprint cheap for an
-//     application that writes on every request (a Laravel session table in
-//     the same file moves data_version every time; excluded, its pages are
-//     not read).
+//  2. Page digest: a table whose pages (every page of its b-tree when its
+//     rows were last read, as dbstat walked it) hold the bytes they held
+//     then, with the same root page and CREATE statement, has the same rows
+//     (see sqlite_pages.go): its row hash is kept. The pages are read
+//     through sqlite_dbpage in one pass over the file; only a table whose
+//     digest changed is walked again and its rows read. A changed digest
+//     only means a new read, never a missed change. This is what keeps a
+//     fingerprint cheap for an application that writes on every request (a
+//     Laravel session table in the same file moves data_version every
+//     time; excluded, its pages are not hashed).
 //  3. Rows: the rows of every other table are read and hashed, spread over
 //     up to sqliteConns more connections that share the same moment.
 //
@@ -49,11 +52,15 @@ import (
 // excluded table are (their body may write any table).
 
 // sqliteSum is the row hash of a table, with the CREATE statement it was
-// read under and the digest of the pages it was read from.
+// read under, its root page, the file header's fields the pages were read
+// by (sqliteHeader), and the pages of its b-tree it was read from (in
+// dbstat's order) with their digest.
 type sqliteSum struct {
 	sql    string
+	root   int64
+	header string
+	pages  []uint32
 	digest [32]byte
-	pages  int
 	rows   []byte
 }
 
@@ -65,6 +72,10 @@ var (
 	sqliteSettle      = 5 * time.Millisecond
 	sqliteSettleTries = 20
 )
+
+// sqliteScanAll is the share of the file's pages from which a page digest
+// reads every page of the file, not only the pages it needs.
+var sqliteScanAll = 0.5
 
 // Fingerprint hashes the working file (see above).
 func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint, err error) {
@@ -297,19 +308,65 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	return f, read, nil
 }
 
-// tableSums reads the row hash of every table, spread over conns: the
-// largest tables (by their pages at the last reading) first, each to the
-// next free connection. It also returns the tables whose rows it read.
+// tableSums reads the row hash of every table, spread over conns. With
+// sums, the pages of the tables that have a row hash there are read
+// first, and the tables whose pages are unchanged keep it. The others are
+// read, the largest tables (by their pages at the last reading) first,
+// each to the next free connection. It also returns the tables whose rows
+// it read.
 func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string, tables []*sqliteTable, sums map[string]sqliteSum) (map[string]sqliteSum, []string, error) {
-	order := append([]*sqliteTable{}, tables...)
-	sort.SliceStable(order, func(i, j int) bool { return sums[order[i].name].pages > sums[order[j].name].pages })
+	out := map[string]sqliteSum{}
+	var header string
+	var hashes *sqlitePageHashes
+	order := make([]*sqliteTable, 0, len(tables))
+	if sums != nil {
+		var err error
+		if header, err = sqliteHeader(ctx, conns[0], schema); err != nil {
+			return nil, nil, err
+		}
+		var kept []*sqliteTable
+		var want []uint32
+		for _, t := range tables {
+			if old, ok := sums[t.name]; ok && !t.virtual && old.rows != nil && old.sql == t.sql && old.root == t.root && old.header == header {
+				kept = append(kept, t)
+				want = append(want, old.pages...)
+			}
+		}
+		if len(kept) > 0 {
+			slices.Sort(want)
+			want = slices.Compact(want)
+			var count int64
+			if err := conns[0].QueryRowContext(ctx, "PRAGMA "+qs(schema)+".page_count").Scan(&count); err != nil {
+				return nil, nil, err
+			}
+			// Most of the file: read all of it in order, which also
+			// gives the pages of the tables walked again.
+			if float64(len(want)) >= sqliteScanAll*float64(count) {
+				want = nil
+			}
+			if hashes, err = readPages(ctx, conns, schema, want); err != nil {
+				return nil, nil, err
+			}
+			for _, t := range kept {
+				old := sums[t.name]
+				if d, ok := hashes.digest(old.pages); ok && d == old.digest {
+					out[t.name] = old
+				}
+			}
+		}
+	}
+	for _, t := range tables {
+		if _, ok := out[t.name]; !ok {
+			order = append(order, t)
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return len(sums[order[i].name].pages) > len(sums[order[j].name].pages) })
 	work := make(chan *sqliteTable, len(order))
 	for _, t := range order {
 		work <- t
 	}
 	close(work)
 	var mu sync.Mutex
-	out := map[string]sqliteSum{}
 	var read []string
 	errs := make([]error, len(conns))
 	var wg sync.WaitGroup
@@ -322,14 +379,14 @@ func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string
 					errs[i] = ctx.Err()
 					return
 				}
-				sum, fresh, err := tableSum(ctx, c, schema, t, sums)
+				sum, err := tableSum(ctx, c, schema, t, sums != nil, header, hashes)
 				if err != nil {
 					errs[i] = fmt.Errorf("%s: %w", t.name, err)
 					return
 				}
 				mu.Lock()
 				out[t.name] = sum
-				if fresh {
+				if !t.virtual {
 					read = append(read, t.name)
 				}
 				mu.Unlock()
@@ -340,55 +397,21 @@ func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string
 	return out, read, errors.Join(errs...)
 }
 
-// tableSum reads the row hash of one table, or keeps the one in sums when
-// its pages and its CREATE statement are what they were; fresh is set when
-// it read the rows.
-func tableSum(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable, sums map[string]sqliteSum) (sum sqliteSum, fresh bool, err error) {
-	sum.sql = t.sql
+// tableSum reads the row hash of one table; with walk, also the pages of
+// its b-tree and their digest, at the same moment (from hashes when they
+// are of the whole file).
+func tableSum(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable, walk bool, header string, hashes *sqlitePageHashes) (sum sqliteSum, err error) {
+	sum.sql, sum.root, sum.header = t.sql, t.root, header
 	if t.virtual {
-		return sum, false, nil
+		return sum, nil
 	}
-	if sums != nil {
-		if sum.digest, sum.pages, err = sqlitePages(ctx, c, schema, t.name); err != nil {
-			return sum, false, err
-		}
-		if old, ok := sums[t.name]; ok && old.sql == t.sql && old.digest == sum.digest && old.rows != nil {
-			sum.rows = old.rows
-			return sum, false, nil
+	if walk {
+		if sum.pages, sum.digest, err = sqliteWalk(ctx, c, schema, t.name, hashes); err != nil {
+			return sum, err
 		}
 	}
 	sum.rows, err = sqliteRowsHash(ctx, c, schema, t)
-	return sum, true, err
-}
-
-// sqlitePages hashes every page of a table's b-tree (its root, inner,
-// leaf and overflow pages, in the order dbstat walks them) and counts
-// them. Two b-trees whose pages hold the same bytes hold the same rows.
-func sqlitePages(ctx context.Context, c *sql.Conn, schema, table string) ([32]byte, int, error) {
-	rows, err := c.QueryContext(ctx, "SELECT s.pageno, p.data FROM dbstat("+ql(schema)+") AS s JOIN sqlite_dbpage("+ql(schema)+") AS p ON p.pgno = s.pageno WHERE s.name = ?", table)
-	if err != nil {
-		return [32]byte{}, 0, err
-	}
-	defer rows.Close()
-	h := sha256.New()
-	var n [8]byte
-	pages := 0
-	for rows.Next() {
-		var pgno int64
-		var data sql.RawBytes
-		if err := rows.Scan(&pgno, &data); err != nil {
-			return [32]byte{}, 0, err
-		}
-		binary.BigEndian.PutUint64(n[:], uint64(pgno))
-		h.Write(n[:])
-		binary.BigEndian.PutUint64(n[:], uint64(len(data)))
-		h.Write(n[:])
-		h.Write(data)
-		pages++
-	}
-	var d [32]byte
-	h.Sum(d[:0])
-	return d, pages, rows.Err()
+	return sum, err
 }
 
 // sqliteColumns describes how a table's rows are read and copied.

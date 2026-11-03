@@ -53,7 +53,7 @@ type SQLite struct {
 	// others kept their row hash).
 	scanned []string
 	// sums holds the row hash of every table read by the last fingerprints,
-	// with the digest of the pages it was read from (sqlitePages).
+	// with the pages it was read from and their digest (sqliteSum).
 	sums map[string]sqliteSum
 	// pristine is the fingerprint of the pristine file, with the identity
 	// of the file it was read from.
@@ -359,6 +359,7 @@ func asciiLower(name string) string {
 // statements of its indexes (sorted), and what kind of table it is.
 type sqliteTable struct {
 	name, sql string
+	root      int64 // its b-tree's root page (0 for a virtual table)
 	indexes   []string
 	virtual   bool // CREATE VIRTUAL TABLE: its rows live in its shadow tables
 	shadow    bool // a table a virtual table keeps its rows in
@@ -435,20 +436,24 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = q.QueryContext(ctx, "SELECT type, name, tbl_name, sql FROM "+qs(schema)+".sqlite_schema ORDER BY rowid")
+	rows, err = q.QueryContext(ctx, "SELECT type, name, tbl_name, sql, rootpage FROM "+qs(schema)+".sqlite_schema ORDER BY rowid")
 	if err != nil {
 		return nil, err
 	}
-	type entry struct{ kind, name, table, sql string }
+	type entry struct {
+		kind, name, table, sql string
+		root                   int64
+	}
 	var all []entry
 	for rows.Next() {
 		var e entry
 		var text sql.NullString
-		if err := rows.Scan(&e.kind, &e.name, &e.table, &text); err != nil {
+		var root sql.NullInt64
+		if err := rows.Scan(&e.kind, &e.name, &e.table, &text, &root); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		e.sql = text.String
+		e.sql, e.root = text.String, root.Int64
 		all = append(all, e)
 	}
 	rows.Close()
@@ -511,7 +516,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			}
 			continue
 		}
-		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, virtual: virtual[e.name], shadow: shadow, noRowid: noRowid[e.name]}
+		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, noRowid: noRowid[e.name]}
 		o.order = append(o.order, e.name)
 	}
 	for _, e := range all {

@@ -42,7 +42,7 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 	a := int(arg)
 	val := []string{fmt.Sprint(a), fmt.Sprintf("%d.25", a), fmt.Sprintf("'t%d'", a), fmt.Sprintf("x'%02x'", a), "NULL", "''"}[a%6]
 	var stmts []string
-	switch op % 24 {
+	switch op % 28 {
 	case 0:
 		stmts = []string{"INSERT INTO t1 (v) VALUES (" + val + ")"}
 	case 1:
@@ -116,6 +116,17 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 		}
 	case 23:
 		stmts = []string{fmt.Sprintf("PRAGMA application_id = %d", a)}
+	case 24:
+		// auto_vacuum changes with the next VACUUM: root pages move when
+		// a table is dropped, free pages leave the file.
+		stmts = []string{"PRAGMA auto_vacuum = " + []string{"NONE", "FULL", "INCREMENTAL"}[a%3], "VACUUM"}
+	case 25:
+		stmts = []string{fmt.Sprintf("PRAGMA incremental_vacuum(%d)", a%8)}
+	case 26:
+		// A new page size (not in WAL mode, where the VACUUM keeps it).
+		stmts = []string{fmt.Sprintf("PRAGMA page_size = %d", 512<<(a%8)), "VACUUM"}
+	case 27:
+		stmts = []string{fmt.Sprintf("DELETE FROM t1 WHERE id > %d", a), fmt.Sprintf("INSERT INTO nr SELECT 'big' || id, id FROM t1 WHERE id %% 3 = %d", a%3)}
 	}
 	for _, q := range stmts {
 		if _, err := db.Exec(q); err != nil && q != "ROLLBACK" {
@@ -154,6 +165,8 @@ func FuzzSQLiteRestore(f *testing.F) {
 		{11, 0, 10, 1, 12, 9, 15, 3, 20, 1, 22, 0},
 		{0, 9, 17, 4, 18, 0, 19, 1, 21, 0, 3, 7, 4, 1},
 		{1, 9, 2, 8, 0, 2, 7, 0, 8, 2, 9, 0, 9, 1, 5, 12, 6, 2, 23, 5},
+		{0, 24, 1, 13, 30, 9, 0, 27, 4, 25, 3, 13, 9, 26, 2, 24, 2, 9, 3, 25, 0},
+		{1, 24, 2, 13, 50, 27, 10, 9, 0, 25, 7, 22, 0, 26, 1, 14, 0},
 	} {
 		f.Add(seed)
 	}
