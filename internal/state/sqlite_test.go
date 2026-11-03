@@ -1706,3 +1706,56 @@ func TestSQLiteRestoreAfterOverwrite(t *testing.T) {
 		t.Fatalf("a and b are %d, want 1 and 2", n)
 	}
 }
+
+// TestSQLiteRowBuckets: the rows of a rowid table, read in parts on
+// several connections, hash as they do read on one (the pristine file's
+// fingerprint is read so): rowids at both ends of the integer range,
+// negative ones, ones at the edges of a bucket, hidden rowids, an empty
+// table; and a change in any part is seen.
+func TestSQLiteRowBuckets(t *testing.T) {
+	ctx := context.Background()
+	s, app := sqliteSchemaFixture(t, "wal", nil,
+		"CREATE TABLE dense (id INTEGER PRIMARY KEY, v)",
+		"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 30000) INSERT INTO dense SELECT i, printf('%.300c', 'a') || i FROM r",
+		"CREATE TABLE edge (id INTEGER PRIMARY KEY, v)",
+		"INSERT INTO edge VALUES (-9223372036854775808, 'min'), (-4097, 'a'), (-4096, 'b'), (-1, 'c'), (0, 'd'), (4095, 'e'), (4096, 'f'), (1099511627776, 'g'), (9223372036854775807, 'max')",
+		"CREATE TABLE hidden (v)",
+		"INSERT INTO hidden (rowid, v) VALUES (-9223372036854775808, 1), (-3, 2), (5000, 3), (9223372036854775807, 4)",
+		"CREATE TABLE empty (id INTEGER PRIMARY KEY, v)")
+	f := sqliteFingerprint(t, s)
+	if d := Diff(f, sqlitePristineFP(t, s)); len(d) > 0 {
+		t.Fatalf("read in parts the working file differs from the pristine one in %v", d)
+	}
+	defer func(n int) { sqliteConns = n }(sqliteConns)
+	sqliteConns = 0
+	if d := Diff(f, sqliteScratch(t, s)); len(d) > 0 {
+		t.Fatalf("read on one connection the rows hash otherwise in %v", d)
+	}
+	sqliteConns = 4
+	for _, c := range []struct{ q, table string }{
+		{"UPDATE dense SET v = 'x' WHERE id = 29999", "table:dense"},
+		{"UPDATE dense SET v = 'x' WHERE id = 1", "table:dense"},
+		{"UPDATE edge SET v = 'X' WHERE id = 9223372036854775807", "table:edge"},
+		{"UPDATE edge SET v = 'X' WHERE id = -9223372036854775808", "table:edge"},
+		{"DELETE FROM edge WHERE id = 4095", "table:edge"},
+		{"INSERT INTO edge VALUES (4095, 'e')", "table:edge"},
+		{"UPDATE hidden SET v = 5 WHERE rowid = -3", "table:hidden"},
+		{"INSERT INTO empty VALUES (7, NULL)", "table:empty"},
+	} {
+		before := sqliteFingerprint(t, s)
+		mustExec(t, app, c.q)
+		after := sqliteFingerprint(t, s)
+		if d := Diff(before, after); !slices.Equal(d, []string{c.table}) {
+			t.Errorf("%s: changed %v, want %s", c.q, d, c.table)
+		}
+		if d := Diff(after, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("%s: differs from a fingerprint from scratch in %v", c.q, d)
+		}
+	}
+	if err := s.Restore(ctx, Diff(sqliteFingerprint(t, s), sqlitePristineFP(t, s))); err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(sqliteFingerprint(t, s), sqlitePristineFP(t, s)); len(d) > 0 {
+		t.Fatalf("after the restore %v differ", d)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,7 +45,8 @@ import (
 //     Laravel session table in the same file moves data_version every
 //     time; excluded, its pages are not hashed).
 //  3. Rows: the rows of every other table are read and hashed, spread over
-//     up to sqliteConns more connections that share the same moment.
+//     up to sqliteConns more connections that share the same moment; a
+//     large rowid table in parts, by ranges of rowids (sqliteRead).
 //
 // The items: table:<name> (its CREATE statement, its indexes' CREATE
 // statements, its sqlite_sequence value and its rows; a virtual table its
@@ -343,9 +345,11 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 // tableSums reads the row hash of every table, spread over conns. With
 // sums, the pages of the tables that have a row hash there are read
 // first, and the tables whose pages are unchanged keep it. The others are
-// read, the largest tables (by their pages at the last reading) first,
-// each to the next free connection. It also returns the tables whose rows
-// it read.
+// read: how and, for a rowid table, the range of its rowids; then the
+// walk of their pages (with sums) and their rows, a large rowid table's
+// in parts of whole buckets, the largest parts (by the table's pages at
+// the last reading) first, each to the next free connection. It also
+// returns the tables whose rows it read.
 func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string, tables []*sqliteTable, sums map[string]sqliteSum) (map[string]sqliteSum, []string, error) {
 	out := map[string]sqliteSum{}
 	var header string
@@ -392,58 +396,143 @@ func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string
 			order = append(order, t)
 		}
 	}
-	sort.SliceStable(order, func(i, j int) bool { return len(sums[order[i].name].pages) > len(sums[order[j].name].pages) })
-	work := make(chan *sqliteTable, len(order))
-	for _, t := range order {
-		work <- t
+	type part struct {
+		r      *sqliteRead
+		walk   bool
+		lo, hi int64
+		cost   int
+		pages  []uint32
+		digest [32]byte
+		rows   []byte
+		bucket []sqliteBucket
 	}
-	close(work)
+	reads := make([]*sqliteRead, len(order))
+	var parts []*part
 	var mu sync.Mutex
+	err := sqliteEach(ctx, conns, len(order), func(c *sql.Conn, i int) error {
+		t := order[i]
+		if t.virtual {
+			return nil
+		}
+		r, err := sqliteReadOf(ctx, c, schema, t)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.name, err)
+		}
+		reads[i] = r
+		pages := len(sums[t.name].pages)
+		var add []*part
+		if sums != nil {
+			add = append(add, &part{r: r, walk: true, cost: pages})
+		}
+		if r.key < 0 {
+			add = append(add, &part{r: r, cost: pages})
+		} else {
+			lo, hi, ok, err := r.bounds(ctx, c)
+			if err != nil {
+				return fmt.Errorf("%s: %w", t.name, err)
+			}
+			if ok {
+				// Parts of whole buckets: a bucket is read on one
+				// connection.
+				first, last := lo>>sqliteBucketBits, hi>>sqliteBucketBits
+				n := min(last-first+1, int64(4*len(conns)))
+				if pages > 0 && pages < 256 {
+					n = 1
+				}
+				for k := range n {
+					from, to := first+(last-first+1)*k/n, first+(last-first+1)*(k+1)/n-1
+					add = append(add, &part{r: r, lo: from << sqliteBucketBits, hi: to<<sqliteBucketBits | (1<<sqliteBucketBits - 1), cost: pages / int(n)})
+				}
+			}
+		}
+		mu.Lock()
+		parts = append(parts, add...)
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.SliceStable(parts, func(i, j int) bool { return parts[i].cost > parts[j].cost })
+	err = sqliteEach(ctx, conns, len(parts), func(c *sql.Conn, i int) error {
+		p := parts[i]
+		var err error
+		switch {
+		case p.walk:
+			p.pages, p.digest, err = sqliteWalk(ctx, c, schema, p.r.t.name, hashes)
+		case p.r.key < 0:
+			p.rows, err = p.r.hash(ctx, c)
+		default:
+			p.bucket, err = p.r.buckets(ctx, c, p.lo, p.hi)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", p.r.t.name, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	byTable := map[*sqliteRead][]*part{}
+	for _, p := range parts {
+		byTable[p.r] = append(byTable[p.r], p)
+	}
 	var read []string
+	for i, t := range order {
+		sum := sqliteSum{sql: t.sql, root: t.root, header: header}
+		if r := reads[i]; r != nil {
+			read = append(read, t.name)
+			var buckets []sqliteBucket
+			for _, p := range byTable[r] {
+				switch {
+				case p.walk:
+					sum.pages, sum.digest = p.pages, p.digest
+				case r.key < 0:
+					sum.rows = p.rows
+				default:
+					buckets = append(buckets, p.bucket...)
+				}
+			}
+			if r.key >= 0 {
+				sum.rows = r.combine(buckets)
+			}
+		}
+		out[t.name] = sum
+	}
+	return out, read, nil
+}
+
+// sqliteEach runs do(c, i) for i from 0 to n-1, spread over conns: each
+// connection takes the next i when it is free. It stops at the first
+// error.
+func sqliteEach(ctx context.Context, conns []*sql.Conn, n int, do func(c *sql.Conn, i int) error) error {
+	var next atomic.Int64
 	errs := make([]error, len(conns))
 	var wg sync.WaitGroup
-	for i, c := range conns {
+	for k, c := range conns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range work {
-				if ctx.Err() != nil {
-					errs[i] = ctx.Err()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= n {
 					return
 				}
-				sum, err := tableSum(ctx, c, schema, t, sums != nil, header, hashes)
-				if err != nil {
-					errs[i] = fmt.Errorf("%s: %w", t.name, err)
+				if err := ctx.Err(); err != nil {
+					errs[k] = err
+					next.Store(int64(n))
 					return
 				}
-				mu.Lock()
-				out[t.name] = sum
-				if !t.virtual {
-					read = append(read, t.name)
+				if err := do(c, i); err != nil {
+					errs[k] = err
+					next.Store(int64(n))
+					return
 				}
-				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-	return out, read, errors.Join(errs...)
-}
-
-// tableSum reads the row hash of one table; with walk, also the pages of
-// its b-tree and their digest, at the same moment (from hashes when they
-// are of the whole file).
-func tableSum(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable, walk bool, header string, hashes *sqlitePageHashes) (sum sqliteSum, err error) {
-	sum.sql, sum.root, sum.header = t.sql, t.root, header
-	if t.virtual {
-		return sum, nil
-	}
-	if walk {
-		if sum.pages, sum.digest, err = sqliteWalk(ctx, c, schema, t.name, hashes); err != nil {
-			return sum, err
-		}
-	}
-	sum.rows, err = sqliteRowsHash(ctx, c, schema, t)
-	return sum, err
+	return errors.Join(errs...)
 }
 
 // sqliteColumns describes how a table's rows are read and copied.
@@ -512,12 +601,34 @@ func readColumns(ctx context.Context, q queryer, schema, table string) (*sqliteC
 	return cols, len(names) > 0, nil
 }
 
-// sqliteRowsHash hashes the rows of a table in key order: rowid order for
-// a rowid table (its rowid included when no column holds it), primary key
-// order for a WITHOUT ROWID table. Every value is hashed with its storage
-// class, so 1, 1.0, '1' and x'31' all differ, as do NULL and an empty text. Generated
-// columns are left out: the CREATE statement says how they are computed.
-func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable) ([]byte, error) {
+// sqliteBucketBits: the rows of a rowid table are hashed in buckets of
+// rowids (rowid >> sqliteBucketBits), so that connections can read the
+// parts of a large table at the same time.
+const sqliteBucketBits = 12
+
+// sqliteRead is how the rows of a table are read: in key order, rowid
+// order for a rowid table (its rowid included when no column holds it),
+// primary key order for a WITHOUT ROWID table. Every value is hashed with
+// its storage class, so 1, 1.0, '1' and x'31' all differ, as do NULL and
+// an empty text. Generated columns are left out: the CREATE statement says
+// how they are computed.
+//
+// The row hash of a rowid table is the hash of the columns read and of its
+// buckets in order, each bucket's number and the hash of its rows. A table
+// whose rowid no name reaches (every name is a column's) and a WITHOUT
+// ROWID table are hashed whole: the columns, then the rows.
+type sqliteRead struct {
+	t     *sqliteTable
+	sel   []string // what is read of a row
+	from  string   // the table, with its schema
+	order string   // the key the rows are read in order of (none: the table's own order)
+	// For a rowid table read in buckets: the rowid's name and where it is
+	// in sel; key is -1 for a table hashed whole.
+	rowid string
+	key   int
+}
+
+func sqliteReadOf(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable) (*sqliteRead, error) {
 	cols, ok, err := readColumns(ctx, c, schema, t.name)
 	if err != nil {
 		return nil, err
@@ -525,46 +636,103 @@ func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTa
 	if !ok {
 		return nil, fmt.Errorf("no such table")
 	}
-	var sel []string
-	order := ""
+	r := &sqliteRead{t: t, key: -1}
 	switch {
 	case t.noRowid:
 		quoted := make([]string, len(cols.pk))
 		for i, k := range cols.pk {
 			quoted[i] = qs(k)
 		}
-		order = strings.Join(quoted, ", ")
+		r.order = strings.Join(quoted, ", ")
 	case cols.ipk != "":
-		order = qs(cols.ipk)
+		r.rowid = qs(cols.ipk)
 	case cols.rowid != "":
-		sel = append(sel, cols.rowid)
-		order = cols.rowid
+		r.sel = append(r.sel, cols.rowid)
+		r.rowid, r.key = cols.rowid, 0
 	}
 	for _, col := range cols.stored {
-		sel = append(sel, "+"+qs(col)) // no declared type: DATETIME text stays text
+		if col == cols.ipk && !t.noRowid {
+			r.key = len(r.sel)
+		}
+		r.sel = append(r.sel, "+"+qs(col)) // no declared type: DATETIME text stays text
 	}
-	q := "SELECT " + strings.Join(sel, ", ") + " FROM " + qs(schema) + "." + qs(t.name)
-	if order != "" {
-		q += " ORDER BY " + order
+	if r.rowid != "" {
+		r.order = r.rowid
+	}
+	r.from = qs(schema) + "." + qs(t.name)
+	return r, nil
+}
+
+// hash reads the rows of a table hashed whole.
+func (r *sqliteRead) hash(ctx context.Context, c *sql.Conn) ([]byte, error) {
+	q := "SELECT " + strings.Join(r.sel, ", ") + " FROM " + r.from
+	if r.order != "" {
+		q += " ORDER BY " + r.order
 	} else {
 		q += " NOT INDEXED" // every rowid name is a column: the table's own order
 	}
-	rows, err := c.QueryContext(ctx, q)
+	h := sha256.New()
+	writeFields(h, r.sel...)
+	buf := make([]byte, 0, 64<<10)
+	err := sqliteScan(ctx, c, q, len(r.sel), func(vals []any) {
+		for _, v := range vals {
+			buf = appendValue(buf, v)
+		}
+		if len(buf) >= 32<<10 {
+			h.Write(buf)
+			buf = buf[:0]
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	h.Write(buf)
+	return h.Sum(nil), nil
+}
+
+// sqliteBucket is the hash of the rows of a bucket.
+type sqliteBucket struct {
+	n   int64
+	sum [32]byte
+}
+
+// bounds reads the lowest and highest rowid of a rowid table; ok is false
+// for an empty table.
+func (r *sqliteRead) bounds(ctx context.Context, c *sql.Conn) (lo, hi int64, ok bool, err error) {
+	var a, b sql.NullInt64
+	err = c.QueryRowContext(ctx, "SELECT min("+r.rowid+"), max("+r.rowid+") FROM "+r.from).Scan(&a, &b)
+	return a.Int64, b.Int64, a.Valid && b.Valid, err
+}
+
+// buckets hashes the rows whose rowid is from lo to hi, which begin and
+// end whole buckets.
+func (r *sqliteRead) buckets(ctx context.Context, c *sql.Conn, lo, hi int64) ([]sqliteBucket, error) {
+	var out []sqliteBucket
 	h := sha256.New()
-	writeFields(h, sel...)
-	vals := make([]any, len(sel))
-	ptrs := make([]any, len(sel))
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
 	buf := make([]byte, 0, 64<<10)
-	for rows.Next() {
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+	cur := int64(0)
+	end := func() {
+		h.Write(buf)
+		buf = buf[:0]
+		b := sqliteBucket{n: cur}
+		h.Sum(b.sum[:0])
+		out = append(out, b)
+		h.Reset()
+	}
+	first := true
+	var bad error
+	q := "SELECT " + strings.Join(r.sel, ", ") + " FROM " + r.from + " WHERE " + r.rowid + " BETWEEN ? AND ? ORDER BY " + r.rowid
+	err := sqliteScan(ctx, c, q, len(r.sel), func(vals []any) {
+		id, ok := vals[r.key].(int64)
+		if !ok {
+			bad = fmt.Errorf("rowid %v is no integer", vals[r.key])
+			return
+		}
+		if n := id >> sqliteBucketBits; first || n != cur {
+			if !first {
+				end()
+			}
+			first, cur = false, n
 		}
 		for _, v := range vals {
 			buf = appendValue(buf, v)
@@ -573,12 +741,53 @@ func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTa
 			h.Write(buf)
 			buf = buf[:0]
 		}
+	}, lo, hi)
+	if err == nil {
+		err = bad
 	}
-	if err := rows.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	h.Write(buf)
-	return h.Sum(nil), nil
+	if !first {
+		end()
+	}
+	return out, nil
+}
+
+// combine is the row hash of a rowid table from its buckets.
+func (r *sqliteRead) combine(buckets []sqliteBucket) []byte {
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].n < buckets[j].n })
+	h := sha256.New()
+	writeFields(h, r.sel...)
+	var b [8]byte
+	for _, k := range buckets {
+		binary.BigEndian.PutUint64(b[:], uint64(k.n))
+		h.Write(b[:])
+		h.Write(k.sum[:])
+	}
+	return h.Sum(nil)
+}
+
+// sqliteScan runs a query and calls row with the values of each row (the
+// slice is reused).
+func sqliteScan(ctx context.Context, c *sql.Conn, query string, n int, row func(vals []any), args ...any) error {
+	rows, err := c.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	vals := make([]any, n)
+	ptrs := make([]any, n)
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		row(vals)
+	}
+	return rows.Err()
 }
 
 // appendValue appends one value with its storage class: a tag, then an
