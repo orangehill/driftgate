@@ -55,6 +55,15 @@ type ssTable struct {
 	FileTable       bool
 	External        bool
 	Ledger          int // ledger_type (2022+): 0 none
+	// Security names an enabled row-level security policy with a
+	// predicate on the table: a filter predicate hides rows from every
+	// read, also DriftGate's, and a block predicate refuses writes, so
+	// such a table is refused (fingerprint, Rows); "" for none.
+	Security string
+	// LegacyLOB: a text, ntext or image column. WRITETEXT and UPDATETEXT
+	// change it without moving any of the table's counters, so its rows
+	// are read every time.
+	LegacyLOB bool
 }
 
 // qname is the table's quoted two-part name.
@@ -341,8 +350,13 @@ SELECT p.class, p.major_id, N'grant ' + p.state_desc COLLATE DATABASE_DEFAULT + 
   FROM sys.database_permissions p WHERE p.class IN (1, 3, 6);
 SELECT e.class, e.major_id, N'property ' + QUOTENAME(e.name)
        + CASE WHEN e.class = 1 AND e.minor_id > 0 THEN N' column ' + ISNULL(QUOTENAME(COL_NAME(e.major_id, e.minor_id)), N'?') ELSE N'' END
-       + N' ' + ISNULL(CAST(SQL_VARIANT_PROPERTY(e.value, 'BaseType') AS nvarchar(128)) COLLATE DATABASE_DEFAULT + N' ' + CONVERT(nvarchar(max), e.value) COLLATE DATABASE_DEFAULT, N'NULL')
-  FROM sys.extended_properties e WHERE e.class IN (1, 3, 6);`
+       + N' ' + ISNULL(CAST(SQL_VARIANT_PROPERTY(e.value, 'BaseType') AS nvarchar(128)) COLLATE DATABASE_DEFAULT
+         + N' ' + ISNULL(CAST(SQL_VARIANT_PROPERTY(e.value, 'Collation') AS nvarchar(128)) COLLATE DATABASE_DEFAULT, N'')
+         + N' ' + CONVERT(varchar(max), CAST(e.value AS varbinary(8000)), 1), N'NULL')
+  FROM sys.extended_properties e WHERE e.class IN (1, 3, 6);
+SELECT pr.target_object_id, QUOTENAME(SCHEMA_NAME(p.schema_id)) + N'.' + QUOTENAME(p.name), p.is_enabled, p.is_schema_bound, pr.predicate_type,
+       ISNULL(pr.operation_desc COLLATE DATABASE_DEFAULT, N''), ISNULL(pr.predicate_definition, N'')
+  FROM sys.security_predicates pr JOIN sys.security_policies p ON p.object_id = pr.object_id;`
 
 // inventory reads the catalog of the database c is connected to, without
 // the values (apply). A table of a type DriftGate cannot fingerprint is
@@ -365,6 +379,16 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 	schemas := map[int64]string{}
 	types := map[int64]string{}
 	table := func(id int64) *ssTable { return inv.byID[id] }
+	// Item names are schema.name without quoting: two objects ([a.b].c and
+	// a.[b.c]) may come out alike, and are refused rather than mixed up.
+	owners := map[string]string{}
+	claim := func(item, owner string) error {
+		if o, ok := owners[item]; ok {
+			return fmt.Errorf("state %s: %s and %s both have the item name %s, so DriftGate cannot tell their changes apart; rename one of them", s.o.Name, o, owner, item)
+		}
+		owners[item] = owner
+		return nil
+	}
 	b := func(v bool) string { return strconv.FormatBool(v) }
 
 	sets := []func(*sql.Rows) error{
@@ -378,6 +402,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			}
 			t.Graph, t.edge = graph != 0, graph == 2
 			t.Item = "table:" + t.Schema + "." + t.Name
+			if err := claim(t.Item, "table "+t.qname()); err != nil {
+				return err
+			}
 			t.Excluded = s.excluded(t.Schema, t.Name)
 			inv.Tables = append(inv.Tables, t)
 			inv.byID[t.ID] = t
@@ -404,6 +431,7 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			}
 			col.Edge = t.Graph && t.edge
 			t.Columns = append(t.Columns, col)
+			t.LegacyLOB = t.LegacyLOB || col.Type == "text" || col.Type == "ntext" || col.Type == "image"
 			line := fmt.Sprintf("column %d %s %s %d %d %d %s null %s", col.ID, qs(col.Name), declared, col.MaxLength, precision, scale, collation, b(col.Nullable))
 			if col.Computed {
 				line += fmt.Sprintf(" as %s persisted %d", computedDef, persisted)
@@ -488,6 +516,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			item := ssObjectKinds[kind] + ":" + schema + "." + name
+			if err := claim(item, ssObjectKinds[kind]+" "+qs2(schema, name)); err != nil {
+				return err
+			}
 			objects[id] = item
 			text := fmt.Sprintf("%s ansi_nulls %d quoted_identifier %d schemabinding %d execute as %s %s\n%s", ssObjectKinds[kind], ansiNulls, quotedID, schemaBound, executeAs, assembly, def)
 			if kind == "TR" {
@@ -505,6 +536,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			item := "trigger:database." + name
+			if err := claim(item, "database trigger "+qs(name)); err != nil {
+				return err
+			}
 			inv.Triggers = append(inv.Triggers, ssTrigger{ID: id, Name: name, Item: item, Disabled: disabled})
 			add(item, fmt.Sprintf("on database disabled %s events %s\n%s", b(disabled), events, def))
 			return nil
@@ -515,6 +549,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			q.Item = "sequence:" + q.Schema + "." + q.Name
+			if err := claim(q.Item, "sequence "+qs2(q.Schema, q.Name)); err != nil {
+				return err
+			}
 			objects[q.ID] = q.Item
 			if s.excluded(q.Schema, q.Name) {
 				return nil
@@ -532,6 +569,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			item := "type:" + schema + "." + name
+			if err := claim(item, "type "+qs2(schema, name)); err != nil {
+				return err
+			}
 			types[id] = item
 			add(item, fmt.Sprintf("type %s %d %d %d %s null %s table %s (%s) %s", base, maxLength, precision, scale, collation, b(nullable), b(tableType), columns, assembly))
 			return nil
@@ -543,6 +583,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			item := "synonym:" + schema + "." + name
+			if err := claim(item, "synonym "+qs2(schema, name)); err != nil {
+				return err
+			}
 			objects[id] = item
 			add(item, "synonym for "+base)
 			return nil
@@ -575,6 +618,24 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			add(classItem(class, id), text)
+			return nil
+		},
+		func(r *sql.Rows) error { // row-level security predicates
+			var id int64
+			var policy, operation, def string
+			var enabled, bound bool
+			var kind int
+			if err := r.Scan(&id, &policy, &enabled, &bound, &kind, &operation, &def); err != nil {
+				return err
+			}
+			predicate := "filter"
+			if kind == 1 {
+				predicate = "block"
+			}
+			if t := table(id); t != nil && enabled && t.Security == "" {
+				t.Security = "policy " + policy + " (" + predicate + " predicate)"
+			}
+			add(strconv.FormatInt(id, 10), fmt.Sprintf("security policy %s enabled %s schemabinding %s %s %s %s", policy, b(enabled), b(bound), predicate, operation, def))
 			return nil
 		},
 	}

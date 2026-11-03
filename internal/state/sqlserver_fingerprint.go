@@ -83,6 +83,9 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 			out.content[t.ID] = "external" // its rows are another server's (PolyBase)
 			continue
 		}
+		if t.Security != "" {
+			return nil, fmt.Errorf("state %s: table %s has row-level security (%s), which hides rows from DriftGate's reads or blocks its writes; turn the policy off in this database or exclude the table", s.o.Name, t.qname(), t.Security)
+		}
 		row, err := sqlServerRow(t.Columns)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", t.Item, err)

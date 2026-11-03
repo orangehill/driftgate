@@ -42,6 +42,7 @@ var sqlServerDenied = map[string]bool{
 var (
 	sqlServerSystem = map[string]bool{
 		"openrowset": true, "opendatasource": true, "openquery": true, "openxml": true, "pwdencrypt": true, "pwdcompare": true,
+		"loginproperty": true, "login_token": true, "user_token": true,
 		"sql_logins": true, "syslogins": true, "sysxlogins": true, "linked_logins": true, "credentials": true,
 		"database_scoped_credentials": true, "master_key_passwords": true, "server_principal_credentials": true,
 	}
@@ -56,21 +57,42 @@ func checkSQLServerQuery(query string) error {
 	if q == "" {
 		return errors.New("sql: empty query")
 	}
-	isIdent := func(c byte) bool {
-		return c == '_' || c == '$' || c == '@' || c == '#' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 0x80
-	}
+	letter := func(c byte) bool { return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+	digit := func(c byte) bool { return c >= '0' && c <= '9' }
+	isIdent := func(c byte) bool { return letter(c) || digit(c) || c == '$' || c == '@' || c == '#' }
+	space := func(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
 	nextNonSpace := func(i int) byte {
-		for ; i < len(q); i++ {
-			if !strings.ContainsRune(" \t\r\n\f\v", rune(q[i])) {
-				return q[i]
-			}
+		for ; i < len(q) && space(q[i]); i++ {
+		}
+		if i < len(q) {
+			return q[i]
 		}
 		return 0
 	}
+	const (
+		other = iota
+		name
+		dot
+	)
 	first, prev := "", ""
+	last, dots := other, 0 // the last token, and the dots of the name it ends
+	named := func() error {
+		if last != dot {
+			dots = 0
+		}
+		last = name
+		return nil
+	}
 	for i := 0; i < len(q); {
 		c := q[i]
 		switch {
+		case space(c):
+			i++
+			continue
+		case c >= 0x80 || c < 0x20:
+			// SQL Server takes some of them for spaces (U+00A0), so where a
+			// word ends would differ from here.
+			return errors.New("sql: only ASCII is accepted outside quoted texts and [names]")
 		case c == '\'' || c == '"' || c == '[':
 			end := c
 			if c == '[' {
@@ -89,21 +111,25 @@ func checkSQLServerQuery(query string) error {
 				}
 				break
 			}
-			if c != '\'' && nextNonSpace(j) == '(' {
-				return errors.New("sql: a quoted name cannot be called as a function")
-			}
-			if c != '\'' {
+			if c == '\'' {
+				last, prev = other, ""
+			} else {
+				if nextNonSpace(j) == '(' {
+					return errors.New("sql: a quoted name cannot be called as a function")
+				}
 				if err := sqlServerName(strings.ToLower(q[i+1 : j-1])); err != nil {
 					return err
 				}
+				named()
+				prev = ""
 			}
-			prev = ""
 			i = j
+			continue
 		case c == ';':
 			return errors.New("sql: only one statement is accepted")
 		case c == '-' && strings.HasPrefix(q[i:], "--"), c == '/' && strings.HasPrefix(q[i:], "/*"):
 			return errors.New("sql: comments are not accepted")
-		case c == '_' || c == '@' || c == '#' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80:
+		case letter(c) || c == '@' || c == '#':
 			j := i
 			for j < len(q) && isIdent(q[j]) {
 				j++
@@ -121,19 +147,50 @@ func checkSQLServerQuery(query string) error {
 			if err := sqlServerName(word); err != nil {
 				return err
 			}
+			named()
 			prev = word
 			i = j
-		case c >= '0' && c <= '9':
-			for i < len(q) && (isIdent(q[i]) || q[i] == '.') { // a number, 1e5, 0x1F
-				i++
+			continue
+		case digit(c) || c == '.' && i+1 < len(q) && digit(q[i+1]):
+			// A number ends where it cannot go on (SQL Server reads 1EXEC as
+			// 1 and EXEC); one a name follows right away is refused.
+			j := i
+			if c == '0' && j+1 < len(q) && (q[j+1] == 'x' || q[j+1] == 'X') {
+				for j += 2; j < len(q) && strings.IndexByte("0123456789abcdefABCDEF", q[j]) >= 0; j++ {
+				}
+			} else {
+				for ; j < len(q) && (digit(q[j]) || q[j] == '.'); j++ {
+				}
+				if j < len(q) && (q[j] == 'e' || q[j] == 'E') {
+					j++
+					if j < len(q) && (q[j] == '+' || q[j] == '-') {
+						j++
+					}
+					for ; j < len(q) && digit(q[j]); j++ {
+					}
+				}
+			}
+			if j < len(q) && (isIdent(q[j]) || q[j] == '.' || q[j] == '\'' || q[j] == '"' || q[j] == '[') {
+				return errors.New("sql: a number followed right away by a name or text is not accepted; put a space between them")
+			}
+			last, prev = other, ""
+			i = j
+			continue
+		case c == '.':
+			if last == name || last == dot {
+				dots++
+				if dots >= 2 {
+					return errors.New("sql: names of three or four parts (another database or server, or schema.table.column) are not accepted")
+				}
+				last = dot
+			} else {
+				last = other
 			}
 			prev = ""
 		default:
-			if !strings.ContainsRune(" \t\r\n\f\v", rune(c)) {
-				prev = ""
-			}
-			i++
+			last, prev = other, ""
 		}
+		i++
 	}
 	if first != "select" && first != "with" {
 		return errors.New("sql: only a SELECT (or WITH … SELECT) statement is accepted")

@@ -86,6 +86,14 @@ func (s *SQLServer) rowsOf(ctx context.Context, c *sql.Conn, schema, name string
 	if len(key) == 0 {
 		return nil, fmt.Errorf("state %s: row_tracking table %s.%s has no primary key", s.o.Name, schema, name)
 	}
+	var secured int
+	if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM sys.security_predicates pr JOIN sys.security_policies p ON p.object_id = pr.object_id
+		WHERE pr.target_object_id = OBJECT_ID(@p1) AND p.is_enabled = 1`, qs2(schema, name)).Scan(&secured); err != nil {
+		return nil, err
+	}
+	if secured > 0 {
+		return nil, fmt.Errorf("state %s: row_tracking table %s.%s has row-level security, which hides rows from DriftGate's reads; turn the policy off in this database or stop tracking the table", s.o.Name, schema, name)
+	}
 	var sel []string
 	for i := 1; i <= len(key); i++ {
 		sel = append(sel, sqlServerKeyText(key[i]))

@@ -63,6 +63,10 @@ func TestSQLServerEncoding(t *testing.T) {
 		{"varbinary(8000) last byte", "x varbinary(8000)", []string{"CAST(" + long(8000, "b") + " AS varbinary(8000))"},
 			[]string{"CAST(" + long(8000, "c") + " AS varbinary(8000))"}},
 		{"two long columns", "x varchar(8000), y varchar(8000)", []string{long(8000, "a") + ", " + long(8000, "b")}, []string{long(8000, "a") + ", " + long(8000, "c")}},
+		{"sql_variant 8000 bytes", "x sql_variant", []string{"CAST(CAST(" + long(7995, "a") + " AS varbinary(max)) + 0x0102030405 AS varbinary(8000))"},
+			[]string{"CAST(CAST(" + long(7995, "a") + " AS varbinary(max)) + 0xFFFFFFFFFF AS varbinary(8000))"}},
+		{"sql_variant 4000 characters", "x sql_variant", []string{"CAST(REPLICATE(N'a', 3998) + N'bc' AS nvarchar(4000))"}, []string{"CAST(REPLICATE(N'a', 3998) + N'bd' AS nvarchar(4000))"}},
+		{"sql_variant length", "x sql_variant", []string{"CAST('a' AS varchar(10))"}, []string{"CAST('a' AS varchar(20))"}},
 		{"max column", "x nvarchar(max)", []string{"CAST(" + long(100000, "b") + " AS nvarchar(max))"}, []string{"CAST(" + long(100000, "c") + " AS nvarchar(max))"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +138,10 @@ func TestSQLServerItems(t *testing.T) {
 		{"INSERT INTO app.orders (total) VALUES (1)", "table:app.orders"},
 		{"BEGIN TRAN; INSERT INTO app.orders (total) VALUES (2); ROLLBACK", "table:app.orders"}, // the identity moved
 		{"DROP SYNONYM app.o", "synonym:app.o"},
+		{"DECLARE @v sql_variant = CAST(1.0000001 AS float); EXEC sp_addextendedproperty N'ver', @v, N'SCHEMA', N'app', N'TABLE', N'orders'", "table:app.orders"},
+		{"DECLARE @v sql_variant = CAST(1.0000002 AS float); EXEC sp_updateextendedproperty N'ver', @v, N'SCHEMA', N'app', N'TABLE', N'orders'", "table:app.orders"},
+		{"DECLARE @v sql_variant = CAST('2020-01-01T10:00:01' AS datetime); EXEC sp_updateextendedproperty N'ver', @v, N'SCHEMA', N'app', N'TABLE', N'orders'", "table:app.orders"},
+		{"DECLARE @v sql_variant = CAST('2020-01-01T10:00:59' AS datetime); EXEC sp_updateextendedproperty N'ver', @v, N'SCHEMA', N'app', N'TABLE', N'orders'", "table:app.orders"},
 	} {
 		mustExec(t, db, tc.stmt)
 		g := sqlServerFull(t, s)
@@ -188,6 +196,10 @@ func TestSQLServerWritePaths(t *testing.T) {
 		"CREATE TABLE logt (id int IDENTITY PRIMARY KEY, what nvarchar(20))",
 		"CREATE TABLE src (id int PRIMARY KEY, v int)",
 		"CREATE TABLE sw (id int PRIMARY KEY, v int)", "CREATE TABLE sw2 (id int PRIMARY KEY, v int)",
+		"CREATE TABLE tx (id int PRIMARY KEY, txt text, ntx ntext, img image)", "INSERT INTO tx VALUES (1, REPLICATE('a', 100), N'abc', 0x0102)",
+		"CREATE TABLE x (id int PRIMARY KEY, doc xml)", "INSERT INTO x VALUES (1, N'<a><b>1</b></a>')",
+		"CREATE TABLE sp (id int PRIMARY KEY, a int SPARSE NULL, b nvarchar(20) SPARSE NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS)", "INSERT INTO sp (id, a) VALUES (1, 1)",
+		"CREATE VIEW vsrc AS SELECT id, v FROM src",
 		"CREATE TRIGGER tr_p ON p AFTER UPDATE AS INSERT INTO logt (what) SELECT N'p' FROM inserted",
 		"INSERT INTO p VALUES (1, 1, REPLICATE(CAST(N'L' AS nvarchar(max)), 20000)), (2, 2, N'short')",
 		"INSERT INTO c VALUES (1, 1, 1), (2, 2, 2)", "INSERT INTO h VALUES (1, 'a'), (1, 'a')",
@@ -241,6 +253,13 @@ func TestSQLServerWritePaths(t *testing.T) {
 		{name: "rolled back", stmt: "BEGIN TRAN; UPDATE src SET v = 99; ROLLBACK"},
 		{name: "rebuild, then one update", stmt: "ALTER INDEX ALL ON src REBUILD; UPDATE src SET v = v + 100 WHERE id = 1", changed: true},
 		{name: "select into", stmt: "SELECT * INTO copy FROM src", changed: true},
+		{name: "writetext", stmt: "DECLARE @p varbinary(16); SELECT @p = TEXTPTR(txt) FROM tx WHERE id = 1; WRITETEXT tx.txt @p 'zzz'", changed: true},
+		{name: "updatetext", stmt: "DECLARE @p varbinary(16); SELECT @p = TEXTPTR(txt) FROM tx WHERE id = 1; UPDATETEXT tx.txt @p 0 1 'Q'", changed: true},
+		{name: "updatetext ntext", stmt: "DECLARE @p varbinary(16); SELECT @p = TEXTPTR(ntx) FROM tx WHERE id = 1; UPDATETEXT tx.ntx @p 0 1 N'Q'", changed: true},
+		{name: "writetext image", stmt: "DECLARE @p varbinary(16); SELECT @p = TEXTPTR(img) FROM tx WHERE id = 1; WRITETEXT tx.img @p 0xFFFF", changed: true},
+		{name: "xml modify", stmt: `UPDATE x SET doc.modify('replace value of (/a/b/text())[1] with "2"')`, changed: true},
+		{name: "column set", stmt: "UPDATE sp SET cs = N'<b>hi</b>'", changed: true},
+		{name: "view update", stmt: "UPDATE vsrc SET v = v + 1", changed: true},
 		{name: "delayed durability", stmt: "ALTER DATABASE CURRENT SET DELAYED_DURABILITY = FORCED; INSERT INTO src VALUES (11, 1); ALTER DATABASE CURRENT SET DELAYED_DURABILITY = DISABLED", changed: true},
 	} {
 		before := mustSQLServerFingerprint(t, s)
@@ -300,17 +319,31 @@ func TestSQLServerReuse(t *testing.T) {
 		t.Fatal("no mode")
 	}
 
-	// A write after the signals, before the tables are read.
-	sqlServerBeforeScan = func() { db.Exec("UPDATE a SET v = 2") }
+	// A write after the signals, before the tables are read: the tables
+	// are read again, and the fingerprint has it.
+	writes := 0
+	sqlServerBeforeScan = func() {
+		if writes == 0 {
+			db.Exec("UPDATE a SET v = 2")
+		}
+		writes++
+	}
 	mustExec(t, db, "UPDATE b SET v = 2")
-	mustSQLServerFingerprint(t, s)
-	sqlServerBeforeScan = nil
 	h := mustSQLServerFingerprint(t, s)
-	if s.Reused() {
-		t.Fatal("reused a fingerprint whose tables were written while it was read")
+	sqlServerBeforeScan = nil
+	if writes != 2 {
+		t.Fatalf("the tables were read %d times, want 2", writes)
 	}
 	if full := sqlServerFull(t, s); !reflect.DeepEqual(h, full) {
 		t.Fatalf("differs from a full fingerprint: %v", Diff(h, full))
+	}
+	// Written every time: no fingerprint.
+	mustExec(t, db, "UPDATE b SET v = 3")
+	sqlServerBeforeScan = func() { db.Exec("UPDATE a SET v = v + 1") }
+	_, err := s.Fingerprint(context.Background(), nil)
+	sqlServerBeforeScan = nil
+	if err == nil || !strings.Contains(err.Error(), "no consistent fingerprint") {
+		t.Fatalf("a database written during every read: %v", err)
 	}
 
 	// Only the written table is read again: what is kept of the other one
@@ -370,7 +403,8 @@ func TestSQLServerOpenWrites(t *testing.T) {
 	if full := sqlServerFull(t, s); !reflect.DeepEqual(f, full) {
 		t.Fatalf("differs from a full fingerprint: %v", Diff(f, full))
 	}
-	// Still open after the wait: not kept.
+	// Still open after the wait: no fingerprint (its rows would be read
+	// before the commit, its other writes maybe after), nothing kept.
 	sqlServerOpenWait = 100 * time.Millisecond
 	mustExec(t, db, "ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE") // the scan does not wait for the row
 	db.SetMaxIdleConns(0)
@@ -382,7 +416,9 @@ func TestSQLServerOpenWrites(t *testing.T) {
 	if _, err := tx.Exec("UPDATE a SET v = 5 WHERE id = 1"); err != nil {
 		t.Fatal(err)
 	}
-	mustSQLServerFingerprint(t, s)
+	if _, err := s.Fingerprint(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "stayed open") {
+		t.Fatalf("a fingerprint while a write stays open: %v", err)
+	}
 	if s.last != nil {
 		t.Fatal("kept a fingerprint taken while a write was open")
 	}
@@ -807,5 +843,174 @@ func TestSQLServerFeatures(t *testing.T) {
 			t.Errorf("%s: changed %v, want %s", w.stmt, d, w.item)
 		}
 		f = g
+	}
+}
+
+// TestSQLServerQueryStaysRead: what slipped past an earlier check (a word
+// glued to a number, a no-break space) is refused, nothing reaches the
+// working database, and other databases cannot be named.
+func TestSQLServerQueryStaysRead(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{})
+	mustExec(t, db, "CREATE TABLE a (i int)")
+	makeSQLServerPristine(t, s)
+	ctx := context.Background()
+	w := strings.ReplaceAll(qs(s.o.Working), "'", "''")
+	for _, q := range []string{
+		"SELECT 1e1EXEC('COMMIT; CREATE TABLE " + w + ".dbo.pwned (i int); BEGIN TRAN')",
+		"SELECT 1EXEC('COMMIT; CREATE TABLE " + w + ".dbo.pwned (i int); BEGIN TRAN')",
+		"SELECT 1\u00a0EXEC('COMMIT; CREATE TABLE " + w + ".dbo.pwned (i int); BEGIN TRAN')",
+		"SELECT * FROM " + qs(s.o.Working) + ".dbo.a",
+		"SELECT CONVERT(varchar(200), LOGINPROPERTY('sa', 'PasswordHash'), 1)",
+	} {
+		if _, err := s.Query(ctx, q); err == nil || !strings.HasPrefix(err.Error(), "sql: ") {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sys.tables WHERE name = 'pwned'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a query wrote to the working database (%d, %v)", n, err)
+	}
+}
+
+// TestSQLServerRowversionAfterFallback: a restore of the whole database
+// (forget) drops the remembered rowversion maxima, so later values cannot
+// hide behind them.
+func TestSQLServerRowversionAfterFallback(t *testing.T) {
+	ctx := context.Background()
+	s, db := newSQLServerTest(t, Options{})
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, v int, rv rowversion)", "INSERT INTO t (id, v) VALUES (1, 1)")
+	makeSQLServerPristine(t, s)
+	var data string
+	if err := master.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(400))").Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	bak := strings.TrimRight(data, "/") + "/" + s.o.Working + "_fb.bak"
+	mustExec(t, master, "BACKUP DATABASE "+qs(s.o.Working)+" TO DISK = "+sqlServerString(bak)+" WITH COPY_ONLY, INIT, FORMAT")
+	defer master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(bak))
+	base := mustSQLServerFingerprint(t, s)["table:dbo.t"]
+	// As an item-level restore of t: rows written anew, maxima remembered.
+	mustExec(t, db, "UPDATE t SET v = v", "UPDATE t SET v = v", "DELETE FROM t", "INSERT INTO t (id, v) VALUES (1, 1)")
+	c, err := s.conn(ctx, s.o.Working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := s.inventory(ctx, c)
+	if err == nil {
+		err = s.rememberRowversions(ctx, c, []*ssTable{inv.ByItem["table:dbo.t"]})
+	}
+	c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.restored([]string{"table:dbo.t"})
+	m := s.rvMax["table:dbo.t"]
+	// As a fallback restore later.
+	s.closePool(s.o.Working)
+	db.Close()
+	mustExec(t, master, "ALTER DATABASE "+qs(s.o.Working)+" SET SINGLE_USER WITH ROLLBACK IMMEDIATE",
+		"RESTORE DATABASE "+qs(s.o.Working)+" FROM DISK = "+sqlServerString(bak)+" WITH REPLACE", "ALTER DATABASE "+qs(s.o.Working)+" SET MULTI_USER")
+	s.forget()
+	db = sqlServerTestDB(t, s.o.DSN, s.o.Working)
+	if got := mustSQLServerFingerprint(t, s)["table:dbo.t"]; got != base {
+		t.Fatal("not the pristine state after the restore")
+	}
+	var rv []byte
+	for range 1000 { // no-op updates until the value reaches the old maximum
+		mustExec(t, db, "UPDATE t SET v = v")
+		if err := db.QueryRow("SELECT rv FROM t").Scan(&rv); err != nil {
+			t.Fatal(err)
+		}
+		if string(rv) >= string(m) {
+			break
+		}
+	}
+	if got := mustSQLServerFingerprint(t, s)["table:dbo.t"]; got == base {
+		t.Fatal("the rowversion moved but the item equals the pristine one")
+	}
+}
+
+// TestSQLServerItemNames: two objects whose item names come out alike are
+// refused, not mixed up.
+func TestSQLServerItemNames(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{})
+	mustExec(t, db, "CREATE SCHEMA [a.b]", "CREATE SCHEMA a", "CREATE TABLE [a.b].c (id int PRIMARY KEY)", "CREATE TABLE a.[b.c] (id int PRIMARY KEY)")
+	if _, err := s.Fingerprint(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "both have the item name table:a.b.c") {
+		t.Fatalf("%v", err)
+	}
+	mustExec(t, db, "DROP TABLE a.[b.c]", "CREATE SCHEMA [database]", "CREATE TABLE [database].t (id int)",
+		"CREATE TRIGGER [database].x ON [database].t AFTER INSERT AS SET NOCOUNT ON",
+		"CREATE TRIGGER x ON DATABASE FOR CREATE_TABLE AS SET NOCOUNT ON")
+	if _, err := s.Fingerprint(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "trigger:database.x") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// TestSQLServerRowLevelSecurity: a table behind an enabled security
+// policy is refused (its filter hides rows from every read); a disabled
+// policy is part of the table's definition.
+func TestSQLServerRowLevelSecurity(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{RowTracking: []string{"orders"}})
+	mustExec(t, db, "CREATE TABLE orders (id int PRIMARY KEY, tenant int, total int)", "INSERT INTO orders VALUES (1, 1, 10), (2, 2, 20)",
+		"CREATE FUNCTION dbo.tenant_pred (@tenant int) RETURNS TABLE WITH SCHEMABINDING AS RETURN SELECT 1 AS ok WHERE @tenant = CAST(SESSION_CONTEXT(N'tenant') AS int)")
+	f := mustSQLServerFingerprint(t, s)
+	mustExec(t, db, "CREATE SECURITY POLICY dbo.tenants ADD FILTER PREDICATE dbo.tenant_pred(tenant) ON dbo.orders WITH (STATE = ON)")
+	ctx := context.Background()
+	if _, err := s.Fingerprint(ctx, nil); err == nil || !strings.Contains(err.Error(), "row-level security") {
+		t.Fatalf("fingerprint: %v", err)
+	}
+	if _, err := s.Rows(ctx, nil); err == nil || !strings.Contains(err.Error(), "row-level security") {
+		t.Fatalf("rows: %v", err)
+	}
+	mustExec(t, db, "ALTER SECURITY POLICY dbo.tenants WITH (STATE = OFF)")
+	g := mustSQLServerFingerprint(t, s)
+	if d := Diff(f, g); !reflect.DeepEqual(d, []string{"table:dbo.orders"}) {
+		t.Fatalf("a disabled policy changed %v", d)
+	}
+}
+
+// TestSQLServerTornRead: a transaction that commits while the tables are
+// read cannot leave a fingerprint of a state the database never had.
+func TestSQLServerTornRead(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{})
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the test login cannot read the server's performance state")
+	}
+	mustExec(t, db, "CREATE TABLE a (id int PRIMARY KEY, v int)", "CREATE TABLE b (id int PRIMARY KEY, v int)",
+		"INSERT INTO a VALUES (1, 1)", "INSERT INTO b VALUES (1, 1)")
+	p := sqlServerFull(t, s) // a = 1, b = 1
+	mustExec(t, db, "UPDATE a SET v = 2")
+	defer func(d time.Duration) { sqlServerOpenWait = d }(sqlServerOpenWait)
+	sqlServerOpenWait = 200 * time.Millisecond
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("UPDATE a SET v = 1"); err != nil { // a back to 1 …
+		t.Fatal(err)
+	}
+	type result struct {
+		f   Fingerprint
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		f, err := s.Fingerprint(context.Background(), nil)
+		got <- result{f, err}
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := tx.Exec("UPDATE b SET v = 2"); err != nil { // … and b to 2, in one transaction
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	r := <-got
+	now := sqlServerFull(t, s)
+	if r.err == nil && len(Diff(p, r.f)) == 0 && len(Diff(p, now)) > 0 {
+		t.Fatalf("a torn read equals the pristine state while b differs")
+	}
+	if r.err == nil && !reflect.DeepEqual(r.f, now) {
+		t.Fatalf("the fingerprint is of no state the database had: %v", Diff(r.f, now))
 	}
 }

@@ -124,12 +124,14 @@ func sqlServerValue(c ssColumn) (string, error) {
 	case "sql_variant":
 		// The value's type and its properties too: an int 1 and a bigint 1
 		// differ only in length, an nvarchar '1' and a varchar '1' in their
-		// bytes, a varchar in its collation.
+		// bytes, a varchar in its collation and declared length. The value
+		// takes up to 8000 bytes: its part starts with a varbinary(max)
+		// operand (see above).
 		prop := func(p, as string) string {
 			return sqlServerPart("CAST(CAST(SQL_VARIANT_PROPERTY("+q+", '"+p+"') AS "+as+") AS varbinary(256))", false)
 		}
 		inner := prop("BaseType", "nvarchar(128)") + " + " + prop("Precision", "int") + " + " + prop("Scale", "int") + " + " +
-			prop("Collation", "nvarchar(128)") + " + " + sqlServerPart("CAST("+q+" AS varbinary(8000))", false)
+			prop("MaxLength", "int") + " + " + prop("Collation", "nvarchar(128)") + " + " + sqlServerPart("CAST("+q+" AS varbinary(max))", true)
 		return "CASE WHEN " + q + " IS NULL THEN NULL ELSE CAST(0x AS varbinary(max)) + " + inner + " END", nil
 	}
 	if c.CLR { // hierarchyid, geometry, geography: their serialised form

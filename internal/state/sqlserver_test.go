@@ -199,6 +199,8 @@ func TestCheckSQLServerQuery(t *testing.T) {
 		"SELECT COUNT(*) FROM t WITH (NOLOCK) WHERE name LIKE N'[a]%'",
 		"SELECT v FROM OPENJSON(N'[1,2]')",
 		"SELECT next_id FROM t", // not NEXT VALUE
+		"SELECT 1.5e-3, .5, 0x1F, t.id FROM dbo.t",
+		"SELECT [nämé] FROM t WHERE x = N'ünïcode'",
 	} {
 		if err := checkSQLServerQuery(q); err != nil {
 			t.Errorf("%s: %v", q, err)
@@ -239,6 +241,19 @@ func TestCheckSQLServerQuery(t *testing.T) {
 		"SELECT [f](1)",
 		"INSERT INTO t VALUES (1)",
 		"SHUTDOWN",
+		"SELECT 1EXEC('SELECT 42')",
+		"SELECT 1e1EXEC('SELECT 42')",
+		"SELECT 0xEXEC('SELECT 42')",
+		"SELECT 1.EXEC('SELECT 42')",
+		"SELECT 1 x WHERE 1=1EXEC('SELECT 42')",
+		"SELECT 1\u00a0EXEC('SELECT 42')",
+		"SELECT 1\u3000EXEC('SELECT 42')",
+		"SELECT 1\x0bEXEC('SELECT 42')",
+		"SELECT LOGINPROPERTY('sa', 'PasswordHash')",
+		"SELECT 1 FROM [x].master.sys.objects",
+		"SELECT * FROM otherdb.dbo.t",
+		"SELECT * FROM otherdb..t",
+		"SELECT * FROM srv.db.dbo.t",
 	} {
 		if err := checkSQLServerQuery(q); err == nil {
 			t.Errorf("%q accepted", q)
