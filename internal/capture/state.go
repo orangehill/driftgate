@@ -196,10 +196,14 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 		}
 		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RowTracking: sc.RowTracking, Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
-		path, err := pristinePath(p, n, servers[n])
-		if err != nil {
-			closeAll()
-			return nil, nil, err
+		// The record's path names the pristine file of SQLite and is
+		// removed by a seed; MySQL and PostgreSQL need it for neither.
+		var path string
+		if seed || sc.Driver == config.SQLite {
+			if path, err = pristinePath(p, n, servers[n]); err != nil {
+				closeAll()
+				return nil, nil, err
+			}
 		}
 		if sc.Driver == config.SQLite {
 			if o.Working, o.Pristine, err = sqliteFiles(p, sc, servers[n], path); err != nil {

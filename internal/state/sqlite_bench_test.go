@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -81,9 +82,9 @@ func BenchmarkSQLiteFingerprint(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("%dMB/digest", mb), func(b *testing.B) {
 			fp(b)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				b.StopTimer()
-				mustExecB(b, app, fmt.Sprintf("INSERT OR REPLACE INTO sessions VALUES (1, '%d')", i))
+				mustExecB(b, app, fmt.Sprintf("INSERT OR REPLACE INTO sessions VALUES (1, '%d')", sqliteBenchValue.Add(1)))
 				b.StartTimer()
 				fp(b)
 			}
@@ -93,9 +94,9 @@ func BenchmarkSQLiteFingerprint(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("%dMB/changed", mb), func(b *testing.B) {
 			fp(b)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				b.StopTimer()
-				mustExecB(b, app, fmt.Sprintf("UPDATE big SET n = %d WHERE id = 1", i))
+				mustExecB(b, app, fmt.Sprintf("UPDATE big SET n = %d WHERE id = 1", sqliteBenchValue.Add(1)))
 				b.StartTimer()
 				fp(b)
 			}
@@ -120,9 +121,9 @@ func BenchmarkSQLiteRestore(b *testing.B) {
 	for _, mb := range sqliteBenchSizes() {
 		s, app := sqliteBenchFile(b, mb)
 		b.Run(fmt.Sprintf("%dMB/small", mb), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				b.StopTimer()
-				mustExecB(b, app, fmt.Sprintf("UPDATE small3 SET v = %d WHERE id = 5", -i-1))
+				mustExecB(b, app, fmt.Sprintf("UPDATE small3 SET v = %d WHERE id = 5", -sqliteBenchValue.Add(1)))
 				b.StartTimer()
 				if err := s.Restore(ctx, []string{"table:small3"}); err != nil {
 					b.Fatal(err)
@@ -133,9 +134,9 @@ func BenchmarkSQLiteRestore(b *testing.B) {
 			continue
 		}
 		b.Run(fmt.Sprintf("%dMB/large-table", mb), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				b.StopTimer()
-				mustExecB(b, app, fmt.Sprintf("UPDATE big SET n = %d WHERE id = 5", -i-1))
+				mustExecB(b, app, fmt.Sprintf("UPDATE big SET n = %d WHERE id = 5", -sqliteBenchValue.Add(1)))
 				b.StartTimer()
 				if err := s.Restore(ctx, []string{"table:big"}); err != nil {
 					b.Fatal(err)
@@ -159,6 +160,10 @@ func BenchmarkSQLiteSeed(b *testing.B) {
 		})
 	}
 }
+
+// sqliteBenchValue is a value no write of a benchmark wrote before, in any
+// run of -count: a write of the same value would change no page.
+var sqliteBenchValue atomic.Int64
 
 func mustExecB(b *testing.B, db *sql.DB, q string) {
 	b.Helper()
