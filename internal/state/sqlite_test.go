@@ -681,11 +681,12 @@ func TestNewSQLite(t *testing.T) {
 		{work, filepath.Join(dir, "link.sqlite"), "is the working database file"},
 		{work, work + "-wal", "-wal"},
 		{work, work + "-journal", "-journal"},
-		{pristine + "-journal", pristine, "named like the pristine file"},
+		{pristine + "-journal", pristine, "next to it"},
 		// A seed removes the -wal and -shm files of its new copy: a working
 		// file named so would be deleted.
-		{newWAL, pristine, "named like the pristine file"},
-		{filepath.Join(dir, "P.sqlite.driftgate-new-shm"), filepath.Join(dir, "p.sqlite"), "named like the pristine file"},
+		{newWAL, pristine, "next to it"},
+		{filepath.Join(dir, "P.sqlite.driftgate-new-shm"), filepath.Join(dir, "p.sqlite"), "next to it"},
+		{work + ".old", work, "named like the pristine file"},
 		{"app.sqlite", pristine, "absolute"},
 	} {
 		s, err := NewSQLite(Options{Name: "db", Working: c.working, Pristine: c.pristine})
