@@ -25,16 +25,21 @@ func tableHash(t *testing.T, s *SQLServer, table string) string {
 	return h
 }
 
-// TestSQLServerEncoding: rows that differ in any way hash differently,
-// and the same rows in any order hash alike.
-func TestSQLServerEncoding(t *testing.T) {
-	s, db := newSQLServerTest(t, Options{}, "COLLATE SQL_Latin1_General_CP1_CI_AS")
-	long := func(n int, last string) string {
-		return "REPLICATE(CAST('a' AS varchar(max)), " + fmt.Sprint(n-1) + ") + '" + last + "'"
-	}
-	for _, tc := range []struct {
+// sqlServerLong is a text of n characters, the last one last.
+func sqlServerLong(n int, last string) string {
+	return "REPLICATE(CAST('a' AS varchar(max)), " + fmt.Sprint(n-1) + ") + '" + last + "'"
+}
+
+// sqlServerEncodingPairs are rows that differ in a way only an exact
+// comparison sees (the database's collation is SQL_Latin1_General_CP1_CI_AS).
+var sqlServerEncodingPairs = func() []struct {
+	name, columns string
+	a, b          []string // rows, as VALUES lists
+} {
+	long := sqlServerLong
+	return []struct {
 		name, columns string
-		a, b          []string // rows, as VALUES lists
+		a, b          []string
 	}{
 		{"split", "x nvarchar(10), y nvarchar(10)", []string{"N'ab', N'c'"}, []string{"N'a', N'bc'"}},
 		{"null and empty", "x nvarchar(10)", []string{"NULL"}, []string{"N''"}},
@@ -69,7 +74,24 @@ func TestSQLServerEncoding(t *testing.T) {
 		{"sql_variant 4000 characters", "x sql_variant", []string{"CAST(REPLICATE(N'a', 3998) + N'bc' AS nvarchar(4000))"}, []string{"CAST(REPLICATE(N'a', 3998) + N'bd' AS nvarchar(4000))"}},
 		{"sql_variant length", "x sql_variant", []string{"CAST('a' AS varchar(10))"}, []string{"CAST('a' AS varchar(20))"}},
 		{"max column", "x nvarchar(max)", []string{"CAST(" + long(100000, "b") + " AS nvarchar(max))"}, []string{"CAST(" + long(100000, "c") + " AS nvarchar(max))"}},
-	} {
+		{"trailing zero byte", "x varbinary(10)", []string{"0x01"}, []string{"0x0100"}},
+		{"nchar case and accent", "x nchar(3) COLLATE Latin1_General_CI_AI", []string{"N'a'"}, []string{"N'á'"}},
+		{"datetimeoffset offset", "x datetimeoffset(3)", []string{"'2020-01-01T10:00:00+02:00'"}, []string{"'2020-01-01T08:00:00+00:00'"}},
+		{"real -0", "x real", []string{"CAST(0 AS real)"}, []string{"CAST(-1e0 * 0e0 AS real)"}},
+		{"float zero and null", "x float", []string{"0e0"}, []string{"NULL"}},
+		{"int null", "x int", []string{"0"}, []string{"NULL"}},
+		{"varchar max trailing space", "x varchar(max)", []string{"'a'"}, []string{"'a '"}},
+		{"datetime", "x datetime", []string{"'2020-01-01T00:00:00.003'"}, []string{"'2020-01-01T00:00:00.007'"}},
+		{"smallmoney", "x smallmoney", []string{"1.0001"}, []string{"1.0002"}},
+		{"char padding under CI", "x char(3), y varchar(3)", []string{"'a', 'b'"}, []string{"'a', 'b '"}},
+	}
+}()
+
+// TestSQLServerEncoding: rows that differ in any way hash differently,
+// and the same rows in any order hash alike.
+func TestSQLServerEncoding(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{}, "COLLATE SQL_Latin1_General_CP1_CI_AS")
+	for _, tc := range sqlServerEncodingPairs {
 		t.Run(tc.name, func(t *testing.T) {
 			table := "e_" + strings.ReplaceAll(tc.name, " ", "_")
 			mustExec(t, db, "CREATE TABLE "+qms(table)+" ("+tc.columns+")")

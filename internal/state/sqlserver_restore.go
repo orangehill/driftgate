@@ -878,67 +878,32 @@ func ssKeyJoin(key []string, a, b string) string {
 const ssParallel = " OPTION (USE HINT ('ENABLE_PARALLEL_PLAN_PREFERENCE'))"
 
 // findChanged finds the keys of the changed rows of every large table of
-// the plan (delta): rows with a column whose encoding (sqlServerColumn,
-// as the fingerprint reads it) differs from the pristine copy's row with
-// the same key, and rows with a key on one side only. They go into a
-// temporary table of the connection. A table where more than a quarter of
-// the rows changed is copied whole. Each column is compared on its own:
-// the rows' whole encodings are varbinary(max), which SQL Server compares
-// several times slower.
+// the plan (delta) in one statement per table: a full join of the working
+// table and the pristine copy's on the key, where a key is on one side
+// only or a column differs (ssDiffers). The keys go into a temporary table
+// of the connection. A table where more than a quarter of the rows changed
+// is copied whole.
 func (s *SQLServer) findChanged(ctx context.Context, c *sql.Conn, plan *ssRestorePlan) error {
 	n := 0
 	for _, rt := range plan.tables {
 		if !rt.delta {
 			continue
 		}
-		var keys, wkeys, pkeys, parts, differ []string
-		for _, col := range rt.p.Key {
-			keys = append(keys, qms(col))
-			wkeys = append(wkeys, "w."+qms(col))
-			pkeys = append(pkeys, "p."+qms(col))
-		}
-		usable := true
-		for _, col := range rt.p.Columns {
-			if !col.hashed() {
-				continue
-			}
-			part, err := sqlServerColumn(col)
-			if err != nil || col.Encrypted {
-				usable = false // copied whole: a copy does not need the encoding
-				break
-			}
-			name := qms(fmt.Sprintf("dg c%d", len(parts)+1))
-			parts = append(parts, part+" AS "+name)
-			differ = append(differ, "w."+name+" <> p."+name)
-		}
-		if !usable {
-			continue
-		}
 		n++
 		k := fmt.Sprintf("#dg_k%d", n)
-		list := strings.Join(keys, ", ")
 		w, p := rt.w.qname(), qms(s.o.Pristine)+"."+rt.p.qname()
-		// UNION ALL: the temporary table gets the key columns' types and
-		// collations without an IDENTITY property.
-		if _, err := c.ExecContext(ctx, fmt.Sprintf("SELECT TOP (0) %s INTO %s FROM %s UNION ALL SELECT TOP (0) %s FROM %s", list, k, p, list, p)); err != nil {
-			return err
-		}
-		cols := strings.Join(append(keys, parts...), ", ")
-		on := ssKeyJoin(rt.p.Key, "w", "p")
-		changed := fmt.Sprintf("INSERT INTO %s SELECT %s FROM (SELECT %s FROM %s) w LEFT JOIN (SELECT %s FROM %s) p ON %s WHERE %s",
-			k, strings.Join(wkeys, ", "), cols, w, cols, p, on, strings.Join(append([]string{"p." + keys[0] + " IS NULL"}, differ...), " OR "))
-		gone := fmt.Sprintf("INSERT INTO %s SELECT %s FROM %s p WHERE NOT EXISTS (SELECT 1 FROM %s w WHERE %s)", k, strings.Join(pkeys, ", "), p, w, on)
-		for _, q := range []string{changed, gone} {
-			_, err := c.ExecContext(ctx, q+ssParallel)
-			if sqlServerNumber(err) == 10715 { // not a valid hint (older servers)
-				_, err = c.ExecContext(ctx, q)
-			}
-			if err != nil {
-				return err
-			}
+		q, ok := ssChangedSQL(rt.p, w, p, k)
+		if !ok {
+			continue // copied whole: a copy does not need the encoding
 		}
 		var count int64
-		if err := c.QueryRowContext(ctx, "SELECT COUNT_BIG(*) FROM "+k).Scan(&count); err != nil {
+		err := c.QueryRowContext(ctx, q+ssParallel+";\nSELECT COUNT_BIG(*) FROM "+k).Scan(&count)
+		if sqlServerNumber(err) == 10715 { // not a valid hint (older servers)
+			k += "_"
+			q, _ = ssChangedSQL(rt.p, w, p, k)
+			err = c.QueryRowContext(ctx, q+";\nSELECT COUNT_BIG(*) FROM "+k).Scan(&count)
+		}
+		if err != nil {
 			return err
 		}
 		if count*4 <= rt.p.Rows {
@@ -946,6 +911,88 @@ func (s *SQLServer) findChanged(ctx context.Context, c *sql.Conn, plan *ssRestor
 		}
 	}
 	return nil
+}
+
+// ssChangedSQL is the batch that makes the temporary table k (it must not
+// exist: the batch is compiled before it runs) and fills it with the keys
+// of the rows in which table w differs from table p (both of definition
+// t, which has a key), up to its last statement's OPTION; ok is false when
+// a column has no encoding. The temporary table gets the key columns'
+// types and collations without an IDENTITY property (UNION ALL).
+func ssChangedSQL(t *ssTable, w, p, k string) (string, bool) {
+	var keys, cols, on, pick, differ []string
+	for i, col := range t.Key {
+		name := qms(fmt.Sprintf("dg k%d", i+1))
+		keys = append(keys, qms(col))
+		cols = append(cols, qms(col)+" AS "+name)
+		on = append(on, "w."+name+" = p."+name)
+		pick = append(pick, "ISNULL(w."+name+", p."+name+")")
+	}
+	for _, col := range t.Columns {
+		if !col.hashed() {
+			continue
+		}
+		if col.Encrypted {
+			return "", false
+		}
+		name := qms(fmt.Sprintf("dg c%d", len(differ)+1))
+		v, d, err := ssDiffers(col, "w."+name, "p."+name)
+		if err != nil {
+			return "", false
+		}
+		cols = append(cols, v+" AS "+name)
+		differ = append(differ, d)
+	}
+	first := "w." + qms("dg k1")
+	list := strings.Join(keys, ", ")
+	sel := strings.Join(cols, ", ")
+	return fmt.Sprintf("SELECT TOP (0) %s INTO %s FROM %s UNION ALL SELECT TOP (0) %s FROM %s;\n", list, k, p, list, p) +
+		fmt.Sprintf("INSERT INTO %s SELECT %s FROM (SELECT %s FROM %s) w FULL JOIN (SELECT %s FROM %s) p ON %s WHERE %s",
+			k, strings.Join(pick, ", "), sel, w, sel, p, strings.Join(on, " AND "),
+			strings.Join(append([]string{first + " IS NULL", "p." + qms("dg k1") + " IS NULL"}, differ...), " OR ")), true
+}
+
+// ssDiffers is how a delta compares a column (ssChangedSQL): the
+// expression it reads the column as, and the condition under which the
+// values a and b of that expression differ. Two values differ exactly
+// when their encodings (sqlServerColumn) do, the way SQL Server compares
+// each type fastest:
+//
+//   - integers, bit, money, uniqueidentifier and the date and time types
+//     but datetimeoffset by their values: = is exact for them;
+//   - float and real by their values, and a zero by its bytes too (0 and
+//     -0 compare equal; a NaN cannot be stored);
+//   - strings and binary strings, decimal and datetimeoffset as the bytes
+//     of their encoding, with their lengths: a collation compares strings
+//     equal that differ (case, trailing spaces), varbinary values that
+//     differ in trailing zero bytes compare equal, decimal values with
+//     another sign of zero and datetimeoffset values of the same instant
+//     in another offset compare equal;
+//   - any other type (xml, text, sql_variant, CLR types) by its encoded
+//     part, which is never NULL.
+//
+// A NULL differs from any value.
+func ssDiffers(c ssColumn, a, b string) (expr, differ string, err error) {
+	null := ""
+	if c.Nullable {
+		null = " OR " + a + " IS NULL AND " + b + " IS NOT NULL OR " + a + " IS NOT NULL AND " + b + " IS NULL"
+	}
+	switch c.Type {
+	case "bit", "tinyint", "smallint", "int", "bigint", "smallmoney", "money", "uniqueidentifier",
+		"date", "time", "datetime2", "datetime", "smalldatetime":
+		return c.expr(), "(" + a + " <> " + b + null + ")", nil
+	case "real", "float":
+		n := 8
+		if c.Type == "real" {
+			n = 4
+		}
+		return c.expr(), fmt.Sprintf("(%s <> %s OR %s = 0 AND CAST(%s AS binary(%d)) <> CAST(%s AS binary(%d))%s)", a, b, a, a, n, b, n, null), nil
+	case "decimal", "numeric", "datetimeoffset", "char", "varchar", "nchar", "nvarchar", "binary", "varbinary":
+		v, err := sqlServerValue(c)
+		return v, "(" + a + " <> " + b + " OR DATALENGTH(" + a + ") <> DATALENGTH(" + b + ")" + null + ")", err
+	}
+	part, err := sqlServerColumn(c)
+	return part, "(" + a + " <> " + b + ")", err
 }
 
 // waitFullText waits until the full-text indexes of the restored tables

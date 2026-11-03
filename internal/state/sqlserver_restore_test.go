@@ -390,6 +390,73 @@ func TestSQLServerRestoreDelta(t *testing.T) {
 	}
 }
 
+// TestSQLServerDeltaCompare: the comparison that finds a delta's changed
+// rows tells apart every two rows the encoding does (key columns too,
+// which the join matches under their collation), and no two equal rows.
+func TestSQLServerDeltaCompare(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{}, "COLLATE SQL_Latin1_General_CP1_CI_AS")
+	type pair struct {
+		name, columns string
+		a, b          string
+	}
+	var pairs []pair
+	for _, tc := range sqlServerEncodingPairs {
+		if len(tc.a) == 1 && len(tc.b) == 1 {
+			pairs = append(pairs, pair{tc.name, "dg_id int NOT NULL PRIMARY KEY, " + tc.columns, "1, " + tc.a[0], "1, " + tc.b[0]})
+		}
+	}
+	pairs = append(pairs,
+		pair{"key case", "k varchar(10) NOT NULL PRIMARY KEY, v int NULL", "'a', 1", "'A', 1"},
+		pair{"key trailing space", "k nvarchar(10) NOT NULL PRIMARY KEY", "N'a'", "N'a '"},
+		pair{"key accent", "k nchar(4) COLLATE Latin1_General_CI_AI NOT NULL PRIMARY KEY", "N'a'", "N'á'"},
+		pair{"key trailing zero byte", "k varbinary(10) NOT NULL PRIMARY KEY", "0x01", "0x0100"},
+		pair{"key datetimeoffset", "k datetimeoffset NOT NULL PRIMARY KEY", "'2020-01-01T10:00:00+02:00'", "'2020-01-01T08:00:00+00:00'"},
+		pair{"key float -0", "k float NOT NULL PRIMARY KEY", "0e0", "-1e0 * 0e0"},
+		pair{"two keys", "a int NOT NULL, b varchar(5) NOT NULL, PRIMARY KEY (a, b)", "1, 'x'", "1, 'X'"},
+		pair{"key on one side", "k int NOT NULL PRIMARY KEY", "1", "2"})
+	ctx := context.Background()
+	c, err := s.conn(ctx, s.o.Working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for i, tc := range pairs {
+		t.Run(tc.name, func(t *testing.T) {
+			w, p := fmt.Sprintf("w%d", i), fmt.Sprintf("p%d", i)
+			sqlServerExec(t, db, "CREATE TABLE "+w+" ("+tc.columns+")", "CREATE TABLE "+p+" ("+tc.columns+")")
+			inv, err := s.inventory(ctx, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tb := inv.ByItem["table:dbo."+w]
+			changed := func(a, b string) int64 {
+				t.Helper()
+				sqlServerExec(t, db, "DELETE FROM "+w, "DELETE FROM "+p, "INSERT INTO "+w+" VALUES ("+a+")", "INSERT INTO "+p+" VALUES ("+b+")")
+				q, ok := ssChangedSQL(tb, "dbo."+w, "dbo."+p, "#k")
+				if !ok {
+					t.Fatal("no comparison")
+				}
+				var n int64
+				if err := c.QueryRowContext(ctx, q+";\nSELECT COUNT_BIG(*) FROM #k; DROP TABLE #k").Scan(&n); err != nil {
+					t.Fatalf("%v\n%s", err, q)
+				}
+				return n
+			}
+			if n := changed(tc.a, tc.b); n == 0 {
+				t.Errorf("(%s) and (%s) compare equal", tc.a, tc.b)
+			}
+			if n := changed(tc.b, tc.a); n == 0 {
+				t.Errorf("(%s) and (%s) compare equal", tc.b, tc.a)
+			}
+			for _, r := range []string{tc.a, tc.b} {
+				if n := changed(r, r); n != 0 {
+					t.Errorf("(%s) differs from itself", r)
+				}
+			}
+		})
+	}
+}
+
 // TestSQLServerRestoreFallbacks: changes item by item cannot restore
 // restore the whole database, which then fingerprints as the pristine
 // copy; an application's connection fails once and its pool connects
