@@ -143,6 +143,9 @@ func (s Secret) read(ctx context.Context, root, driver string) (dsn, database st
 		}
 		return "", "", errors.New("no source")
 	}
+	if driver == SQLite { // a file, read by checkSQLiteDSN
+		return v, "", nil
+	}
 	dsn, err = appconf.Convert(v, driver)
 	return dsn, "", err
 }
@@ -153,8 +156,8 @@ func (s Secret) read(ctx context.Context, root, driver string) (dsn, database st
 // another database than the one the application runs on would reset the
 // wrong one. That error is ErrInvalid and names only the databases. SQL
 // Server compares the names in any letter case, as its default collation
-// does. SQLite needs no DSN (it returns ""); a setting it names must name
-// the file working is.
+// does. SQLite needs no DSN (it returns ""); a setting it names, and a DSN
+// of the environment or 1Password, must name the file working is.
 func (c Component) ReadDSN(ctx context.Context, root string) (string, error) {
 	if c.Driver == SQLite && c.DSN.IsZero() {
 		return "", nil
@@ -165,6 +168,11 @@ func (c Component) ReadDSN(ctx context.Context, root string) (string, error) {
 	}
 	if err := c.checkNamed(root, named); err != nil {
 		return "", err
+	}
+	if c.Driver == SQLite && (c.DSN.Env != "" || c.DSN.Op != "") {
+		if err := checkSQLiteDSN(root, dsn, c.Working); err != nil {
+			return "", err
+		}
 	}
 	return dsn, nil
 }

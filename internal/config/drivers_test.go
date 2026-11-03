@@ -73,17 +73,46 @@ func TestUnknownDriverNamesAll(t *testing.T) {
 	}
 }
 
-// TestReadDSNSQLite: an SQLite component needs no DSN; one it has is read
-// (env and op name no file, so nothing to compare).
+// TestReadDSNSQLite: an SQLite component needs no DSN; one of the
+// environment must name the working file, and one that names no file is
+// refused without showing it.
 func TestReadDSNSQLite(t *testing.T) {
+	root := t.TempDir()
 	c := Component{Driver: SQLite, Working: "db.sqlite"}
-	if dsn, err := c.ReadDSN(context.Background(), t.TempDir()); err != nil || dsn != "" {
+	if dsn, err := c.ReadDSN(context.Background(), root); err != nil || dsn != "" {
 		t.Errorf("no dsn: %q, %v", dsn, err)
 	}
-	t.Setenv("DG_TEST_SQLITE_DSN", "file:db.sqlite")
 	c.DSN = Secret{Env: "DG_TEST_SQLITE_DSN"}
-	if dsn, err := c.ReadDSN(context.Background(), t.TempDir()); err != nil || dsn != "file:db.sqlite" {
-		t.Errorf("env dsn: %q, %v", dsn, err)
+	for _, v := range []string{"file:db.sqlite", "file:db.sqlite?mode=rw&_pragma=busy_timeout(5000)", "sqlite:///db.sqlite", "./db.sqlite",
+		"file://" + filepath.ToSlash(filepath.Join(root, "db.sqlite")), filepath.Join(root, "db.sqlite")} {
+		t.Setenv("DG_TEST_SQLITE_DSN", v)
+		if dsn, err := c.ReadDSN(context.Background(), root); err != nil || dsn != v {
+			t.Errorf("%s: %q, %v", v, dsn, err)
+		}
+	}
+	for _, v := range []string{"file:other.sqlite", "sqlite:////srv/db.sqlite", "mysql://root:s3cr3t@db:3306/", "Data Source=db.sqlite;Password=s3cr3t", ":memory:", "file://remote/db.sqlite"} {
+		t.Setenv("DG_TEST_SQLITE_DSN", v)
+		_, err := c.ReadDSN(context.Background(), root)
+		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "s3cr3t") {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+}
+
+// TestSQLiteDSNFile: the file an SQLite DSN names.
+func TestSQLiteDSNFile(t *testing.T) {
+	for v, want := range map[string]string{
+		"app.db": "app.db", "database/app.sqlite": "database/app.sqlite", "/srv/app.db": "/srv/app.db",
+		"file:app.db": "app.db", "file:app.db?mode=ro#x": "app.db", "file:///srv/a%20b.db": "/srv/a b.db",
+		"file://localhost/srv/app.db": "/srv/app.db", "file:///C:/data/app.db": "C:/data/app.db",
+		"sqlite:///app.db": "app.db", "sqlite:////srv/app.db": "/srv/app.db", "sqlite:app.db": "app.db",
+		"": "", ":memory:": "", "file::memory:?cache=shared": "", "file://host/app.db": "", "sqlite://host/app.db": "",
+		"postgres://u:p@h/db": "", "Data Source=app.db": "", "file:a%zz.db": "",
+	} {
+		got, ok := sqliteDSNFile(v)
+		if got != want || ok != (want != "") {
+			t.Errorf("%q: %q %v, want %q", v, got, ok, want)
+		}
 	}
 }
 
