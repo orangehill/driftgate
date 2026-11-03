@@ -95,7 +95,12 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 			stmts = []string{"VACUUM"}
 		}
 	case 15:
-		stmts = []string{fmt.Sprintf("INSERT INTO docs VALUES ('word%d lorem')", a)}
+		if a%4 == 3 {
+			// A new configuration, which each connection keeps.
+			stmts = []string{fmt.Sprintf("INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(%d.5)')", a%9)}
+		} else {
+			stmts = []string{fmt.Sprintf("INSERT INTO docs VALUES ('word%d lorem')", a)}
+		}
 	case 16:
 		stmts = []string{"UPDATE t1 SET v = v"}
 	case 17:
@@ -142,7 +147,9 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 // leaves a file equal to it (also as the fingerprint that reads only what
 // the restore wrote says): the same fingerprint, the same rows both ways
 // (EXCEPT) and the same schema, an intact file, and the excluded table
-// and the triggers' table not written by the restore.
+// and the triggers' table not written by the restore; the application's
+// connection, open all along, matches the full-text table as the pristine
+// file does.
 func FuzzSQLiteRestore(f *testing.F) {
 	tmpl := f.TempDir()
 	work, pristine := filepath.Join(tmpl, "app.sqlite"), filepath.Join(tmpl, "pristine.sqlite")
@@ -168,6 +175,8 @@ func FuzzSQLiteRestore(f *testing.F) {
 		{1, 9, 2, 8, 0, 2, 7, 0, 8, 2, 9, 0, 9, 1, 5, 12, 6, 2, 23, 5},
 		{0, 24, 1, 13, 30, 9, 0, 27, 4, 25, 3, 13, 9, 26, 2, 24, 2, 9, 3, 25, 0},
 		{1, 24, 2, 13, 50, 27, 10, 9, 0, 25, 7, 22, 0, 26, 1, 14, 0},
+		[]byte("\x92\x84\x8bi601"),
+		{1, 15, 3, 20, 1, 21, 0, 15, 4, 15, 7, 2, 1},
 	} {
 		f.Add(seed)
 	}
@@ -225,6 +234,23 @@ func FuzzSQLiteRestore(f *testing.F) {
 		if n := count(t, app, "SELECT count(*) FROM t3"); n != t3 {
 			t.Fatalf("the restore fired triggers: t3 has %d rows, had %d", n, t3)
 		}
+		// The application's connection, open across the restore, sees an
+		// intact file and matches and ranks as the pristine file does.
+		// (Before the ATTACH below: that makes the connection read the
+		// schema again, and connect its virtual tables anew.)
+		var ok string
+		if err := app.QueryRow("PRAGMA integrity_check").Scan(&ok); err != nil || ok != "ok" {
+			t.Fatalf("integrity_check: %s %v", ok, err)
+		}
+		pdb, err := sqliteOpen(p, sqliteReadOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pm, am := sqliteFuzzMatch(t, pdb), sqliteFuzzMatch(t, app)
+		pdb.Close()
+		if am != pm {
+			t.Fatalf("the application's connection matches %q, the pristine file %q", am, pm)
+		}
 		mustExec(t, app, "ATTACH DATABASE "+ql(p)+" AS p")
 		schema := `SELECT type, name, tbl_name, sql FROM %s.sqlite_schema WHERE name NOT LIKE 'sqlite\_%%' ESCAPE '\' AND name <> 'driftgate_pristine' AND tbl_name <> 'sessions'`
 		if n := count(t, app, "SELECT count(*) FROM ("+fmt.Sprintf(schema, "main")+" EXCEPT "+fmt.Sprintf(schema, "p")+")") +
@@ -259,11 +285,18 @@ func FuzzSQLiteRestore(f *testing.F) {
 			}
 		}
 		mustExec(t, app, "DETACH DATABASE p")
-		var ok string
-		if err := app.QueryRow("PRAGMA integrity_check").Scan(&ok); err != nil || ok != "ok" {
-			t.Fatalf("integrity_check: %s %v", ok, err)
-		}
 	})
+}
+
+// sqliteFuzzMatch is what a connection finds in the full-text table: the
+// rowids and ranks of a match.
+func sqliteFuzzMatch(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var m sql.NullString
+	if err := db.QueryRow(`SELECT group_concat(rowid || ':' || printf('%.9e', rank), ',') FROM (SELECT rowid, rank FROM docs WHERE docs MATCH 'alpha OR lorem OR word*' ORDER BY rowid)`).Scan(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.String
 }
 
 func mustExecF(f *testing.F, db *sql.DB, stmts ...string) {

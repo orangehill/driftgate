@@ -522,6 +522,126 @@ print("written", flush=True)
 	}
 }
 
+// sqliteFullTextCheck is what a connection finds in the full-text table
+// docs: the rowids and ranks of a match, and the integrity check.
+const sqliteFullTextCheck = `SELECT (SELECT group_concat(rowid || ':' || printf('%.9e', rank), ',') FROM (SELECT rowid, rank FROM docs WHERE docs MATCH 'alpha OR gamma' ORDER BY rowid)), (SELECT integrity_check FROM pragma_integrity_check)`
+
+// TestSQLiteRestoreFullTextOpenConnections: connections the application
+// keeps open across a restore of a full-text table's shadow tables (two in
+// this process, one in a Python process when there is one) find what the
+// pristine file holds and see an intact file, in WAL and in rollback mode.
+// FTS5 keeps the table's configuration on each connection, and reads it
+// again only when the cookie in the structure record changes, then setting
+// only the settings that have a row: the rank function the restore
+// deleted would stay, and so would the second one set after it, whose
+// cookie is the first one's again.
+func TestSQLiteRestoreFullTextOpenConnections(t *testing.T) {
+	for _, mode := range []string{"wal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			s, app := sqliteSchemaFixture(t, mode, nil,
+				`CREATE VIRTUAL TABLE docs USING fts5 (body)`,
+				`INSERT INTO docs VALUES ('alpha beta'), ('gamma delta'), ('epsilon'), ('alpha gamma'), ('beta alpha alpha'), ('delta'), ('gamma gamma')`)
+			other := sqliteApp(t, s.o.Working)
+			check := func(db *sql.DB) string {
+				var match, ok string
+				if err := db.QueryRow(sqliteFullTextCheck).Scan(&match, &ok); err != nil {
+					t.Fatal(err)
+				}
+				return match + " " + ok
+			}
+			want := check(app)
+			if !strings.HasSuffix(want, " ok") || check(other) != want {
+				t.Fatalf("before: %s, %s", want, check(other))
+			}
+
+			var py *exec.Cmd
+			var pyIn *os.File
+			var pyOut *bufio.Reader
+			pyCheck := func() string {
+				pyIn.WriteString("\n")
+				line, _ := pyOut.ReadString('\n')
+				return strings.TrimSpace(line)
+			}
+			if python := sqlitePython(t); python != "" {
+				script := filepath.Join(t.TempDir(), "holder.py")
+				os.WriteFile(script, []byte(`import sqlite3, sys
+c = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=10)
+for _ in sys.stdin:
+    print(*c.execute(sys.argv[2]).fetchone(), flush=True)
+`), 0o644)
+				py = exec.Command(python, "-I", script, s.o.Working, sqliteFullTextCheck)
+				in, w, _ := os.Pipe()
+				py.Stdin, pyIn = in, w
+				out, err := py.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stderr bytes.Buffer
+				py.Stderr = &stderr
+				if err := py.Start(); err != nil {
+					t.Fatal(err)
+				}
+				in.Close()
+				defer py.Wait()
+				defer pyIn.Close()
+				pyOut = bufio.NewReader(out)
+				if got := pyCheck(); got != want {
+					t.Fatalf("python before: %q, want %q %s", got, want, stderr.String())
+				}
+			} else {
+				t.Log("no python3: the in-process connections only")
+			}
+
+			// Rows deleted, a rolled back write, a delete that finds
+			// nothing, and a new configuration the other connections read.
+			mustExec(t, app, "DELETE FROM docs WHERE rowid % 2 = 1")
+			mustExec(t, app, "BEGIN", "INSERT INTO docs VALUES ('alpha zeta')", "ROLLBACK")
+			mustExec(t, app, "DELETE FROM docs WHERE rowid % 2 = 1", "INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(100.0)')")
+			changed := check(app)
+			if changed == want || check(other) != changed || py != nil && pyCheck() != changed {
+				t.Fatalf("after the changes: %s, %s", changed, check(other))
+			}
+			if err := s.Restore(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := check(app); got != want {
+				t.Errorf("the application's connection finds %q after the restore, want %q", got, want)
+			}
+			if got := check(other); got != want {
+				t.Errorf("the other connection finds %q after the restore, want %q", got, want)
+			}
+			if py != nil {
+				if got := pyCheck(); got != want {
+					t.Errorf("python finds %q after the restore, want %q", got, want)
+				}
+			}
+
+			// The configuration changed again: the cookie is the one the
+			// other connections saw with the first change.
+			mustExec(t, app, "INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(0.01)')")
+			fresh := sqliteApp(t, s.o.Working)
+			want = check(fresh)
+			if want == changed {
+				t.Fatalf("the two configurations rank the same: %s", want)
+			}
+			if got := check(other); got != want {
+				t.Errorf("the other connection finds %q, want %q (a configuration of before)", got, want)
+			}
+			if py != nil {
+				if got := pyCheck(); got != want {
+					t.Errorf("python finds %q, want %q (a configuration of before)", got, want)
+				}
+				pyIn.Close()
+				if err := py.Wait(); err != nil {
+					t.Fatal(err)
+				}
+				py = nil
+			}
+		})
+	}
+}
+
 // TestSQLiteScanLetsWritersIn: in WAL mode an application writer that does
 // not wait for locks (busy_timeout 0) commits while a fingerprint reads.
 func TestSQLiteScanLetsWritersIn(t *testing.T) {

@@ -252,9 +252,16 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]st
 			}
 		}
 	}
+	shadows := false
 	for _, t := range fill {
 		if err := copyRows(ctx, c, pris.tables[t]); err != nil {
 			return nil, fmt.Errorf("table %s: %w", t, err)
+		}
+		shadows = shadows || pris.tables[t].shadow
+	}
+	if shadows {
+		if err := newSchemaVersion(ctx, c); err != nil {
+			return nil, err
 		}
 	}
 	// INSERT … SELECT leaves sqlite_sequence at the working file's value.
@@ -313,6 +320,36 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]st
 		}
 	}
 	return unique(append(append(append([]string{}, drop...), create...), fill...)), nil
+}
+
+// newSchemaVersion moves main's schema_version on by one, as a CREATE or
+// DROP does, so every connection to the file reads the schema again and
+// connects its virtual tables anew. A virtual table's module keeps what it
+// read of its shadow tables on each connection, and how it tells that
+// they changed need not hold for a restore, which writes earlier rows
+// back. FTS5 reads a table's configuration (its %_config rows: the rank
+// function, secure-delete, the merge settings) again only when the cookie
+// in its structure record changes, and then sets only the settings that
+// have a row: a connection keeps a rank function the application set
+// after the seed when the restore deletes its row, and keeps any setting
+// when the restored record carries a cookie the connection saw with other
+// rows (the configuration changed once after the restore as before it).
+// Its matches would be ranked by the configuration of before. (The
+// structure record itself is read again when PRAGMA data_version moves,
+// which the restore's commit does for every other connection, though not
+// by PRAGMA integrity_check, which checks the rows against the record the
+// connection read last and finds them corrupt.)
+//
+// The schema_version is not part of a fingerprint, so a file restored this
+// way is as like the pristine file as one restored without.
+func newSchemaVersion(ctx context.Context, c *sql.Conn) error {
+	var v int64
+	if err := c.QueryRowContext(ctx, "PRAGMA main.schema_version").Scan(&v); err != nil {
+		return err
+	}
+	// It is a 32-bit field, and wraps as SQLite's own change does.
+	_, err := c.ExecContext(ctx, fmt.Sprintf("PRAGMA main.schema_version = %d", int32(v)+1))
+	return err
 }
 
 // copyRows empties a table of main and copies the pristine file's rows
