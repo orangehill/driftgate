@@ -107,6 +107,43 @@ func TestSQLiteFiles(t *testing.T) {
 			t.Errorf("pristine linked to working: %v", err)
 		}
 	}
+	// A sidecar of working through a linked folder, which need not exist.
+	if os.Symlink(filepath.Join(p.Root, "database"), filepath.Join(p.Root, "alias")) == nil {
+		for _, f := range []string{"alias/app.sqlite-wal", "alias/APP.sqlite-shm", "alias/app.sqlite"} {
+			sc.Pristine = f
+			if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "is the working file") {
+				t.Errorf("pristine %s: %v", f, err)
+			}
+		}
+	}
+	// Working through a link; pristine is the real file's journal.
+	q := sqliteProject(t, config.Component{Working: "database/app.sqlite"})
+	if os.Symlink(filepath.Join(q.Root, "database", "app.sqlite"), filepath.Join(q.Root, "app.sqlite")) == nil {
+		qc := q.State["db"]
+		qc.Working, qc.Pristine = "app.sqlite", "database/app.sqlite-journal"
+		qserver, err := serverOf(q, qc, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = sqliteFiles(q, qc, qserver, record); err == nil || !strings.Contains(err.Error(), "is the working file") {
+			t.Errorf("pristine the journal of working's real file: %v", err)
+		}
+	}
+	// The reverse: working is a sidecar of the pristine copy.
+	if !sqliteOverlap("/p/db.sqlite-wal", "/p/db.sqlite") || sqliteOverlap("/p/db.sqlite", "/p/db2.sqlite") {
+		t.Error("sqliteOverlap by path")
+	}
+	// A hard link to working's -wal file.
+	wal := filepath.Join(p.Root, "database", "app.sqlite-wal")
+	if err := os.WriteFile(wal, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if os.Link(wal, filepath.Join(p.Root, "database", "hard.sqlite")) == nil {
+		sc.Pristine = "database/hard.sqlite"
+		if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "is the working file") {
+			t.Errorf("pristine a hard link to working's -wal: %v", err)
+		}
+	}
 	if os.Symlink(t.TempDir(), filepath.Join(p.Root, "outside")) == nil {
 		sc.Pristine = "outside/pristine.sqlite"
 		if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "outside the project") {
