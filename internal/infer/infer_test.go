@@ -19,6 +19,10 @@ func TestPattern(t *testing.T) {
 		{[]string{"XSRF-TOKEN=ab12; path=/", "XSRF-TOKEN=cd34; path=/"}, `XSRF-TOKEN=[0-9a-f]{4}; path=/`},
 		{[]string{"2026-10-29T10:27:08.896Z", "2026-10-29T10:27:09.112Z"}, `\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z`},
 		{[]string{"eyJ.a-b_c.x1", "eyJ.ab.c-d_e2"}, `[0-9A-Za-z\-._]+`},
+		{[]string{"11bca30b-0308-4725-9d4e-6f1a2b3c4d5e", "7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d"}, `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`},
+		{[]string{"11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E", "7E2F0C41-5521-4A0B-8C3D-0E9F8A7B6C5D"}, `[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}`},
+		{[]string{"/orders/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E?x=1", "/orders/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d?x=2"}, `/orders/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\?x=\d`},
+		{[]string{"/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/1", "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/2"}, `/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/\d`},
 		{[]string{"same", "same"}, ``},
 		{[]string{"abc", ""}, `[a-z]*`},
 		{[]string{"", "2024-01-01"}, `[0-9\-]*`},
@@ -39,5 +43,45 @@ func TestPattern(t *testing.T) {
 				t.Errorf("%q does not match %q", got, v)
 			}
 		}
+	}
+}
+
+// A UUID group that holds digits only in every sample must not become \d{4}:
+// the next UUID has letters there. The case of the samples stays.
+func TestPatternUUIDAnyGroup(t *testing.T) {
+	got := Pattern([]string{"11bca30b-0308-4725-9d4e-6f1a2b3c4d5e", "7e2f0c41-5521-4725-8c3d-0e9f8a7b6c5d"})
+	re := regexp.MustCompile("^(?:" + got + ")$")
+	if v := "0b5c1e2a-af3d-4bc1-a9e8-77f1d2c3b4a5"; !re.MatchString(v) {
+		t.Errorf("%q does not match %q", got, v)
+	}
+	if v := "0B5C1E2A-AF3D-4BC1-A9E8-77F1D2C3B4A5"; re.MatchString(v) {
+		t.Errorf("%q matches %q, an uppercase UUID for lowercase samples", got, v)
+	}
+}
+
+// A UUID that is the same in every sample (a tenant) is kept: another one is
+// a change.
+func TestPatternUUIDSame(t *testing.T) {
+	got := Pattern([]string{"/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/1", "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/2"})
+	re := regexp.MustCompile("^(?:" + got + ")$")
+	if v := "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/3"; !re.MatchString(v) {
+		t.Errorf("%q does not match %q", got, v)
+	}
+	if v := "/t/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d/jobs/3"; re.MatchString(v) {
+		t.Errorf("%q matches %q, another tenant", got, v)
+	}
+}
+
+// The same UUID in another case is still the same UUID, in either case.
+func TestPatternUUIDSameFold(t *testing.T) {
+	got := Pattern([]string{"x/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/1", "x/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E/2"})
+	re := regexp.MustCompile("^(?:" + got + ")$")
+	for _, v := range []string{"x/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/3", "x/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E/3"} {
+		if !re.MatchString(v) {
+			t.Errorf("%q does not match %q", got, v)
+		}
+	}
+	if v := "x/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d/3"; re.MatchString(v) {
+		t.Errorf("%q matches %q, another UUID", got, v)
 	}
 }

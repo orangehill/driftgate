@@ -592,6 +592,11 @@ guards:
     command: ["sh", "-c", "grep -q '^QUEUE_CONNECTION=sync' .env"]
 ```
 
+A step whose result does not depend on the restored data, such as building
+a view or configuration cache, belongs before the capture, not in `prepare`
+(unless a `state:` component restores the files it writes): `prepare` runs
+after every restore, so its time multiplies with the number of restores.
+
 ### discover
 
 Adapters that find the routes. `driftgate init` writes them; the order of
