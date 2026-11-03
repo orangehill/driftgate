@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -303,14 +304,29 @@ func TestSQLiteReuse(t *testing.T) {
 				t.Fatalf("after a new column read %v, want tags", s.scanned)
 			}
 
-			// Another file put in place of the working one.
+			// Another file put in place of the working one: renamed over
+			// it, or on Windows, which renames over or deletes no file
+			// that is open, a copy written over it in rollback mode (in
+			// WAL mode DriftGate's -wal and -shm files would stay with
+			// the new file).
 			other.Close()
 			app.Close()
 			repl := s.o.Working + ".new"
 			r := sqliteApp(t, repl)
 			mustExec(t, r, "CREATE TABLE only (id INTEGER PRIMARY KEY)")
 			r.Close()
-			if err := os.Rename(repl, s.o.Working); err != nil {
+			if runtime.GOOS == "windows" {
+				if mode == "wal" {
+					return
+				}
+				raw, err := os.ReadFile(repl)
+				if err == nil {
+					err = os.WriteFile(s.o.Working, raw, 0o600)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Rename(repl, s.o.Working); err != nil {
 				t.Fatal(err)
 			}
 			os.Remove(s.o.Working + "-wal")
@@ -683,14 +699,18 @@ func TestNewSQLite(t *testing.T) {
 	}
 }
 
-// TestSQLiteURI: a name with ?, #, % or a space stays one file name.
+// TestSQLiteURI: a name with ?, #, %, & or a space stays one file name.
 func TestSQLiteURI(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "a b#c")
 	os.MkdirAll(dir, 0o755)
-	work := filepath.Join(dir, "x?mode=ro%41.sqlite")
+	name := "x?mode=ro%41.sqlite"
+	if runtime.GOOS == "windows" { // no ? in a file name there
+		name = "x&mode=ro%41.sqlite"
+	}
+	work := filepath.Join(dir, name)
 	mustExec(t, sqliteApp(t, work), "CREATE TABLE a (id INTEGER PRIMARY KEY)")
 	ents, _ := os.ReadDir(dir)
-	if len(ents) != 1 || ents[0].Name() != "x?mode=ro%41.sqlite" {
+	if len(ents) != 1 || ents[0].Name() != name {
 		t.Fatalf("files: %v", ents)
 	}
 	s, err := NewSQLite(Options{Name: "db", Working: work, Pristine: filepath.Join(dir, "p#1.sqlite")})
@@ -778,10 +798,14 @@ func TestSQLiteQuery(t *testing.T) {
 			t.Errorf("%s: accepted (%v)", q, got)
 		}
 	}
-	if n := count(t, sqliteApp(t, s.o.Pristine), "SELECT count(*) FROM users WHERE email = 'q'"); n != 0 {
+	check := sqliteApp(t, s.o.Pristine)
+	if n := count(t, check, "SELECT count(*) FROM users WHERE email = 'q'"); n != 0 {
 		t.Fatal("a query wrote to the pristine file")
 	}
-	os.Remove(s.o.Pristine)
+	check.Close() // Windows deletes no file that is open
+	if err := os.Remove(s.o.Pristine); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Query(ctx, "SELECT 1 ORDER BY 1"); err == nil || !strings.Contains(err.Error(), "run driftgate seed") {
 		t.Errorf("no pristine file: %v", err)
 	}

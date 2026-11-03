@@ -228,7 +228,9 @@ func FuzzSQLitePath(f *testing.F) {
 			if r == "" || filepath.IsAbs(r) || strings.Contains(r, `\`) || r == ".." || strings.HasPrefix(r, "../") || strings.Contains(r, "/../") {
 				t.Fatalf("%q in %s: %q is not a path inside the project", v, base, r)
 			}
-			opened := absRoot + "/" + base + "/" + n
+			// From the root past links: on Windows also its long name, as
+			// TEMP may hold the short one (C:\Users\RUNNER~1).
+			opened := realRoot + "/" + base + "/" + n
 			if strings.HasPrefix(n, "/") || len(n) >= 2 && isLetter(n[0]) && n[1] == ':' {
 				opened = n
 			}
@@ -248,6 +250,10 @@ func FuzzSQLitePath(f *testing.F) {
 // the folder the framework takes it from, with what to check.
 func TestSQLiteFind(t *testing.T) {
 	djangoSettings := "from pathlib import Path\n\nBASE_DIR = Path(__file__).resolve().parent.parent\n\nINSTALLED_APPS = ['django.contrib.sessions']\n\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': BASE_DIR / 'db.sqlite3',\n    }\n}\n"
+	elsewhere := "/var/lib/app/database.sqlite" // an absolute path of this system, outside the project
+	if runtime.GOOS == "windows" {
+		elsewhere = `C:\ProgramData\app\database.sqlite`
+	}
 	tests := []struct {
 		name  string
 		files map[string]string
@@ -270,7 +276,7 @@ func TestSQLiteFind(t *testing.T) {
 		},
 		{
 			name:  "laravel outside",
-			files: map[string]string{"artisan": "", ".env": "DB_CONNECTION=sqlite\nDB_DATABASE=/var/lib/app/database.sqlite\n"},
+			files: map[string]string{"artisan": "", ".env": "DB_CONNECTION=sqlite\nDB_DATABASE=" + elsewhere + "\n"},
 			other: []string{".env: the SQLite file is outside the project"},
 		},
 		{

@@ -86,14 +86,18 @@ func TestReadDSNSQLite(t *testing.T) {
 		t.Errorf("no dsn: %q, %v", dsn, err)
 	}
 	c.DSN = Secret{Env: "DG_TEST_SQLITE_DSN"}
+	// An absolute file: URI has an empty authority: file:///tmp/db.sqlite,
+	// file:///C:/db.sqlite. SQLite refuses file://C:/db.sqlite (the
+	// authority C:), and so does DriftGate.
+	abs := "/" + strings.TrimPrefix(filepath.ToSlash(filepath.Join(root, "db.sqlite")), "/")
 	for _, v := range []string{"file:db.sqlite", "file:db.sqlite?mode=rw&_pragma=busy_timeout(5000)", "sqlite:///db.sqlite", "./db.sqlite",
-		"file://" + filepath.ToSlash(filepath.Join(root, "db.sqlite")), filepath.Join(root, "db.sqlite")} {
+		"file://" + abs, "file://localhost" + abs, filepath.Join(root, "db.sqlite")} {
 		t.Setenv("DG_TEST_SQLITE_DSN", v)
 		if dsn, err := c.ReadDSN(context.Background(), root); err != nil || dsn != v {
 			t.Errorf("%s: %q, %v", v, dsn, err)
 		}
 	}
-	for _, v := range []string{"file:other.sqlite", "sqlite:////srv/db.sqlite", "mysql://root:s3cr3t@db:3306/", "Data Source=db.sqlite;Password=s3cr3t", ":memory:", "file://remote/db.sqlite"} {
+	for _, v := range []string{"file:other.sqlite", "sqlite:////srv/db.sqlite", "mysql://root:s3cr3t@db:3306/", "Data Source=db.sqlite;Password=s3cr3t", ":memory:", "file://remote/db.sqlite", "file://C:/db.sqlite"} {
 		t.Setenv("DG_TEST_SQLITE_DSN", v)
 		_, err := c.ReadDSN(context.Background(), root)
 		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "s3cr3t") || strings.HasPrefix(err.Error(), "dsn:") {
