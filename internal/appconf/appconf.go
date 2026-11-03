@@ -238,6 +238,9 @@ func (r Ref) Read(root, driver string, env Lookup) (dsn, database string, err er
 	if hp := p.hostNeeded(r, driver); hp != "" {
 		return "", "", fmt.Errorf("%s: %s", r.where(), hostNeededText(p, hp))
 	}
+	if p, err = sqlServerFiles(root, driver, p); err != nil {
+		return "", "", fmt.Errorf("%s: %w", r.where(), err)
+	}
 	dsn, err = p.dsn(driver, r.where())
 	if p.driver == SQLite {
 		return dsn, p.file, err

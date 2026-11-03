@@ -76,6 +76,9 @@ func (f *finder) add(r Ref, hint, other string) {
 			d.Note = join(d.Note, n)
 		}
 	}
+	if d.Driver == SQLServer {
+		d.Note = join(d.Note, p.sqlServerNote())
+	}
 	if hp := p.hostNeeded(r, d.Driver); hp != "" {
 		d.HostNeeded = hp
 		d.Note = join(d.Note, hostNeededText(p, hp))
@@ -444,10 +447,7 @@ func (f *finder) compose() {
 		if !ok || d.Ref.Source == Compose || d.Ref.Source == Env {
 			continue
 		}
-		target := "3306"
-		if imageDriver(cp.services[svc].image) == Postgres {
-			target = "5432"
-		}
+		target := defaultPort(imageDriver(cp.services[svc].image))
 		if d.Port != "" {
 			target = d.Port
 		}

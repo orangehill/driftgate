@@ -90,6 +90,9 @@ type parts struct {
 	// the shared ones leave out (SQL Server's Encrypt).
 	raw  fields
 	note string // what to check by hand about the setting (SQLite: a relative file)
+	// mssql is what a SQL Server setting says besides the address and the
+	// credentials: its TLS and its client (sqlserver.go).
+	mssql sqlServerTLS
 }
 
 // database is p without the password.
@@ -130,7 +133,7 @@ func driverName(name string) (driver, other string) {
 		return MySQL, ""
 	case strings.Contains(n, "postgres"):
 		return Postgres, ""
-	case strings.Contains(n, "sqlserver"):
+	case strings.Contains(n, "sqlserver"), strings.Contains(n, "sql_server"): // Django: sql_server.pyodbc
 		return detected(SQLServer)
 	case strings.Contains(n, "h2"), strings.Contains(n, "hsqldb"), strings.Contains(n, "derby"):
 		return "", "an in-memory Java database"
@@ -160,9 +163,22 @@ const errURL = constError("not a valid URL; percent-encode special characters su
 // Convert returns a DSN given in a form an application uses but DriftGate's
 // drivers do not take, a JDBC URL or an ADO.NET connection string, as one
 // they take (see Ref.DSN), as is libpq's host=… user=… form; any other DSN
-// comes back as it is. It serves a DSN of the environment or 1Password.
+// comes back as it is. A DSN of SQL Server is always rebuilt, also
+// go-mssqldb's own URL, so the driver gets no key DriftGate has not read
+// and an explicit encrypt. It serves a DSN of the environment or 1Password.
 func Convert(dsn, driver string) (string, error) {
 	v := strings.TrimSpace(dsn)
+	if driver == SQLServer {
+		// Every form, go-mssqldb's own URL too: the driver ignores a key it
+		// does not know (Integrated Security), and without encrypt it
+		// trusts any certificate, so the DSN is rebuilt from what DriftGate
+		// reads.
+		p, err := fromValue(v)
+		if err != nil {
+			return "", err
+		}
+		return p.dsn(driver, "the DSN")
+	}
 	if !strings.HasPrefix(v, "jdbc:") && !connString(v) && (strings.Contains(v, "://") || isDriverForm(v) || !strings.Contains(v, "=")) {
 		return dsn, nil
 	}
@@ -406,6 +422,9 @@ func fromFields(f fields) (parts, error) {
 	fill(&p.name, nameKeys)
 	fill(&p.user, userKeys)
 	fill(&p.password, passwordKeys)
+	if p.driver == SQLServer || p.driver == "" && p.other == "" && p.form == "" && sqlServerServerForm(p.host) {
+		return sqlServerFields(p, f)
+	}
 	for k, v := range f {
 		if err := p.opts.set(k, v); err != nil {
 			return parts{}, err

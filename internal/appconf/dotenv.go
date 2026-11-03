@@ -279,7 +279,7 @@ func readDotenv(root, file, key string, lookup Lookup) (parts, error) {
 	p := parts{host: env[dbHost], port: env[dbPort], name: env[dbDatabase], user: env[dbUsername], password: env[dbPassword], socket: env[dbSocket]}
 	p.setDriver(env[dbConnection])
 	if p.driver == SQLServer {
-		return laravelSQLServer(file, env, p)
+		return laravelSQLServer(root, file, env, p)
 	}
 	if p.driver == Postgres { // Laravel's pgsql connection has no socket
 		p.socket = ""

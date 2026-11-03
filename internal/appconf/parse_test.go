@@ -126,13 +126,13 @@ func TestFromValue(t *testing.T) {
 		{"Host=/var/run/postgresql;Database=app;Username=u", Postgres, "postgres://u@/?host=%2Fvar%2Frun%2Fpostgresql", ""},
 		{"Server=localhost;Protocol=unix;Database=app;Uid=u", MySQL, "mysql://u@localhost:3306/", ""},
 		{"Host=db;Database=app;Username=u;Password=p", "", "", "x does not say which database it is; set the driver (" + driverList() + ")"},
-		{"Server=(localdb)\\mssqllocaldb;Database=x;Trusted_Connection=True", MySQL, "", "x names SQL Server; " + restores()},
-		{"Server=tcp:x.database.windows.net,1433;Initial Catalog=x;User ID=u;Password=p", MySQL, "", "x names SQL Server; " + restores()},
+		{"Server=(localdb)\\mssqllocaldb;Database=x;Trusted_Connection=True", MySQL, "", errSQLServerLocalDB.Error()},
+		{"Server=tcp:x.database.windows.net,1433;Initial Catalog=x;User ID=u;Password=p", MySQL, "", "x names a sqlserver database, the driver is mysql"},
 		{"Data Source=app.db", MySQL, "", "x names a sqlite database, the driver is mysql"},
 		{"Data Source=app.db", SQLite, "", ""},
 		// Others.
 		{"sqlite:///var/data.db", MySQL, "", "x names a sqlite database, the driver is mysql"},
-		{"sqlsrv://u:p@db/app", MySQL, "", "x names SQL Server; " + restores()},
+		{"sqlsrv://u:p@db/app", MySQL, "", "x names a sqlserver database, the driver is mysql"},
 		{"redis://u:p@db", MySQL, "", "a redis:// URL names no database DriftGate knows (" + driverList() + ")"},
 		{"mysql://u:p@db/app", Postgres, "", "x names a mysql database, the driver is postgres"},
 		{"mysql://u:p%zz@db/app", MySQL, "", errURL.Error()},
@@ -402,7 +402,7 @@ func TestConvert(t *testing.T) {
 		{"Server=h;Database=d;Uid=u;Pwd=p", MySQL, "mysql://u:p@h:3306/", ""},
 		{"Host=h;Database=d;Username=u;Password=p", Postgres, "postgres://u:p@h:5432/", ""},
 		{"Server=h;Uid=u;Pwd='unterminated", MySQL, "", "connection string: the value of pair 3 has no closing quote"},
-		{"Server=(localdb)\\x;Trusted_Connection=yes", MySQL, "", "the DSN names SQL Server; " + restores()},
+		{"Server=(localdb)\\x;Trusted_Connection=yes", MySQL, "", errSQLServerLocalDB.Error()},
 	} {
 		got, err := Convert(tt.in, tt.driver)
 		if tt.err != "" {
