@@ -642,6 +642,40 @@ for _ in sys.stdin:
 	}
 }
 
+// TestSQLiteRestoreDropsVirtualTable: a restore that drops a virtual table
+// the application made in place of a plain one drops its shadow tables
+// with it, and the fingerprints after it, which keep what the restore did
+// not write, no longer list them.
+func TestSQLiteRestoreDropsVirtualTable(t *testing.T) {
+	ctx := context.Background()
+	s, app := sqliteSchemaFixture(t, "wal", nil, "CREATE TABLE docs (x)", "INSERT INTO docs VALUES (1)")
+	mustExec(t, app, "DROP TABLE docs", "CREATE VIRTUAL TABLE docs USING fts5 (body)", "INSERT INTO docs VALUES ('a b')")
+	pristine := sqlitePristineFP(t, s)
+	sqliteFingerprint(t, s)
+	if err := s.Restore(ctx, []string{"table:docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, app, "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'docs%'"); n != 1 {
+		t.Fatalf("%d tables named docs… after the restore, want 1", n)
+	}
+	sub, err := s.Fingerprint(ctx, []string{"table:docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(sub, pristine.Subset([]string{"table:docs"})); len(d) > 0 {
+		t.Fatalf("the check of the restored item finds %v different", d)
+	}
+	for range 2 {
+		f := sqliteFingerprint(t, s)
+		if d := Diff(f, pristine); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore (reused: %v) differs from the pristine one in %v", s.reused, d)
+		}
+		if d := Diff(f, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore differs from one read from scratch in %v", d)
+		}
+	}
+}
+
 // TestSQLiteScanLetsWritersIn: in WAL mode an application writer that does
 // not wait for locks (busy_timeout 0) commits while a fingerprint reads.
 func TestSQLiteScanLetsWritersIn(t *testing.T) {

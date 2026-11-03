@@ -231,6 +231,17 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]st
 			return nil, tableErr(t, work.tables[t], err)
 		}
 	}
+	// Dropping a virtual table drops its shadow tables too: they are
+	// written as well.
+	for _, t := range drop {
+		if w := work.tables[t]; w != nil && w.virtual {
+			for _, name := range work.order {
+				if sh := work.tables[name]; sh.shadow && strings.HasPrefix(name, t+"_") {
+					drop = append(drop, name)
+				}
+			}
+		}
+	}
 	for _, t := range create {
 		p := pris.tables[t]
 		if !p.virtual {

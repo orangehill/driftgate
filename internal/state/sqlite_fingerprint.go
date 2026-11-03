@@ -131,13 +131,22 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	// DriftGate's restores wrote since the last fingerprint, the tables
 	// they wrote, and the views, triggers and pragmas (only their
 	// statements and values are read).
-	var want func(item string) bool
+	var want, reread func(item string) bool
+	// present lists the tables the file has now: fingerprint asks want
+	// about each of them.
+	present := map[string]bool{}
 	n := tables
 	switch {
 	case quiet:
-		want = func(item string) bool {
+		reread = func(item string) bool {
 			_, known := s.last[item]
 			return s.restored[item] || !strings.HasPrefix(item, "table:") || !known
+		}
+		want = func(item string) bool {
+			if strings.HasPrefix(item, "table:") {
+				present[item] = true
+			}
+			return reread(item)
 		}
 		n = int64(len(s.restored))
 	case items != nil:
@@ -161,9 +170,13 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	switch {
 	case quiet:
 		// A table the restores wrote that is gone, or any view,
-		// trigger or pragma not read now, is no longer there.
+		// trigger or pragma not read now, is no longer there; nor is a
+		// table the file does not have now, whichever way it went (the
+		// shadow tables of a virtual table a restore dropped).
 		last := maps.Clone(s.last)
-		maps.DeleteFunc(last, func(item string, _ string) bool { return want(item) })
+		maps.DeleteFunc(last, func(item string, _ string) bool {
+			return reread(item) || strings.HasPrefix(item, "table:") && !present[item]
+		})
 		maps.Copy(last, f)
 		s.last, s.restored = last, nil
 		f = maps.Clone(last)
