@@ -619,7 +619,7 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 		if g := grant(c, d.User); g != "" && (!known || !canCreate(d)) {
 			grants = append(grants, g)
 			if c.Driver == config.SQLServer {
-				notes = append(notes, sqlServerFast(d.User))
+				notes = append(notes, sqlServerNarrow(c, d.User), sqlServerFast(d.User))
 			}
 		}
 		if c.Driver == config.SQLServer {

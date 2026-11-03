@@ -805,7 +805,10 @@ driver is built without them. The login needs:
 
 - the server role `dbcreator`: it creates the pristine copy, renames and
   drops the copies it made (it owns them), and restores the working
-  database from a backup;
+  database from a backup. `dbcreator` reaches every database of the
+  server, not only these: its login may alter any of them (take it
+  offline, set it to single user), restore over any of them (`RESTORE …
+  WITH REPLACE`) and drop any of them, though it cannot read their data;
 - `db_owner` in the working database (or to own it): it backs it up and
   restores it, table by table and, when it must, as a whole.
 
@@ -821,6 +824,26 @@ IF SUSER_SID(N'shop') NOT IN (SELECT sid FROM sys.database_principals WHERE sid 
 IF SUSER_SID(N'shop') <> (SELECT sid FROM sys.database_principals WHERE name = N'dbo') ALTER ROLE [db_owner] ADD MEMBER [shop];
 ```
 
+A narrower grant, which `setup` prints too: instead of both, the right to
+create databases and the ownership of the working database.
+
+```sql
+USE [master]; GRANT CREATE ANY DATABASE TO [shop]; ALTER AUTHORIZATION ON DATABASE::[Shop] TO [shop];
+```
+
+The login then reaches only the databases it owns, the working database
+and the copies it makes: seeds, restores item by item and as a whole
+work, and altering, restoring over or dropping any other database is
+refused. It is not the default because it changes the working
+database's owner, which an application may rely on (the login becomes
+`dbo` there; whatever ran as the old owner, such as `EXECUTE AS OWNER`
+or cross-database ownership chaining, changes with it). It fails (error
+15110) while the login has a user in that database: drop it first
+(`USE [Shop]; DROP USER [shop];`; as `dbo` the login needs none). Either
+grant lets the login restore any backup file the server can read into a
+new database of its own, and so read it: keep the backups of other
+databases out of the server's reach, its backup folder included.
+
 Optional, and proposed by `setup` with it: `GRANT VIEW SERVER
 PERFORMANCE STATE TO [shop];` (SQL Server 2022 and later; `VIEW SERVER
 STATE` on 2017 and 2019). With it a fingerprint of data that did not
@@ -830,7 +853,11 @@ also waits for the application's open transactions. Without it the result
 is the same, but every fingerprint reads every table, which takes longer
 on a large database; the log says so once. The login's own permissions
 are the real limit of what DriftGate's queries can do
-([security](security.md)).
+([security](security.md)). Either permission also lets the login itself
+read every session of the server and the SQL text it runs or ran
+(`sys.dm_exec_requests`, the plan cache), literals included; DriftGate's
+queries refuse those views, but grant it only to a login the server's
+other users may trust with that.
 
 **DSN and TLS.** DriftGate's DSN is go-mssqldb's URL,
 `sqlserver://user:pass@host:1433?encrypt=true`; a DSN of the environment

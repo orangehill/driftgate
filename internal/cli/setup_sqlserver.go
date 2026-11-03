@@ -13,7 +13,10 @@ import (
 // dbcreator (it creates, renames and drops the copies, which it then
 // owns) and db_owner in the working database (it backs it up, restores
 // it table by table and, when it must, as a whole). sa, a sysadmin, needs
-// nothing.
+// nothing. dbcreator reaches every database of the server (it may take
+// any offline, restore over it or drop it), so setup also offers the
+// narrower grant (sqlServerNarrow), which changes the working database's
+// owner and is therefore not the default.
 
 // sqlServerGrant is what an administrator runs for the login user to make
 // and restore the pristine copy of the SQL Server component c (grant): in
@@ -30,6 +33,22 @@ func sqlServerGrant(c config.Component, user string) string {
 		"IF SUSER_SID(%s) NOT IN (SELECT sid FROM sys.database_principals WHERE sid IS NOT NULL) CREATE USER %s FOR LOGIN %s; "+
 		"IF SUSER_SID(%s) <> (SELECT sid FROM sys.database_principals WHERE name = N'dbo') ALTER ROLE [db_owner] ADD MEMBER %s;",
 		u, qsName(c.Working), n, u, u, n, u)
+}
+
+// sqlServerNarrow is the grant setup offers instead of sqlServerGrant:
+// CREATE ANY DATABASE, and the login made the owner of the working
+// database (dbo there), reach only the databases the login owns. It
+// changes the owner, which an application may rely on, and fails while
+// the login has a user in the working database.
+func sqlServerNarrow(c config.Component, user string) string {
+	if user == "" {
+		user = "<user>"
+	}
+	u := qsName(user)
+	return fmt.Sprintf("dbcreator lets the login take any database of the server offline, restore over it or drop it; narrower, instead of the grant above: "+
+		"USE [master]; GRANT CREATE ANY DATABASE TO %s; ALTER AUTHORIZATION ON DATABASE::%s TO %s; "+
+		"it makes %s the owner of %s (dbo there), which the application may rely on not changing; drop the login's user in %s first if it has one (USE %s; DROP USER %s;)",
+		u, qsName(c.Working), u, u, c.Working, c.Working, qsName(c.Working), u)
 }
 
 // sqlServerFast is the grant setup proposes besides sqlServerGrant, which

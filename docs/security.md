@@ -51,7 +51,14 @@ to do it.
   that reach files, programs, other servers, sessions or logins
   ([SQL Server](configuration.md#sql-server)). Its login needs
   `dbcreator` and `db_owner` in the working database, not `sysadmin`
-  (`sa` only for a local container).
+  (`sa` only for a local container). `dbcreator` lets the login take any
+  database of the server offline, restore over it or drop it; the
+  narrower grant (`CREATE ANY DATABASE` and ownership of the working
+  database) reaches only the databases the login owns, but changes the
+  working database's owner. Either lets it restore any backup file the
+  server can read. `VIEW SERVER STATE` (2017, 2019) and `VIEW SERVER
+  PERFORMANCE STATE` (2022), optional, let the login read the SQL text of
+  every session.
 - Commands run without a shell (a shell is written explicitly and shows in
   the diff), data from responses never goes into their arguments, and they
   do not receive `DRIFTGATE_KEY`, the variable `key.env` names, or any

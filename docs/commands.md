@@ -200,7 +200,11 @@ Sets up a new project from zero to its first baseline, in this order:
   \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB), `ALTER ROLE
   "shop" CREATEDB;` (PostgreSQL), or for SQL Server the server role
   `dbcreator` and `db_owner` in the working database (the statements are
-  under [SQL Server](configuration.md#sql-server); nothing for `sa`). For
+  under [SQL Server](configuration.md#sql-server); nothing for `sa`).
+  `dbcreator` lets the login take any database of the server offline,
+  restore over it or drop it, so setup also prints the narrower grant,
+  `CREATE ANY DATABASE` and ownership of the working database, which
+  changes that database's owner (the login must have no user in it). For
   SQL Server it also proposes `VIEW SERVER PERFORMANCE STATE` (`VIEW
   SERVER STATE` before 2022), which makes fingerprints of unchanged data
   almost free, and says where the copy goes: a database on the same

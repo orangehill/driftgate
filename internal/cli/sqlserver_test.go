@@ -215,6 +215,7 @@ func TestSetupSQLServerMessages(t *testing.T) {
 	code, out, errOut := runCLI(t, "setup", "--yes", "--url", appURL)
 	if code != ExitEnv || !strings.Contains(out, "state: db sqlserver Shop on 127.0.0.1:"+port+", user shop") ||
 		!strings.Contains(out, "grant it (as an administrator): USE [master]; ALTER SERVER ROLE [dbcreator] ADD MEMBER [shop]; USE [Shop];") ||
+		!strings.Contains(out, "narrower, instead of the grant above: USE [master]; GRANT CREATE ANY DATABASE TO [shop]; ALTER AUTHORIZATION ON DATABASE::[Shop] TO [shop];") ||
 		!strings.Contains(out, "check by hand:") || !strings.Contains(out, "verifies the server's certificate") {
 		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
 	}
@@ -266,6 +267,10 @@ func TestSQLServerGrantText(t *testing.T) {
 	}
 	if g := grant(c, ""); !strings.Contains(g, "[<user>]") {
 		t.Errorf("grant without a user: %q", g)
+	}
+	if n := sqlServerNarrow(c, "o'neil]x"); !strings.Contains(n, "USE [master]; GRANT CREATE ANY DATABASE TO [o'neil]]x]; ALTER AUTHORIZATION ON DATABASE::[Sh]]op] TO [o'neil]]x];") ||
+		!strings.Contains(n, "USE [Sh]]op]; DROP USER [o'neil]]x];") || !strings.Contains(n, "restore over it or drop it") {
+		t.Errorf("narrow grant: %q", n)
 	}
 	if f := sqlServerFast(""); !strings.Contains(f, "GRANT VIEW SERVER PERFORMANCE STATE TO [<user>];") || !strings.Contains(f, "GRANT VIEW SERVER STATE TO [<user>];") {
 		t.Errorf("fast: %q", f)

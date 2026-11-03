@@ -350,16 +350,32 @@ func TestSQLServerChaos(t *testing.T) {
 // working database seeds, restores item by item and the whole database,
 // and seeds again.
 func TestSQLServerNotSysadmin(t *testing.T) {
+	testSQLServerLogin(t, false)
+}
+
+// TestSQLServerNarrowGrant: so does a login with CREATE ANY DATABASE that
+// owns the working database (the narrower grant the docs offer instead of
+// dbcreator), and it cannot take another database offline or restore over
+// it.
+func TestSQLServerNarrowGrant(t *testing.T) {
+	testSQLServerLogin(t, true)
+}
+
+func testSQLServerLogin(t *testing.T, narrow bool) {
 	ctx := context.Background()
 	s, db := newSQLServerTest(t, Options{})
 	b := make([]byte, 4)
 	rand.Read(b)
 	login, password := "dgt_login_"+hex.EncodeToString(b), "Dg-"+hex.EncodeToString(b)+"-Pw;@{x}"
 	master := sqlServerTestDB(t, s.o.DSN, "")
-	sqlServerExec(t, master, "CREATE LOGIN "+qms(login)+" WITH PASSWORD = "+sqlServerString(password)+", CHECK_POLICY = OFF",
-		"ALTER SERVER ROLE dbcreator ADD MEMBER "+qms(login))
-	sqlServerExec(t, db, "CREATE USER "+qms(login)+" FOR LOGIN "+qms(login), "ALTER ROLE db_owner ADD MEMBER "+qms(login),
-		"CREATE TABLE users (id int IDENTITY PRIMARY KEY, name nvarchar(20) NULL)", "INSERT INTO users (name) VALUES (N'a')",
+	sqlServerExec(t, master, "CREATE LOGIN "+qms(login)+" WITH PASSWORD = "+sqlServerString(password)+", CHECK_POLICY = OFF")
+	if narrow {
+		sqlServerExec(t, master, "GRANT CREATE ANY DATABASE TO "+qms(login), "ALTER AUTHORIZATION ON DATABASE::"+qms(s.o.Working)+" TO "+qms(login))
+	} else {
+		sqlServerExec(t, master, "ALTER SERVER ROLE dbcreator ADD MEMBER "+qms(login))
+		sqlServerExec(t, db, "CREATE USER "+qms(login)+" FOR LOGIN "+qms(login), "ALTER ROLE db_owner ADD MEMBER "+qms(login))
+	}
+	sqlServerExec(t, db, "CREATE TABLE users (id int IDENTITY PRIMARY KEY, name nvarchar(20) NULL)", "INSERT INTO users (name) VALUES (N'a')",
 		"CREATE TABLE sessions (id int PRIMARY KEY)", "INSERT INTO sessions VALUES (1)",
 		"CREATE SEQUENCE seq START WITH 1", "CREATE VIEW v AS SELECT id FROM users")
 	u, _ := url.Parse(s.o.DSN)
@@ -376,6 +392,7 @@ func TestSQLServerNotSysadmin(t *testing.T) {
 	t.Cleanup(func() {
 		user.Close()
 		dropSQLServerDatabase(master, o.Pristine)
+		dropSQLServerDatabase(master, o.Working) // a login that owns a database cannot be dropped
 		master.Exec("DROP LOGIN " + qms(login))
 	})
 	if info := mustSQLServerInfo(t, user); info.Sysadmin {
@@ -401,6 +418,20 @@ func TestSQLServerNotSysadmin(t *testing.T) {
 	}
 	if err := user.Restore(ctx, nil); err != nil {
 		t.Fatal(err)
+	}
+	if !narrow {
+		return
+	}
+	other := sqlServerTestName()
+	sqlServerExec(t, master, "CREATE DATABASE "+qms(other))
+	t.Cleanup(func() { dropSQLServerDatabase(master, other) })
+	u.RawQuery = "encrypt=" + u.Query().Get("encrypt") + "&TrustServerCertificate=" + u.Query().Get("TrustServerCertificate")
+	as := sqlServerTestDB(t, u.String(), "")
+	for _, q := range []string{"ALTER DATABASE " + qms(other) + " SET OFFLINE WITH ROLLBACK IMMEDIATE",
+		"RESTORE DATABASE " + qms(other) + " FROM DISK = N'dg_none.bak' WITH REPLACE", "DROP DATABASE " + qms(other)} {
+		if _, err := as.Exec(q); err == nil || !strings.Contains(err.Error(), "permission") {
+			t.Errorf("%s: %v", q, err)
+		}
 	}
 }
 
