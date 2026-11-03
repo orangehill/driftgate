@@ -1095,3 +1095,28 @@ func TestSQLServerSnapshotSetting(t *testing.T) {
 		t.Fatal("restored item by item")
 	}
 }
+
+// TestSQLServerSeededFingerprintQuiet: the record of a fresh seed (the
+// pristine copy's fingerprint) equals the working database's when nothing
+// wrote: what only the pristine copy has (READ_ONLY, the snapshot
+// isolation a read-only database reports, the mark) is not part of it.
+func TestSQLServerSeededFingerprintQuiet(t *testing.T) {
+	for _, snapshot := range []string{"OFF", "ON"} {
+		t.Run("snapshot "+snapshot, func(t *testing.T) {
+			s, _, _ := newSQLServerSeeded(t, Options{},
+				"ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION "+snapshot,
+				"CREATE TABLE t (id int IDENTITY PRIMARY KEY, v int NULL)", "INSERT INTO t (v) VALUES (1)",
+				"CREATE USER u0 WITHOUT LOGIN", "ALTER ROLE db_datareader ADD MEMBER u0", "GRANT CREATE TABLE TO u0",
+				"DENY SELECT ON SCHEMA::dbo TO u0", "EXEC sp_addextendedproperty @name = N'appver', @value = N'2'",
+				"CREATE PARTITION FUNCTION pf (int) AS RANGE LEFT FOR VALUES (1)", "CREATE PARTITION SCHEME ps AS PARTITION pf ALL TO ([PRIMARY])",
+				"CREATE RULE r0 AS @v > 0", "EXEC sp_bindrule 'r0', 't.v'", "ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = 2")
+			record, err := s.SeededFingerprint(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(mustSQLServerFingerprint(t, s), record); len(d) > 0 {
+				t.Fatalf("the working database and the record of its fresh seed differ in %v", d)
+			}
+		})
+	}
+}
