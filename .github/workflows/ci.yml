@@ -93,6 +93,15 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      # The SQLite and SQL Server drivers are imported by internal/state
+      # alone (its tests included): every other package reaches a database
+      # through a state component.
+      - name: Driver imports
+        run: |
+          go list -test -f '{{.ImportPath}} {{join .Imports " "}}' ./... \
+            | awk '$1 !~ /^github\.com\/orangehill\/driftgate\/internal\/state(_test)?$/ {
+                     for (i = 2; i <= NF; i++) if ($i ~ /^(modernc\.org\/sqlite|github\.com\/microsoft\/go-mssqldb)(\/|$)/) { print $1 ": " $i; bad = 1 } }
+                   END { exit bad }'
       # Coverage of the whole module (-coverpkg), with the databases of this
       # job; the report goes to Coveralls on pushes, never failing the job.
       - name: Test
@@ -184,6 +193,51 @@ jobs:
       - name: Test
         run: go test -count=1 ${{ matrix.packages }}
 
+  # SQLite: the driver's tests on the three systems the binary runs on, as
+  # SQLite's file locking differs between them; the database is a file, so
+  # no service is needed. Also for pull requests.
+  sqlite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: sqlite (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        shell: bash
+        run: go test -count=1 -run SQLite ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/config/ ./internal/dbdsn/
+
+  # SQL Server: the driver's tests against SQL Server 2022 (Developer), also
+  # for pull requests. The image starts slowly; the tests wait for it.
+  sqlserver:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Dg-Passw0rd-2026
+        ports: ["14331:1433"]
+    env:
+      DRIFTGATE_TEST_SQLSERVER: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -race -count=1 -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
+
   # Windows: the packages that need no database, and the parts written for
   # it (the store lock, process groups). A cross-compiled build (build)
   # does not run a test.
@@ -205,6 +259,7 @@ jobs:
             ./internal/allowlist/ ./internal/catalog/ ./internal/glob/ ./internal/jsonx/ ./internal/pii/ ./internal/scan/ \
             ./internal/secret/ ./internal/report/ ./internal/baseline/ ./internal/httpx/ ./internal/har/ ./internal/sheet/ ./internal/upload/
           go test -count=1 -run 'TestHelp|TestClassify|TestUsageErrors|TestCompareNamesAreConfiguration|TestImportAndCompare|TestReport|TestHidePrivateValues|TestLockStoreSweep' ./internal/cli/
+          go test -count=1 -run 'SQLite|SQLServer' ./internal/appconf/ ./internal/dbdsn/
 
   # The six platforms, also for pull requests: the package gate
   # below must fail before a merge, not on main or in a release.
@@ -252,5 +307,10 @@ jobs:
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           if go list -deps ./cmd/driftgate | grep -Ex 'text/template|html/template|net/http/pprof|expvar|plugin'; then
+            exit 1
+          fi
+          # SQL Server takes SQL logins only: the driver's Kerberos, Azure AD
+          # and named-pipe parts, and what they pull in, stay out.
+          if go list -deps ./cmd/driftgate | grep -E 'jcmturner|github\.com/Azure/|AzureAD|go-mssqldb/(azuread|integratedauth/krb5|namedpipe)'; then
             exit 1
           fi
