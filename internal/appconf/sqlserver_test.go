@@ -3,6 +3,7 @@ package appconf
 import (
 	"math/rand"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -219,7 +220,7 @@ func TestSQLServerProjectRefusals(t *testing.T) {
 		{map[string]string{"compose.yaml": "services:\n  db:\n    image: mcr.microsoft.com/mssql/server:2022-latest\n    environment:\n      MSSQL_SA_PASSWORD: p\n"},
 			Ref{Source: Compose, File: "compose.yaml", Key: "db"}, "publishes no port for 1433"},
 		{map[string]string{".env": "DB_CONNECTION=sqlsrv\nDB_HOST=db\\SHOP\nDB_USERNAME=app\n"},
-			Ref{Source: Dotenv, File: ".env"}, "without its port"},
+			Ref{Source: Dotenv, File: ".env"}, "DB_HOST names an instance and DB_PORT is not set"},
 		{map[string]string{".env": "DB_CONNECTION=sqlsrv\nDB_HOST=db\nDB_USERNAME=app\nDB_ENCRYPT=maybe\n"},
 			Ref{Source: Dotenv, File: ".env"}, ".env: DB_ENCRYPT: the SQL Server setting Encrypt has a value"},
 		{map[string]string{"settings.py": "DATABASES = {'default': {'ENGINE': 'mssql', 'NAME': 'shop', 'USER': 'app', 'PASSWORD': 'p', 'HOST': 'db', 'OPTIONS': {'dsn': 'shop'}}}\n"},
@@ -232,6 +233,49 @@ func TestSQLServerProjectRefusals(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tt.err) {
 			t.Errorf("%+v: %v, want an error with %q", tt.ref, err, tt.err)
 		}
+	}
+}
+
+// TestSQLServerCertificateFiles: a certificate file a setting of the
+// project names is the project's, read past links; .pem and .der only; a
+// DSN of the environment gives it by its absolute path.
+func TestSQLServerCertificateFiles(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const jdbc = "jdbc:sqlserver://db:1433;user=app;password=p;trustServerCertificateCA="
+	for _, tt := range []struct{ file, err string }{
+		{"certs/ca.pem", ""},
+		{"certs/missing.pem", "a certificate file: certs/missing.pem: not found"},
+		{"../ca.pem", "must be inside the project"},
+		{outside, "outside the project"},
+		{"certs/ca.crt", "a .pem or .der file"},
+	} {
+		root := writeTree(t, map[string]string{".env": "X=\"" + jdbc + tt.file + "\"\n", "certs/ca.pem": "x", "certs/ca.crt": "x"})
+		dsn, err := Ref{Source: Dotenv, File: ".env", Key: "X"}.DSN(root, SQLServer, nil)
+		if tt.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.err) {
+				t.Errorf("%s: %s, %v; want an error with %q", tt.file, dsn, err, tt.err)
+			}
+			continue
+		}
+		real, _ := filepath.EvalSymlinks(filepath.Join(root, "certs", "ca.pem"))
+		if want := "sqlserver://app:p@db:1433?certificate=" + url.QueryEscape(real) + "&encrypt=true"; err != nil || dsn != want {
+			t.Errorf("%s: %s, %v; want %s", tt.file, dsn, err, want)
+		}
+	}
+	if _, err := Convert(jdbc+"certs/ca.pem", SQLServer); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Errorf("a relative path in a DSN of the environment: %v", err)
+	}
+}
+
+// TestSQLServerDjangoOptionsOnly: Django's OPTIONS are read for a SQL
+// Server engine only.
+func TestSQLServerDjangoOptionsOnly(t *testing.T) {
+	root := writeTree(t, map[string]string{"settings.py": "DATABASES = {'default': {'ENGINE': 'django.db.backends.mysql', 'NAME': 'shop', 'USER': 'app', 'PASSWORD': 'p', 'HOST': 'db', 'OPTIONS': {'dsn': 'x', 'driver': 'y'}}}\n"})
+	if dsn, err := (Ref{Source: Python, File: "settings.py", Key: "default"}).DSN(root, MySQL, nil); err != nil || dsn != "mysql://app:p@db:3306/" {
+		t.Errorf("%s, %v", dsn, err)
 	}
 }
 
@@ -310,6 +354,9 @@ func TestSQLServerNotes(t *testing.T) {
 	}
 	if !strings.Contains(b, "add TrustServerCertificate=true to the application's setting") {
 		t.Errorf("B: %s", b)
+	}
+	if p, err := fromValue("sqlserver://app:p@db:1433/shop"); err != nil || p.name != "shop" || !strings.Contains(p.sqlServerNote(), "as Rails reads it") {
+		t.Errorf("a path for the database: %q, %q, %v", p.name, p.sqlServerNote(), err)
 	}
 }
 

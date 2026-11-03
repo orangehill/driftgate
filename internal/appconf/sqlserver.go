@@ -96,9 +96,12 @@ const (
 	// errSQLServerInstance refuses a named instance without a port: the SQL
 	// Server Browser would choose the port, on a UDP port DriftGate does
 	// not reach.
-	errSQLServerInstance = constError("names an instance without its port; add the port the instance listens on (host\\instance,port)")
-	errSQLServerODBCPort = constError("gives Port=, which Microsoft's ODBC drivers do not read: write the port with the server (Server=host,1433)")
-	errSQLServerCertPair = constError("names the server's own certificate (ServerCertificate) with HostNameInCertificate or a CA certificate; the two ways of verifying do not go together: keep one")
+	errSQLServerInstance     = constError("names an instance without its port; add the port the instance listens on (host\\instance,port)")
+	errSQLServerODBCPort     = constError("gives Port=, which Microsoft's ODBC drivers do not read: write the port with the server (Server=host,1433)")
+	errSQLServerCertType     = constError("names a certificate file DriftGate's driver cannot read: it takes a .pem or .der file (convert a .cer or .crt with openssl x509)")
+	errSQLServerCertRelative = constError("names a certificate file by a relative path; a DSN of the environment or 1Password gives it by its absolute path")
+	errSQLServerCertOutside  = constError("names a certificate file outside the project; DriftGate reads only the project's files for a setting of the project")
+	errSQLServerCertPair     = constError("names the server's own certificate (ServerCertificate) with HostNameInCertificate or a CA certificate; the two ways of verifying do not go together: keep one")
 )
 
 // errSQLServerValue names a SQL Server setting, by DriftGate's name for it,
@@ -605,7 +608,7 @@ func fromSQLServerURL(v string) (parts, error) {
 		}
 		q[fk] = vs[0]
 	}
-	upath := strings.Trim(u.Path, "/")
+	upath, pathNote := strings.Trim(u.Path, "/"), ""
 	port := u.Port()
 	host := u.Hostname()
 	switch scheme {
@@ -638,6 +641,7 @@ func fromSQLServerURL(v string) (parts, error) {
 				return parts{}, errSQLServerAmbiguous
 			}
 			p.name = upath
+			pathNote = "the path of the sqlserver:// URL is taken for the database, as Rails reads it; go-mssqldb takes it for an instance: a Go application names its database with the database parameter"
 		}
 	default:
 		switch scheme {
@@ -664,6 +668,7 @@ func fromSQLServerURL(v string) (parts, error) {
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(host, port); err != nil {
 		return parts{}, err
 	}
+	p.mssql.note = join(pathNote, p.mssql.note)
 	return p, nil
 }
 
@@ -852,8 +857,9 @@ func sqlServerFields(p parts, f fields) (parts, error) {
 // sqlServerFields follows, the ODBC keys of extra_params and an ODBC data
 // source, which is refused. Values set by code are left out.
 func sqlServerOptions(m map[string]any, f fields) {
+	engine, _ := m["ENGINE"].(string)
 	o, ok := m["OPTIONS"].(map[string]any)
-	if !ok {
+	if d, _ := driverName(engine); !ok || d != SQLServer {
 		return
 	}
 	for k, key := range map[string]string{"driver": "odbcdriver", "extra_params": "extraparams", "dsn": "odbcdsn"} {
@@ -881,6 +887,9 @@ func laravelSQLServer(root, file string, env map[string]string, p parts) (parts,
 	}
 	var err error
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(p.host, p.port); err != nil {
+		if err == errSQLServerInstance {
+			return parts{}, fmt.Errorf("%s: DB_HOST names an instance and DB_PORT is not set; DriftGate does not ask the SQL Server Browser for the port: set DB_PORT to the instance's port", file)
+		}
 		return parts{}, fmt.Errorf("%s: %s: %w", file, dbHost, err)
 	}
 	if p.port == "" {
@@ -1046,6 +1055,17 @@ func (s sqlServerTLS) params(host string) (url.Values, error) {
 	if s.serverCert != "" && (s.ca != "" || s.hostInCert != "") {
 		return nil, errSQLServerCertPair
 	}
+	for _, f := range []string{s.ca, s.serverCert} {
+		if f == "" {
+			continue
+		}
+		if ext := strings.ToLower(filepath.Ext(f)); ext != ".pem" && ext != ".der" {
+			return nil, errSQLServerCertType
+		}
+		if !filepath.IsAbs(f) && !strings.HasPrefix(f, "/") {
+			return nil, errSQLServerCertRelative
+		}
+	}
 	if trust {
 		q.Set("TrustServerCertificate", "true")
 	}
@@ -1195,4 +1215,47 @@ func packageMajor(lc, pkg string) (int, bool) {
 	}
 	major, err := strconv.Atoi(v[:n])
 	return major, err == nil
+}
+
+// sqlServerFiles resolves the certificate files a SQL Server setting of
+// the project names (Ref.Read; driver is the component's): a relative path
+// against the project root, past symbolic links, which must stay inside
+// it, as must an absolute one.
+func sqlServerFiles(root, driver string, p parts) (parts, error) {
+	if p.driver != SQLServer && (p.driver != "" || driver != SQLServer) {
+		return p, nil
+	}
+	s, err := p.sqlServerSettings()
+	if err != nil {
+		return parts{}, err
+	}
+	realRoot, err := filepath.Abs(root)
+	if err == nil {
+		realRoot, err = filepath.EvalSymlinks(realRoot)
+	}
+	if err != nil {
+		return parts{}, fmt.Errorf("the project folder: %w", unwrapPath(err))
+	}
+	for _, f := range []*string{&s.ca, &s.serverCert} {
+		switch {
+		case *f == "":
+		case filepath.IsAbs(*f):
+			real, err := filepath.EvalSymlinks(*f)
+			if err != nil {
+				return parts{}, fmt.Errorf("a certificate file: %w", unwrapPath(err))
+			}
+			if rel, err := filepath.Rel(realRoot, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return parts{}, errSQLServerCertOutside
+			}
+			*f = real
+		default:
+			real, err := localPath(root, *f)
+			if err != nil {
+				return parts{}, fmt.Errorf("a certificate file: %w", err)
+			}
+			*f = real
+		}
+	}
+	p.mssql = s
+	return p, nil
 }
