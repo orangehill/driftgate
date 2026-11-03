@@ -99,10 +99,12 @@ func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\
 // a connection string with the keys or the server forms only SQL Server or
 // SQLite take is read as theirs (sqlServerConnString, sqliteConnString).
 func fromConnString(kv fields) (parts, error) {
-	if p, ok, err := sqlServerConnString(kv); ok {
+	// SQLite first: a Windows path of its file (C:\data\app.db) is not
+	// SQL Server's host\instance.
+	if p, ok, err := sqliteConnString(kv); ok {
 		return p, err
 	}
-	if p, ok, err := sqliteConnString(kv); ok {
+	if p, ok, err := sqlServerConnString(kv); ok {
 		return p, err
 	}
 	if _, ok := kv.get(hostKeys); !ok {

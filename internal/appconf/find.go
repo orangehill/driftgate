@@ -60,7 +60,7 @@ func (f *finder) add(r Ref, hint, other string) {
 		p.driver, p.other = hint, other
 	}
 	if p.other != "" {
-		f.note(file, r.where()+" names "+p.other+"; DriftGate restores MySQL, MariaDB and PostgreSQL")
+		f.note(file, r.where()+" names "+p.other+"; "+restores())
 		return
 	}
 	d := p.database()
@@ -69,7 +69,12 @@ func (f *finder) add(r Ref, hint, other string) {
 		d.Note = "set in this shell's environment; it must be set when DriftGate runs"
 	}
 	if d.Driver == "" {
-		d.Note = join(d.Note, "the setting does not say which database it is: set driver (mysql or postgres)")
+		d.Note = join(d.Note, "the setting does not say which database it is: set driver ("+driverList()+")")
+	}
+	if p.driver == SQLite {
+		if n := f.sqliteNote(p); n != "" {
+			d.Note = join(d.Note, n)
+		}
 	}
 	if hp := p.hostNeeded(r, d.Driver); hp != "" {
 		d.HostNeeded = hp
@@ -353,6 +358,9 @@ func (f *finder) rails() {
 		r.Key = "development.primary"
 	}
 	f.add(r, "", "")
+	if r.Key == "development.primary" {
+		f.railsSQLite(file, "development")
+	}
 }
 
 // django reads DATABASES of the settings files that set it.

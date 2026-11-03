@@ -32,6 +32,35 @@ func detected(driver string) (string, string) {
 	return driver, ""
 }
 
+// restores names the databases DriftGate restores, for a message about a
+// setting of another.
+func restores() string {
+	dbs := []string{"MySQL", "MariaDB", "PostgreSQL"}
+	if sqliteReady {
+		dbs = append(dbs, "SQLite")
+	}
+	if sqlServerReady {
+		dbs = append(dbs, "SQL Server")
+	}
+	return "DriftGate restores " + strings.Join(dbs[:len(dbs)-1], ", ") + " and " + dbs[len(dbs)-1]
+}
+
+// driverList names the drivers of the settings appconf reads, for a
+// message asking for one.
+func driverList() string {
+	ds := []string{"mysql", "postgres"}
+	if sqliteReady {
+		ds = append(ds, "sqlite")
+	}
+	if sqlServerReady {
+		ds = append(ds, "sqlserver")
+	}
+	if len(ds) == 2 {
+		return "mysql or postgres"
+	}
+	return strings.Join(ds[:len(ds)-1], ", ") + " or " + ds[len(ds)-1]
+}
+
 // defaultPort is the port a driver's server listens on by default.
 func defaultPort(driver string) string {
 	switch driver {
@@ -59,7 +88,8 @@ type parts struct {
 	// raw holds the keys of a setting given as separate values or as a
 	// connection string (fromFields), for a driver that takes settings
 	// the shared ones leave out (SQL Server's Encrypt).
-	raw fields
+	raw  fields
+	note string // what to check by hand about the setting (SQLite: a relative file)
 }
 
 // database is p without the password.
@@ -153,6 +183,9 @@ func fromValue(v string) (parts, error) {
 	v = strings.TrimPrefix(v, "vertx-reactive:")
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "r2dbc:"), "pool:")
 	if p, ok, err := sqlServerValue(v); ok {
+		return p, err
+	}
+	if p, ok, err := sqliteValue(v); ok {
 		return p, err
 	}
 	switch {
@@ -462,9 +495,9 @@ func (p parts) dsn(driver, where string) (string, error) {
 	}
 	switch {
 	case p.other != "":
-		return "", fmt.Errorf("%s names %s; DriftGate restores MySQL, MariaDB and PostgreSQL", where, p.other)
+		return "", fmt.Errorf("%s names %s; %s", where, p.other, restores())
 	case driver == "" && p.driver == "":
-		return "", fmt.Errorf("%s does not say which database it is; set the driver (mysql or postgres)", where)
+		return "", fmt.Errorf("%s does not say which database it is; set the driver (%s)", where, driverList())
 	case driver != "" && p.driver != "" && driver != p.driver:
 		return "", fmt.Errorf("%s names a %s database, the driver is %s", where, p.driver, driver)
 	case driver == "":
