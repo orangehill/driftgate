@@ -572,6 +572,19 @@ A catalog with requests that change data needs at least one component with
 a restore; otherwise `capture` and `run` refuse it (exit 2) unless
 `--allow-mutating-without-restore`.
 
+#### SQLite
+
+<!-- driver: sqlite. working is the database file, relative to the project
+root; the pristine copy is a file of the store; the DSN is optional. To be
+written with the driver: restore and seed in place, same machine, exclude
+advice, fingerprinted items, settings detection. -->
+
+#### SQL Server
+
+<!-- driver: sqlserver (also mssql), SQL Server 2017 and later, SQL logins.
+To be written with the driver: DSN and TLS, permissions, restore and
+fallback, seed, rowversion, settings detection. -->
+
 ### seed, prepare, guards
 
 | Key | Meaning |
