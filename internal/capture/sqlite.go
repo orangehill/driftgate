@@ -1,11 +1,8 @@
 package capture
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/appconf"
@@ -25,25 +22,17 @@ func sqliteStorePristine(record string) string {
 
 // sqliteFiles are the absolute paths of the working file and the pristine
 // copy of the SQLite component sc, for state.Options: working as serverOf
-// resolved it, pristine as set (inside the project, past symbolic links;
-// it need not exist yet) or by default in the store (sqliteStorePristine).
-// The pristine copy is never the working file, whatever links lead there.
+// resolved it, pristine as set (appconf.SQLitePath: the file the system
+// opens, inside the project past symbolic links; it and its folder need
+// not exist yet, as seed makes them) or by default in the store
+// (sqliteStorePristine). The pristine copy is never the working file,
+// whatever links lead there.
 func sqliteFiles(p *config.Project, sc config.Component, server, record string) (working, pristine string, err error) {
 	working = strings.TrimPrefix(server, sqliteServerPrefix)
 	if sc.Pristine == "" {
 		return working, sqliteStorePristine(record), nil
 	}
-	file := path.Clean(strings.ReplaceAll(sc.Pristine, `\`, "/"))
-	dir, err := appconf.LocalPath(p.Root, path.Dir(file))
-	if err != nil {
-		return "", "", fmt.Errorf("pristine: %w", err)
-	}
-	pristine = filepath.Join(dir, path.Base(file))
-	if _, err := os.Lstat(pristine); err == nil {
-		if pristine, err = appconf.LocalPath(p.Root, file); err != nil {
-			return "", "", fmt.Errorf("pristine: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if pristine, err = appconf.SQLitePath(p.Root, sc.Pristine); err != nil {
 		return "", "", fmt.Errorf("pristine: %s: %w", sc.Pristine, err)
 	}
 	if sqliteOverlap(working, pristine) {

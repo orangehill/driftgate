@@ -156,7 +156,8 @@ func TestSQLiteDSNAsFound(t *testing.T) {
 
 // TestCheckNamed: the database a setting names must be working; SQL
 // Server's in any letter case, MySQL's and PostgreSQL's exactly, SQLite's
-// the same file (by path, or past a link when both exist).
+// the same file (by path as the system opens it, or past a link when both
+// exist): working through link/.. is the file past the link, not beside it.
 func TestCheckNamed(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "database"), 0o755); err != nil {
@@ -166,6 +167,10 @@ func TestCheckNamed(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked := os.Symlink(filepath.Join(root, "database", "app.sqlite"), filepath.Join(root, "link.sqlite")) == nil
+	if err := os.MkdirAll(filepath.Join(root, "database", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	up := os.Symlink(filepath.Join(root, "database", "sub"), filepath.Join(root, "sub")) == nil
 	dsn := Secret{Dotenv: ".env"}
 	for _, c := range []struct {
 		driver, working, named string
@@ -184,6 +189,9 @@ func TestCheckNamed(t *testing.T) {
 		{SQLite, "database/app.sqlite", "database/other.sqlite", false},
 		{SQLite, "database/missing.sqlite", "database/missing.sqlite", true},
 		{SQLite, "link.sqlite", "database/app.sqlite", linked},
+		{SQLite, "sub/../app.sqlite", "database/app.sqlite", up},
+		{SQLite, "sub/../app.sqlite", "app.sqlite", !up},
+		{SQLite, "sub/../missing.sqlite", "database/missing.sqlite", up},
 	} {
 		err := Component{Driver: c.driver, DSN: dsn, Working: c.working}.checkNamed(root, c.named)
 		if (err == nil) != c.ok {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/appconf"
@@ -63,16 +62,14 @@ func sqlitePath(file string) string {
 
 // sameSQLiteFile reports whether the file a setting names (named, as
 // appconf reads it: relative to the project root, or absolute) is working:
-// the same file when both exist, else the same path.
+// the same path as the system opens them (appconf.SQLitePath, which resolves
+// working as it resolves the setting), or the same file when both exist.
 func sameSQLiteFile(root, named, working string) bool {
-	abs := func(file string) string {
-		f := filepath.FromSlash(strings.ReplaceAll(file, `\`, "/"))
-		if !filepath.IsAbs(f) {
-			f = filepath.Join(root, f)
-		}
-		return filepath.Clean(f)
+	a, errA := appconf.SQLitePath(root, named)
+	b, errB := appconf.SQLitePath(root, working)
+	if errA != nil || errB != nil {
+		return false
 	}
-	a, b := abs(named), abs(working)
 	if a == b {
 		return true
 	}

@@ -605,11 +605,19 @@ func dsnErr(dsn config.Secret, name string, err error) error {
 
 // serverOf names the server of the database component sc whose DSN is dsn
 // (dbdsn.Server). An SQLite database has none: it is named by its file,
-// file: and the real path of working, which must exist inside the project.
+// file: and the real path of working (appconf.SQLitePath: the file the
+// system opens), which must exist inside the project.
 func serverOf(p *config.Project, sc config.Component, dsn string) (string, error) {
 	if sc.Driver == config.SQLite {
-		working, err := appconf.LocalPath(p.Root, sc.Working)
+		working, err := appconf.SQLitePath(p.Root, sc.Working)
 		if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		// Stat only: closing a handle of a file SQLite has open in this
+		// process would drop its locks.
+		if _, err := os.Stat(working); errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("working: %s: not found", sc.Working)
+		} else if err != nil {
 			return "", fmt.Errorf("working: %w", err)
 		}
 		return sqliteServerPrefix + working, nil

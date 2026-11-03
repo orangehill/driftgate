@@ -97,9 +97,15 @@ func TestSQLiteFiles(t *testing.T) {
 	if _, pristine, err = sqliteFiles(p, sc, server, record); err != nil || filepath.Base(pristine) != "pristine.sqlite" || !filepath.IsAbs(pristine) {
 		t.Errorf("set: %s %v", pristine, err)
 	}
-	sc.Pristine = "missing/pristine.sqlite"
-	if _, _, err = sqliteFiles(p, sc, server, record); err == nil {
-		t.Error("pristine in a missing folder: no error")
+	// A folder that does not exist yet, which seed makes.
+	sc.Pristine = "missing/deeper/pristine.sqlite"
+	realRoot, _ := filepath.EvalSymlinks(p.Root)
+	if _, pristine, err = sqliteFiles(p, sc, server, record); err != nil || pristine != filepath.Join(realRoot, "missing", "deeper", "pristine.sqlite") {
+		t.Errorf("pristine in a missing folder: %s %v", pristine, err)
+	}
+	sc.Pristine = "missing/../../pristine.sqlite"
+	if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "outside the project") {
+		t.Errorf("pristine above the project: %v", err)
 	}
 	if os.Symlink(filepath.Join(p.Root, "database", "app.sqlite"), filepath.Join(p.Root, "database", "link.sqlite")) == nil {
 		sc.Pristine = "database/link.sqlite"
@@ -145,9 +151,50 @@ func TestSQLiteFiles(t *testing.T) {
 		}
 	}
 	if os.Symlink(t.TempDir(), filepath.Join(p.Root, "outside")) == nil {
-		sc.Pristine = "outside/pristine.sqlite"
-		if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "outside the project") {
-			t.Errorf("pristine through a link outside the project: %v", err)
+		for _, f := range []string{"outside/pristine.sqlite", "outside/missing/pristine.sqlite", "outside/../pristine.sqlite"} {
+			sc.Pristine = f
+			if _, _, err = sqliteFiles(p, sc, server, record); err == nil || !strings.Contains(err.Error(), "outside the project") {
+				t.Errorf("pristine %s through a link outside the project: %v", f, err)
+			}
+		}
+	}
+	if os.Symlink(filepath.Join(p.Root, "gone"), filepath.Join(p.Root, "dangling")) == nil {
+		sc.Pristine = "dangling/pristine.sqlite"
+		if _, _, err = sqliteFiles(p, sc, server, record); err == nil {
+			t.Error("pristine through a link that leads nowhere: no error")
+		}
+	}
+}
+
+// TestSQLiteWorkingPhysical: working is the file the system opens, past a
+// link before a .. (sub/../app.sqlite with sub a link to database/sub is
+// database/app.sqlite), never one that leaves the project.
+func TestSQLiteWorkingPhysical(t *testing.T) {
+	p := sqliteProject(t, config.Component{Working: "database/app.sqlite"})
+	if err := os.MkdirAll(filepath.Join(p.Root, "database", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if os.Symlink(filepath.Join(p.Root, "database", "sub"), filepath.Join(p.Root, "sub")) != nil {
+		t.Skip("no symbolic links")
+	}
+	sc := p.State["db"]
+	sc.Working = "sub/../app.sqlite"
+	server, err := serverOf(p, sc, "")
+	real, _ := filepath.EvalSymlinks(filepath.Join(p.Root, "database", "app.sqlite"))
+	if err != nil || server != "file:"+real {
+		t.Errorf("working through a link: %s %v, want file:%s", server, err, real)
+	}
+	sc.Pristine = "sub/../app.sqlite-wal"
+	if _, _, err = sqliteFiles(p, sc, server, ""); err == nil || !strings.Contains(err.Error(), "is the working file") {
+		t.Errorf("pristine working's -wal through the link: %v", err)
+	}
+	if os.Symlink(t.TempDir(), filepath.Join(p.Root, "out")) == nil {
+		if err := os.WriteFile(filepath.Join(p.Root, "app.sqlite"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sc.Working = "out/../app.sqlite" // lexically app.sqlite of the project
+		if _, err := serverOf(p, sc, ""); err == nil || !strings.Contains(err.Error(), "outside the project") {
+			t.Errorf("working through a link outside the project: %v", err)
 		}
 	}
 }

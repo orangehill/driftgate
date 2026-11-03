@@ -587,7 +587,7 @@ process.
 |---|---|---|
 | `driver` | `sqlite` | |
 | `working` | path, required | the database file the application opens, relative to the project root; it must exist when a command runs (the application's migrations make it) |
-| `pristine` | path | its pristine copy; default a file of the local store (`pristine/<name>-<hash>.sqlite`, next to the record of its fingerprint), so every checkout and working file has its own. When set, another file inside the project, in a folder that exists: not `working` and not one of its `-wal`, `-shm` and `-journal` files, also in letter case |
+| `pristine` | path | its pristine copy; default a file of the local store (`pristine/<name>-<hash>.sqlite`, next to the record of its fingerprint), so every checkout and working file has its own. When set, another file inside the project (seed creates it, and its folder when that does not exist yet): not `working` and not one of its `-wal`, `-shm` and `-journal` files, also in letter case |
 | `dsn` | a file of the project \| `{env}` \| `{op}` | optional: the setting the application reads (`{ dotenv: .env }`, see [database DSNs](#database-dsns)); the file it names must be `working`, so a changed `DB_DATABASE` stops a command (exit 2) instead of restoring a file the application no longer uses. An `env` or `op` value is a path, a `file:` URI or an `sqlite:` URL |
 | `exclude`, `row_tracking` | | as above; a row without a primary key is named by its rowid (`rowid=7`) |
 
@@ -604,10 +604,10 @@ state:
 ```
 
 **The file.** `working` and `pristine` are relative to the project root
-and inside it, also past symbolic links. A path from the application's
-settings is resolved as the system opens it: a `..` after a symbolic link
-goes up from where the link leads, and a link out of the project is
-refused. Refused too: an in-memory database (`:memory:`, `mode=memory`,
+and inside it, also past symbolic links. They, and a path from the
+application's settings, are resolved as the system opens them: a `..`
+after a symbolic link goes up from where the link leads, and a link out
+of the project is refused. Refused too: an in-memory database (`:memory:`, `mode=memory`,
 SQLAlchemy's `sqlite://`), a file outside the project, a network share
 (`\\server\share\…`), a URL with a host (other than `file://localhost/`),
 an encrypted file (SQLCipher, a `Password=` of Microsoft.Data.Sqlite) and

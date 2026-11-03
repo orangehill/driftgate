@@ -331,39 +331,82 @@ func sqliteResolved(root string, r Ref, p parts, base, name string) (parts, erro
 
 // sqliteFile is the database file name names, relative to base (a folder
 // relative to root with /; name may be absolute), as a path relative to
-// root with /. The path is resolved as the system opens it: component by
-// component, each symbolic link followed before a .. after it is taken,
-// so storage/../app.db with storage a link to var/storage is var/app.db.
-// The file must be inside root, also when it does not exist yet; it is
-// looked at, never opened. No error quotes the name.
+// root with /, resolved as sqliteReal resolves it. No error quotes the
+// name.
 func sqliteFile(root, base, name string) (string, error) {
+	r, err := sqliteReal(root, base, name)
+	if err != nil {
+		return "", err
+	}
+	// The path as the setting writes it, when it is the same file (a link
+	// inside the project kept); else the one the system opens.
+	for _, dir := range []string{r.absRoot, r.realRoot} {
+		if lex, ok := within(dir, filepath.Clean(r.raw)); ok {
+			if again, err := physicalPath(filepath.Join(r.realRoot, lex)); err == nil && again == r.real {
+				return filepath.ToSlash(lex), nil
+			}
+		}
+	}
+	return filepath.ToSlash(r.rel), nil
+}
+
+// SQLitePath is the absolute path the system opens for file, an SQLite
+// file of the project as driftgate.yaml names it (working:, pristine:):
+// relative to root (or absolute), resolved as a setting of the application
+// is (sqliteReal), so link/../app.db is the file the system opens, not
+// app.db. It must be inside the project past any symbolic links; it, and
+// folders above it, need not exist yet. The file is looked at, never
+// opened. No error quotes the name.
+func SQLitePath(root, file string) (string, error) {
+	r, err := sqliteReal(root, "", file)
+	if err != nil {
+		return "", err
+	}
+	return r.real, nil
+}
+
+// sqlitePaths is a file of the project as sqliteReal resolves it.
+type sqlitePaths struct {
+	absRoot, realRoot string // the project folder, absolute and past links
+	raw               string // the name, absolute, not cleaned
+	real              string // the file the system opens
+	rel               string // real relative to realRoot
+}
+
+// sqliteReal resolves the database file name names, relative to base (a
+// folder relative to root with /; name may be absolute), as the system
+// opens it: component by component, each symbolic link followed before a
+// .. after it is taken, so storage/../app.db with storage a link to
+// var/storage is var/app.db. The file must be inside root, also when it
+// does not exist yet. No error quotes the name.
+func sqliteReal(root, base, name string) (sqlitePaths, error) {
 	n := strings.ReplaceAll(name, `\`, "/") // as CheckFile takes it, so ..\ cannot escape on Windows
 	switch {
 	case n == "":
-		return "", errors.New("names no SQLite file")
+		return sqlitePaths{}, errors.New("names no SQLite file")
 	case strings.ContainsRune(n, 0):
-		return "", errors.New("the SQLite file name holds a NUL")
+		return sqlitePaths{}, errors.New("the SQLite file name holds a NUL")
 	case strings.HasPrefix(n, "//"):
-		return "", errors.New("the SQLite file is on a network share; DriftGate restores a file of the project only")
+		return sqlitePaths{}, errors.New("the SQLite file is on a network share; DriftGate restores a file of the project only")
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("the project folder: %w", unwrapPath(err))
+		return sqlitePaths{}, fmt.Errorf("the project folder: %w", unwrapPath(err))
 	}
 	realRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		return "", fmt.Errorf("the project folder: %w", unwrapPath(err))
+		return sqlitePaths{}, fmt.Errorf("the project folder: %w", unwrapPath(err))
 	}
 	sep := string(filepath.Separator)
 	var raw string // not cleaned: a .. is taken where the system takes it
 	switch drive := len(n) >= 2 && isLetter(n[0]) && n[1] == ':'; {
 	case drive && runtime.GOOS != "windows":
-		return "", errors.New("the SQLite file is a Windows path, outside the project on this system")
+		return sqlitePaths{}, errors.New("the SQLite file is a Windows path, outside the project on this system")
 	case drive && (len(n) < 3 || n[2] != '/'):
-		return "", errors.New("the SQLite file is relative to a drive (C:name); write it relative to the project or in full")
+		return sqlitePaths{}, errors.New("the SQLite file is relative to a drive (C:name); write it relative to the project or in full")
 	case drive, strings.HasPrefix(n, "/"):
 		if !drive && runtime.GOOS == "windows" {
-			return "", errors.New("the SQLite file is a path without a drive; write it relative to the project or in full")
+			return sqlitePaths{}, errors.New("the SQLite file is a path without a drive; write it relative to the project or in full")
 		}
 		raw = filepath.FromSlash(n)
 	default:
@@ -371,31 +414,22 @@ func sqliteFile(root, base, name string) (string, error) {
 	}
 	real, err := physicalPath(raw)
 	if err != nil {
-		return "", err
+		return sqlitePaths{}, err
 	}
 	rel, ok := within(realRoot, real)
 	if !ok {
 		if _, lexical := within(absRoot, filepath.Clean(raw)); lexical {
-			return "", errors.New("the SQLite file: a symbolic link leads outside the project")
+			return sqlitePaths{}, errors.New("the SQLite file: a symbolic link leads outside the project")
 		}
-		return "", errors.New("the SQLite file is outside the project; DriftGate restores a file of the project only")
+		return sqlitePaths{}, errors.New("the SQLite file is outside the project; DriftGate restores a file of the project only")
 	}
 	if rel == "." {
-		return "", errors.New("the SQLite file is the project folder")
+		return sqlitePaths{}, errors.New("the SQLite file is the project folder")
 	}
 	if fi, err := os.Stat(real); err == nil && fi.IsDir() {
-		return "", errors.New("the SQLite file is a folder")
+		return sqlitePaths{}, errors.New("the SQLite file is a folder")
 	}
-	// The path as the setting writes it, when it is the same file (a link
-	// inside the project kept); else the one the system opens.
-	for _, dir := range []string{absRoot, realRoot} {
-		if lex, ok := within(dir, filepath.Clean(raw)); ok {
-			if again, err := physicalPath(filepath.Join(realRoot, lex)); err == nil && again == real {
-				return filepath.ToSlash(lex), nil
-			}
-		}
-	}
-	return filepath.ToSlash(rel), nil
+	return sqlitePaths{absRoot: absRoot, realRoot: realRoot, raw: raw, real: real, rel: rel}, nil
 }
 
 // physicalPath is the absolute path p as the system resolves it when it
