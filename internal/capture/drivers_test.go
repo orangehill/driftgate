@@ -153,12 +153,18 @@ func TestSQLiteFiles(t *testing.T) {
 }
 
 // TestOpenSQLiteAndSQLServer: the capture opens SQLite and SQL Server
-// components through their drivers, an SQLite database without a DSN or
-// an allowed host. (Until the drivers land, both stop there; the drivers'
-// own tests replace this one.)
+// components through their drivers. An SQLite database is a file: no host
+// check applies to it, even when only a remote host is allowed. Whatever a
+// driver reports is named after the component.
 func TestOpenSQLiteAndSQLServer(t *testing.T) {
 	p := sqliteProject(t, config.Component{Working: "database/app.sqlite"})
-	if _, err := openComponents(context.Background(), p, nil, nil); err == nil || !strings.Contains(err.Error(), "state db: SQLite is not implemented yet") {
+	p.Target.AllowHosts = []string{"203.0.113.10"}
+	comps, err := openComponents(context.Background(), p, nil, nil)
+	if err == nil {
+		for _, c := range comps {
+			c.Close()
+		}
+	} else if !strings.Contains(err.Error(), "state db: ") || strings.Contains(err.Error(), "allow") || strings.Contains(err.Error(), "not a server") {
 		t.Errorf("sqlite: %v", err)
 	}
 
@@ -168,7 +174,12 @@ func TestOpenSQLiteAndSQLServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openComponents(context.Background(), s, nil, nil); err == nil || !strings.Contains(err.Error(), "state db: ") || !strings.Contains(err.Error(), "SQL Server is not implemented yet") {
+	comps, err = openComponents(context.Background(), s, nil, nil)
+	if err == nil {
+		for _, c := range comps {
+			c.Close()
+		}
+	} else if !strings.Contains(err.Error(), "state db: ") {
 		t.Errorf("sqlserver: %v", err)
 	}
 }
