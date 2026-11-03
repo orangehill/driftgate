@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/chaos"
 )
@@ -695,7 +696,7 @@ func TestSQLiteRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for table, key := range map[string]string{"users": "id=1", "tags": "name=go", "log": "rowid=7"} {
+	for table, key := range map[string]string{"users": "id=1", "tags": "name='go'", "log": "rowid=7"} {
 		if _, ok := before[table][key]; !ok {
 			t.Errorf("%s: no row %s in %v", table, key, before[table])
 		}
@@ -905,5 +906,339 @@ func mustExecConn(t *testing.T, c *sql.Conn, stmts ...string) {
 		if _, err := c.ExecContext(context.Background(), s); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
+	}
+}
+
+// sqliteSchemaFixture makes a working file with the given statements in a
+// journal mode, seeds it and returns the component and the application's
+// connection.
+func sqliteSchemaFixture(t *testing.T, mode string, exclude []string, stmts ...string) (*SQLite, *sql.DB) {
+	t.Helper()
+	dir := t.TempDir()
+	o := Options{Name: "db", Working: filepath.Join(dir, "app.sqlite"), Pristine: filepath.Join(dir, "store", "pristine.sqlite"), Exclude: exclude}
+	app := sqliteApp(t, o.Working)
+	mustExec(t, app, "PRAGMA journal_mode = "+mode)
+	mustExec(t, app, stmts...)
+	s, err := NewSQLite(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.Seed(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s, app
+}
+
+// sqliteRestoreChecked restores the items that differ, checks them the
+// way the capture does (only those items again), and then checks that
+// the whole file is the pristine one: a restore that passes the first
+// check and fails the second would be a false pass.
+func sqliteRestoreChecked(t *testing.T, s *SQLite) {
+	t.Helper()
+	ctx := context.Background()
+	pristine := sqlitePristineFP(t, s)
+	items := Diff(sqliteFingerprint(t, s), pristine)
+	if err := s.Restore(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Fingerprint(ctx, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(got, pristine.Subset(items)); len(d) > 0 {
+		t.Fatalf("the restore of %v left %v different", items, d)
+	}
+	if d := Diff(sqliteFingerprint(t, s), pristine); len(d) > 0 {
+		t.Fatalf("the restore of %v passed its check, but %v differ from the pristine file", items, d)
+	}
+}
+
+// TestSQLiteNameCase: SQLite names are case-insensitive, and an index or a
+// trigger keeps its table's name as its statement wrote it. A trigger on
+// USERS is still dropped before users is written and made again after (it
+// neither fires nor gets lost), an index on USERS is part of users, and a
+// seed does not fire a trigger on SESSIONS while it empties sessions.
+func TestSQLiteNameCase(t *testing.T) {
+	t.Run("trigger fires", func(t *testing.T) {
+		s, app := sqliteSchemaFixture(t, "wal", nil,
+			"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+			"CREATE TABLE counts (n INTEGER)",
+			"INSERT INTO counts VALUES (0)",
+			"CREATE TRIGGER users_count AFTER INSERT ON USERS BEGIN UPDATE counts SET n = n + 1; END",
+			"INSERT INTO users VALUES (1, 'a')")
+		mustExec(t, app, "INSERT INTO users VALUES (2, 'b')", "UPDATE counts SET n = n - 1")
+		sqliteRestoreChecked(t, s)
+	})
+	t.Run("trigger lost", func(t *testing.T) {
+		s, app := sqliteSchemaFixture(t, "delete", nil,
+			"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+			"CREATE TABLE audit2 (m TEXT)",
+			"CREATE TRIGGER users_a AFTER INSERT ON Users BEGIN INSERT INTO audit2 VALUES (NEW.email); END")
+		mustExec(t, app, "ALTER TABLE users ADD COLUMN extra TEXT")
+		sqliteRestoreChecked(t, s)
+		if n := count(t, app, "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'"); n != 1 {
+			t.Fatalf("%d triggers after the restore, want 1", n)
+		}
+	})
+	t.Run("renamed in case", func(t *testing.T) {
+		s, app := sqliteSchemaFixture(t, "wal", nil,
+			"CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, v)", "INSERT INTO users (v) VALUES (1)",
+			"CREATE TABLE other (x)", "CREATE TRIGGER t1 AFTER INSERT ON users BEGIN INSERT INTO other VALUES (1); END")
+		mustExec(t, app, "ALTER TABLE users RENAME TO tmp_u", "ALTER TABLE tmp_u RENAME TO Users")
+		sqliteRestoreChecked(t, s)
+		if n := count(t, app, "SELECT count(*) FROM other"); n != 0 {
+			t.Fatal("the restore fired the trigger")
+		}
+	})
+	t.Run("index", func(t *testing.T) {
+		s, app := sqliteSchemaFixture(t, "wal", nil, "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+		before := sqliteFingerprint(t, s)
+		mustExec(t, app, "CREATE UNIQUE INDEX ue ON USERS (email)")
+		if d := Diff(before, sqliteFingerprint(t, s)); !slices.Equal(d, []string{"table:users"}) {
+			t.Fatalf("an index on USERS changed %v", d)
+		}
+		sqliteRestoreChecked(t, s)
+	})
+	t.Run("seed", func(t *testing.T) {
+		s, _ := sqliteSchemaFixture(t, "wal", []string{"sessions"},
+			"CREATE TABLE users (id INTEGER PRIMARY KEY, n INTEGER)",
+			"CREATE TABLE sessions (id TEXT PRIMARY KEY)",
+			"INSERT INTO users VALUES (1, 0)",
+			"INSERT INTO sessions VALUES ('s')",
+			"CREATE TRIGGER sess_gone AFTER DELETE ON SESSIONS BEGIN UPDATE users SET n = n + 1; END")
+		if d := Diff(sqliteFingerprint(t, s), sqlitePristineFP(t, s)); len(d) > 0 {
+			t.Fatalf("the seed fired a trigger of an excluded table: %v differ", d)
+		}
+	})
+}
+
+// TestSQLiteExcludedTableTrigger: a trigger of an excluded table is an
+// item: its body may write any table.
+func TestSQLiteExcludedTableTrigger(t *testing.T) {
+	s, app := sqliteSchemaFixture(t, "wal", []string{"sessions"},
+		"CREATE TABLE users (id INTEGER PRIMARY KEY, n INTEGER)",
+		"CREATE TABLE sessions (id TEXT PRIMARY KEY)",
+		"CREATE TRIGGER st AFTER INSERT ON sessions BEGIN SELECT 1; END")
+	before := sqliteFingerprint(t, s)
+	mustExec(t, app, "INSERT INTO sessions VALUES ('a')", "DROP TRIGGER st", "CREATE TRIGGER st AFTER INSERT ON sessions BEGIN UPDATE users SET n = n + 1; END")
+	if d := Diff(before, sqliteFingerprint(t, s)); !slices.Equal(d, []string{"trigger:st"}) {
+		t.Fatalf("changed %v, want trigger:st", d)
+	}
+	sqliteRestoreChecked(t, s)
+	if n := count(t, app, "SELECT count(*) FROM sessions"); n != 1 {
+		t.Fatalf("the restore of the trigger changed the excluded table: %d rows", n)
+	}
+}
+
+// TestSQLiteKeepsLocks: DriftGate never opens and closes a database file
+// itself: that would drop the locks of every connection of the process to
+// it. While one component holds the write lock, a second one opening the
+// same file (and seeding from it) leaves another process locked out.
+func TestSQLiteKeepsLocks(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("no python3")
+	}
+	for _, mode := range []string{"delete", "wal"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := sqliteFixture(t, mode, Options{})
+			writer := func() string {
+				out, _ := exec.Command(python, "-I", "-c", `import sqlite3, sys
+c = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=0)
+try:
+    c.execute("BEGIN IMMEDIATE"); print("got the write lock"); c.execute("ROLLBACK")
+except sqlite3.OperationalError as e:
+    print("locked out")`, s.o.Working).CombinedOutput()
+				return strings.TrimSpace(string(out))
+			}
+			if _, err := s.main.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			}
+			defer s.main.ExecContext(ctx, "ROLLBACK")
+			if got := writer(); got != "locked out" {
+				t.Fatalf("before: %s", got)
+			}
+			o := s.o
+			o.Pristine = filepath.Join(t.TempDir(), "other.sqlite")
+			other, err := NewSQLite(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other.checkPristine(ctx)
+			other.Close()
+			if got := writer(); got != "locked out" {
+				t.Fatalf("after a second component opened the file: %s", got)
+			}
+		})
+	}
+}
+
+// TestSQLiteOverwrittenInPlace: a copy written over the working file (the
+// same file, the same change counter, other rows) is not taken for the
+// file the last fingerprint read.
+func TestSQLiteOverwrittenInPlace(t *testing.T) {
+	s, app := sqliteSchemaFixture(t, "delete", nil, "CREATE TABLE a (id INTEGER PRIMARY KEY, v)", "INSERT INTO a VALUES (1, 1)")
+	app.Close()
+	bak := s.o.Working + ".bak"
+	copyFile(t, s.o.Working, bak)
+	a := sqliteApp(t, s.o.Working)
+	mustExec(t, a, "UPDATE a SET v = 2")
+	a.Close()
+	before := sqliteFingerprint(t, s)
+	b := sqliteApp(t, bak)
+	mustExec(t, b, "UPDATE a SET v = 3") // the copy's change counter now equals the file's
+	b.Close()
+	data, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.o.Working, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := sqliteFingerprint(t, s)
+	if s.Reused() || !slices.Equal(Diff(before, after), []string{"table:a"}) {
+		t.Fatalf("the overwritten file: reused %v, changed %v", s.Reused(), Diff(before, after))
+	}
+}
+
+// TestSQLiteExcludedRowsGone: the rows of an excluded table do not stay in
+// the free pages of the pristine file.
+func TestSQLiteExcludedRowsGone(t *testing.T) {
+	for _, mode := range []string{"delete", "wal"} {
+		t.Run(mode, func(t *testing.T) {
+			s, app := sqliteFixture(t, mode, Options{})
+			mustExec(t, app, "INSERT INTO sessions VALUES ('s2', 'SECRET-SESSION-TOKEN-0123456789')",
+				"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 2000) INSERT INTO sessions SELECT 'n' || i, 'SECRET-SESSION-TOKEN-' || i FROM r")
+			if err := s.Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(s.o.Pristine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("SECRET-SESSION-TOKEN")) {
+				t.Fatal("rows of the excluded table are in the pristine file")
+			}
+		})
+	}
+}
+
+// TestSQLiteRowsKeys: keys tell an integer from a text, a text from a
+// blob's hex, and a text that holds a separator; rows with the same key
+// are an error.
+func TestSQLiteRowsKeys(t *testing.T) {
+	ctx := context.Background()
+	s, _ := sqliteSchemaFixture(t, "wal", nil,
+		"CREATE TABLE k (id PRIMARY KEY, v)",
+		"INSERT INTO k VALUES (1, 'int'), ('1', 'text'), (x'31', 'blob'), ('x''31''', 'hex text')",
+		"CREATE TABLE c (a, b, PRIMARY KEY (a, b))",
+		"INSERT INTO c VALUES ('1,b=2', 3), ('1', '2,b=3')",
+		"CREATE TABLE n (id TEXT PRIMARY KEY, v)",
+		"INSERT INTO n VALUES (NULL, 1), (NULL, 2)")
+	s.o.RowTracking = []string{"k", "c", "n"}
+	r, err := s.Rows(ctx, []string{"table:k", "table:c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r["k"]) != 4 || len(r["c"]) != 2 {
+		t.Fatalf("keys: %v %v", r["k"], r["c"])
+	}
+	if _, err := s.Rows(ctx, []string{"table:n"}); err == nil || !strings.Contains(err.Error(), "same primary key") {
+		t.Fatalf("two NULL keys: %v", err)
+	}
+}
+
+// TestSQLiteQueryShapes: a query returns the first column in the query's
+// own order, whatever its shape, also for a DATETIME first column (read
+// as its text).
+func TestSQLiteQueryShapes(t *testing.T) {
+	ctx := context.Background()
+	s, _ := sqliteFixture(t, "wal", Options{})
+	w := sqliteApp(t, s.o.Pristine)
+	mustExec(t, w, "CREATE TABLE n (id INTEGER PRIMARY KEY, k TEXT, v INT, d DATETIME)",
+		`WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 200)
+			INSERT INTO n (k, v, d) SELECT printf('k%03d', (i * 7919) % 1000), (i * 31) % 50, printf('2024-01-%02d 10:00:00', 1 + i % 28) FROM r`)
+	w.Close()
+	direct, err := sqliteOpen(s.o.Pristine, sqliteReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Close()
+	for _, q := range []string{
+		"SELECT k FROM n ORDER BY v DESC, k",
+		"SELECT DISTINCT k FROM n ORDER BY k DESC",
+		"SELECT k FROM n GROUP BY k ORDER BY count(*) DESC, k",
+		"SELECT k FROM n WHERE v < 10 UNION ALL SELECT k FROM n WHERE v > 40 ORDER BY 1 DESC",
+		"SELECT k FROM n WHERE v < 10 UNION SELECT k FROM n WHERE v > 40 ORDER BY 1 DESC",
+		"SELECT a.k FROM n a JOIN n b ON a.id = b.id + 1 ORDER BY a.v DESC, a.k",
+		"SELECT k FROM n ORDER BY v DESC, k LIMIT 10 OFFSET 5",
+		"SELECT k, row_number() OVER (ORDER BY v) FROM n ORDER BY v DESC, k",
+		"WITH t AS (SELECT k, v FROM n) SELECT k FROM t ORDER BY v DESC, k",
+		"SELECT d, k FROM n ORDER BY k DESC",
+		"SELECT DISTINCT d FROM n ORDER BY d DESC LIMIT 5",
+		"WITH t AS (SELECT d, v FROM n) SELECT d FROM t ORDER BY v, d DESC",
+	} {
+		got, err := s.Query(ctx, q)
+		if err != nil {
+			t.Errorf("%s: %v", q, err)
+			continue
+		}
+		// The query itself, its times written back in SQLite's format.
+		want := sqliteQueryText(t, direct, q)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s:\n got %v\nwant %v", q, got, want)
+		}
+	}
+}
+
+// sqliteQueryText runs a query and reads its first column as text, a
+// time read back in SQLite's own format.
+func sqliteQueryText(t *testing.T, db *sql.DB, q string) []string {
+	t.Helper()
+	rows, err := db.Query(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	var out []string
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		rows.Scan(ptrs...)
+		switch v := vals[0].(type) {
+		case time.Time:
+			out = append(out, v.Format("2006-01-02 15:04:05"))
+		case []byte:
+			out = append(out, string(v))
+		default:
+			out = append(out, fmt.Sprint(v))
+		}
+	}
+	return out
+}
+
+// TestSQLiteSeedCleansUp: a seed that fails after the copy leaves no new
+// file behind, and the old pristine file as it was.
+func TestSQLiteSeedCleansUp(t *testing.T) {
+	s, _ := sqliteFixture(t, "wal", Options{})
+	old := sqlitePristineFP(t, s)
+	s.o.Replacing = func() error { return fmt.Errorf("no") }
+	if err := s.Seed(context.Background()); err == nil {
+		t.Fatal("the seed did not fail")
+	}
+	for _, suf := range []string{"", "-journal", "-wal", "-shm"} {
+		if _, err := os.Stat(s.o.Pristine + sqliteNew + suf); err == nil {
+			t.Errorf("%s is left", sqliteNew+suf)
+		}
+	}
+	s.pristine = nil
+	if d := Diff(sqlitePristineFP(t, s), old); len(d) > 0 {
+		t.Fatalf("the failed seed changed the pristine file: %v", d)
 	}
 }
