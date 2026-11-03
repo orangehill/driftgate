@@ -372,6 +372,19 @@ func (s *SQLServer) markValue(ctx context.Context, fallback, created string) (st
 	return string(b), err
 }
 
+// denied adds what the login lacks to an error of a seed or restore the
+// server refused for want of a right: to create a database (262), or to
+// open one it has no user in (916: a pristine copy another login made).
+func (s *SQLServer) denied(err error) error {
+	switch sqlServerNumber(err) {
+	case 262:
+		return fmt.Errorf("%w (the login needs the server role dbcreator to make the pristine copy; driftgate setup shows the statements)", err)
+	case 916:
+		return fmt.Errorf("%w (the login needs the server role dbcreator and db_owner in the working database, and a seed made with it; driftgate setup shows the statements)", err)
+	}
+	return err
+}
+
 // checkPristine refuses to drop or overwrite a database (the pristine copy
 // or a database Seed and Restore make next to it) that DriftGate did not
 // make for this working database: one with user objects, schemas or users

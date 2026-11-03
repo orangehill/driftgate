@@ -58,7 +58,8 @@ var ssInteger = regexp.MustCompile(`^-?[0-9]{1,38}$`)
 
 // Restore brings the given items of the working database back to the
 // pristine copy; nil means every item that differs.
-func (s *SQLServer) Restore(ctx context.Context, items []string) error {
+func (s *SQLServer) Restore(ctx context.Context, items []string) (err error) {
+	defer func() { err = s.denied(err) }()
 	if _, err := s.server(ctx); err != nil {
 		return err
 	}
@@ -189,11 +190,11 @@ func (s *SQLServer) differing(ctx context.Context, mark *sqlServerMark) ([]strin
 func (s *SQLServer) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
 	mark, err := s.pristineMark(ctx)
 	if err != nil {
-		return nil, err
+		return nil, s.denied(err)
 	}
 	p, err := s.pristineFingerprint(ctx, mark)
 	if err != nil {
-		return nil, err
+		return nil, s.denied(err)
 	}
 	return maps.Clone(p), nil
 }
