@@ -707,9 +707,9 @@ func TestSQLServerRestoreFailed(t *testing.T) {
 }
 
 // TestSQLServerRestoreNotOnline: a working database the user took offline
-// is brought online and restored, the rows of its excluded tables kept;
-// one restoring that DriftGate did not leave so, with tables excluded, is
-// refused.
+// is brought online and restored, the rows of its excluded tables kept (a
+// seed refuses it and names the restore); one restoring that DriftGate
+// did not leave so, with tables excluded, is refused.
 func TestSQLServerRestoreNotOnline(t *testing.T) {
 	ctx := context.Background()
 	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
@@ -723,6 +723,10 @@ func TestSQLServerRestoreNotOnline(t *testing.T) {
 	sqlServerExec(t, db, "INSERT INTO sessions VALUES (1),(2),(3)", "INSERT INTO users VALUES (2)")
 	db.SetMaxIdleConns(0)
 	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" SET OFFLINE WITH ROLLBACK IMMEDIATE")
+	// A seed does not copy it: it says what brings it back.
+	if err := s.Seed(ctx); err == nil || !strings.Contains(err.Error(), "is OFFLINE; run a capture or a restore first: it brings the database back from the pristine copy") {
+		t.Fatalf("seed of an offline working database: %v", err)
+	}
 	if err := s.Restore(ctx, nil); err != nil {
 		t.Fatal(err)
 	}

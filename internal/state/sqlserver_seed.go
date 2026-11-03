@@ -50,7 +50,9 @@ func (s *SQLServer) Seed(ctx context.Context) error {
 		return fmt.Errorf("state %s: working database %s does not exist", s.o.Name, s.o.Working)
 	}
 	if w.State != "ONLINE" {
-		return fmt.Errorf("state %s: working database %s is %s", s.o.Name, s.o.Working, w.State)
+		// A restore that stopped, or the user, left it so; a restore
+		// brings it back from the pristine copy.
+		return fmt.Errorf("state %s: working database %s is %s; run a capture or a restore first: it brings the database back from the pristine copy", s.o.Name, s.o.Working, w.State)
 	}
 	newDB := s.o.Pristine + "_dgnew"
 	if len([]rune(s.o.Pristine)) > 122 {
