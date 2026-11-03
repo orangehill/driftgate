@@ -253,7 +253,7 @@ func (s *SQLServer) leaveOutExcluded(ctx context.Context, db string) error {
 	if err != nil {
 		return err
 	}
-	g := ssGuardFor(inv, set, func(*ssTable) bool { return false })
+	g := ssGuardFor(inv, set, func(*ssTable) bool { return false }, false)
 	var b strings.Builder
 	b.WriteString("BEGIN TRANSACTION;\n" + g.offSQL())
 	for _, t := range inv.Tables {

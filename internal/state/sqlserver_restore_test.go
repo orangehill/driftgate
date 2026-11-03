@@ -500,7 +500,8 @@ func TestSQLServerRestoreExcluded(t *testing.T) {
 	if got := snapshot(); got != strings.Replace(want, "fk_sessions_users 00", "fk_sessions_users 01", 1) {
 		t.Fatalf("excluded after an item-level restore:\n%s\nwant\n%s", got, want)
 	}
-	sqlServerExec(t, db, "DELETE FROM sessions WHERE user_id = 3", "ALTER TABLE sessions WITH CHECK CHECK CONSTRAINT fk_sessions_users")
+	// The rows go back after a restore of the whole database too, the
+	// foreign key no longer trusted.
 	want = snapshot()
 	sqlServerExec(t, db, "ALTER VIEW v AS SELECT id, name FROM users")
 	if !restoreSQLServer(t, s, db, log, p) {

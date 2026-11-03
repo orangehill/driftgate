@@ -462,8 +462,9 @@ type ssTolerant struct{ table, schema, name string }
 // ssGuardFor is the guard of writing the rows of the tables in set.
 // tolerant tells the tables whose trusted foreign keys stay trusted only
 // when their rows allow it (excluded tables: their rows are not the
-// pristine copy's).
-func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bool) *ssGuard {
+// pristine copy's). With own, the rows written are such rows, so the
+// foreign keys of the tables in set are turned off too and checked after.
+func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bool, own bool) *ssGuard {
 	g := &ssGuard{}
 	var ddl []string
 	for _, tr := range inv.Triggers {
@@ -486,7 +487,7 @@ func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bo
 		}
 		alter := "ALTER TABLE " + child.qname()
 		switch {
-		case set[fk.Referenced]:
+		case set[fk.Referenced] || own && set[fk.Table]:
 			g.off = append(g.off, alter+" NOCHECK CONSTRAINT "+qs(fk.Name))
 			switch {
 			case fk.NotTrusted:
@@ -589,7 +590,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 	for _, rt := range plan.tables {
 		set[rt.w.ID] = true
 	}
-	g := ssGuardFor(winv, set, func(t *ssTable) bool { return t.Excluded })
+	g := ssGuardFor(winv, set, func(t *ssTable) bool { return t.Excluded }, false)
 	batch := "BEGIN TRANSACTION;\n" + g.offSQL() + s.restoreSQL(plan)
 	if len(g.tolerant) == 0 {
 		batch += ssStatements(g.checks) + ssStatements(g.triggers)
