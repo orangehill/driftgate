@@ -117,6 +117,18 @@ func TestSQLiteFile(t *testing.T) {
 		bad = append(bad, struct{ base, name string }{"", "C:x.db"}, struct{ base, name string }{"", "/x.db"})
 	}
 	if links {
+		// .. after a link goes up from where the link leads, as the system
+		// takes it: storage/../app.sqlite is shared/app.sqlite, not app.sqlite.
+		if err := os.Symlink(filepath.Join(root, "shared", "storage"), filepath.Join(root, "storage")); err != nil {
+			t.Fatal(err)
+		}
+		os.MkdirAll(filepath.Join(root, "shared", "storage"), 0o755)
+		if got, err := sqliteFile(root, "", "storage/../app.sqlite"); err != nil || got != "shared/app.sqlite" {
+			t.Errorf("storage/../app.sqlite: %q %v, want shared/app.sqlite", got, err)
+		}
+		os.Symlink(filepath.Join(outside, "sub"), filepath.Join(root, "ext"))
+		os.MkdirAll(filepath.Join(outside, "sub"), 0o755)
+		bad = append(bad, struct{ base, name string }{"", "ext/../app.sqlite"})
 		bad = append(bad, struct{ base, name string }{"", "out/x.db"}, struct{ base, name string }{"", "dangling"}, struct{ base, name string }{"", "dangling/x.db"})
 		if got, err := sqliteFile(root, "", "in/real.db"); err != nil || got != "in/real.db" {
 			t.Errorf("a link inside the project: %q %v", got, err)
@@ -131,12 +143,48 @@ func TestSQLiteFile(t *testing.T) {
 	}
 }
 
-// FuzzSQLitePath: whatever a setting names, the file read is inside the
-// project, past symbolic links, and the path is relative with /.
+// resolvePhysical resolves p as the system does when it opens it, with
+// Lstat and Readlink only (independent of physicalPath): each link is
+// replaced by its target before the components after it are taken.
+func resolvePhysical(p string) string {
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(p)
+	cur := vol + sep
+	todo := strings.Split(filepath.ToSlash(p[len(vol):]), "/")
+	for hops := 0; len(todo) > 0; {
+		c := todo[0]
+		todo = todo[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, c)
+		if fi, err := os.Lstat(next); err == nil && fi.Mode()&os.ModeSymlink != 0 && hops < 40 {
+			hops++
+			target, _ := os.Readlink(next)
+			if filepath.IsAbs(target) {
+				v := filepath.VolumeName(target)
+				cur, target = v+sep, target[len(v):]
+			}
+			todo = append(strings.Split(filepath.ToSlash(target), "/"), todo...)
+			continue
+		}
+		cur = next
+	}
+	return cur
+}
+
+// FuzzSQLitePath: whatever a setting names, the file the system would open
+// for it is inside the project, and is the file the path read names; the
+// path is relative with /.
 func FuzzSQLitePath(f *testing.F) {
 	for _, s := range []string{"db.sqlite", "../x.db", "..\\..\\x.db", "out/x.db", "C:\\x.db", "\\\\srv\\s\\x.db", "//srv/s/x.db",
 		"file:../x.db", "file:%2e%2e/x.db", "file:x.db?mode=ro#f", "file:///etc/x.db", "sqlite:////etc/x.db", "sqlite:///../x.db",
-		"sqlite3:../x.db", "Data Source=../x.db", "in/../../x.db", "in/x.db", "/", "a/./b/../../../x"} {
+		"sqlite3:../x.db", "Data Source=../x.db", "in/../../x.db", "in/x.db", "/", "a/./b/../../../x", "storage/../x.db",
+		"storage/../../x.db", "in/up/x.db", "nope/../storage/../x.db"} {
 		f.Add(s)
 	}
 	root := f.TempDir()
@@ -145,8 +193,10 @@ func FuzzSQLitePath(f *testing.F) {
 	if runtime.GOOS != "windows" {
 		os.Symlink(outside, filepath.Join(root, "out"))
 		os.Symlink("../..", filepath.Join(root, "in", "up"))
+		os.Symlink(filepath.Join("in", "deep"), filepath.Join(root, "storage"))
 	}
-	realRoot, err := filepath.EvalSymlinks(root)
+	absRoot, _ := filepath.Abs(root)
+	realRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -155,6 +205,7 @@ func FuzzSQLitePath(f *testing.F) {
 		if err != nil || p.driver != SQLite {
 			p = parts{driver: SQLite, name: v}
 		}
+		n := strings.ReplaceAll(p.name, `\`, "/")
 		for _, base := range []string{"", "in", "in/deep"} {
 			r, err := sqliteFile(root, base, p.name)
 			if err != nil {
@@ -163,17 +214,17 @@ func FuzzSQLitePath(f *testing.F) {
 			if r == "" || filepath.IsAbs(r) || strings.Contains(r, `\`) || r == ".." || strings.HasPrefix(r, "../") || strings.Contains(r, "/../") {
 				t.Fatalf("%q in %s: %q is not a path inside the project", v, base, r)
 			}
-			real := filepath.Join(realRoot, filepath.FromSlash(r))
-			dir, tail := real, ""
-			for {
-				if res, err := filepath.EvalSymlinks(dir); err == nil {
-					real = filepath.Join(res, tail)
-					break
-				}
-				dir, tail = filepath.Dir(dir), filepath.Join(filepath.Base(dir), tail)
+			opened := absRoot + "/" + base + "/" + n
+			if strings.HasPrefix(n, "/") || len(n) >= 2 && isLetter(n[0]) && n[1] == ':' {
+				opened = n
 			}
-			if rel, err := filepath.Rel(realRoot, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				t.Fatalf("%q in %s: %q leads outside the project (%s)", v, base, r, real)
+			want := resolvePhysical(filepath.FromSlash(opened))
+			got := resolvePhysical(filepath.Join(realRoot, filepath.FromSlash(r)))
+			if got != want {
+				t.Fatalf("%q in %s: %q is %s, the system opens %s", v, base, r, got, want)
+			}
+			if rel, err := filepath.Rel(realRoot, got); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				t.Fatalf("%q in %s: %q leads outside the project (%s)", v, base, r, got)
 			}
 		}
 	})
@@ -201,7 +252,7 @@ func TestSQLiteFind(t *testing.T) {
 			name:  "laravel relative",
 			files: map[string]string{"artisan": "", ".env": "DB_CONNECTION=sqlite\nDB_DATABASE=storage/app.sqlite\n"},
 			paths: []string{"storage/app.sqlite <- dotenv .env "},
-			notes: []string{"DB_DATABASE is a relative path, which Laravel opens from the folder PHP runs in"},
+			notes: []string{"DB_DATABASE is a relative path: Laravel 11 and later open it from the folder PHP runs in"},
 		},
 		{
 			name:  "laravel outside",

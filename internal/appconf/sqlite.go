@@ -31,8 +31,12 @@ const sqliteReady = true
 const sqliteDefault = "database/database.sqlite"
 
 // isSQLiteValue reports a DSN that is the name of an SQLite file: one
-// ending in .db, .sqlite or .sqlite3 (fromValue, after the other forms).
+// ending in .db, .sqlite or .sqlite3 (fromValue, after the other forms),
+// with no scheme before it (a drive letter is none).
 func isSQLiteValue(v string) bool {
+	if scheme, _, ok := strings.Cut(v, ":"); ok && isScheme(scheme) {
+		return false
+	}
 	lv := strings.ToLower(v)
 	return strings.HasSuffix(lv, ".db") || strings.HasSuffix(lv, ".sqlite") || strings.HasSuffix(lv, ".sqlite3")
 }
@@ -40,14 +44,36 @@ func isSQLiteValue(v string) bool {
 // sqliteValue reads a DSN that starts with a scheme only SQLite takes:
 // sqlite: (also sqlite+pysqlite:), sqlite3:, spatialite: or file:. It is
 // tried before the other forms, as such a URL may hold an = in its query.
-// ok is false for any other DSN.
+// A file of another engine (h2:file:app.db, derby:app.db, the jdbc: cut)
+// is that engine's, not an SQLite file for its .db. ok is false for any
+// other DSN.
 func sqliteValue(v string) (p parts, ok bool, err error) {
 	scheme, _, found := strings.Cut(v, ":")
-	if !found || !sqliteScheme(scheme) {
+	if !found || !isScheme(scheme) {
+		return parts{}, false, nil
+	}
+	if !sqliteScheme(scheme) {
+		if _, other := driverName(scheme); other != "" && !strings.Contains(v, "://") {
+			return parts{other: other}, true, nil
+		}
 		return parts{}, false, nil
 	}
 	p, err = fromSQLiteValue(v)
 	return p, true, err
+}
+
+// isScheme reports a URL scheme: a letter, then letters, digits, + - and
+// ., two characters at least (C: is a drive).
+func isScheme(s string) bool {
+	if len(s) < 2 || !isLetter(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if c := s[i]; !isLetter(c) && !('0' <= c && c <= '9') && c != '+' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // sqliteScheme reports a URL scheme that names SQLite.
@@ -70,7 +96,9 @@ const errMemory = constError("an in-memory SQLite database (:memory:) lives only
 //     its ?query and #fragment left out, %HH decoded;
 //   - sqlite:///NAME (relative), sqlite:////ABS, as SQLAlchemy, Laravel's
 //     DB_URL and dj-database-url write them; sqlite:NAME;
-//   - sqlite3:NAME, sqlite3:///ABS, as Rails writes them.
+//   - sqlite3:NAME, sqlite3:///ABS, as Rails writes them, %HH decoded.
+//
+// Only file: takes a host, localhost.
 //
 // The name is left in p.name, for resolveSQLite.
 func fromSQLiteValue(v string) (parts, error) {
@@ -93,7 +121,7 @@ func fromSQLiteValue(v string) (parts, error) {
 	}
 	if auth, ok := strings.CutPrefix(rest, "//"); ok {
 		host, name, _ := strings.Cut(auth, "/")
-		if host != "" && !strings.EqualFold(host, "localhost") {
+		if host != "" && !(scheme == "file" && strings.EqualFold(host, "localhost")) {
 			return parts{}, errors.New("the SQLite URL names a host; an SQLite database is a file of this machine (the value is not shown)")
 		}
 		switch {
@@ -105,7 +133,7 @@ func fromSQLiteValue(v string) (parts, error) {
 			rest = "/" + name
 		}
 	}
-	if scheme == "file" {
+	if scheme == "file" || scheme == "sqlite3" {
 		dec, err := percentDecode(rest)
 		if err != nil {
 			return parts{}, err
@@ -125,7 +153,8 @@ func fromSQLiteValue(v string) (parts, error) {
 	return p, nil
 }
 
-// percentDecode decodes the %HH of a file: URI, as SQLite does.
+// percentDecode decodes the %HH of a file: URI, as SQLite does (and of a
+// sqlite3: URL, as Rails does).
 func percentDecode(s string) (string, error) {
 	if !strings.Contains(s, "%") {
 		return s, nil
@@ -183,6 +212,9 @@ func sqliteConnString(kv fields) (p parts, ok bool, err error) {
 			return parts{}, false, nil
 		}
 	}
+	if _, ok := kv["password"]; ok {
+		return parts{}, true, errors.New("the SQLite file of the connection string is encrypted (Password=); DriftGate cannot read it")
+	}
 	if strings.EqualFold(name, ":memory:") || strings.EqualFold(kv["mode"], "memory") {
 		return parts{}, true, errMemory
 	}
@@ -221,12 +253,13 @@ func laravelSQLite(file string, env map[string]string) (parts, error) {
 	switch {
 	case p.name == "":
 		p.file = sqliteDefault
-	case p.name == ":memory:":
+	case p.name == ":memory:", strings.Contains(strings.ToLower(p.name), "mode=memory"):
 		return parts{}, fmt.Errorf("%s: %s: %w", file, from, errMemory)
 	case !sqliteAbs(p.name):
-		// Laravel opens a relative file from the folder PHP runs in: the
-		// project root for artisan, public/ for PHP-FPM.
-		p.note = from + " is a relative path, which Laravel opens from the folder PHP runs in (the project root for artisan, public/ under PHP-FPM); DriftGate takes it relative to the project root: make it absolute, or leave DB_DATABASE unset for database/database.sqlite"
+		// Laravel 11 and later: realpath($path) ?: realpath(base_path($path)),
+		// the folder PHP runs in first; Laravel 10 and before that folder
+		// only (public/ under php artisan serve and PHP-FPM).
+		p.note = from + " is a relative path: Laravel 11 and later open it from the folder PHP runs in when it is there, else from the project root; Laravel 10 and before only from the folder PHP runs in (public/ under php artisan serve and PHP-FPM); DriftGate takes it relative to the project root: make it absolute, or leave DB_DATABASE unset for database/database.sqlite"
 	}
 	return p, nil
 }
@@ -298,9 +331,11 @@ func sqliteResolved(root string, r Ref, p parts, base, name string) (parts, erro
 
 // sqliteFile is the database file name names, relative to base (a folder
 // relative to root with /; name may be absolute), as a path relative to
-// root with /. The file must be inside root, past any symbolic links, also
-// when it does not exist yet; it is looked at, never opened. No error
-// quotes the name.
+// root with /. The path is resolved as the system opens it: component by
+// component, each symbolic link followed before a .. after it is taken,
+// so storage/../app.db with storage a link to var/storage is var/app.db.
+// The file must be inside root, also when it does not exist yet; it is
+// looked at, never opened. No error quotes the name.
 func sqliteFile(root, base, name string) (string, error) {
 	n := strings.ReplaceAll(name, `\`, "/") // as CheckFile takes it, so ..\ cannot escape on Windows
 	switch {
@@ -319,52 +354,31 @@ func sqliteFile(root, base, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("the project folder: %w", unwrapPath(err))
 	}
-	var abs string
+	sep := string(filepath.Separator)
+	var raw string // not cleaned: a .. is taken where the system takes it
 	switch drive := len(n) >= 2 && isLetter(n[0]) && n[1] == ':'; {
 	case drive && runtime.GOOS != "windows":
 		return "", errors.New("the SQLite file is a Windows path, outside the project on this system")
 	case drive && (len(n) < 3 || n[2] != '/'):
 		return "", errors.New("the SQLite file is relative to a drive (C:name); write it relative to the project or in full")
-	case drive:
-		abs = filepath.Clean(filepath.FromSlash(n))
-	case strings.HasPrefix(n, "/"):
-		if runtime.GOOS == "windows" {
+	case drive, strings.HasPrefix(n, "/"):
+		if !drive && runtime.GOOS == "windows" {
 			return "", errors.New("the SQLite file is a path without a drive; write it relative to the project or in full")
 		}
-		abs = filepath.Clean(n)
+		raw = filepath.FromSlash(n)
 	default:
-		abs = filepath.Join(absRoot, filepath.FromSlash(base), filepath.FromSlash(n))
+		raw = absRoot + sep + filepath.FromSlash(base) + sep + filepath.FromSlash(n)
 	}
-	rel, ok := within(absRoot, abs)
+	real, err := physicalPath(raw)
+	if err != nil {
+		return "", err
+	}
+	rel, ok := within(realRoot, real)
 	if !ok {
-		if rel, ok = within(realRoot, abs); !ok {
-			return "", errors.New("the SQLite file is outside the project; DriftGate restores a file of the project only")
+		if _, lexical := within(absRoot, filepath.Clean(raw)); lexical {
+			return "", errors.New("the SQLite file: a symbolic link leads outside the project")
 		}
-	}
-	// Past symbolic links: the longest part of the path that exists,
-	// resolved, with the rest after it.
-	real := filepath.Join(realRoot, rel)
-	dir, tail := real, ""
-	for {
-		r, err := filepath.EvalSymlinks(dir)
-		if err == nil {
-			real = filepath.Join(r, tail)
-			break
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("the SQLite file: %w", unwrapPath(err))
-		}
-		if _, err := os.Lstat(dir); err == nil {
-			return "", errors.New("the SQLite file: a symbolic link leads nowhere, or outside the project")
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", errors.New("the SQLite file: its folder does not exist")
-		}
-		dir, tail = parent, filepath.Join(filepath.Base(dir), tail)
-	}
-	if _, ok := within(realRoot, real); !ok {
-		return "", errors.New("the SQLite file: a symbolic link leads outside the project")
+		return "", errors.New("the SQLite file is outside the project; DriftGate restores a file of the project only")
 	}
 	if rel == "." {
 		return "", errors.New("the SQLite file is the project folder")
@@ -372,7 +386,57 @@ func sqliteFile(root, base, name string) (string, error) {
 	if fi, err := os.Stat(real); err == nil && fi.IsDir() {
 		return "", errors.New("the SQLite file is a folder")
 	}
+	// The path as the setting writes it, when it is the same file (a link
+	// inside the project kept); else the one the system opens.
+	for _, dir := range []string{absRoot, realRoot} {
+		if lex, ok := within(dir, filepath.Clean(raw)); ok {
+			if again, err := physicalPath(filepath.Join(realRoot, lex)); err == nil && again == real {
+				return filepath.ToSlash(lex), nil
+			}
+		}
+	}
 	return filepath.ToSlash(rel), nil
+}
+
+// physicalPath is the absolute path p as the system resolves it when it
+// opens it: from the root of its volume, component by component, a
+// symbolic link followed before a .. after it goes up. A part that does
+// not exist yet is kept as written; a link that leads nowhere is refused.
+func physicalPath(p string) (string, error) {
+	vol := filepath.VolumeName(p)
+	cur := vol + string(filepath.Separator)
+	missing := false
+	for _, c := range strings.Split(filepath.ToSlash(p[len(vol):]), "/") {
+		switch c {
+		case "", ".":
+			continue
+		case "..": // after a part that does not exist, which is no link, it goes back up that part
+			cur = filepath.Dir(cur)
+			if missing {
+				_, err := os.Lstat(cur)
+				missing = err != nil
+			}
+			continue
+		}
+		next := filepath.Join(cur, c)
+		if missing {
+			cur = next
+			continue
+		}
+		r, err := filepath.EvalSymlinks(next)
+		switch {
+		case err == nil:
+			cur = r
+		case errors.Is(err, os.ErrNotExist):
+			if _, err := os.Lstat(next); err == nil {
+				return "", errors.New("the SQLite file: a symbolic link leads nowhere, or outside the project")
+			}
+			missing, cur = true, next
+		default:
+			return "", fmt.Errorf("the SQLite file: %w", unwrapPath(err))
+		}
+	}
+	return cur, nil
 }
 
 // within is p relative to dir when p is dir or inside it.
@@ -382,6 +446,34 @@ func within(dir, p string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+// SQLiteFile is the database file an SQLite DSN of the environment or
+// 1Password names, relative to the project root with /, read as Find and
+// Ref.Read read a setting (the one resolver of SQLite paths): variable is
+// the environment variable that holds it ("" for none), which says
+// whether Prisma takes it from schema.prisma's folder. No error quotes
+// the value.
+func SQLiteFile(root, variable, value string) (string, error) {
+	v := strings.TrimSpace(value)
+	p, err := fromValue(v)
+	if err != nil && v != "" && !strings.ContainsAny(v, ":=;") { // a path without a known ending
+		p, err = parts{driver: SQLite, name: v}, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if p.driver != SQLite || p.other != "" {
+		return "", errors.New("not the path of an SQLite file, a file: URI or an sqlite: URL (the value is not shown)")
+	}
+	p, err = resolveSQLite(root, Ref{Source: Env, Key: variable}, p)
+	if err != nil {
+		if inner := errors.Unwrap(err); inner != nil {
+			return "", inner // without the variable, which the caller names
+		}
+		return "", err
+	}
+	return p.file, nil
 }
 
 // sqliteDSN is the DSN of an SQLite setting (parts.dsn): none, as the

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/orangehill/driftgate/internal/appconf"
 )
 
 // TestSQLiteAndSQLServerValidation: sqlite and sqlserver (also mssql) are
@@ -99,20 +101,55 @@ func TestReadDSNSQLite(t *testing.T) {
 	}
 }
 
-// TestSQLiteDSNFile: the file an SQLite DSN names.
-func TestSQLiteDSNFile(t *testing.T) {
-	for v, want := range map[string]string{
-		"app.db": "app.db", "database/app.sqlite": "database/app.sqlite", "/srv/app.db": "/srv/app.db",
-		"file:app.db": "app.db", "file:app.db?mode=ro#x": "app.db", "file:///srv/a%20b.db": "/srv/a b.db",
-		"file://localhost/srv/app.db": "/srv/app.db", "file:///C:/data/app.db": "C:/data/app.db",
-		"sqlite:///app.db": "app.db", "sqlite:////srv/app.db": "/srv/app.db", "sqlite:app.db": "app.db",
-		"": "", ":memory:": "", "file::memory:?cache=shared": "", "file://host/app.db": "", "sqlite://host/app.db": "",
-		"postgres://u:p@h/db": "", "Data Source=app.db": "", "file:a%zz.db": "",
-	} {
-		got, ok := sqliteDSNFile(v)
-		if got != want || ok != (want != "") {
-			t.Errorf("%q: %q %v, want %q", v, got, ok, want)
+// TestSQLiteDSNAsFound: an SQLite DSN of the environment is read as
+// appconf reads the setting (one resolver): Find's file is working, and
+// ReadDSN takes it; Prisma's file: URL relative to schema.prisma, Rails'
+// sqlite3:, SQLAlchemy's sqlite:///.
+func TestSQLiteDSNAsFound(t *testing.T) {
+	project := func(prisma bool) string {
+		root := t.TempDir()
+		files := map[string]string{"prisma/dev.db": "", "storage/dev.sqlite3": "", "dev.db": ""}
+		if prisma {
+			files["prisma/schema.prisma"] = "datasource db {\n provider = \"sqlite\"\n url = env(\"DATABASE_URL\")\n}\n"
 		}
+		for name, content := range files {
+			os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o755)
+			if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	withPrisma, without := project(true), project(false)
+	for _, c := range []struct{ root, v, want string }{
+		{withPrisma, "file:./dev.db", "prisma/dev.db"},
+		{withPrisma, "sqlite:///dev.db", "prisma/dev.db"},
+		{without, "file:./dev.db", "dev.db"},
+		{without, "sqlite3:storage/dev.sqlite3", "storage/dev.sqlite3"},
+		{without, "spatialite:storage/dev.sqlite3", "storage/dev.sqlite3"},
+		{without, "file:storage/dev%2Esqlite3?mode=rw", "storage/dev.sqlite3"},
+	} {
+		t.Setenv("DATABASE_URL", c.v)
+		var found []string
+		for _, d := range appconf.Find(c.root, os.LookupEnv).Databases {
+			if d.Ref.Source != appconf.Env {
+				continue
+			}
+			found = append(found, d.Path)
+			comp := Component{Driver: SQLite, Working: d.Path, DSN: SecretFor(d.Ref)}
+			if _, err := comp.ReadDSN(context.Background(), c.root); err != nil {
+				t.Errorf("%s: ReadDSN of working %s: %v", c.v, d.Path, err)
+			}
+		}
+		if len(found) != 1 || found[0] != c.want {
+			t.Errorf("%s: found %q, want %s", c.v, found, c.want)
+		}
+	}
+	// Another variable than schema.prisma's is taken from the root.
+	comp := Component{Driver: SQLite, Working: "dev.db", DSN: Secret{Env: "DG_TEST_SQLITE_DSN"}}
+	t.Setenv("DG_TEST_SQLITE_DSN", "file:./dev.db")
+	if _, err := comp.ReadDSN(context.Background(), withPrisma); err != nil {
+		t.Errorf("another variable: %v", err)
 	}
 }
 

@@ -170,7 +170,7 @@ func (c Component) ReadDSN(ctx context.Context, root string) (string, error) {
 		return "", err
 	}
 	if c.Driver == SQLite && (c.DSN.Env != "" || c.DSN.Op != "") {
-		if err := checkSQLiteDSN(root, dsn, c.Working); err != nil {
+		if err := checkSQLiteDSN(root, c.DSN.Env, dsn, c.Working); err != nil {
 			return "", err
 		}
 	}

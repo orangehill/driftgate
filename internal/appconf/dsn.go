@@ -286,7 +286,7 @@ func fromURL(v string) (parts, error) {
 	var p parts
 	p.setDriver(u.Scheme)
 	if p.driver == "" && p.other == "" {
-		return parts{}, fmt.Errorf("a %s:// URL names no database DriftGate knows (mysql, postgres)", printable(u.Scheme))
+		return parts{}, fmt.Errorf("a %s:// URL names no database DriftGate knows (%s)", printable(u.Scheme), driverList())
 	}
 	switch p.driver {
 	case "":

@@ -133,7 +133,7 @@ func TestFromValue(t *testing.T) {
 		// Others.
 		{"sqlite:///var/data.db", MySQL, "", "x names a sqlite database, the driver is mysql"},
 		{"sqlsrv://u:p@db/app", MySQL, "", "x names SQL Server; " + restores()},
-		{"redis://u:p@db", MySQL, "", "a redis:// URL names no database DriftGate knows (mysql, postgres)"},
+		{"redis://u:p@db", MySQL, "", "a redis:// URL names no database DriftGate knows (" + driverList() + ")"},
 		{"mysql://u:p@db/app", Postgres, "", "x names a mysql database, the driver is postgres"},
 		{"mysql://u:p%zz@db/app", MySQL, "", errURL.Error()},
 		{"just text", MySQL, "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
