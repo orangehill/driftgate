@@ -258,7 +258,11 @@ func readAppSettings(root, file, key string, env Lookup) (parts, error) {
 	if strings.TrimSpace(v) == "" {
 		return parts{}, fmt.Errorf("%s: %s is not set", file, key)
 	}
-	return fromValue(v)
+	p, err := fromValue(v)
+	if err != nil {
+		return parts{}, err
+	}
+	return sqlServerClientOf(root, file, p), nil
 }
 
 // csprojDriver is the database a project's packages use: mysql, postgres,

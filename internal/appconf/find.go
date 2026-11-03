@@ -60,7 +60,7 @@ func (f *finder) add(r Ref, hint, other string) {
 		p.driver, p.other = hint, other
 	}
 	if p.other != "" {
-		f.note(file, r.where()+" names "+p.other+"; DriftGate restores MySQL, MariaDB and PostgreSQL")
+		f.note(file, r.where()+" names "+p.other+"; DriftGate restores "+restored(" and "))
 		return
 	}
 	d := p.database()
@@ -69,7 +69,10 @@ func (f *finder) add(r Ref, hint, other string) {
 		d.Note = "set in this shell's environment; it must be set when DriftGate runs"
 	}
 	if d.Driver == "" {
-		d.Note = join(d.Note, "the setting does not say which database it is: set driver (mysql or postgres)")
+		d.Note = join(d.Note, "the setting does not say which database it is: set driver ("+driverNames(" or ")+")")
+	}
+	if d.Driver == SQLServer {
+		d.Note = join(d.Note, p.sqlServerNote())
 	}
 	if hp := p.hostNeeded(r, d.Driver); hp != "" {
 		d.HostNeeded = hp
@@ -436,10 +439,7 @@ func (f *finder) compose() {
 		if !ok || d.Ref.Source == Compose || d.Ref.Source == Env {
 			continue
 		}
-		target := "3306"
-		if imageDriver(cp.services[svc].image) == Postgres {
-			target = "5432"
-		}
+		target := defaultPort(imageDriver(cp.services[svc].image))
 		if d.Port != "" {
 			target = d.Port
 		}

@@ -99,7 +99,7 @@ func TestFind(t *testing.T) {
 		{
 			dir:   "dotnet-pg",
 			dbs:   []string{"postgres localhost:5432/app app <- appsettings Api/Api.csproj ConnectionStrings:AppDb"},
-			notes: []string{"Legacy/Legacy.csproj: ConnectionStrings:DefaultConnection names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
+			notes: []string{"Legacy/Legacy.csproj: ConnectionStrings:DefaultConnection: " + errSQLServerLocalDB.Error()},
 			dsns:  []string{"postgres://app:S3cr-npgsql@localhost:5432/"},
 		},
 		{

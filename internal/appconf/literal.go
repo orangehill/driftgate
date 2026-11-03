@@ -388,6 +388,7 @@ func literalSetting(v any, file, key, lang string) (parts, error) {
 		return parts{}, fmt.Errorf("%s: %s is not an array of settings, or is computed by %s code", file, key, lang)
 	}
 	f, coded := literalFields(m)
+	sqlServerOptions(m, f)
 	slices.Sort(coded)
 	for _, k := range coded {
 		switch fieldKey(k) {
