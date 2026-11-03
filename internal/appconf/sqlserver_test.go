@@ -19,7 +19,7 @@ func TestSQLServerForms(t *testing.T) {
 		{"Server=tcp:db.prod,1433;Initial Catalog=Shop;User ID=app;Password=p;Encrypt=True;TrustServerCertificate=False", "sqlserver://app:p@db.prod:1433?encrypt=true", ""},
 		{"Server=db.prod;Database=Shop;User Id=app;Password=p", "sqlserver://app:p@db.prod:1433?encrypt=true", ""},
 		{"Data Source=db.prod,14331;Initial Catalog=Shop;UID=app;PWD=p;Encrypt=Strict;TrustServerCertificate=true", "sqlserver://app:p@db.prod:14331?encrypt=strict", ""},
-		{"Server=db.prod\\SHOP,1533;Database=Shop;User Id=app;Password=p;Encrypt=false", "sqlserver://app:p@db.prod:1533?TrustServerCertificate=true&encrypt=false", ""},
+		{"Server=db.prod\\SHOP,1533;Database=Shop;User Id=app;Password=p;Encrypt=false", "sqlserver://app:p@db.prod:1533?encrypt=false", ""},
 		{"Server=localhost,1433;Database=Shop;User Id=sa;Password=p;Encrypt=Optional;TrustServerCertificate=yes", "sqlserver://sa:p@localhost:1433?TrustServerCertificate=true&encrypt=false", ""},
 		{"Server=.;Database=Shop;User Id=sa;Password=p;MultipleActiveResultSets=true", "sqlserver://sa:p@127.0.0.1:1433?encrypt=true", ""},
 		{"Server=(local);Database=Shop;User Id=sa;Password=p;Trusted_Connection=False", "sqlserver://sa:p@127.0.0.1:1433?encrypt=true", ""},
@@ -31,14 +31,17 @@ func TestSQLServerForms(t *testing.T) {
 		{"Driver={ODBC Driver 18 for SQL Server};Server=tcp:db.prod,1433;Database=Shop;Uid=app;Pwd=p", "sqlserver://app:p@db.prod:1433?encrypt=true", ""},
 		{"Driver={ODBC Driver 17 for SQL Server};Server=db.prod;Database=Shop;Uid=app;Pwd=p", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", ""},
 		{"Driver={ODBC Driver 17 for SQL Server};Server=db.prod;Uid=app;Pwd={p;}}q};Encrypt=yes;TrustServerCertificate=yes", "sqlserver://app:p;%7Dq@db.prod:1433?TrustServerCertificate=true&encrypt=true", ""},
-		{"Driver=FreeTDS;Server=db.prod;Port=1533;Uid=app;Pwd=p", "sqlserver://app:p@db.prod:1533?TrustServerCertificate=true&encrypt=false", ""},
+		{"Driver=FreeTDS;Server=db.prod;Port=1533;Uid=app;Pwd=p", "sqlserver://app:p@db.prod:1533?encrypt=true", ""}, // freetds.conf may ask for TLS
+		{"Driver=FreeTDS;Server=db.prod;Port=1533;Uid=app;Pwd=p;Encryption=require", "sqlserver://app:p@db.prod:1533?TrustServerCertificate=true&encrypt=true", ""},
+		{"Driver=FreeTDS;Server=db.prod;Uid=app;Pwd=p;Encryption=request", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", ""},
+		{"Driver={ODBC Driver 18 for SQL Server};Server=db.prod;Uid=app;Pwd=p;Encrypt=no", "sqlserver://app:p@db.prod:1433?encrypt=false", ""},
 		{"odbc:server=db.prod;user id=app;password={a;b};encrypt=true", "sqlserver://app:a;b@db.prod:1433?encrypt=true", ""},
 		// JDBC and Prisma: encrypt and verify by default.
 		{"jdbc:sqlserver://db.prod:1433;databaseName=Shop;user=app;password={p;w}}};trustServerCertificate=true", "sqlserver://app:p;w%7D@db.prod:1433?TrustServerCertificate=true&encrypt=true", ""},
-		{"jdbc:sqlserver://db.prod\\SHOP:1533;databaseName=Shop;user=app;password=p;encrypt=false", "sqlserver://app:p@db.prod:1533?TrustServerCertificate=true&encrypt=false", ""},
+		{"jdbc:sqlserver://db.prod\\SHOP:1533;databaseName=Shop;user=app;password=p;encrypt=false", "sqlserver://app:p@db.prod:1533?encrypt=false", ""},
 		{"jdbc:sqlserver://;serverName=db.prod;portNumber=1533;user=app;password=p;hostNameInCertificate=*.example.com;sslProtocol=TLSv1.3", "sqlserver://app:p@db.prod:1533?encrypt=true&hostNameInCertificate=%2A.example.com&tlsmin=1.3", ""},
 		{"sqlserver://localhost:1433;database=Shop;user=SA;password=p;encrypt=true;trustServerCertificate=true", "sqlserver://SA:p@localhost:1433?TrustServerCertificate=true&encrypt=true", ""},
-		{"sqlserver://db.prod:1433;database=Shop;user=app;password=p;encrypt=DANGER_PLAINTEXT", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", ""},
+		{"sqlserver://db.prod:1433;database=Shop;user=app;password=p;encrypt=DANGER_PLAINTEXT", "sqlserver://app:p@db.prod:1433?encrypt=false", ""},
 		{"sqlserver://db.prod:1433;database=Shop;user=app;password=p;trustServerCertificateCA=/ca.pem", "sqlserver://app:p@db.prod:1433?certificate=%2Fca.pem&encrypt=true", ""},
 		// go-mssqldb: by default the data is not encrypted, the login is,
 		// without verifying the certificate.
@@ -46,7 +49,7 @@ func TestSQLServerForms(t *testing.T) {
 		{"sqlserver://app:p%40q@db.prod/SHOP?database=Shop&port=1533&encrypt=true&TrustServerCertificate=true&app+name=x", "sqlserver://app:p%40q@db.prod:1533?TrustServerCertificate=true&encrypt=true", ""},
 		{"sqlserver://app:p@db.prod?database=Shop&encrypt=strict&certificate=/ca.pem", "sqlserver://app:p@db.prod:1433?certificate=%2Fca.pem&encrypt=strict", ""},
 		// Prisma's and go-mssqldb's plaintext: DriftGate still encrypts the login.
-		{"sqlserver://app:p@db.prod:1433?encrypt=disable", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", ""},
+		{"sqlserver://app:p@db.prod:1433?encrypt=disable", "sqlserver://app:p@db.prod:1433?encrypt=false", ""},
 		// Encrypt false with a certificate to verify the login with.
 		{"Server=db,1433;User Id=app;Password=p;Encrypt=false;ServerCertificate=/s.pem", "sqlserver://app:p@db:1433?encrypt=false&serverCertificate=%2Fs.pem", ""},
 		// Laravel's and Node's URLs: the path is the database.
@@ -83,6 +86,17 @@ func TestSQLServerForms(t *testing.T) {
 		{"sqlserver://app:p@db.prod:1433?database=a&Database=b", "", "gives a parameter twice"},
 		{"sqlserver://app:p@db.prod:1433?frobnicate=1", "", "parameter frobnicate of the sqlserver:// URL is not supported"},
 		{"Driver={ODBC Driver 18 for SQL Server};DSN=shop;Uid=app;Pwd=p", "", "ODBC data source"},
+		{"Driver={ODBC Driver 18 for SQL Server};Server=db,1433;Uid=app;Pwd=p;Encrypt=yes;encrypt=no", "", "a key is given twice"},
+		{"jdbc:sqlserver://db:1433;user=app;password=p;encrypt=true;Encrypt=false", "", "a key is given twice"},
+		{"Driver={ODBC Driver 18 for SQL Server};Server=db;Port=1533;Uid=app;Pwd=p", "", "Port="},
+		{"Server=db,1433;Data Source=evil,1433;User Id=app;Password=p;MultipleActiveResultSets=true", "", "gives the server (Server, Data Source, Address) twice"},
+		{"Server=db,1433;Database=a;Initial Catalog=b;User Id=app;Password=p", "", "gives the database (Database, Initial Catalog) twice"},
+		{"Server=db,1433;User Id=app;UID=other;Password=p", "", "gives the user"},
+		{"Server=db,1433;User Id=app;Password=p;PWD=q", "", "gives the password"},
+		{"Driver={ODBC Driver 18 for SQL Server};Server=db,1433;Address=evil;Uid=app;Pwd=p", "", "gives the server"},
+		{"jdbc:sqlserver://db:1433;serverName=evil;user=app;password=p", "", "gives the server twice"},
+		{"jdbc:sqlserver://db:1433;portNumber=1533;user=app;password=p", "", "two different ports"},
+		{"Server=db;Database=a;Initial Catalog=b;User Id=app;Password=p", "", "gives the database"},
 	} {
 		got, err := Convert(tt.in, SQLServer)
 		if tt.err != "" {
@@ -139,9 +153,9 @@ func TestSQLServerProjects(t *testing.T) {
 		{"Microsoft.Data.SqlClient 5", map[string]string{"Api/Api.csproj": csproj("Microsoft.Data.SqlClient", "5.2.1"), "Api/appsettings.json": conn},
 			Ref{Source: AppSettings, File: "Api/Api.csproj", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=true", "Shop"},
 		{"Microsoft.Data.SqlClient 3", map[string]string{"Api/Api.csproj": csproj("Microsoft.Data.SqlClient", "3.1.5"), "Api/appsettings.json": conn},
-			Ref{Source: AppSettings, File: "Api/Api.csproj", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", "Shop"},
+			Ref{Source: AppSettings, File: "Api/Api.csproj", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=false", "Shop"},
 		{"EF Core 6", map[string]string{"Api/Api.csproj": csproj("Microsoft.EntityFrameworkCore.SqlServer", "6.0.33"), "Api/appsettings.json": conn},
-			Ref{Source: AppSettings, File: "Api/appsettings.json", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", "Shop"},
+			Ref{Source: AppSettings, File: "Api/appsettings.json", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=false", "Shop"},
 		{"System.Data.SqlClient", map[string]string{"Api/Api.csproj": csproj("System.Data.SqlClient", "4.8.6"), "Api/appsettings.json": conn},
 			Ref{Source: AppSettings, File: "Api/Api.csproj", Key: "ConnectionStrings:Default"}, nil, "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", "Shop"},
 		{"central versions", map[string]string{"Api/Api.csproj": `<Project><ItemGroup><PackageReference Include="Microsoft.Data.SqlClient" /></ItemGroup></Project>`, "Api/appsettings.json": conn},
@@ -166,7 +180,7 @@ func TestSQLServerProjects(t *testing.T) {
 		{"Prisma", map[string]string{".env": "DATABASE_URL=\"sqlserver://db.prod:1433;database=shop;user=app;password={p;q};encrypt=true\"\n"},
 			Ref{Source: Dotenv, File: ".env", Key: "DATABASE_URL"}, nil, "sqlserver://app:p;q@db.prod:1433?encrypt=true", "shop"},
 		{"Rails", map[string]string{"config/database.yml": "development:\n  adapter: sqlserver\n  host: db.prod\n  port: 1433\n  database: shop\n  username: app\n  password: p\n"},
-			Ref{Source: YAML, File: "config/database.yml", Key: "development"}, nil, "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", "shop"},
+			Ref{Source: YAML, File: "config/database.yml", Key: "development"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=true", "shop"},
 		{"Go config.yaml", map[string]string{"config.yaml": "database:\n  url: sqlserver://app:p@db.prod:1433?database=shop&encrypt=true\n"},
 			Ref{Source: YAML, File: "config.yaml", Key: "database"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=true", "shop"},
 		{"compose", map[string]string{"compose.yaml": "services:\n  db:\n    image: mcr.microsoft.com/mssql/server:2022-latest\n    environment:\n      MSSQL_SA_PASSWORD: p@ss;w0rd\n      MSSQL_TCP_PORT: \"1533\"\n    ports: [\"14331:1533\"]\n"},
@@ -292,7 +306,7 @@ func TestSQLServerNotes(t *testing.T) {
 	if !strings.Contains(a, "the server is ., the local one") || !strings.Contains(a, "leaves Encrypt to the application's client") {
 		t.Errorf("A: %s", a)
 	}
-	if b != "" {
+	if !strings.Contains(b, "add TrustServerCertificate=true to the application's setting") {
 		t.Errorf("B: %s", b)
 	}
 }
@@ -350,11 +364,14 @@ func tlsStrength(encrypt string, trust bool) int {
 }
 
 // appStrength is the strength of what an application's client does with
-// encrypt and trust: with Encrypt false the clients (SqlClient, ODBC, JDBC)
-// encrypt the login without verifying the certificate.
-func appStrength(encrypt string, trust bool) int {
-	if encrypt == "false" {
-		return tlsStrength("false", true)
+// encrypt and trust. With Encrypt false a client that never verifies the
+// certificate (loginTrust: System.Data.SqlClient, ODBC Driver 17) encrypts
+// the login without verifying; the others (Microsoft.Data.SqlClient, ODBC
+// Driver 18, JDBC) verify it when the server encrypts, which DriftGate
+// must not skip.
+func appStrength(encrypt string, trust, loginTrust bool) int {
+	if encrypt == "false" && loginTrust {
+		trust = true
 	}
 	return tlsStrength(encrypt, trust)
 }
@@ -384,11 +401,15 @@ func TestSQLServerTLSNeverWeaker(t *testing.T) {
 	encrypts := []string{"", "true", "false", "strict", "yes", "no", "Mandatory", "Optional", "1", "0"}
 	trusts := []string{"", "true", "false", "yes", "no"}
 	norm := map[string]string{"": "", "true": "true", "yes": "true", "mandatory": "true", "1": "true", "false": "false", "no": "false", "optional": "false", "0": "false", "strict": "strict"}
-	clients := []struct{ csproj, encrypt string }{
-		{"Microsoft.Data.SqlClient\" Version=\"5.1.0", "true"},
-		{"Microsoft.Data.SqlClient\" Version=\"2.1.0", "false"},
-		{"System.Data.SqlClient\" Version=\"4.8.6", "false"},
-		{"Unknown.Package\" Version=\"1.0.0", "true"}, // the client of an unknown default must not be weaker than verifying
+	clients := []struct {
+		csproj, encrypt string
+		loginTrust      bool
+	}{
+		{"Microsoft.Data.SqlClient\" Version=\"5.1.0", "true", false},
+		{"Microsoft.Data.SqlClient\" Version=\"2.1.0", "false", false},
+		{"Microsoft.EntityFrameworkCore.SqlServer\" Version=\"6.0.0", "false", false},
+		{"System.Data.SqlClient\" Version=\"4.8.6", "false", true},
+		{"Unknown.Package\" Version=\"1.0.0", "true", false}, // the client of an unknown default must not be weaker than verifying
 	}
 	rng := rand.New(rand.NewSource(1))
 	for range 2000 {
@@ -420,7 +441,7 @@ func TestSQLServerTLSNeverWeaker(t *testing.T) {
 		if appEnc == "strict" {
 			appTrust = false
 		}
-		if got, want := goMSSQLStrength(t, dsn), appStrength(appEnc, appTrust); got < want {
+		if got, want := goMSSQLStrength(t, dsn), appStrength(appEnc, appTrust, c.loginTrust); got < want {
 			t.Errorf("%s (%s): %s is weaker (%d < %d)", cs, c.csproj, dsn, got, want)
 		}
 		if strings.Contains(cs, "HostNameInCertificate") && !strings.Contains(dsn, "hostNameInCertificate=db.example.com") {
@@ -500,21 +521,33 @@ func checkSQLServerDSN(t *testing.T, in, password, server, extra string) {
 	// What the setting asked for, read back by the same rules, is never
 	// stronger than the DSN.
 	kv := fields{}
-	if strings.Contains(in, "sqlserver://") {
+	goURL := false
+	if _, rest, ok := strings.Cut(in, "sqlserver://"); ok && !jdbcForm(rest) {
+		// A go-mssqldb URL: without encrypt its driver verifies nothing.
+		goURL = true
+		if u, err := url.Parse(strings.TrimPrefix(in, "jdbc:")); err == nil {
+			for k, vs := range u.Query() {
+				kv[fieldKey(k)] = vs[0]
+			}
+		}
+	} else if ok {
 		_, props, _ := strings.Cut(in, ";")
 		kv, _ = parseJDBCProps(props)
-	} else if odbc, ok := parseODBC(in); ok && odbcSQLServer(odbc["driver"]) {
+	} else if odbc, err := parseODBC(in); err == nil && odbcSQLServer(odbc["driver"]) {
 		kv = odbc
 	} else {
 		kv, _ = parseConnString(in)
 	}
 	var s sqlServerTLS
 	_ = s.setAll(kv)
+	if _, ok := kv["encrypt"]; goURL && !ok {
+		s.loginTrust = true
+	}
 	asked := s.encrypt
 	if asked == "" {
 		asked = "false" // the weakest default of a client
 	}
-	if got, want := goMSSQLStrength(t, dsn), appStrength(asked, s.trust == "true" && asked != "strict"); got < want {
+	if got, want := goMSSQLStrength(t, dsn), appStrength(asked, s.trust == "true" && asked != "strict" || s.tdsRequire && s.ca == "", s.loginTrust); got < want {
 		t.Fatalf("%q: %s is weaker than the setting (%d < %d)", in, dsn, got, want)
 	}
 	if s.hostInCert != "" && q.Get("hostNameInCertificate") != s.hostInCert && asked != "disable" {

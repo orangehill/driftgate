@@ -54,6 +54,16 @@ type sqlServerTLS struct {
 	// false, or "" when DriftGate cannot tell (it then encrypts and
 	// verifies).
 	client string
+	// loginTrust: with Encrypt off the client encrypts the login without
+	// ever verifying the certificate, also on a server that forces
+	// encryption (System.Data.SqlClient, ODBC Driver 17 and earlier,
+	// go-mssqldb without encrypt, FreeTDS with encryption off or request).
+	// The other clients verify it when the server encrypts, as
+	// go-mssqldb does.
+	loginTrust bool
+	// tdsRequire: FreeTDS's encryption = require, which encrypts without
+	// verifying unless it is given a CA.
+	tdsRequire bool
 	// compose: the setting is a compose service's, whose certificate is
 	// the container's own, self-signed one: trusted on a loopback address
 	// of this machine only.
@@ -87,6 +97,7 @@ const (
 	// Server Browser would choose the port, on a UDP port DriftGate does
 	// not reach.
 	errSQLServerInstance = constError("names an instance without its port; add the port the instance listens on (host\\instance,port)")
+	errSQLServerODBCPort = constError("gives Port=, which Microsoft's ODBC drivers do not read: write the port with the server (Server=host,1433)")
 	errSQLServerCertPair = constError("names the server's own certificate (ServerCertificate) with HostNameInCertificate or a CA certificate; the two ways of verifying do not go together: keep one")
 )
 
@@ -124,6 +135,17 @@ func (s *sqlServerTLS) set(k, v string) error {
 			s.encrypt = "strict"
 		default:
 			return errSQLServerValue("Encrypt", "true, false or strict")
+		}
+	case "encryption": // FreeTDS: off, request, require, strict
+		switch strings.ToLower(v) {
+		case "off", "request":
+			s.encrypt, s.loginTrust = "false", true
+		case "require":
+			s.encrypt, s.tdsRequire = "true", true
+		case "strict":
+			s.encrypt = "strict"
+		default:
+			return errSQLServerValue("encryption", "off, request, require or strict")
 		}
 	case "trustservercertificate":
 		b, ok := sqlServerBool(v)
@@ -330,21 +352,22 @@ func sqlServerValue(v string) (p parts, ok bool, err error) {
 		return p, true, err
 	}
 	if len(v) >= len("odbc:") && strings.EqualFold(v[:len("odbc:")], "odbc:") { // go-mssqldb's ODBC form
-		kv, ok := parseODBC(v[len("odbc:"):])
-		if !ok {
-			return parts{}, true, errors.New("not an ODBC connection string (the value is not shown)")
+		kv, err := parseODBC(v[len("odbc:"):])
+		if err != nil {
+			return parts{}, true, err
 		}
 		p, err = fromODBC(kv)
 		return p, true, err
 	}
-	if kv, ok := parseODBC(v); ok && odbcSQLServer(kv["driver"]) {
+	kv, perr := parseODBC(v)
+	if perr == nil && odbcSQLServer(kv["driver"]) {
 		p, err = fromODBC(kv)
 		return p, true, err
 	}
 	// One that names a SQL Server ODBC driver but is written wrong is not
 	// read by other rules, which take its {…} literally.
-	if kv, err := parseConnString(v); err == nil && odbcSQLServer(kv["driver"]) {
-		return parts{}, true, errors.New("not an ODBC connection string: every pair is key=value, separated by ;, a value with ; or } in {…} (the value is not shown)")
+	if kv, err := parseConnString(v); perr != nil && err == nil && odbcSQLServer(kv["driver"]) {
+		return parts{}, true, perr
 	}
 	return parts{}, false, nil
 }
@@ -437,9 +460,53 @@ func parseJDBCProps(s string) (fields, error) {
 		if k == "" {
 			return nil, errors.New("a property of the URL has no name (the value is not shown)")
 		}
+		if _, dup := out[k]; dup {
+			// ODBC takes the first, JDBC the last: neither is guessed.
+			return nil, errors.New("a key is given twice (names are not case-sensitive; the value is not shown); keep one")
+		}
 		out[k] = v
 	}
 	return out, nil
+}
+
+// Keys that name one setting in several ways.
+var (
+	sqlServerHostKeys     = []string{"server", "datasource", "address", "addr", "networkaddress"}
+	sqlServerNameKeys     = []string{"initialcatalog", "database", "databasename"}
+	sqlServerUserKeys     = []string{"userid", "uid", "user", "username"}
+	sqlServerPasswordKeys = []string{"password", "pwd"}
+)
+
+// one is the value kv gives the setting that keys name (what names it in
+// an error): the clients differ in which of two keys wins (SqlClient the
+// last, ODBC the first), so two keys with different values are refused.
+func one(kv fields, what string, keys []string) (string, error) {
+	v, found := "", false
+	for _, k := range keys {
+		if x, ok := kv[k]; ok {
+			if found && x != v {
+				return "", fmt.Errorf("gives the %s twice, with different values (the values are not shown); keep one", what)
+			}
+			v, found = x, true
+		}
+	}
+	return v, nil
+}
+
+// sqlServerIdentity reads the server, database, user and password of a
+// connection string's keys (see one).
+func sqlServerIdentity(kv fields) (server, name, user, password string, err error) {
+	if server, err = one(kv, "server (Server, Data Source, Address)", sqlServerHostKeys); err != nil {
+		return
+	}
+	if name, err = one(kv, "database (Database, Initial Catalog)", sqlServerNameKeys); err != nil {
+		return
+	}
+	if user, err = one(kv, "user (User ID, UID, User)", sqlServerUserKeys); err != nil {
+		return
+	}
+	password, err = one(kv, "password (Password, PWD)", sqlServerPasswordKeys)
+	return
 }
 
 // fromSQLServerJDBC reads a JDBC URL of mssql-jdbc, or Prisma's, which is
@@ -461,14 +528,24 @@ func fromSQLServerJDBC(rest string) (parts, error) {
 	case strings.Count(host, ":") == 1:
 		host, port, _ = strings.Cut(host, ":")
 	}
-	if host == "" {
-		host = kv["servername"]
+	if sn := kv["servername"]; sn != "" {
+		if host != "" && host != sn {
+			return parts{}, errors.New("gives the server twice, with different values (the values are not shown); keep one")
+		}
+		host = sn
 	}
 	if inst, ok := kv["instancename"]; ok && !strings.Contains(host, `\`) && inst != "" {
 		host += `\` + inst
 	}
-	if port == "" {
-		port, _ = kv.get([]string{"portnumber", "port"})
+	pn, err := one(kv, "port (portNumber, port)", []string{"portnumber", "port"})
+	if err != nil {
+		return parts{}, err
+	}
+	if pn != "" {
+		if port != "" && port != pn {
+			return parts{}, errSQLServerPorts
+		}
+		port = pn
 	}
 	if host == "" {
 		host = "localhost" // mssql-jdbc's default serverName
@@ -481,9 +558,9 @@ func fromSQLServerJDBC(rest string) (parts, error) {
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(host, port); err != nil {
 		return parts{}, err
 	}
-	p.name, _ = kv.get([]string{"databasename", "database", "initialcatalog"})
-	p.user, _ = kv.get([]string{"user", "username", "userid", "uid"})
-	p.password, _ = kv.get([]string{"password", "pwd"})
+	if _, p.name, p.user, p.password, err = sqlServerIdentity(kv); err != nil {
+		return parts{}, err
+	}
 	return p, nil
 }
 
@@ -504,8 +581,8 @@ var goMSSQLTLSParams = []string{"encrypt", "trustservercertificate", "hostnamein
 // URL (sqlserver://user:pass@host:port/instance?database=…&encrypt=…,
 // whose client leaves the data unencrypted by default), Laravel's sqlsrv://
 // (pdo_sqlsrv: its ODBC driver decides), Node's mssql:// (tedious: encrypts
-// and verifies) and dblib:// (FreeTDS: no encryption by default); their
-// path is the database.
+// and verifies) and dblib:// (FreeTDS, whose freetds.conf may ask for
+// encryption: unknown); their path is the database.
 func fromSQLServerURL(v string) (parts, error) {
 	u, err := url.Parse(v)
 	if err != nil || u.Opaque != "" || u.Fragment != "" {
@@ -566,9 +643,7 @@ func fromSQLServerURL(v string) (parts, error) {
 		switch scheme {
 		case "mssql":
 			p.mssql.client = "true"
-		case "dblib":
-			p.mssql.client = "false"
-		}
+		} // dblib (FreeTDS): unknown, as for FreeTDS's ODBC driver
 		p.name = upath
 		if p.user == "" {
 			p.user, _ = q.get([]string{"user", "username", "userid", "uid"})
@@ -583,6 +658,9 @@ func fromSQLServerURL(v string) (parts, error) {
 	if err := p.mssql.setAll(q); err != nil { // what is refused before the address
 		return parts{}, err
 	}
+	if _, ok := q["encrypt"]; scheme == "sqlserver" && !ok {
+		p.mssql.loginTrust = true // go-mssqldb without encrypt verifies nothing
+	}
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(host, port); err != nil {
 		return parts{}, err
 	}
@@ -591,13 +669,16 @@ func fromSQLServerURL(v string) (parts, error) {
 
 // parseODBC reads an ODBC connection string: key=value pairs separated by
 // ;, a value in {…} when it holds a ; (}} for a }), keys as fieldKey makes
-// them. ok is false for text that is not one.
-func parseODBC(s string) (fields, bool) {
+// them, none twice. No error quotes the text.
+func parseODBC(s string) (fields, error) {
 	kv, err := parseJDBCProps(s)
-	if err != nil || len(kv) == 0 {
-		return nil, false
+	if err == nil && len(kv) == 0 {
+		err = errors.New("it is empty")
 	}
-	return kv, true
+	if err != nil {
+		return nil, fmt.Errorf("not an ODBC connection string: %w", err)
+	}
+	return kv, nil
 }
 
 // odbcSQLServer reports an ODBC driver of SQL Server: Microsoft's ODBC
@@ -613,9 +694,12 @@ func odbcSQLServer(driver string) bool {
 }
 
 // odbcClient is the Encrypt default of an ODBC driver: ODBC Driver 18 and
-// later encrypt and verify; 17 and earlier, the Native Client, the old SQL
-// Server driver and FreeTDS do not; "" for a driver DriftGate cannot tell.
-func odbcClient(driver string) string {
+// later encrypt and verify; 17 and earlier, the Native Client and the old
+// SQL Server driver do not, and never verify the certificate with Encrypt
+// off (loginTrust); "" for a driver DriftGate cannot tell, FreeTDS among
+// them, as its freetds.conf may ask for encryption the setting does not
+// show.
+func odbcClient(driver string) (client string, loginTrust bool) {
 	d := strings.ToLower(driver)
 	version := func(after string) (int, bool) {
 		i := strings.Index(d, after)
@@ -633,38 +717,46 @@ func odbcClient(driver string) string {
 	for _, w := range []string{"odbc driver", "msodbcsql"} {
 		if v, ok := version(w); ok {
 			if v >= 18 {
-				return "true"
+				return "true", false
 			}
-			return "false"
+			return "false", true
 		}
 	}
 	switch {
-	case strings.Contains(d, "native client"), strings.Contains(d, "sqlncli"), strings.Contains(d, "freetds"), strings.Contains(d, "tdsodbc"),
-		strings.Trim(d, "{} ") == "sql server":
-		return "false"
+	case strings.Contains(d, "native client"), strings.Contains(d, "sqlncli"), strings.Trim(d, "{} ") == "sql server":
+		return "false", true
 	}
-	return ""
+	return "", false
+}
+
+// freeTDS reports FreeTDS's ODBC driver.
+func freeTDS(driver string) bool {
+	d := strings.ToLower(driver)
+	return strings.Contains(d, "freetds") || strings.Contains(d, "tdsodbc")
 }
 
 // fromODBC reads an ODBC connection string of SQL Server.
 func fromODBC(kv fields) (parts, error) {
 	p := parts{driver: SQLServer}
 	p.mssql.read = true
-	p.mssql.client = odbcClient(kv["driver"])
-	server, _ := kv.get([]string{"server", "address", "addr"})
+	p.mssql.client, p.mssql.loginTrust = odbcClient(kv["driver"])
+	server, name, user, password, err := sqlServerIdentity(kv)
+	if err != nil {
+		return parts{}, err
+	}
 	if err := sqlServerTransport(server); err != nil {
 		return parts{}, err
 	}
 	if err := p.mssql.setAll(kv); err != nil {
 		return parts{}, err
 	}
-	var err error
+	if kv["port"] != "" && !freeTDS(kv["driver"]) {
+		return parts{}, errSQLServerODBCPort
+	}
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(server, kv["port"]); err != nil {
 		return parts{}, err
 	}
-	p.name, _ = kv.get([]string{"database", "initialcatalog"})
-	p.user, _ = kv.get([]string{"uid", "userid", "user"})
-	p.password, _ = kv.get([]string{"pwd", "password"})
+	p.name, p.user, p.password = name, user, password
 	return p, nil
 }
 
@@ -683,6 +775,9 @@ var sqlServerMarkers = []string{"trustedconnection", "multipleactiveresultsets",
 func sqlServerConnString(kv fields) (p parts, ok bool, err error) {
 	server, _ := kv.get(hostKeys)
 	marked := sqlServerServerForm(server)
+	for _, k := range sqlServerHostKeys {
+		marked = marked || sqlServerServerForm(kv[k])
+	}
 	for _, k := range sqlServerMarkers {
 		if _, ok := kv[k]; ok {
 			marked = true
@@ -693,6 +788,9 @@ func sqlServerConnString(kv fields) (p parts, ok bool, err error) {
 	}
 	p = parts{driver: SQLServer, raw: kv}
 	p.mssql.read = true
+	if server, p.name, p.user, p.password, err = sqlServerIdentity(kv); err != nil {
+		return parts{}, true, err
+	}
 	if err := sqlServerTransport(server); err != nil {
 		return parts{}, true, err
 	}
@@ -702,9 +800,6 @@ func sqlServerConnString(kv fields) (p parts, ok bool, err error) {
 	if p.host, p.port, p.mssql.note, err = sqlServerAddress(server, kv["port"]); err != nil {
 		return parts{}, true, err
 	}
-	p.name, _ = kv.get([]string{"initialcatalog", "database"})
-	p.user, _ = kv.get([]string{"userid", "uid", "user", "username"})
-	p.password, _ = kv.get([]string{"password", "pwd"})
 	return p, true, nil
 }
 
@@ -717,19 +812,21 @@ func sqlServerFields(p parts, f fields) (parts, error) {
 	p.driver, p.raw = SQLServer, f
 	if !p.mssql.read {
 		p.mssql.read = true
+		if _, _, _, _, err := sqlServerIdentity(f); err != nil {
+			return parts{}, err
+		}
 		if err := p.mssql.setAll(f); err != nil {
 			return parts{}, err
 		}
-		switch d := fieldKey(f["adapter"]); {
-		case d == "sqlserver": // Rails: TinyTDS on FreeTDS
-			p.mssql.client = "false"
-		case f["odbcdriver"] != "": // Django's OPTIONS driver
-			p.mssql.client = odbcClient(f["odbcdriver"])
+		// Rails' TinyTDS runs on FreeTDS, whose freetds.conf may ask for
+		// encryption: its client stays unknown.
+		if f["odbcdriver"] != "" { // Django's OPTIONS driver
+			p.mssql.client, p.mssql.loginTrust = odbcClient(f["odbcdriver"])
 		}
 		if extra := f["extraparams"]; strings.TrimSpace(extra) != "" { // Django's OPTIONS extra_params
-			kv, ok := parseODBC(extra)
-			if !ok {
-				return parts{}, errors.New("OPTIONS extra_params is not an ODBC connection string (the value is not shown)")
+			kv, err := parseODBC(extra)
+			if err != nil {
+				return parts{}, fmt.Errorf("OPTIONS extra_params: %w", err)
 			}
 			if err := p.mssql.setAll(kv); err != nil {
 				return parts{}, err
@@ -876,7 +973,7 @@ func mergeSQLServerTLS(s, t sqlServerTLS) sqlServerTLS {
 		}
 	}
 	if s.client == "" {
-		s.client = t.client
+		s.client, s.loginTrust, s.tdsRequire = t.client, s.loginTrust || t.loginTrust, s.tdsRequire || t.tdsRequire
 	}
 	s.note = join(s.note, t.note)
 	return s
@@ -890,6 +987,9 @@ func (p parts) sqlServerSettings() (sqlServerTLS, error) {
 	s := p.mssql
 	if !s.read {
 		s.read = true
+		if _, _, _, _, err := sqlServerIdentity(p.raw); err != nil {
+			return sqlServerTLS{}, err
+		}
 		if err := s.setAll(p.raw); err != nil {
 			return sqlServerTLS{}, err
 		}
@@ -899,10 +999,12 @@ func (p parts) sqlServerSettings() (sqlServerTLS, error) {
 
 // encryption is what DriftGate connects with: Encrypt (the setting's, else
 // its client's default, else true), and whether it trusts the server's
-// certificate without verifying it. With Encrypt false the clients encrypt
-// the login only, without verifying the certificate (go-mssqldb would
-// verify it, and fail on a self-signed one): DriftGate trusts it too,
-// unless the setting gives a certificate to verify it with.
+// certificate without verifying it: when the setting says so, for a
+// compose service's own certificate on loopback, and when the client
+// never verifies it (loginTrust with Encrypt off, FreeTDS's require),
+// unless the setting gives a certificate to verify it with. With Encrypt
+// off go-mssqldb verifies the certificate the login is encrypted with, as
+// the other clients do when the server encrypts.
 func (s sqlServerTLS) encryption(host string) (encrypt string, trust bool) {
 	encrypt = s.encrypt
 	if encrypt == "" {
@@ -918,7 +1020,8 @@ func (s sqlServerTLS) encryption(host string) (encrypt string, trust bool) {
 	switch {
 	case encrypt == "strict": // strict always verifies
 		trust = false
-	case encrypt == "false" && s.ca == "" && s.serverCert == "":
+	case s.ca != "" || s.serverCert != "": // verified with them, as the setting asks
+	case encrypt == "false" && s.loginTrust, encrypt == "true" && s.tdsRequire:
 		trust = true
 	}
 	return encrypt, trust
@@ -1005,6 +1108,8 @@ func (p parts) sqlServerNote() string {
 		note = join(note, "DriftGate trusts the container's own certificate on this machine (encrypt=true, TrustServerCertificate=true)")
 	case s.encrypt == "" && s.client == "":
 		note = join(note, "the setting leaves Encrypt to the application's client, which DriftGate cannot tell: DriftGate encrypts and verifies the server's certificate; for a self-signed one, set Encrypt and TrustServerCertificate in the setting")
+	case encrypt == "false" && !trust:
+		note = join(note, "Encrypt is off, and the application's client verifies the server's certificate when the server encrypts: DriftGate verifies the certificate the login is encrypted with; for a self-signed one, add TrustServerCertificate=true to the application's setting")
 	}
 	return note
 }
@@ -1035,13 +1140,16 @@ func sqlServerClientOf(root, file string, p parts) parts {
 	if err != nil {
 		return p
 	}
-	p.mssql.client = csprojClient(string(raw))
+	p.mssql.client, p.mssql.loginTrust = csprojClient(string(raw))
 	return p
 }
 
 // csprojClient is the Encrypt default of the SQL Server client a project
-// file references (see sqlServerClientOf); "" when it cannot tell.
-func csprojClient(csproj string) string {
+// file references (see sqlServerClientOf), "" when it cannot tell, and
+// whether it never verifies the certificate with Encrypt off
+// (System.Data.SqlClient; Microsoft.Data.SqlClient verifies it when the
+// server encrypts).
+func csprojClient(csproj string) (client string, loginTrust bool) {
 	lc := strings.ToLower(csproj)
 	for _, c := range []struct {
 		pkg   string
@@ -1049,15 +1157,15 @@ func csprojClient(csproj string) string {
 	}{{"microsoft.data.sqlclient", 4}, {"microsoft.entityframeworkcore.sqlserver", 7}} {
 		if v, ok := packageMajor(lc, c.pkg); ok {
 			if v >= c.major {
-				return "true"
+				return "true", false
 			}
-			return "false"
+			return "false", false
 		}
 	}
 	if strings.Contains(lc, `"system.data.sqlclient"`) {
-		return "false"
+		return "false", true
 	}
-	return ""
+	return "", false
 }
 
 // packageMajor is the major version of the PackageReference to pkg of a
