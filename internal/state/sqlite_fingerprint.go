@@ -144,8 +144,9 @@ func (s *SQLite) dataVersion(ctx context.Context) (int64, error) {
 // waits for the application's to end) and returns the connection that
 // then holds the write lock, with main's data_version. The lock is held
 // only while the read transactions start, not while they read: an
-// application writer that does not wait for locks (Laravel's default
-// busy_timeout is 0) would otherwise fail.
+// application writer would otherwise wait for the whole scan (PHP's PDO
+// SQLite waits up to 60 s, which Laravel keeps unless its busy_timeout is
+// set), or fail with "database is locked" if it does not wait for locks.
 func (s *SQLite) barrier(ctx context.Context) (*sql.Conn, int64, error) {
 	lock, err := s.db.Conn(ctx)
 	if err != nil {
