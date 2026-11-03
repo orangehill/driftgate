@@ -192,6 +192,9 @@ func (p *ssProject) status(t *testing.T, db string) string {
 const (
 	ssWritable = "ONLINE MULTI_USER read-only=false"
 	ssPristine = "ONLINE MULTI_USER read-only=true"
+	// ssKeptOut: a restore of the whole database keeps the application
+	// out while it saves and copies back the rows of excluded tables.
+	ssKeptOut = "ONLINE RESTRICTED_USER read-only=false"
 )
 
 // usable fails the test unless the working database is online for the
@@ -276,9 +279,10 @@ var ssWrite = []string{
 // a view), after the excluded table was saved, after the database was
 // taken offline, and after it was restored before the excluded rows came
 // back: the next capture brings the database online and as pristine, with
-// the excluded rows the application wrote. Every time, that capture equals
-// one before, the working database is online and writable, and the
-// pristine copy online and read-only.
+// the excluded rows the application wrote, and lets the application in
+// again (the kill left the database RESTRICTED_USER). Every time, that
+// capture equals one before, the working database is online and writable,
+// and the pristine copy online and read-only.
 func TestCrashRestoreSQLServer(t *testing.T) {
 	for i, tc := range []struct {
 		point string
@@ -287,9 +291,9 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 		after []string
 	}{
 		{"state.sqlserver.restore", false, []string{ssWritable}},
-		{"state.sqlserver.restore.saved", true, []string{ssWritable}},
-		{"state.sqlserver.restore.offline", true, []string{"OFFLINE MULTI_USER read-only=false"}},
-		{"state.sqlserver.restore.restored", true, []string{ssWritable}},
+		{"state.sqlserver.restore.saved", true, []string{ssKeptOut}},
+		{"state.sqlserver.restore.offline", true, []string{"OFFLINE RESTRICTED_USER read-only=false"}},
+		{"state.sqlserver.restore.restored", true, []string{ssKeptOut}},
 	} {
 		t.Run(tc.point, func(t *testing.T) {
 			if i > 0 {
@@ -327,7 +331,7 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 					t.Errorf("seed of the database the kill left offline: %v", r)
 				}
 			}
-			if status == ssWritable {
+			if status == ssWritable || status == ssKeptOut {
 				// Before the commit, or before the database went offline,
 				// nothing changed; after the restore, it is pristine.
 				got := p.data(t)
