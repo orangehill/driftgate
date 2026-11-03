@@ -140,7 +140,7 @@ hash alone:
   (0 or 1).
 
 ```yaml
-- uses: orangehill/driftgate@v1.0.1
+- uses: orangehill/driftgate@v1.0.2
   with:
     # Private requests are checked locally; CI checks the public ones.
     args: --skip-private

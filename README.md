@@ -71,10 +71,10 @@ User documentation: [`docs/`](docs/README.md).
 the signature of `SHA256SUMS` first, then the binary against it:
 
 ```sh
-gh release download v1.0.1 --repo orangehill/driftgate \
+gh release download v1.0.2 --repo orangehill/driftgate \
   --pattern driftgate-linux-amd64 --pattern 'SHA256SUMS*'
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.1 \
+  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
@@ -285,9 +285,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # … start the application and its database …
-      - uses: orangehill/driftgate@v1.0.1   # a release tag or a commit SHA
+      - uses: orangehill/driftgate@v1.0.2   # a release tag or a commit SHA
         with:
-          version: v1.0.1   # download and verify the signed release binary; default: build from source
+          version: v1.0.2   # download and verify the signed release binary; default: build from source
           args: --skip-private
 ```
 
