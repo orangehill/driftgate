@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/appconf"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
@@ -77,7 +78,7 @@ type pristineFile struct {
 	Format      int               `json:"format,omitempty"` // state.FingerprintFormat; 0 in a file of format 1
 	Component   string            `json:"component"`
 	Driver      string            `json:"driver"`
-	Server      string            `json:"server,omitempty"` // dbdsn.Server; none in a file of an earlier release
+	Server      string            `json:"server,omitempty"` // serverOf; none in a file of an earlier release
 	Working     string            `json:"working"`
 	Pristine    string            `json:"pristine"`
 	Created     string            `json:"created"`
@@ -162,7 +163,7 @@ func openComponents(ctx context.Context, p *config.Project, env []string, log io
 }
 
 // openServers is openComponents that also returns the server of every
-// database component (dbdsn.Server), by name. For a seed, a component
+// database component (serverOf), by name. For a seed, a component
 // removes the record of its pristine copy right before it replaces that
 // copy (state.Options.Replacing).
 func openServers(ctx context.Context, p *config.Project, env []string, log io.Writer, seed bool) ([]state.Component, map[string]string, error) {
@@ -189,18 +190,24 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			closeAll()
 			return nil, nil, dsnErr(sc.DSN, n, err)
 		}
-		if servers[n], err = dbdsn.Server(sc.Driver, dsn); err != nil {
+		if servers[n], err = serverOf(p, sc, dsn); err != nil {
 			closeAll()
 			return nil, nil, configErr("state %s: %v", n, err)
 		}
 		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RowTracking: sc.RowTracking, Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
-		if seed {
-			path, err := pristinePath(p, n, servers[n])
-			if err != nil {
+		path, err := pristinePath(p, n, servers[n])
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		if sc.Driver == config.SQLite {
+			if o.Working, o.Pristine, err = sqliteFiles(p, sc, servers[n], path); err != nil {
 				closeAll()
-				return nil, nil, err
+				return nil, nil, configErr("state %s: %v", n, err)
 			}
+		}
+		if seed {
 			o.Replacing = func() error {
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
@@ -210,8 +217,9 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 		}
 		// A restore rewrites the tables: the database must be on an allowed
 		// host, and every host the driver may connect to is checked, first
-		// by name and then at every connection, on the address dialled.
-		if !sc.AllowRemote {
+		// by name and then at every connection, on the address dialled. An
+		// SQLite database is a file of the project, on no host.
+		if !sc.AllowRemote && sc.Driver != config.SQLite {
 			const hint = "allow_remote: true for this component"
 			if err := dbx.AllowHosts(ctx, sc.Driver, dsn, p.AllowHostLists(), hint); err != nil {
 				closeAll()
@@ -223,9 +231,14 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			}
 		}
 		var c state.Component
-		if sc.Driver == config.Postgres {
+		switch sc.Driver {
+		case config.Postgres:
 			c, err = state.NewPostgres(o)
-		} else {
+		case config.SQLite:
+			c, err = state.NewSQLite(o)
+		case config.SQLServer:
+			c, err = state.NewSQLServer(o)
+		default:
 			c, err = state.NewMySQL(o)
 		}
 		if err != nil {
@@ -544,7 +557,11 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if err := snapshot.WriteJSON(path, pf); err != nil {
 			return err
 		}
-		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), sc.Pristine, len(f), time.Since(start).Round(time.Millisecond))
+		pristine := sc.Pristine
+		if sc.Driver == config.SQLite && pristine == "" {
+			pristine = sqliteStorePristine(path)
+		}
+		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), pristine, len(f), time.Since(start).Round(time.Millisecond))
 	}
 	return nil
 }
@@ -586,6 +603,20 @@ func dsnErr(dsn config.Secret, name string, err error) error {
 	return configErr("state %s: dsn: %v", name, err)
 }
 
+// serverOf names the server of the database component sc whose DSN is dsn
+// (dbdsn.Server). An SQLite database has none: it is named by its file,
+// file: and the real path of working, which must exist inside the project.
+func serverOf(p *config.Project, sc config.Component, dsn string) (string, error) {
+	if sc.Driver == config.SQLite {
+		working, err := appconf.LocalPath(p.Root, sc.Working)
+		if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		return sqliteServerPrefix + working, nil
+	}
+	return dbdsn.Server(sc.Driver, dsn)
+}
+
 // Seeded reports whether every database component has a pristine copy on
 // the server its DSN names now.
 func Seeded(ctx context.Context, p *config.Project) (bool, error) {
@@ -597,7 +628,7 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 		if err != nil {
 			return false, dsnErr(sc.DSN, name, err)
 		}
-		server, err := dbdsn.Server(sc.Driver, dsn)
+		server, err := serverOf(p, sc, dsn)
 		if err != nil {
 			return false, configErr("state %s: %v", name, err)
 		}

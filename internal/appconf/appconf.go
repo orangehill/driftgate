@@ -184,6 +184,12 @@ func localPath(root, file string) (string, error) {
 	return real, nil
 }
 
+// LocalPath is the real path of a file of the project, relative to root:
+// past any symbolic links, which must stay inside the project's own folder
+// (also past links). The file must exist. An error names the file, never
+// what it holds.
+func LocalPath(root, file string) (string, error) { return localPath(root, file) }
+
 // unwrapPath drops the path from an error of os, which names the file in
 // its own words.
 func unwrapPath(err error) error {
