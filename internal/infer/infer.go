@@ -133,9 +133,26 @@ func Pattern(values []string) string {
 	}
 	var b strings.Builder
 	if shared {
-		for j, t := range toks[0] {
+		for j := 0; j < len(toks[0]); j++ {
+			t := toks[0][j]
 			if !t.run {
 				b.WriteString(regexp.QuoteMeta(t.text))
+				continue
+			}
+			// A UUID that changes is any UUID of the samples' case: its
+			// groups are hex by chance digits only (0308), so a format built
+			// from the samples would reject the next one. One that is the
+			// same everywhere (a tenant) stays as it is.
+			if ids := uuidAt(toks, j); ids != nil {
+				switch {
+				case allEqual(ids):
+					b.WriteString(regexp.QuoteMeta(ids[0]))
+				case equalFold(ids):
+					b.WriteString(`(?i:` + regexp.QuoteMeta(ids[0]) + `)`)
+				default:
+					b.WriteString(uuidFormat(ids))
+				}
+				j += 8 // five runs and the four dashes between them
 				continue
 			}
 			parts := make([]string, len(toks))
@@ -221,6 +238,66 @@ var (
 	integer  = lazy.Regexp(`^-?\d+$`)
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
 )
+
+var uuid = lazy.Regexp(`^(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// uuidFormat matches any UUID with the letters' case of the samples: a
+// serializer that changes the case changes the contract. Samples without
+// letters get lowercase.
+func uuidFormat(ids []string) string {
+	lower, upper := false, false
+	for _, id := range ids {
+		lower = lower || strings.ContainsAny(id, "abcdef")
+		upper = upper || strings.ContainsAny(id, "ABCDEF")
+	}
+	c := `[0-9a-f]`
+	switch {
+	case lower && upper:
+		c = `[0-9a-fA-F]`
+	case upper:
+		c = `[0-9A-F]`
+	}
+	return fmt.Sprintf(`%[1]s{8}-%[1]s{4}-%[1]s{4}-%[1]s{4}-%[1]s{12}`, c)
+}
+
+// uuidAt returns the UUID of every value at token j (five runs with dashes
+// between them), or nil when one value has none there. The caller has
+// checked that the values share their tokens.
+func uuidAt(toks [][]token, j int) []string {
+	ids := make([]string, len(toks))
+	for i, t := range toks {
+		if j+9 > len(t) {
+			return nil
+		}
+		var s strings.Builder
+		for _, x := range t[j : j+9] {
+			s.WriteString(x.text)
+		}
+		if !uuid().MatchString(s.String()) {
+			return nil
+		}
+		ids[i] = s.String()
+	}
+	return ids
+}
+
+func equalFold(s []string) bool {
+	for _, v := range s {
+		if !strings.EqualFold(v, s[0]) {
+			return false
+		}
+	}
+	return true
+}
+
+func allEqual(s []string) bool {
+	for _, v := range s {
+		if v != s[0] {
+			return false
+		}
+	}
+	return true
+}
 
 var calendarWord = lazy.Regexp(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$`)
 
