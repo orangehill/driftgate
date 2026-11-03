@@ -1048,7 +1048,7 @@ Prints the version.
 
 ```
 $ driftgate version
-driftgate v1.0.1 (commit …, built …)
+driftgate v1.0.2 (commit …, built …)
 ```
 
 ---

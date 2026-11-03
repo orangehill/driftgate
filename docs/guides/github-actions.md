@@ -46,9 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # … install, start the application on 127.0.0.1 …
-      - uses: orangehill/driftgate@v1.0.1   # pin a release tag or a commit SHA
+      - uses: orangehill/driftgate@v1.0.2   # pin a release tag or a commit SHA
         with:
-          version: v1.0.1
+          version: v1.0.2
           args: --skip-private
           junit: driftgate-junit.xml
 ```
@@ -111,7 +111,7 @@ the action keeps a dump of the seeded databases in the Actions cache, keyed
 on the hash of the files the seed reads and on `pristine-cache-key`:
 
 ```yaml
-      - uses: orangehill/driftgate@v1.0.1
+      - uses: orangehill/driftgate@v1.0.2
         with:
           pristine-cache-files: |
             database/migrations/**
