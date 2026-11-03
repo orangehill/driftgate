@@ -891,7 +891,11 @@ func (s *setup) summary(p *config.Project, d detected) {
 		row("framework", "none recognised")
 	}
 	if s.database != "" {
-		row("database", s.database+"; the password stays where it is")
+		note := "; the password stays where it is"
+		if sqliteOnly(p) {
+			note = ""
+		}
+		row("database", s.database+note)
 	} else {
 		row("database", "none (no state:)")
 	}

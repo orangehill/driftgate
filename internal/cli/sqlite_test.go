@@ -33,7 +33,10 @@ func TestSetupSQLite(t *testing.T) {
 	if c.Driver != config.SQLite || c.Working != "database/database.sqlite" || c.Pristine != "" || c.DSN != (config.Secret{Dotenv: ".env"}) || !reflect.DeepEqual(c.Exclude, want) {
 		t.Errorf("state db: %+v", c)
 	}
-	if !strings.Contains(out, "chosen: exclude: sessions, cache") || strings.Contains(out+errOut, "GRANT") {
+	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); !strings.Contains(raw, "dsn: {dotenv: .env}   # from .env, read when a command runs; it must name the working file\n") {
+		t.Errorf("configuration:\n%s", raw)
+	}
+	if !strings.Contains(out, "chosen: exclude: sessions, cache") || strings.Contains(out+errOut, "GRANT") || strings.Contains(out, "password") {
 		t.Errorf("output:\n%s\n%s", out, errOut)
 	}
 

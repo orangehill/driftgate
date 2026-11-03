@@ -279,6 +279,9 @@ const dsnEnv = "DG_DB_DSN"
 func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 	dsn := flow(config.SecretFor(d.Ref))
 	comment := "from " + where(d) + ", read when a command runs; the password stays there"
+	if d.Driver == appconf.SQLite {
+		comment = "from " + where(d) + ", read when a command runs; it must name the working file"
+	}
 	if d.Ref.IsZero() {
 		dsn = flow(config.Secret{Env: dsnEnv})
 		comment = "set " + dsnEnv + " to the DSN (mysql://user:pass@host:3306/ or postgres://…)"

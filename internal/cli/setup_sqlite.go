@@ -215,5 +215,16 @@ func (s *setup) ownSQLiteFile(p *config.Project, path, name string, c config.Com
 	return true, nil
 }
 
+// sqliteOnly reports whether every database of p is an SQLite file, which
+// has no password.
+func sqliteOnly(p *config.Project) bool {
+	for _, name := range databases(p) {
+		if p.State[name].Driver != config.SQLite {
+			return false
+		}
+	}
+	return len(databases(p)) > 0
+}
+
 // cleanFile is a file of the configuration with / and cleaned.
 func cleanFile(file string) string { return path.Clean(strings.ReplaceAll(file, `\`, "/")) }
