@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -769,25 +770,37 @@ func (r *sqliteRead) combine(buckets []sqliteBucket) []byte {
 }
 
 // sqliteScan runs a query and calls row with the values of each row (the
-// slice is reused).
+// slice is reused). The rows are read from the driver itself: through
+// database/sql every blob would be copied once more.
 func sqliteScan(ctx context.Context, c *sql.Conn, query string, n int, row func(vals []any), args ...any) error {
-	rows, err := c.QueryContext(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	vals := make([]any, n)
-	ptrs := make([]any, n)
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
-	for rows.Next() {
-		if err := rows.Scan(ptrs...); err != nil {
+	return c.Raw(func(dc any) error {
+		q, ok := dc.(driver.QueryerContext)
+		if !ok {
+			return fmt.Errorf("sqlite: no QueryContext on %T", dc)
+		}
+		named := make([]driver.NamedValue, len(args))
+		for i, a := range args {
+			named[i] = driver.NamedValue{Ordinal: i + 1, Value: a}
+		}
+		rows, err := q.QueryContext(ctx, query, named)
+		if err != nil {
 			return err
 		}
-		row(vals)
-	}
-	return rows.Err()
+		defer rows.Close()
+		dest := make([]driver.Value, n)
+		vals := make([]any, n)
+		for {
+			if err := rows.Next(dest); err == io.EOF {
+				return nil
+			} else if err != nil {
+				return err
+			}
+			for i, v := range dest {
+				vals[i] = v
+			}
+			row(vals)
+		}
+	})
 }
 
 // appendValue appends one value with its storage class: a tag, then an

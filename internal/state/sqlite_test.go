@@ -148,6 +148,7 @@ func TestSQLiteFingerprintAndRestore(t *testing.T) {
 		{"last bit of a real", []string{"UPDATE users SET score = 1.5000000000000002 WHERE id = 1"}, []string{"table:users"}},
 		{"text to blob", []string{"UPDATE tags SET extra = CAST('ab' AS BLOB) WHERE name = 'sql'"}, []string{"table:tags"}},
 		{"null to empty", []string{"UPDATE users SET avatar = '' WHERE id = 2"}, []string{"table:users"}},
+		{"null to empty blob", []string{"UPDATE users SET avatar = x'' WHERE id = 2"}, []string{"table:users"}},
 		{"datetime text", []string{"UPDATE users SET created_at = '2024-01-02T03:04:05' WHERE id = 1"}, []string{"table:users"}},
 		{"generated column", []string{"UPDATE posts SET title = 'hello!' WHERE id = 1"}, []string{"table:posts"}},
 		{"autoincrement", []string{"INSERT INTO users (email) VALUES ('c@x')", "DELETE FROM users WHERE email = 'c@x'"}, []string{"table:users"}},
