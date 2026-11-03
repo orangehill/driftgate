@@ -157,3 +157,16 @@ yrcwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEAnSiEjtvjlsPv
 e3FJ3Azzkac45g==
 -----END CERTIFICATE-----
 `)
+
+// TestSQLiteHasNoServer: an SQLite database is a file; it has no hosts to
+// allow and no server to name, whatever the DSN.
+func TestSQLiteHasNoServer(t *testing.T) {
+	for _, dsn := range []string{"", "file:db.sqlite", "mysql://u:p@db.example.com:3306/"} {
+		if hosts, err := Hosts(SQLite, dsn); err == nil || hosts != nil {
+			t.Errorf("Hosts(%q): %q, %v", dsn, hosts, err)
+		}
+		if server, err := Server(SQLite, dsn); err == nil || server != "" {
+			t.Errorf("Server(%q): %q, %v", dsn, server, err)
+		}
+	}
+}
