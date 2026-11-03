@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -268,9 +269,56 @@ func TestCaptureSQLite(t *testing.T) {
 			pristine.Close()
 			out.Reset()
 			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "c", Restore: "each", Out: &out})
-			if err == nil || !strings.Contains(err.Error(), "restore of db left 1 items different from the pristine copy: [table:users]") {
+			if err == nil || !strings.Contains(err.Error(), "restore of db left 1 items different from the fingerprint driftgate seed recorded of the pristine copy: [table:users]") {
 				t.Fatalf("capture on a changed pristine copy: %v\n%s", err, out.String())
 			}
 		})
+	}
+}
+
+// TestSeedSQLiteWhileWriting: the application writes after the seed made
+// its copy and before it recorded it. The record is of the copy, so the
+// first restore brings the working file back to it and the capture runs;
+// a record of the working file then would hold the application's row and
+// fail every restore until the next seed.
+func TestSeedSQLiteWhileWriting(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	file := filepath.Join(root, "database", "app.sqlite")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	app := newSQLiteApp(t, file, "wal")
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "database/app.sqlite", Exclude: []string{"sessions"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chaos.At = func(point string) {
+		if point == "state.sqlite.seed" {
+			app.mu.Lock()
+			defer app.mu.Unlock()
+			if _, err := app.db.Exec("INSERT INTO users (email) VALUES ('written-during-seed@x')"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { chaos.At = nil })
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	chaos.At = nil
+	if n := app.count(t, "users"); n != 3 {
+		t.Fatalf("%d users after the seed, want the 2 copied and the one written during it", n)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "a", Restore: "each"}); err != nil {
+		t.Fatalf("capture after a seed the application wrote during: %v", err)
+	}
+	if n := app.count(t, "users"); n != 2 {
+		t.Errorf("%d users after the capture, want the 2 of the pristine copy", n)
 	}
 }

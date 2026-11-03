@@ -572,6 +572,13 @@ func hashFields(fields ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// SeededFingerprint is the fingerprint of the pristine file, what a seed
+// records: the copy is one moment of the working file, which the
+// application may have changed since.
+func (s *SQLite) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+	return s.pristineFingerprint(ctx)
+}
+
 // pristineFingerprint hashes the pristine file, read-only; it is kept as
 // long as the file is the same and unchanged.
 func (s *SQLite) pristineFingerprint(ctx context.Context) (Fingerprint, error) {

@@ -377,7 +377,7 @@ func (t *tracker) restore(ctx context.Context) error {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the pristine copy: %v", c.Name(), len(d), limit(d, 20))
+			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the application wrote while the seed ran, or the pristine copy changed since, run driftgate seed again while the application does not write", c.Name(), len(d), limit(d, 20))
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
@@ -499,6 +499,12 @@ type SeedOptions struct {
 	Out, Log     io.Writer
 }
 
+// seededFingerprinter is a component that fingerprints its pristine copy
+// (state.SQLite).
+type seededFingerprinter interface {
+	SeededFingerprint(ctx context.Context) (state.Fingerprint, error)
+}
+
 // Seed runs the seed commands, which load the data into the working state,
 // then makes that state the pristine copy of every database component and
 // records its fingerprint.
@@ -548,7 +554,14 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if err := c.Seed(ctx); err != nil {
 			return envErr("seed of %s failed: %v", c.Name(), err)
 		}
-		f, err := c.Fingerprint(ctx, nil)
+		// The record is of the pristine copy itself where the component
+		// can read it (SQLite): the working data may have moved on since
+		// the copy was made, while the application kept writing.
+		fingerprint := c.Fingerprint
+		if pc, ok := c.(seededFingerprinter); ok {
+			fingerprint = func(ctx context.Context, _ []string) (state.Fingerprint, error) { return pc.SeededFingerprint(ctx) }
+		}
+		f, err := fingerprint(ctx, nil)
 		if err != nil {
 			return envErr("state %s: fingerprint: %v", c.Name(), err)
 		}
