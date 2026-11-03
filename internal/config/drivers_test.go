@@ -38,6 +38,7 @@ func TestSQLiteAndSQLServerValidation(t *testing.T) {
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Restore: []string{"x"}}, err: "without a driver"},
 		{comp: Component{Driver: "sqlite", DSN: Secret{Env: "X", Key: "k"}, Working: "db.sqlite"}, err: "dsn: "},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sess*"}, RowTracking: []string{"sessions"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sessions", "job_batches", "cache_*"}}, driver: SQLite}, // tables the file may not have
 		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop"}, driver: SQLServer, pristine: "Shop_pristine"},
 		{comp: Component{Driver: "mssql", DSN: Secret{Env: "X"}, Working: "Shop", Pristine: "ShopClean"}, driver: SQLServer, pristine: "ShopClean"},
 		{comp: Component{Driver: "sqlserver", Working: "Shop"}, err: "needs dsn"},

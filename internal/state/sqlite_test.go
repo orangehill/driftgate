@@ -1031,6 +1031,38 @@ func TestSQLiteExcludedTableTrigger(t *testing.T) {
 	}
 }
 
+// TestSQLiteExcludedAbsent: exclude: may name tables the file does not
+// have (Laravel 10 has no job_batches; a glob matching nothing); seed,
+// fingerprint and restore take the tables that exist and ignore the rest,
+// and a table the application makes later under an excluded name is
+// excluded from then on.
+func TestSQLiteExcludedAbsent(t *testing.T) {
+	for _, mode := range []string{"wal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			s, app := sqliteSchemaFixture(t, mode, []string{"sessions", "job_batches", "cache_*", "failed_jobs"},
+				"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+				"CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT)",
+				"INSERT INTO users VALUES (1, 'a')",
+				"INSERT INTO sessions VALUES ('s1', 'x')")
+			before := sqliteFingerprint(t, s)
+			for item := range before {
+				if strings.Contains(item, "sessions") || strings.Contains(item, "job_batches") || strings.Contains(item, "cache") {
+					t.Fatalf("fingerprint has the excluded item %s", item)
+				}
+			}
+			mustExec(t, app, "INSERT INTO users VALUES (2, 'b')", "INSERT INTO sessions VALUES ('s2', 'y')",
+				"CREATE TABLE job_batches (id TEXT PRIMARY KEY)", "INSERT INTO job_batches VALUES ('b1')")
+			if d := Diff(before, sqliteFingerprint(t, s)); !slices.Equal(d, []string{"table:users"}) {
+				t.Fatalf("changed %v, want table:users", d)
+			}
+			sqliteRestoreChecked(t, s)
+			if n := count(t, app, "SELECT count(*) FROM sessions") + count(t, app, "SELECT count(*) FROM job_batches"); n != 3 {
+				t.Fatalf("the restore changed the excluded tables: %d rows, want 3", n)
+			}
+		})
+	}
+}
+
 // TestSQLiteKeepsLocks: DriftGate never opens and closes a database file
 // itself: that would drop the locks of every connection of the process to
 // it. While one component holds the write lock, a second one opening the
