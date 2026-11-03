@@ -97,6 +97,7 @@ jobs:
       # alone (its tests included): every other package reaches a database
       # through a state component.
       - name: Driver imports
+        shell: bash
         run: |
           go list -test -f '{{.ImportPath}} {{join .Imports " "}}' ./... \
             | awk '$1 !~ /^github\.com\/orangehill\/driftgate\/internal\/state(_test)?$/ {
@@ -226,6 +227,9 @@ jobs:
           MSSQL_PID: Developer
           MSSQL_SA_PASSWORD: Dg-Passw0rd-2026
         ports: ["14331:1433"]
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b"
+          --health-interval=5s --health-retries=30
     env:
       DRIFTGATE_TEST_SQLSERVER: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true
     steps:

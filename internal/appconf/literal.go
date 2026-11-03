@@ -9,7 +9,9 @@ import (
 
 // code stands for a value only running the program could give: a function
 // call, a variable, a constant, string interpolation.
-type code struct{}
+type code struct {
+	src string // the expression, as written (value)
+}
 
 // literal reads the array literals of PHP ([…], array(…), 'k' => v) and
 // the dict and list literals of Python ({'k': v}, […]) without running
@@ -54,9 +56,14 @@ func (l *literal) value(depth int) (any, error) {
 	if depth > 64 {
 		return nil, errLiteral
 	}
+	l.space()
+	start := l.i
 	v, err := l.primary(depth)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := v.(code); ok {
+		v = code{src: strings.TrimSpace(l.s[start:l.i])}
 	}
 	if l.py && depth == 0 {
 		for l.i < len(l.s) && (l.s[l.i] == ' ' || l.s[l.i] == '\t' || l.s[l.i] == '\r') {
@@ -71,7 +78,7 @@ func (l *literal) value(depth int) (any, error) {
 		if err := l.skipExpr(); err != nil {
 			return nil, err
 		}
-		return code{}, nil
+		return code{src: strings.TrimSpace(l.s[start:l.i])}, nil
 	}
 	return v, nil
 }
@@ -391,6 +398,9 @@ func literalSetting(v any, file, key, lang string) (parts, error) {
 	sqlServerOptions(m, f)
 	slices.Sort(coded)
 	for _, k := range coded {
+		if fieldKey(k) == "name" && sqliteEngine(f) {
+			continue // BASE_DIR / 'db.sqlite3' (resolveDjango)
+		}
 		switch fieldKey(k) {
 		case "host", "port", "name", "dbname", "username", "user", "password", "engine", "url":
 			return parts{}, fmt.Errorf("%s: %s.%s is computed by %s code; DriftGate does not run it (put the DSN in an environment variable and use dsn: { env: NAME })", file, key, printableName(k), lang)

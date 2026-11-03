@@ -46,11 +46,37 @@ func sqliteFiles(p *config.Project, sc config.Component, server, record string) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", fmt.Errorf("pristine: %s: %w", sc.Pristine, err)
 	}
-	// Stat only: a file SQLite may have open is never opened here.
-	if a, err := os.Stat(pristine); err == nil {
-		if b, err := os.Stat(working); err == nil && os.SameFile(a, b) {
-			return "", "", fmt.Errorf("pristine %s is the working file %s", sc.Pristine, sc.Working)
-		}
+	if sqliteOverlap(working, pristine) {
+		return "", "", fmt.Errorf("pristine %s is the working file %s or one of its -wal, -shm and -journal files", sc.Pristine, sc.Working)
 	}
 	return working, pristine, nil
+}
+
+// sqliteSidecars are the files SQLite keeps next to a database file.
+var sqliteSidecars = []string{"", "-wal", "-shm", "-journal"}
+
+// sqliteOverlap reports whether the real paths working and pristine name
+// one file, or one is a sidecar file of the other: by path in any letter
+// case (macOS and Windows), and by identity for the files that exist (a
+// hard link). Stat only: a file SQLite may have open is never opened here.
+func sqliteOverlap(working, pristine string) bool {
+	p, perr := os.Stat(pristine)
+	for _, s := range sqliteSidecars {
+		if strings.EqualFold(pristine, working+s) || strings.EqualFold(working, pristine+s) {
+			return true
+		}
+		if perr == nil {
+			if w, err := os.Stat(working + s); err == nil && os.SameFile(p, w) {
+				return true
+			}
+		}
+	}
+	if w, err := os.Stat(working); err == nil {
+		for _, s := range sqliteSidecars[1:] {
+			if q, err := os.Stat(pristine + s); err == nil && os.SameFile(w, q) {
+				return true
+			}
+		}
+	}
+	return false
 }

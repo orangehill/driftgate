@@ -388,6 +388,9 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 	if db.Note != "" {
 		s.check = append(s.check, where(db)+": "+db.Note)
 	}
+	if err := checkSQLiteDriver(db, driver); err != nil {
+		return err
+	}
 	if driver != "" {
 		db.Driver = driver
 	}
@@ -403,10 +406,17 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 		}
 		db.Driver = driverOf(v)
 	}
-	if database != "" {
+	if err := checkSQLiteDriver(db, db.Driver); err != nil {
+		return err
+	}
+	if db.Driver == appconf.SQLite {
+		if err := s.sqliteDatabase(&db, database); err != nil {
+			return err
+		}
+	} else if database != "" {
 		db.Name = database
 	}
-	if db.Name == "" && !s.a.yes {
+	if db.Name == "" && db.Driver != appconf.SQLite && !s.a.yes {
 		v, err := s.a.value("Which database does the application use (its name)?", "the settings name no database: pass --database <name>", databaseName)
 		if err != nil {
 			return err
@@ -430,9 +440,18 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 	if db.Ref.IsZero() {
 		s.check = append(s.check, fmt.Sprintf("%s cannot be read from a file: set %s to the DSN before DriftGate runs (dsn: { env: %s })", where(db), dsnEnv, dsnEnv))
 	}
+	if db.Driver == appconf.SQLite && db.Path != "" {
+		if err := s.sqliteExclude(dr, db); err != nil {
+			return err
+		}
+	}
 	dr.db, dr.enable = &db, true
-	if db.Name == "" {
-		s.check = append(s.check, fmt.Sprintf("state: is commented out: the settings name no database the application uses; set working: and uncomment it in %s (or start over with --database <name>), then run %s", rel(dr.p.Root, dr.p.Layout.Config), s.resume))
+	if workingOf(db) == "" {
+		what := "name"
+		if db.Driver == appconf.SQLite {
+			what = "file"
+		}
+		s.check = append(s.check, fmt.Sprintf("state: is commented out: the settings name no database the application uses; set working: and uncomment it in %s (or start over with --database <%s>), then run %s", rel(dr.p.Root, dr.p.Layout.Config), what, s.resume))
 		fmt.Fprintf(s.out, "state: db %s, commented out: no database named\n", describe(db))
 		return nil
 	}
@@ -578,6 +597,11 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	var lines, grants []string
 	for _, name := range names {
 		c := p.State[name]
+		if c.Driver == config.SQLite {
+			if err := s.sqliteMissing(p, name, c); err != nil {
+				return err
+			}
+		}
 		if _, err := c.ReadDSN(ctx, p.Root); err != nil {
 			return dsnErr(c.DSN, err, fmt.Errorf("state %s: dsn: %v\nfix it in %s (or the setting it names), then run %s: it goes on from here", name, err, rel(p.Root, path), s.resume))
 		}

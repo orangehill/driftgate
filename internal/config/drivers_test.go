@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/orangehill/driftgate/internal/appconf"
 )
 
 // TestSQLiteAndSQLServerValidation: sqlite and sqlserver (also mssql) are
@@ -73,17 +75,81 @@ func TestUnknownDriverNamesAll(t *testing.T) {
 	}
 }
 
-// TestReadDSNSQLite: an SQLite component needs no DSN; one it has is read
-// (env and op name no file, so nothing to compare).
+// TestReadDSNSQLite: an SQLite component needs no DSN; one of the
+// environment must name the working file, and one that names no file is
+// refused without showing it.
 func TestReadDSNSQLite(t *testing.T) {
+	root := t.TempDir()
 	c := Component{Driver: SQLite, Working: "db.sqlite"}
-	if dsn, err := c.ReadDSN(context.Background(), t.TempDir()); err != nil || dsn != "" {
+	if dsn, err := c.ReadDSN(context.Background(), root); err != nil || dsn != "" {
 		t.Errorf("no dsn: %q, %v", dsn, err)
 	}
-	t.Setenv("DG_TEST_SQLITE_DSN", "file:db.sqlite")
 	c.DSN = Secret{Env: "DG_TEST_SQLITE_DSN"}
-	if dsn, err := c.ReadDSN(context.Background(), t.TempDir()); err != nil || dsn != "file:db.sqlite" {
-		t.Errorf("env dsn: %q, %v", dsn, err)
+	for _, v := range []string{"file:db.sqlite", "file:db.sqlite?mode=rw&_pragma=busy_timeout(5000)", "sqlite:///db.sqlite", "./db.sqlite",
+		"file://" + filepath.ToSlash(filepath.Join(root, "db.sqlite")), filepath.Join(root, "db.sqlite")} {
+		t.Setenv("DG_TEST_SQLITE_DSN", v)
+		if dsn, err := c.ReadDSN(context.Background(), root); err != nil || dsn != v {
+			t.Errorf("%s: %q, %v", v, dsn, err)
+		}
+	}
+	for _, v := range []string{"file:other.sqlite", "sqlite:////srv/db.sqlite", "mysql://root:s3cr3t@db:3306/", "Data Source=db.sqlite;Password=s3cr3t", ":memory:", "file://remote/db.sqlite"} {
+		t.Setenv("DG_TEST_SQLITE_DSN", v)
+		_, err := c.ReadDSN(context.Background(), root)
+		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "s3cr3t") {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+}
+
+// TestSQLiteDSNAsFound: an SQLite DSN of the environment is read as
+// appconf reads the setting (one resolver): Find's file is working, and
+// ReadDSN takes it; Prisma's file: URL relative to schema.prisma, Rails'
+// sqlite3:, SQLAlchemy's sqlite:///.
+func TestSQLiteDSNAsFound(t *testing.T) {
+	project := func(prisma bool) string {
+		root := t.TempDir()
+		files := map[string]string{"prisma/dev.db": "", "storage/dev.sqlite3": "", "dev.db": ""}
+		if prisma {
+			files["prisma/schema.prisma"] = "datasource db {\n provider = \"sqlite\"\n url = env(\"DATABASE_URL\")\n}\n"
+		}
+		for name, content := range files {
+			os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o755)
+			if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	withPrisma, without := project(true), project(false)
+	for _, c := range []struct{ root, v, want string }{
+		{withPrisma, "file:./dev.db", "prisma/dev.db"},
+		{withPrisma, "sqlite:///dev.db", "prisma/dev.db"},
+		{without, "file:./dev.db", "dev.db"},
+		{without, "sqlite3:storage/dev.sqlite3", "storage/dev.sqlite3"},
+		{without, "spatialite:storage/dev.sqlite3", "storage/dev.sqlite3"},
+		{without, "file:storage/dev%2Esqlite3?mode=rw", "storage/dev.sqlite3"},
+	} {
+		t.Setenv("DATABASE_URL", c.v)
+		var found []string
+		for _, d := range appconf.Find(c.root, os.LookupEnv).Databases {
+			if d.Ref.Source != appconf.Env {
+				continue
+			}
+			found = append(found, d.Path)
+			comp := Component{Driver: SQLite, Working: d.Path, DSN: SecretFor(d.Ref)}
+			if _, err := comp.ReadDSN(context.Background(), c.root); err != nil {
+				t.Errorf("%s: ReadDSN of working %s: %v", c.v, d.Path, err)
+			}
+		}
+		if len(found) != 1 || found[0] != c.want {
+			t.Errorf("%s: found %q, want %s", c.v, found, c.want)
+		}
+	}
+	// Another variable than schema.prisma's is taken from the root.
+	comp := Component{Driver: SQLite, Working: "dev.db", DSN: Secret{Env: "DG_TEST_SQLITE_DSN"}}
+	t.Setenv("DG_TEST_SQLITE_DSN", "file:./dev.db")
+	if _, err := comp.ReadDSN(context.Background(), withPrisma); err != nil {
+		t.Errorf("another variable: %v", err)
 	}
 }
 

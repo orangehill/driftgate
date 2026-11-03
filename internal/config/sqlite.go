@@ -82,3 +82,19 @@ func sameSQLiteFile(root, named, working string) bool {
 	sb, errB := os.Stat(b)
 	return errA == nil && errB == nil && os.SameFile(sa, sb)
 }
+
+// checkSQLiteDSN checks an SQLite DSN of the environment or 1Password
+// (variable is the environment variable, "" for 1Password): the file it
+// names, read as appconf reads a setting (appconf.SQLiteFile), must be the
+// one working is (sameSQLiteFile). No error quotes the DSN, which may be
+// meant for another database and hold a password.
+func checkSQLiteDSN(root, variable, dsn, working string) error {
+	file, err := appconf.SQLiteFile(root, variable, dsn)
+	if err != nil {
+		return invalid{fmt.Errorf("dsn: %w", err)}
+	}
+	if !sameSQLiteFile(root, file, working) {
+		return invalid{fmt.Errorf("dsn: it names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the DSN", file, working, file, working, file)}
+	}
+	return nil
+}

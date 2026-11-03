@@ -453,7 +453,7 @@ func (cp *composeProject) database(root, name string, env Lookup) (parts, error)
 	}
 	driver := imageDriver(image)
 	if driver == "" {
-		return parts{}, fmt.Errorf("%s: service %s runs no %s image", cp.file, printableName(name), restored(" or "))
+		return parts{}, fmt.Errorf("%s: service %s runs no MySQL, MariaDB, PostgreSQL or SQL Server image", cp.file, printableName(name))
 	}
 	if driver == SQLServer {
 		return cp.sqlServerDatabase(root, name, env)
