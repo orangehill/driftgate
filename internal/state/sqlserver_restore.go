@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/orangehill/driftgate/internal/chaos"
+	"github.com/orangehill/driftgate/internal/lazy"
 )
 
 // A restore brings the changed tables and sequences back item by item, in
@@ -54,7 +54,7 @@ func fallback(format string, args ...any) error {
 }
 
 // ssInteger is a value DriftGate writes into a statement as a number.
-var ssInteger = regexp.MustCompile(`^-?[0-9]{1,38}$`)
+var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 
 // Restore brings the given items of the working database back to the
 // pristine copy; nil means every item that differs.
@@ -506,7 +506,7 @@ func (s *SQLServer) planRestore(winv, pinv *ssInventory, items []string, facts *
 				if rt.clear, rt.reseed, ok = ssIdentityPlan(pt.Identity, wt.Identity, pt.Rows == 0, truncatable); !ok {
 					return nil, fallback("the identity column of %s cannot be set back to where the pristine copy's stands item by item", item)
 				}
-				if rt.reseed != "" && !ssInteger.MatchString(rt.reseed) {
+				if rt.reseed != "" && !ssInteger().MatchString(rt.reseed) {
 					return nil, fallback("the identity value of %s cannot be written", item)
 				}
 				if rt.clear == "TRUNCATE" && pt.Identity.Last.Valid && !large {
@@ -545,12 +545,12 @@ func (s *SQLServer) planRestore(winv, pinv *ssInventory, items []string, facts *
 // number.
 func ssRestartSQL(name string, want *ssSequence, n int) (string, bool) {
 	if !want.LastUsed.Valid {
-		if !ssInteger.MatchString(want.Current) {
+		if !ssInteger().MatchString(want.Current) {
 			return "", false
 		}
 		return fmt.Sprintf("ALTER SEQUENCE %s RESTART WITH %s;\n", name, want.Current), true
 	}
-	if !ssInteger.MatchString(want.LastUsed.String) {
+	if !ssInteger().MatchString(want.LastUsed.String) {
 		return "", false
 	}
 	return fmt.Sprintf("ALTER SEQUENCE %s RESTART WITH %s;\nDECLARE @dg_n%d sql_variant = NEXT VALUE FOR %s;\n", name, want.LastUsed.String, n, name), true

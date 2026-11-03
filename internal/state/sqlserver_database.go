@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	mssql "github.com/microsoft/go-mssqldb"
 
 	"github.com/orangehill/driftgate/internal/chaos"
+	"github.com/orangehill/driftgate/internal/lazy"
 )
 
 // A restore that cannot bring items back one by one (sqlserver_restore.go)
@@ -779,7 +779,7 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 			if t.Identity != nil {
 				fmt.Fprintf(&body, "SET IDENTITY_INSERT %s OFF;\n", t.qname())
 				if last := e.a.String; e.a.Valid && last != "NULL" {
-					if !ssInteger.MatchString(last) {
+					if !ssInteger().MatchString(last) {
 						return fmt.Errorf("state %s: the saved identity value of %s cannot be read", s.o.Name, e.item)
 					}
 					name := sqlServerString(t.qname())
@@ -797,7 +797,7 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 		if t.Identity != nil {
 			fmt.Fprintf(&body, "SET IDENTITY_INSERT %s OFF;\n", t.qname())
 			if reseed != "" {
-				if !ssInteger.MatchString(reseed) {
+				if !ssInteger().MatchString(reseed) {
 					return fmt.Errorf("state %s: the saved identity value of %s cannot be read", s.o.Name, e.item)
 				}
 				fmt.Fprintf(&body, "DBCC CHECKIDENT (%s, RESEED, %s) WITH NO_INFOMSGS;\n", sqlServerString(t.qname()), reseed)
@@ -908,7 +908,7 @@ func (s *SQLServer) sameFamily(ctx context.Context, db string) bool {
 	n := 0
 	for files.Next() {
 		var path string
-		if files.Scan(&path) != nil || !ssSeedFile.MatchString(path[strings.LastIndexAny(path, `/\`)+1:]) {
+		if files.Scan(&path) != nil || !ssSeedFile().MatchString(path[strings.LastIndexAny(path, `/\`)+1:]) {
 			return false
 		}
 		n++
@@ -917,7 +917,7 @@ func (s *SQLServer) sameFamily(ctx context.Context, db string) bool {
 }
 
 // ssSeedFile is the name Seed gives a file of the copy it restores.
-var ssSeedFile = regexp.MustCompile(`^dg_[0-9a-f]{8}_[0-9]+(\.(mdf|ndf|ldf))?$`)
+var ssSeedFile = lazy.Regexp(`^dg_[0-9a-f]{8}_[0-9]+(\.(mdf|ndf|ldf))?$`)
 
 // dropLeft drops a database DriftGate made next to the pristine copy and
 // left behind (<pristine>_dgnew, <pristine>_dgx) when checkPristine allows
