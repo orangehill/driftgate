@@ -123,7 +123,9 @@ folder, from the frameworks it finds.
   a `run` would otherwise create the pristine database unasked.
   `driftgate setup` turns it on after asking, or uncomment it. With
   several settings it takes the one `setup --yes` would and lists the
-  others above `state:`.
+  others above `state:`. For an SQLite file it also writes the tables
+  the framework keeps its sessions, cache and jobs in as `exclude:`
+  ([SQLite](configuration.md#sqlite)).
 
 ```sh
 driftgate init --project shop
@@ -133,7 +135,7 @@ driftgate init --project shop
 
 ```
 driftgate setup [--yes] [--project <name>] [--baselines local|git]
-    [--driver mysql|postgres] [--database <name>] [--url <address>]
+    [--driver mysql|postgres|sqlite|sqlserver] [--database <name>] [--url <address>]
 ```
 
 Sets up a new project from zero to its first baseline, in this order:
@@ -158,8 +160,8 @@ Sets up a new project from zero to its first baseline, in this order:
 | `--yes` | ask nothing: take the best database setting and make the pristine copy. Where a value would have to be guessed, it stops and says what to pass |
 | `--project <name>` | project name (default: the folder name) |
 | `--baselines local\|git` | as for `init`; default `local` |
-| `--driver mysql\|postgres` | the database server, when the settings do not say |
-| `--database <name>` | the database the application uses, when the settings do not say |
+| `--driver mysql\|postgres\|sqlite\|sqlserver` | the database server, when the settings do not say |
+| `--database <name>` | the database the application uses (SQLite: its file, relative to the project root), when the settings do not say |
 | `--url <address>` | where the application answers, when the settings do not say it or say it wrongly |
 
 - **Several database settings** (`.env` and `.env.local`, a compose
@@ -181,6 +183,16 @@ Sets up a new project from zero to its first baseline, in this order:
 - **No database name**, or PostgreSQL's own database `postgres` (a compose
   service without `POSTGRES_DB`): the block is written commented out, with
   what to set; `--database` names it.
+- **An SQLite file** (Laravel 11 and later by default, Django, Rails,
+  Prisma, ASP.NET; see [SQLite](configuration.md#sqlite)): `working:` is
+  the file, the pristine copy a file of DriftGate's store, and nothing is
+  granted. Setup proposes to exclude the framework's own tables in the
+  same file (sessions, cache, jobs; default yes, `--yes` says yes), and
+  says to run the application's migrations first when the file does not
+  exist yet (exit 2). `--driver sqlite` for a setting that names a
+  database server, or another driver for one that names an SQLite file,
+  stops it (exit 2). In a worktree, the worktree's settings must name a
+  file of its own, which must exist there (git does not carry it).
 - **A user that may not create a database.** Before the pristine copy it
   says what to grant, as an administrator: `GRANT ALL PRIVILEGES ON
   \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB) or `ALTER ROLE
@@ -262,7 +274,11 @@ pristine copy and checks them against its fingerprint. The fingerprint is
 kept in the local store per database server (from the DSN, without its
 credentials) and databases, so checkouts of the project (git worktrees)
 that share the store but use their own database server never take each
-other's; `run` seeds when this server has none yet.
+other's; `run` seeds when this server has none yet. An SQLite database is
+named by the real path of its working file, and its pristine copy is a
+file next to that record unless `pristine:` names one
+([SQLite](configuration.md#sqlite)); the seed only reads the working
+file.
 
 ```sh
 driftgate seed

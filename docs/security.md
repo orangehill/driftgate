@@ -39,7 +39,11 @@ to do it.
   compose service is acceptable only for a local, disposable database in a
   container on this machine (what `driftgate setup` prefers when the
   application's setting names that service); a database on a shared server
-  gets a limited user.
+  gets a limited user. An SQLite file has no users: there the query runs
+  on the pristine file opened read-only, on a connection that lets only
+  reads compile, without `ATTACH`, `PRAGMA` or the functions and tables
+  that reach other files or the file's pages
+  ([SQLite](configuration.md#sqlite)).
 - Commands run without a shell (a shell is written explicitly and shows in
   the diff), data from responses never goes into their arguments, and they
   do not receive `DRIFTGATE_KEY`, the variable `key.env` names, or any
@@ -76,7 +80,13 @@ to do it.
   reached. A database
   elsewhere needs `allow_remote: true` on that component, so a wrong DSN
   cannot reach a production server. The data module's target follows the
-  same rule (`data.allow_remote`).
+  same rule (`data.allow_remote`). An SQLite database is a file inside the
+  project (also past symbolic links): a file outside it, on a network
+  share (`\\server\share`) or in memory is refused, `allow_remote` does not
+  apply, and a restore writes inside the file, in one transaction, without
+  firing its triggers or cascading its foreign keys. The pristine copy of
+  an SQLite file keeps no rows of excluded tables (sessions, tokens), not
+  even in its free pages.
 - Against production, DriftGate sends no request that changes data without
   two separate flags. It is meant for a copy of the data: CI, staging, a
   developer machine.
@@ -140,8 +150,8 @@ to do it.
   project's `UserSecretsId` are read from outside it, and never written.
   The setting's TLS is kept: one DriftGate cannot pass on stops the
   command instead of connecting without it. A setting that names another
-  database than `working` stops the command, so a restore never resets a
-  database the application does not run on; one whose host may be the
+  database than `working` (for SQLite, another file) stops the command,
+  so a restore never resets a database the application does not run on; one whose host may be the
   local socket or TCP needs `host:` (DriftGate does not guess). A
   connection string is never read as a URL or the MySQL driver's form, so
   no part of its password is taken for the user and shown. No project code runs to read
@@ -261,6 +271,7 @@ to do it.
 A release is built only from a tag `vX.Y.Z` on a commit of `main`, by
 `.github/workflows/release.yml`, after the CI checks of `ci.yml` itself
 (format, vet, staticcheck, tests against MariaDB, MySQL and PostgreSQL,
+of SQLite on Linux, macOS and Windows,
 fuzzing, `govulncheck` without findings, and the size and package limits of
 the binaries on the six platforms, which pull requests pass too). It is
 published from the `release` environment. Each release has:

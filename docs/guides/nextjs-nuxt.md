@@ -93,6 +93,28 @@ entries with a format. Values that change only with a new build show up as
 drift after the next build; check that they are build artefacts before you
 allow them.
 
+## A Prisma database on SQLite
+
+With `provider = "sqlite"` and `url = env("DATABASE_URL")` in
+`prisma/schema.prisma`, `init` and `setup` read the file from `.env`.
+Prisma takes a relative `file:` URL from the folder of `schema.prisma`,
+and so does DriftGate: `DATABASE_URL="file:./dev.db"` is `prisma/dev.db`.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite
+    dsn: { dotenv: .env, key: DATABASE_URL }   # it must name working
+    working: prisma/dev.db
+```
+
+The pristine copy is a file of DriftGate's store, and restores write
+inside `dev.db` while the server keeps it open (see
+[SQLite](../configuration.md#sqlite)). `_prisma_migrations` is
+fingerprinted and restored like any other table. Run `prisma migrate dev`
+(or `migrate deploy`) before `setup`, so the file exists.
+
 ## API next to pages
 
 A Next.js API route is compared like any JSON API. In a monorepo where the

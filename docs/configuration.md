@@ -341,11 +341,12 @@ Every capture starts from the same data. Each entry under `state:` is a
 component, named by a simple name: a database with a built-in driver, or
 anything else through commands.
 
-**A database** (MySQL, MariaDB or PostgreSQL):
+**A database** (MySQL, MariaDB or PostgreSQL; an SQLite file takes the
+keys of [SQLite](#sqlite)):
 
 | Key | Type | Meaning |
 |---|---|---|
-| `driver` | `mysql` (also MariaDB; `mariadb` is accepted) \| `postgres` | |
+| `driver` | `mysql` (also MariaDB; `mariadb` is accepted) \| `postgres` \| `sqlite` | |
 | `dsn` | `{env}` \| `{op}` \| a file of the project | the server, never written in the file: `mysql://user:pass@host:3306/` (or the driver's `user:pass@tcp(host:3306)/`), `postgres://user:pass@host:5432/`, or where the project keeps it (`{ dotenv: .env }`); see [database DSNs](#database-dsns) |
 | `working` | string, required | the database the application uses |
 | `pristine` | string | its pristine copy; default `<working>_pristine`; must differ from `working` (MySQL/MariaDB: also in letter case) |
@@ -526,8 +527,8 @@ restore a database the application no longer runs on.
   `schema`) are left out, except PostgreSQL's `application_name`,
   `connect_timeout` and `target_session_attrs`; so is the database
   (`working` and `database` name it).
-- A file that names another database (SQL Server, SQLite) or a driver
-  other than the component's is an error, as is a value only code
+- A file that names a driver other than the component's is an error
+  (an SQLite file for a `mysql` component), as is a value only code
   computes (`os.environ[...]` in `settings.py`, other Ruby in ERB): put the
   DSN in a variable and use `{ env: NAME }`.
 - `.env` files are read as phpdotenv, Node's dotenv and godotenv agree:
@@ -574,10 +575,185 @@ a restore; otherwise `capture` and `run` refuse it (exit 2) unless
 
 #### SQLite
 
-<!-- driver: sqlite. working is the database file, relative to the project
-root; the pristine copy is a file of the store; the DSN is optional. To be
-written with the driver: restore and seed in place, same machine, exclude
-advice, fingerprinted items, settings detection. -->
+An SQLite database is a file of the project. DriftGate has SQLite built
+in: [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) with
+SQLite 3.54.1, SQLite's own C code translated to Go, so the binary needs
+no CGO and locks the file as the application's SQLite does. Any SQLite 3
+file works, in WAL or rollback-journal mode. CI tests it on Linux, macOS
+and Windows with Python's `sqlite3` as the application in another
+process.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `sqlite` | |
+| `working` | path, required | the database file the application opens, relative to the project root; it must exist when a command runs (the application's migrations make it) |
+| `pristine` | path | its pristine copy; default a file of the local store (`pristine/<name>-<hash>.sqlite`, next to the record of its fingerprint), so every checkout and working file has its own. When set, another file inside the project, in a folder that exists: not `working` and not one of its `-wal`, `-shm` and `-journal` files, also in letter case |
+| `dsn` | a file of the project \| `{env}` \| `{op}` | optional: the setting the application reads (`{ dotenv: .env }`, see [database DSNs](#database-dsns)); the file it names must be `working`, so a changed `DB_DATABASE` stops a command (exit 2) instead of restoring a file the application no longer uses. An `env` or `op` value is a path, a `file:` URI or an `sqlite:` URL |
+| `exclude`, `row_tracking` | | as above; a row without a primary key is named by its rowid (`rowid=7`) |
+
+`allow_remote` is refused: there is no server.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite
+    dsn: { dotenv: .env }       # DB_CONNECTION=sqlite; it must name working
+    working: database/database.sqlite
+    exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]
+```
+
+**The file.** `working` and `pristine` are relative to the project root
+and inside it, also past symbolic links. A path from the application's
+settings is resolved as the system opens it: a `..` after a symbolic link
+goes up from where the link leads, and a link out of the project is
+refused. Refused too: an in-memory database (`:memory:`, `mode=memory`,
+SQLAlchemy's `sqlite://`), a file outside the project, a network share
+(`\\server\share\…`), a URL with a host (other than `file://localhost/`),
+an encrypted file (SQLCipher, a `Password=` of Microsoft.Data.Sqlite) and
+a file that `|DataDirectory|` names. A relative path is taken as the
+framework takes it; where the application opens it from the folder it
+runs in, `init` and `setup` add a note to check it:
+
+| Setting | The file |
+|---|---|
+| Laravel `.env` (`DB_CONNECTION=sqlite`) | `DB_DATABASE`, or the file of `DB_URL` / `DATABASE_URL`; unset, `database/database.sqlite`. A relative `DB_DATABASE` is taken from the project root, with a note: Laravel 11 and later open it from the folder PHP runs in when it is there, else from the root; Laravel 10 and earlier only from the folder PHP runs in (`public/` under `php artisan serve` and PHP-FPM). Leave it unset or make it absolute |
+| Django `settings.py` (`django.db.backends.sqlite3`) | `BASE_DIR / 'db.sqlite3'`, `str(BASE_DIR / …)` or `os.path.join(BASE_DIR, …)`, with `BASE_DIR` as `startproject` writes it (`Path(__file__).resolve().parent.parent`, or `os.path.dirname` of `__file__`); a relative string from `manage.py`'s folder. Other code is not run: set `working:` |
+| Prisma (`provider = "sqlite"` in `prisma/schema.prisma`) | the `file:` URL of the variable its `url = env("…")` names, relative to `prisma/`, as Prisma takes it |
+| Rails `config/database.yml` (`adapter: sqlite3`) | relative to the Rails root; every SQLite database of `development` |
+| ASP.NET `appsettings.json` (`Data Source=app.db`) | relative to the `.csproj`'s folder, where `dotnet run` runs |
+| any other | relative to the project root |
+
+- **Rails 8** has a file per database (`primary`, `cache`, `queue`,
+  `cable`; a new application splits them in production only). Each file
+  of `development` is a component of its own; `init` and `setup` write
+  the primary and list the others. The cache, queue and cable databases (Solid Cache, Solid Queue, Solid Cable) change without a
+  request changing data: leave them out of `state:`, or exclude their
+  tables.
+- **The same machine.** SQLite's locks keep a restore and the
+  application's writes apart, so the file must be on a local disk of the
+  machine DriftGate runs on, opened by an application on that machine.
+  They do not hold across network file systems (NFS, SMB), and Docker
+  Desktop's file sharing (macOS, Windows) is not documented to keep them:
+  `init` and `setup` note a compose service that mounts the file's folder
+  into its container. Run the application on this machine
+  (or on Linux, where a bind mount is the same file system).
+
+**Restore, in place.** A restore writes inside the working file, in one
+transaction, as the application's own SQLite does; the file is never
+copied, renamed or deleted, nor are its `-wal`, `-shm` and `-journal`
+files. The application's open connections keep the file they opened: a
+copy or a rename over it would leave them reading and writing the old
+file (a pass on data that is not the restored data, and lost writes), with
+`-wal` and `-shm` files that no longer match the file.
+
+- Only the items that differ are restored, in one `BEGIN IMMEDIATE`
+  transaction with the pristine file attached read-only, so the
+  application sees all of a restore or none of it. A table with the
+  pristine definition is emptied and filled again with `INSERT … SELECT`,
+  which SQLite copies as raw records (a table without an `INTEGER PRIMARY
+  KEY` with its hidden rowids, so they are kept), and gets its
+  `sqlite_sequence` value back; a changed table is copied whole. A table
+  whose definition (its or its indexes' `CREATE` statement) differs is
+  dropped and created from the pristine file; views and triggers are made
+  again from it, and `user_version` and `application_id` set to its own.
+- Nothing a restore does runs the application's logic: foreign keys are off
+  on DriftGate's connections, so deletes do not cascade, and the triggers
+  of the tables it writes are dropped before and created again after,
+  inside the transaction. Excluded tables, SQLite's statistics and the
+  mark of the pristine copy are not touched.
+- A working file replaced on disk (deleted and made again, a copy written
+  over it) is noticed at the next fingerprint, restore or seed: DriftGate
+  opens the new file and reads it in full.
+
+**Seed.** `driftgate seed` copies one moment of the working file
+(`VACUUM INTO`) into `<pristine>.driftgate-new`, marks it (a table
+`driftgate_pristine`), empties its excluded tables (with
+`secure_delete`, so the rows of sessions and tokens do not stay in its
+free pages), sets it to rollback mode (`DELETE`), writes it to disk and
+renames it over the pristine file; a seed that stops before leaves the
+old copy. The working file is only read. A file at the `pristine` path is
+replaced only when it has the mark, is empty, or is the one DriftGate's
+record names; any other is someone's data, and seed stops and names it.
+
+**Fingerprint.** It covers `table:<name>` (its `CREATE` statement, those
+of its indexes, its `sqlite_sequence` value and its rows), `view:`,
+`trigger:`, `pragma:user_version` and `pragma:application_id`. Every
+value is hashed with its storage class, so `1`, `1.0`, `'1'` and `x'31'`
+differ, as do NULL and `''`; a generated column counts by its definition.
+A virtual table (FTS5, R*Tree) counts by its `CREATE` statement, its rows
+by its shadow tables; a module DriftGate's SQLite does not have stops a
+restore with the advice to exclude the table. Not covered: SQLite's
+statistics (`sqlite_stat1` …, which `ANALYZE` and `PRAGMA optimize`
+write), temporary objects, excluded tables and the mark. A trigger of an
+excluded table is covered: its body may write any table.
+
+A fingerprint is taken at one of three costs; the first one of a command
+reads every table:
+
+| Fingerprint | When | 1 MB | 50 MB | 500 MB |
+|---|---|---|---|---|
+| reused | nothing committed since the last one (`PRAGMA data_version`, the schema version, the file's identity, size and time, and no restore of DriftGate's own) | 22 µs | 28 µs | 54 µs |
+| page digests | something was written, but every table's pages hash as at its last reading (only an excluded table was written) | 0.87 ms | 30 ms | 302 ms |
+| rows | the tables whose pages changed are read again (one row of the large table) | 3.0 ms | 150 ms | 1.13 s |
+| full | every table read | 3.5 ms | 167 ms | 1.67 s |
+
+Seed (1, 50, 500 MB): 12.8 ms, 124 ms, 1.33 s. Restore of a small table with one changed
+row: about 0.35 ms; of a table of about 490 MB: 4.5 s. Measured on an
+Apple M4 in WAL mode, on a file with one large table with an index,
+twenty small tables and an excluded session table. A database session or
+cache table written on every request moves `data_version` every time: the
+page digests then keep the fingerprint from reading the other tables.
+
+**Locks.** DriftGate's connections wait up to 10 s for a lock the
+application holds (`busy_timeout`), and never change the file's journal
+mode or locking mode or checkpoint its WAL.
+
+- A fingerprint first waits for a write the application has under way
+  (`BEGIN IMMEDIATE`); when one committed meanwhile, it looks again after
+  5 ms, up to 20 times, so a request that ends with several transactions
+  is seen whole. Holding the write lock only for that moment, it starts
+  read transactions on up to five connections, which then read one moment
+  of the file while the application goes on.
+- In WAL mode the application's writers are not held up by a fingerprint
+  or a seed. In rollback mode (`DELETE`, SQLite's default, which Laravel
+  and Django keep; Rails sets WAL) a reading transaction keeps writers
+  from committing: for the duration of a scan or of a seed's copy, an
+  application write waits (or, without a busy timeout, fails with
+  `database is locked`). Exclude what background workers write, or switch
+  the file to WAL.
+- A restore is one write transaction: the application's writers wait for
+  it, and its readers see the data before or after it.
+
+**Exclude** what the framework writes on every request or outside
+requests, in the same file: sessions, cache, jobs. Restoring them would
+log users out and drop queued jobs, and their writes would make every
+fingerprint read them. `init` and `setup` propose them from the settings
+(`setup` asks, default yes):
+
+- Laravel: `sessions`, `cache` and `cache_locks`, `jobs` when
+  `SESSION_DRIVER`, `CACHE_STORE` (`CACHE_DRIVER` before Laravel 11) and
+  `QUEUE_CONNECTION` are `database` on the default connection, or unset
+  with `database` as the default (the framework's since Laravel 11), or
+  the tables `SESSION_TABLE`, `DB_CACHE_TABLE`, `DB_CACHE_LOCK_TABLE` and
+  `DB_QUEUE_TABLE` name; `job_batches`, and `failed_jobs` unless
+  `QUEUE_FAILED_DRIVER` is `null`, `file` or `dynamodb`; Telescope's
+  (`telescope_entries`, `telescope_entries_tags`, `telescope_monitoring`)
+  and Pulse's (`pulse_values`, `pulse_entries`, `pulse_aggregates`) when
+  `composer.json` requires them;
+- Django: `django_session`, with database sessions.
+
+An excluded table keeps its definition in the pristine copy, without
+rows. `exclude` may name tables the file does not have.
+
+**Queries** (`params` `sql:`) run on the pristine file, opened read-only
+(`mode=ro`, `query_only`, defensive mode), on a connection that lets only
+reads compile. Besides what the other drivers refuse, `ATTACH`, `DETACH`,
+`PRAGMA`, `VACUUM`, `REINDEX`, the tables that read the file's pages
+(`sqlite_dbpage`, `dbstat`, `sqlite_dbdata`, `sqlite_dbptr`) and the
+functions `load_extension`, `fts3_tokenizer`, `readfile`, `writefile` and
+`edit` are refused. A `DATETIME` value comes back as the text SQLite
+holds.
 
 #### SQL Server
 

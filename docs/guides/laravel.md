@@ -27,7 +27,8 @@ driftgate init
 Rules written directly in a controller (`$request->validate([...])`) are not
 read; such routes get no sample body, and `coverage` lists them.
 
-`state:` and `base_url` come from `.env` (`DB_*`, `APP_URL`); with Sail,
+`state:` and `base_url` come from `.env` (`DB_*`, `APP_URL`; an SQLite
+file, the default of Laravel 11 and later, see [SQLite](#sqlite)); with Sail,
 from the compose file: the `mysql` service's published port and its root
 user, which can create the pristine copy (fine for Sail's local container;
 on a shared server use a limited user). `init` writes `state:` commented
@@ -75,7 +76,7 @@ rewrite, not one you keep work in.
 ```yaml
 state:
   db:
-    driver: mysql                    # MariaDB too; postgres for PostgreSQL
+    driver: mysql                    # MariaDB too; postgres for PostgreSQL; sqlite below
     dsn: { env: DG_DB_DSN }          # export DG_DB_DSN=mysql://root:secret@127.0.0.1:3306/
     working: shop                    # DB_DATABASE of the application
     exclude: [sessions, cache, cache_locks, jobs, failed_jobs]
@@ -97,6 +98,42 @@ guards:
   that is not restored makes the second capture differ.
 - With Sail or Docker, run the seed commands through
   `docker compose exec -T laravel.test …` as well.
+
+### SQLite
+
+Laravel 11 and later start on SQLite: `DB_CONNECTION=sqlite` with
+`DB_DATABASE` unset is `database/database.sqlite`, and the sessions,
+cache and queue (`SESSION_DRIVER`, `CACHE_STORE`, `QUEUE_CONNECTION` =
+`database`) are tables of the same file. `setup` finds the file, proposes
+to exclude those tables (default yes), grants nothing, and makes the
+pristine copy as a file of DriftGate's store:
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite
+    dsn: { dotenv: .env }               # it must name working
+    working: database/database.sqlite
+    exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]
+```
+
+- Restores write inside the file while `php artisan serve` (or Herd) keeps
+  it open; the application sees the restored data on its next query. See
+  [SQLite](../configuration.md#sqlite) for what is restored and how.
+- Leave `DB_DATABASE` unset or make it absolute. A relative one is taken
+  from the project root, as Laravel 11 and later do when it is not in the
+  folder PHP runs in; Laravel 10 and earlier open it from that folder
+  only (`public/` under `php artisan serve` and PHP-FPM), and `setup`
+  notes it.
+- `setup` takes the data already in the file as pristine (`seed
+  --skip-commands`); run the migrations first (`php artisan migrate`),
+  which make the file.
+- Laravel keeps the file in rollback mode, where a fingerprint keeps
+  writers waiting while it reads (a few milliseconds on a small file). A
+  queue worker on the same file writes `jobs`, which is excluded.
+- Checked on a Laravel 12 application: fingerprints 4–5 ms, restores
+  3–4 ms, about 1.2 s per capture of 11 requests.
 
 ## 4. Authenticated routes
 
