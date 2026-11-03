@@ -772,6 +772,18 @@ func (p *Postgres) Seed(ctx context.Context) error {
 	}, p.o.Replacing)
 }
 
+// SeededFingerprint is the fingerprint of the pristine database, what a
+// seed records: the copy is the working database at one moment, which the
+// application may have changed since. The pristine database accepts
+// connections only while it is read.
+func (p *Postgres) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+	if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
+		return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
+	}
+	defer p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS false")
+	return p.fingerprint(ctx, p.o.Pristine, nil, FingerprintFormat)
+}
+
 // checkPristine refuses to replace a pristine database that Seed did not
 // make: one that has objects of its own and no pristineComment, unless it is
 // adopted.

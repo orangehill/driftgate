@@ -1090,6 +1090,28 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	return err
 }
 
+// SeededFingerprint is the fingerprint of the pristine database, what a
+// seed records: the tables are copied one by one, and the application may
+// have changed the working database while they were and since. The items
+// are named as the working database's; the mark (pristineTable) is none of
+// them, and the counters the working database's fingerprints start from
+// are left as they were.
+func (m *MySQL) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+	c, err := m.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	ok, err := dbx.MySQLDatabaseExists(ctx, c, m.o.Pristine)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("state %s: pristine database %s does not exist; run driftgate seed", m.o.Name, m.o.Pristine)
+	}
+	return m.fingerprint(ctx, c, m.o.Pristine, nil)
+}
+
 // checkPristine refuses to drop a pristine database that Seed did not make:
 // one that has tables, views, routines or events and no pristineTable,
 // unless it is adopted (Options.AdoptPristine).
