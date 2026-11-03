@@ -21,7 +21,8 @@ import (
 // the old copy as it was. The pristine file replaced must carry the mark,
 // be empty, or be adopted (Options.AdoptPristine): any other file named as
 // the pristine one is someone's data and is not replaced.
-func (s *SQLite) Seed(ctx context.Context) error {
+func (s *SQLite) Seed(ctx context.Context) (err error) {
+	defer s.busy(&err)
 	if err := s.current(); err != nil {
 		return err
 	}
@@ -35,7 +36,7 @@ func (s *SQLite) Seed(ctx context.Context) error {
 	if err := removeNew(tmp); err != nil {
 		return err // left by a seed that stopped
 	}
-	err := s.vacuumInto(ctx, tmp)
+	err = s.vacuumInto(ctx, tmp)
 	if err == nil {
 		err = s.prepare(ctx, tmp)
 	}

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"modernc.org/sqlite" // registers the "sqlite" driver
 
@@ -221,6 +222,21 @@ func sqliteURI(path string, params ...string) (string, error) {
 		b.WriteString("?" + strings.Join(params, "&"))
 	}
 	return b.String(), nil
+}
+
+// sqliteBusyWait is how long DriftGate's connections wait for a lock
+// another connection holds (busy_timeout of sqliteSession and
+// sqliteReadOnly).
+var sqliteBusyWait = 10 * time.Second
+
+// busy turns SQLite's "database is locked" (SQLITE_BUSY, after
+// sqliteBusyWait) into what happened and what to do.
+func (s *SQLite) busy(err *error) {
+	var e *sqlite.Error
+	if *err == nil || !errors.As(*err, &e) || e.Code()&0xff != 5 {
+		return
+	}
+	*err = fmt.Errorf("state %s: another connection held a lock on %s for %s (%w): a long transaction of the application, or a worker (queue, scheduler) writing to it; end that transaction or stop the worker, then run the command again", s.o.Name, s.o.Working, sqliteBusyWait, *err)
 }
 
 // sqliteSession is how DriftGate's connections to the working file work: the

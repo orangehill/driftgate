@@ -11,7 +11,8 @@ import (
 // Rows reads the rows of the tracked tables among items (nil: every
 // tracked table), all at one moment. A row's key is its primary key, or
 // rowid=N for a table without one.
-func (s *SQLite) Rows(ctx context.Context, items []string) (Rows, error) {
+func (s *SQLite) Rows(ctx context.Context, items []string) (_ Rows, err error) {
+	defer s.busy(&err)
 	if err := s.current(); err != nil {
 		return nil, err
 	}

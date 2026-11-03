@@ -1157,6 +1157,36 @@ func TestSQLiteExcludedLeavesNoTrace(t *testing.T) {
 	}
 }
 
+// TestSQLiteBusy: a lock the application holds longer than DriftGate
+// waits is reported as what it is, with what to do.
+func TestSQLiteBusy(t *testing.T) {
+	session, wait := slices.Clone(sqliteSession), sqliteBusyWait
+	for i, p := range sqliteSession {
+		if strings.HasPrefix(p, "_pragma=busy_timeout(") {
+			sqliteSession[i] = "_pragma=busy_timeout(200)"
+		}
+	}
+	sqliteBusyWait = 200 * time.Millisecond
+	t.Cleanup(func() { sqliteSession, sqliteBusyWait = session, wait })
+	ctx := context.Background()
+	s, app := sqliteFixture(t, "delete", Options{})
+	mustExec(t, app, "UPDATE users SET email = 'z@x' WHERE id = 1")
+	c, err := app.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	mustExecConn(t, c, "BEGIN IMMEDIATE")
+	defer c.ExecContext(ctx, "ROLLBACK")
+	err = s.Restore(ctx, []string{"table:users"})
+	if err == nil || !strings.Contains(err.Error(), "another connection held a lock on "+s.o.Working+" for 200ms") || !strings.Contains(err.Error(), "stop the worker") {
+		t.Fatalf("restore under a held lock: %v", err)
+	}
+	if _, err := s.Fingerprint(ctx, nil); err == nil || !strings.Contains(err.Error(), "another connection held a lock") {
+		t.Fatalf("fingerprint under a held lock: %v", err)
+	}
+}
+
 // TestSQLiteKeepsLocks: DriftGate never opens and closes a database file
 // itself: that would drop the locks of every connection of the process to
 // it. While one component holds the write lock, a second one opening the

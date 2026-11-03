@@ -67,7 +67,8 @@ var (
 )
 
 // Fingerprint hashes the working file (see above).
-func (s *SQLite) Fingerprint(ctx context.Context, items []string) (Fingerprint, error) {
+func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint, err error) {
+	defer s.busy(&err)
 	s.reused, s.scanned = false, nil
 	if err := s.current(); err != nil {
 		return nil, err

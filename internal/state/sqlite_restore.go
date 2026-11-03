@@ -37,7 +37,8 @@ import (
 //
 // Excluded tables, SQLite's statistics and the pristine mark are never
 // touched.
-func (s *SQLite) Restore(ctx context.Context, items []string) error {
+func (s *SQLite) Restore(ctx context.Context, items []string) (err error) {
+	defer s.busy(&err)
 	if items != nil && len(items) == 0 {
 		return nil
 	}
