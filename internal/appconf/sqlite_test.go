@@ -72,9 +72,23 @@ func TestSQLiteValues(t *testing.T) {
 			t.Errorf("%s: the error quotes the value: %v", v, err)
 		}
 	}
-	// A URL of another database ending in .db is not an SQLite file.
+	// A URL or a file of another database ending in .db is not an SQLite
+	// file.
 	if p, err := fromValue("postgres://u:p@db/app.db"); err != nil || p.driver != Postgres {
 		t.Errorf("postgres URL: %q %v", p.driver, err)
+	}
+	for _, v := range []string{"jdbc:h2:file:./data/app.db", "jdbc:hsqldb:file:app.db", "jdbc:derby:app.db"} {
+		if p, err := fromValue(v); err != nil || p.driver != "" || p.other == "" {
+			t.Errorf("%s: %q %q %v", v, p.driver, p.other, err)
+		}
+	}
+	for _, v := range []string{"sqlite://localhost/app.db", "sqlite3://localhost/app.db", "duckdb:///app.db"} {
+		if p, err := fromValue(v); err == nil {
+			t.Errorf("%s: %q %q, want an error", v, p.driver, p.name)
+		}
+	}
+	if p, err := fromValue("sqlite3:storage/my%20app.sqlite3"); err != nil || p.name != "storage/my app.sqlite3" {
+		t.Errorf("sqlite3: %q %v", p.name, err)
 	}
 }
 
@@ -428,12 +442,13 @@ func TestSQLiteBaseDir(t *testing.T) {
 		t.Errorf("relative NAME: %q, %v", db, err)
 	}
 	for src, want := range map[string]int{
-		"BASE_DIR = Path(__file__).resolve().parent.parent":                      1,
-		"BASE_DIR = Path(__file__).resolve(strict=True).parent.parent.parent":    2,
-		"BASE_DIR = Path(__file__).resolve().parents[1]  # root":                 1,
-		"BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))": 1,
-		"BASE_DIR = Path(env('ROOT'))":                                           -1,
-		"BASE_DIR = Path(__file__).parent.parents":                               -1,
+		"BASE_DIR = Path(__file__).resolve().parent.parent":                                         1,
+		"BASE_DIR = Path(__file__).resolve(strict=True).parent.parent.parent":                       2,
+		"BASE_DIR = Path(__file__).resolve().parents[1]  # root":                                    1,
+		"BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))":                    1,
+		"BASE_DIR = Path(env('ROOT'))":                                                              -1,
+		"BASE_DIR = Path(__file__).parent.parents":                                                  -1,
+		"BASE_DIR = Path(__file__).resolve().parent.parent\nif DEBUG:\n    BASE_DIR = Path('/srv')": -1,
 		"x = 1": -1,
 	} {
 		n, ok := baseDirLevels(src + "\n")

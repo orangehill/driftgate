@@ -95,10 +95,8 @@ func (s *setup) sqliteExclude(dr *draft, db appconf.Database) error {
 		}
 		yes = a == "" || a == "y" || a == "yes"
 	}
-	{
-		dr.exclude = tables
-		s.chosen = append(s.chosen, fmt.Sprintf("exclude: %s (%s)", strings.Join(tables, ", "), why))
-	}
+	dr.exclude = tables
+	s.chosen = append(s.chosen, fmt.Sprintf("exclude: %s (%s)", strings.Join(tables, ", "), why))
 	return nil
 }
 

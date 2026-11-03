@@ -202,11 +202,12 @@ func disagree(dbs []appconf.Database) (a, b appconf.Database, ok bool) {
 	return a, b, false
 }
 
-// sqliteSiblings reports two SQLite files of one setting (Rails' primary
-// and queue databases): two databases of the application, not settings
-// that disagree.
+// sqliteSiblings reports two SQLite files of one Rails database.yml (its
+// primary and queue databases): two databases of the application, not
+// settings that disagree.
 func sqliteSiblings(x, y appconf.Database) bool {
-	return x.Driver == appconf.SQLite && y.Driver == appconf.SQLite && x.Ref.Source == y.Ref.Source && x.Ref.File == y.Ref.File && x.Ref.Key != y.Ref.Key
+	return x.Driver == appconf.SQLite && y.Driver == appconf.SQLite && x.Ref.Source == appconf.YAML && y.Ref.Source == appconf.YAML &&
+		x.Ref.File == y.Ref.File && x.Ref.Key != y.Ref.Key
 }
 
 // rankURLs orders the addresses found, best first, each once: a port a

@@ -600,10 +600,18 @@ func baseDirJoin(src string) ([]string, bool) {
 // baseDirLevels reads BASE_DIR of a settings file: the number of folders
 // it is above the file's own (Path(__file__).resolve().parent.parent is
 // 1), when it is written as startproject writes it; the last assignment
-// counts.
+// counts, and one inside a block makes it unknown.
 func baseDirLevels(src string) (int, bool) {
 	var def string
 	for _, line := range strings.Split(src, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimLeft(line, " \t"), "BASE_DIR"); ok && len(rest) < len(line)-len("BASE_DIR") {
+			// Set again in a block (if, try): which one counts, only running
+			// the code tells.
+			if rest = strings.TrimLeft(rest, " \t"); strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==") {
+				return 0, false
+			}
+			continue
+		}
 		if rest, ok := strings.CutPrefix(line, "BASE_DIR"); ok {
 			if rest = strings.TrimLeft(rest, " \t"); strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==") {
 				def = strings.TrimSpace(rest[1:])
