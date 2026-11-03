@@ -125,21 +125,44 @@ func (s *setup) sqliteMissing(p *config.Project, name string, c config.Component
 }
 
 // adoptSQLite checks an SQLite database of the main worktree's project
-// before this worktree takes it: working is a path of the checkout, so
-// file (working, or the file this worktree's setting names, which
-// ownDatabase then makes working) is this worktree's own, which must exist
-// here (git does not carry it) and must not be the main worktree's
-// working.
-func (s *setup) adoptSQLite(here, main, name, file, working string) error {
+// before this worktree takes it. working is a path of the checkout, so
+// this worktree's own file; with a dsn, the setting it names must name a
+// file of this worktree (d, known), which ownDatabase then makes working.
+// That file must exist here (git does not carry it) and must not be the
+// main worktree's. Without a dsn, what Find noted about this worktree's
+// SQLite settings is shown: one may name another file than working.
+func (s *setup) adoptSQLite(here, main, name string, c config.Component, found appconf.Found, d appconf.Database, known bool) error {
+	var notes []string
+	for _, n := range found.Notes {
+		if strings.Contains(n.Text, "SQLite") && !controls(n.File, n.Text) {
+			notes = append(notes, n.File+": "+n.Text)
+		}
+	}
+	file := c.Working
+	switch {
+	case !c.DSN.IsZero() && (!known || d.Path == ""):
+		why := ""
+		if len(notes) > 0 {
+			why = " (" + strings.Join(notes, "; ") + ")"
+		}
+		return configErr("state %s: this worktree's setting %s names no database file of this worktree%s; its runs could restore a file the main worktree uses. Give this worktree a file of its own in its settings, then run %s",
+			name, flow(c.DSN), why, s.resume)
+	case known:
+		file = d.Path
+	default:
+		for _, n := range notes {
+			fmt.Fprintln(s.out, "note: "+n)
+		}
+	}
 	mine, err := appconf.LocalPath(here, file)
 	if err != nil {
 		if strings.HasSuffix(err.Error(), ": not found") {
 			return configErr("state %s: the database file %s is not in this worktree (git does not carry it): copy the main worktree's (%s), or create it with the application's migrations, then run %s",
-				name, file, filepath.Join(main, filepath.FromSlash(working)), s.resume)
+				name, file, filepath.Join(main, filepath.FromSlash(c.Working)), s.resume)
 		}
 		return configErr("state %s: working %s: %v", name, file, err)
 	}
-	theirs, err := appconf.LocalPath(main, working)
+	theirs, err := appconf.LocalPath(main, c.Working)
 	if err != nil {
 		return nil
 	}

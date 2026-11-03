@@ -141,8 +141,35 @@ state:
 
 	// The main worktree's own file is refused.
 	s := &setup{a: &asker{yes: true}, resume: "driftgate setup"}
-	if err := s.adoptSQLite(main, main, "db", "database/database.sqlite", "database/database.sqlite"); err == nil || !strings.Contains(err.Error(), "is the main worktree's database file") {
+	c := config.Component{Driver: config.SQLite, Working: "database/database.sqlite"}
+	if err := s.adoptSQLite(main, main, "db", c, appconf.Found{}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "is the main worktree's database file") {
 		t.Errorf("the main worktree's file: %v", err)
+	}
+}
+
+// TestSetupSQLiteWorktreeMainFile: a worktree whose .env names the main
+// worktree's file by its absolute path (a copied .env) is refused before
+// anything is written when the configuration reads the setting; without
+// a dsn, setup says what it found.
+func TestSetupSQLiteWorktreeMainFile(t *testing.T) {
+	for _, dsn := range []string{"    dsn: {dotenv: .env}\n", ""} {
+		main := setupDir(t, map[string]string{".gitignore": ".env\n.driftgate/\n*.sqlite\n", ".env": "DB_CONNECTION=sqlite\n", "artisan": "",
+			"database/.gitkeep": "", "database/database.sqlite": "SQLite format 3\x00"})
+		write(t, filepath.Join(main, ".driftgate", "driftgate.yaml"), "version: 1\nproject: shop\nbaselines: local\ntarget:\n  base_url: http://127.0.0.1:1\nstate:\n  db:\n    driver: sqlite\n"+dsn+"    working: database/database.sqlite\n")
+		write(t, filepath.Join(main, ".driftgate", "baselines", "local", "acceptances.jsonl"), "")
+		env := "DB_CONNECTION=sqlite\nDB_DATABASE=" + filepath.Join(main, "database", "database.sqlite") + "\n"
+		wt := worktree(t, main, map[string]string{".env": env, "database/database.sqlite": "SQLite format 3\x00"})
+		code, out, errOut := runCLI(t, "setup", "--yes")
+		_, taken := os.Stat(filepath.Join(wt, ".driftgate", "driftgate.yaml"))
+		if dsn != "" {
+			if code != ExitConfig || !strings.Contains(errOut, "names no database file of this worktree") || !strings.Contains(errOut, "outside the project") || taken == nil {
+				t.Errorf("with a dsn: %d\n%s\n%s", code, out, errOut)
+			}
+			continue
+		}
+		if !strings.Contains(out, "note: .env: the SQLite file is outside the project") || taken != nil {
+			t.Errorf("without a dsn: %d\n%s\n%s", code, out, errOut)
+		}
 	}
 }
 

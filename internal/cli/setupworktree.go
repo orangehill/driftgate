@@ -42,11 +42,7 @@ func (s *setup) adopt(here, main string) (string, error) {
 		c := src.State[name]
 		d, known := setting(found, c)
 		if c.Driver == config.SQLite {
-			file := c.Working
-			if known && d.Path != "" {
-				file = d.Path // ownDatabase makes it working
-			}
-			if err := s.adoptSQLite(here, main, name, file, c.Working); err != nil {
+			if err := s.adoptSQLite(here, main, name, c, found, d, known); err != nil {
 				return "", err
 			}
 			continue
