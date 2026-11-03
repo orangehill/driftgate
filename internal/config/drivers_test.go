@@ -104,6 +104,19 @@ func TestReadDSNSQLite(t *testing.T) {
 			t.Errorf("%s: %v", v, err)
 		}
 	}
+	// A dsn naming a password field or variable: the bare word read as a
+	// file name is never shown.
+	for _, v := range []string{"S3cr3t-P@ssw0rd!", "hunter2", "s3cr3t:pass", `C:\hunter2`, "s3cr3t/pass"} {
+		t.Setenv("DG_TEST_SQLITE_DSN", v)
+		_, err := c.ReadDSN(context.Background(), root)
+		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "ssw0rd") || strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "s3cr3t") {
+			t.Errorf("password-like %s: %v", v, err)
+		}
+	}
+	t.Setenv("DG_TEST_SQLITE_DSN", "other.sqlite")
+	if _, err := c.ReadDSN(context.Background(), root); err == nil || !strings.Contains(err.Error(), "names the database file other.sqlite") {
+		t.Errorf("an SQLite file is named: %v", err)
+	}
 }
 
 // TestSQLiteDSNAsFound: an SQLite DSN of the environment is read as

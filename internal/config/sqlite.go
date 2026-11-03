@@ -84,14 +84,41 @@ func sameSQLiteFile(root, named, working string) bool {
 // (variable is the environment variable, "" for 1Password): the file it
 // names, read as appconf reads a setting (appconf.SQLiteFile), must be the
 // one working is (sameSQLiteFile). No error quotes the DSN, which may be
-// meant for another database and hold a password.
+// meant for another database and hold a password; the file it names is
+// quoted only when the value has the form of an SQLite setting (a bare
+// word read as a file name may be a password: a dsn that names the wrong
+// field or variable).
 func checkSQLiteDSN(root, variable, dsn, working string) error {
 	file, err := appconf.SQLiteFile(root, variable, dsn)
 	if err != nil {
 		return invalid{err}
 	}
 	if !sameSQLiteFile(root, file, working) {
+		if !sqliteShaped(dsn) {
+			return invalid{fmt.Errorf("it names another file than working %s (not shown: the value is not written as an SQLite setting, a file: or sqlite: URL or a .db, .sqlite or .sqlite3 file; check that the dsn names the right variable or field)", working)}
+		}
 		return invalid{fmt.Errorf("it names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the DSN", file, working, file, working, file)}
 	}
 	return nil
+}
+
+// sqliteShaped reports whether a DSN is written as an SQLite setting: a
+// URL of an SQLite scheme, or a file named .db, .sqlite or .sqlite3.
+func sqliteShaped(dsn string) bool {
+	name := strings.ToLower(dsn)
+	if scheme, _, ok := strings.Cut(name, ":"); ok {
+		switch scheme {
+		case "file", "sqlite", "sqlite3", "spatialite", "jdbc":
+			return true
+		}
+	}
+	if i := strings.IndexAny(name, "?#"); i >= 0 {
+		name = name[:i]
+	}
+	for _, ext := range []string{".db", ".sqlite", ".sqlite3"} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
 }
