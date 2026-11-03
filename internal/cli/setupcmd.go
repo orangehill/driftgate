@@ -162,12 +162,12 @@ func setupCmd(args []string, out, errOut io.Writer) (int, error) {
 	if len(pos) != 0 {
 		return 0, usageErr("setup")
 	}
-	switch *driver {
-	case "", config.MySQL, config.Postgres:
-	case "mariadb":
-		*driver = config.MySQL
-	default:
-		return 0, configErr("setup: --driver must be mysql or postgres, got %q", *driver)
+	if *driver != "" {
+		d := driverOf(*driver)
+		if d == "" {
+			return 0, configErr("setup: --driver must be %s, got %q", driverChoices, *driver)
+		}
+		*driver = d
 	}
 	if *appURL != "" {
 		if err := checkURL(*appURL); err != nil {
@@ -392,16 +392,16 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 		db.Driver = driver
 	}
 	if db.Driver == "" {
-		v, err := s.a.value("Which database server is it, mysql or postgres?", "the settings do not say which database server it is: pass --driver mysql or --driver postgres", func(v string) error {
-			if v != config.MySQL && v != config.Postgres {
-				return errors.New("mysql or postgres")
+		v, err := s.a.value("Which database is it, "+driverChoices+"?", "the settings do not say which database it is: pass --driver with "+driverChoices, func(v string) error {
+			if driverOf(v) == "" {
+				return errors.New(driverChoices)
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		db.Driver = v
+		db.Driver = driverOf(v)
 	}
 	if database != "" {
 		db.Name = database
@@ -587,9 +587,13 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 		} else {
 			s.database = fmt.Sprintf("%s %s (dsn: %s)", c.Driver, c.Working, flow(c.DSN))
 		}
-		lines = append(lines, fmt.Sprintf("%s, a copy of %s", c.Pristine, c.Working))
-		if !known || !canCreate(d) {
-			grants = append(grants, grant(c, d.User))
+		pristine := c.Pristine
+		if c.Driver == config.SQLite && pristine == "" {
+			pristine = "file in DriftGate's store" // capture.sqliteStorePristine
+		}
+		lines = append(lines, fmt.Sprintf("%s, a copy of %s", pristine, c.Working))
+		if g := grant(c, d.User); g != "" && (!known || !canCreate(d)) {
+			grants = append(grants, g)
 		}
 	}
 	if len(names) > 1 {
@@ -723,13 +727,36 @@ func setting(found appconf.Found, c config.Component) (appconf.Database, bool) {
 	return appconf.Database{}, false
 }
 
-// grant is the statement that lets user create the pristine copy of c.
+// driverChoices names the drivers setup takes.
+const driverChoices = "mysql, postgres, sqlite or sqlserver"
+
+// driverOf is the driver a --driver value or an answer names: mariadb is
+// mysql, mssql is sqlserver; "" for none DriftGate has.
+func driverOf(v string) string {
+	switch v {
+	case config.MySQL, "mariadb":
+		return config.MySQL
+	case config.Postgres, config.SQLite:
+		return v
+	case config.SQLServer, "mssql":
+		return config.SQLServer
+	}
+	return ""
+}
+
+// grant is the statement that lets user create the pristine copy of c; ""
+// when there is none to grant (an SQLite file).
 func grant(c config.Component, user string) string {
 	if user == "" {
 		user = "<user>"
 	}
-	if c.Driver == config.Postgres {
+	switch c.Driver {
+	case config.Postgres:
 		return fmt.Sprintf(`ALTER ROLE "%s" CREATEDB;`, user)
+	case config.SQLite:
+		return ""
+	case config.SQLServer:
+		return sqlServerGrant(c, user)
 	}
 	return fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%%';", c.Pristine, user)
 }

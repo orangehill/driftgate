@@ -111,26 +111,44 @@ func join(a, b string) string {
 }
 
 // canCreate reports a database user that can make the pristine copy for
-// certain: the root user of a compose MySQL or MariaDB service, or the user
-// of a compose PostgreSQL service, which the image makes a superuser.
+// certain: the root user of a compose MySQL or MariaDB service, the user
+// of a compose PostgreSQL service, which the image makes a superuser, or
+// sa of a compose SQL Server service.
 func canCreate(d appconf.Database) bool {
-	return d.Ref.Source == appconf.Compose && (d.Driver == appconf.Postgres || d.User == "root")
+	if d.Ref.Source != appconf.Compose {
+		return false
+	}
+	switch d.Driver {
+	case appconf.Postgres:
+		return true
+	case appconf.SQLServer:
+		return strings.EqualFold(d.User, "sa")
+	case appconf.SQLite:
+		return false
+	}
+	return d.User == "root"
 }
 
 // server is the server and database a setting names, as this machine
 // reaches them: the loopback addresses are one host, and a missing port is
 // the driver's default. MySQL's localhost and no host are the local socket
-// for most of its clients, not TCP; PostgreSQL's no host too.
+// for most of its clients, not TCP; PostgreSQL's no host too. An SQLite
+// database is its file.
 func server(d appconf.Database) string {
+	if d.Driver == appconf.SQLite {
+		return "sqlite:" + d.Path
+	}
 	host, port := d.Host, d.Port
 	switch {
+	case d.Driver == appconf.SQLServer && (host == "" || host == "localhost"):
+		host = "local" // SQL Server takes TCP only
 	case host == "" || host == "localhost" && d.Driver != appconf.Postgres:
 		host = "socket"
 	case host == "localhost", host == "127.0.0.1", host == "::1":
 		host = "local"
 	}
 	if port == "" {
-		port = map[string]string{appconf.MySQL: "3306", appconf.Postgres: "5432"}[d.Driver]
+		port = map[string]string{appconf.MySQL: "3306", appconf.Postgres: "5432", appconf.SQLServer: "1433"}[d.Driver]
 	}
 	return d.Driver + "://" + host + ":" + port + "/" + d.Name
 }
@@ -250,22 +268,34 @@ func stateBlock(d appconf.Database, on bool) string {
 		dsn = flow(config.Secret{Env: dsnEnv})
 		comment = "set " + dsnEnv + " to the DSN (mysql://user:pass@host:3306/ or postgres://…)"
 	}
+	working := d.Name
+	if d.Driver == appconf.SQLite {
+		working = d.Path
+	}
 	lines := []string{
 		"state:                                    # restored at the start and before requests that change data",
 		"  db:",
 		"    driver: " + d.Driver,
 		"    dsn: " + dsn + "   # " + comment,
-		"    working: " + scalar(d.Name),
+		"    working: " + scalar(working),
 	}
-	if d.Name != "" {
+	switch {
+	case d.Driver == appconf.SQLite:
+		// The pristine copy is a file of the store; the DSN only
+		// cross-checks working, so none is needed without a setting.
+		if d.Ref.IsZero() {
+			lines = slices.Delete(lines, 3, 4)
+		}
+		lines = append(lines, "    # pristine: a file of DriftGate's store by default, made by driftgate seed")
+	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
 	lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
 	var missing []string
 	if d.Driver == "" {
-		missing = append(missing, "driver (mysql or postgres)")
+		missing = append(missing, "driver (mysql, postgres, sqlite or sqlserver)")
 	}
-	if d.Name == "" {
+	if working == "" {
 		missing = append(missing, "working (the database the application uses)")
 	}
 	var b strings.Builder
