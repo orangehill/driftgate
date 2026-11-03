@@ -170,8 +170,10 @@ Sets up a new project from zero to its first baseline, in this order:
   (`.env.development.local`, `.env.local`, `.env.development`, `.env`, …),
   and says which it took. A compose service comes first only when the
   application's setting names that server and database: its root user
-  (MySQL, MariaDB, when the root password is known) or its user
-  (PostgreSQL, a superuser of the image) can create the pristine copy.
+  (MySQL, MariaDB, when the root password is known), its user
+  (PostgreSQL, a superuser of the image) or `sa` (SQL Server) can create
+  the pristine copy. A SQL Server image names no database: the service
+  takes the database of the application's setting for the same server.
   That is meant for a local, disposable database in a container; on a
   shared server use a limited user ([security](security.md)). A compose
   service of another database comes last. The others are listed in the
@@ -195,10 +197,18 @@ Sets up a new project from zero to its first baseline, in this order:
   file of its own, which must exist there (git does not carry it).
 - **A user that may not create a database.** Before the pristine copy it
   says what to grant, as an administrator: `GRANT ALL PRIVILEGES ON
-  \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB) or `ALTER ROLE
-  "shop" CREATEDB;` (PostgreSQL). A seed that fails for want of the
-  right (MySQL/MariaDB errors 1044, 1142, 1227; PostgreSQL 42501) repeats
-  it; another failure (the server not running) does not.
+  \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB), `ALTER ROLE
+  "shop" CREATEDB;` (PostgreSQL), or for SQL Server the server role
+  `dbcreator` and `db_owner` in the working database (the statements are
+  under [SQL Server](configuration.md#sql-server); nothing for `sa`). For
+  SQL Server it also proposes `VIEW SERVER PERFORMANCE STATE` (`VIEW
+  SERVER STATE` before 2022), which makes fingerprints of unchanged data
+  almost free, and says where the copy goes: a database on the same
+  server, restored from a `COPY_ONLY` backup, with two backup files in
+  the server's backup folder. A seed that fails for want of the right
+  (MySQL/MariaDB errors 1044, 1142, 1227; PostgreSQL 42501; SQL Server
+  229, 230, 262, 297, 916, 3110, 4060, 4063, 5011, 15247) repeats it;
+  another failure (the server not running) does not.
 - **A setting only this shell's environment holds** (Spring's
   `SPRING_DATASOURCE_*`): `dsn: { env: DG_DB_DSN }`, with the note of what
   was found; setup stops until `DG_DB_DSN` holds the DSN.
@@ -274,7 +284,10 @@ pristine copy and checks them against its fingerprint. The fingerprint is
 kept in the local store per database server (from the DSN, without its
 credentials) and databases, so checkouts of the project (git worktrees)
 that share the store but use their own database server never take each
-other's; `run` seeds when this server has none yet. An SQLite database is
+other's; `run` seeds when this server has none yet. A SQL Server pristine
+copy is a read-only database on the same server, made from a `COPY_ONLY`
+backup of the working database, with a backup of its own in the server's
+backup folder ([SQL Server](configuration.md#sql-server)). An SQLite database is
 named by the real path of its working file, and its pristine copy is a
 file next to that record unless `pristine:` names one
 ([SQLite](configuration.md#sqlite)); the seed only reads the working

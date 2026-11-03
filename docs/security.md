@@ -43,7 +43,15 @@ to do it.
   on the pristine file opened read-only, on a connection that lets only
   reads compile, without `ATTACH`, `PRAGMA` or the functions and tables
   that reach other files or the file's pages
-  ([SQLite](configuration.md#sqlite)).
+  ([SQLite](configuration.md#sqlite)). On SQL Server a read-only database
+  still runs `EXEC xp_cmdshell` and `OPENROWSET`, so the query is also
+  refused with any other statement's keyword (T-SQL needs no `;` between
+  statements), `NEXT VALUE FOR`, names of three or four parts (another
+  database or server), and the system procedures, functions and views
+  that reach files, programs, other servers, sessions or logins
+  ([SQL Server](configuration.md#sql-server)). Its login needs
+  `dbcreator` and `db_owner` in the working database, not `sysadmin`
+  (`sa` only for a local container).
 - Commands run without a shell (a shell is written explicitly and shows in
   the diff), data from responses never goes into their arguments, and they
   do not receive `DRIFTGATE_KEY`, the variable `key.env` names, or any
@@ -74,7 +82,9 @@ to do it.
   they must be copies: on this machine (a local address or a socket) or on a
   host some target's `allow_hosts` names. A private address alone is not
   enough, as it may be production. Every host the driver may connect to is
-  checked (PostgreSQL `host=`, several hosts, `PG*` variables), and every
+  checked (PostgreSQL `host=`, several hosts, `PG*` variables; SQL Server
+  takes one host over TCP, and a named instance without its port, a
+  failover partner, named pipes and shared memory are refused), and every
   connection is checked again on the address it actually goes to, so a
   name that resolves elsewhere after the check (DNS rebinding) is not
   reached. A database
@@ -152,7 +162,14 @@ to do it.
   command instead of connecting without it. A setting that names another
   database than `working` (for SQLite, another file) stops the command,
   so a restore never resets a database the application does not run on; one whose host may be the
-  local socket or TCP needs `host:` (DriftGate does not guess). A
+  local socket or TCP needs `host:` (DriftGate does not guess). SQL
+  Server's TLS is never weaker than the application's client: `Encrypt`
+  and `TrustServerCertificate` are passed on, a setting that leaves
+  `Encrypt` unset gets the client's own default (encrypted and verified
+  when DriftGate cannot tell the client), the sign-in is encrypted even
+  with `Encrypt` off, and `Strict` is never weakened; a certificate file
+  a setting names must be inside the project
+  ([SQL Server](configuration.md#sql-server)). A
   connection string is never read as a URL or the MySQL driver's form, so
   no part of its password is taken for the user and shown. No project code runs to read
   a setting: PHP, Python and Ruby (ERB) are read as text. A password read
@@ -271,7 +288,8 @@ to do it.
 A release is built only from a tag `vX.Y.Z` on a commit of `main`, by
 `.github/workflows/release.yml`, after the CI checks of `ci.yml` itself
 (format, vet, staticcheck, tests against MariaDB, MySQL and PostgreSQL,
-of SQLite on Linux, macOS and Windows,
+of SQLite on Linux, macOS and Windows, of SQL Server 2019, 2022 and 2025
+with a check of its TLS against a server with a certificate of a test CA,
 fuzzing, `govulncheck` without findings, and the size and package limits of
 the binaries on the six platforms, which pull requests pass too). It is
 published from the `release` environment. Each release has:

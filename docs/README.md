@@ -22,6 +22,7 @@ quick start). This documentation describes DriftGate 1.0.
 ## Guides
 
 - [Laravel](guides/laravel.md), with Herd, Docker / Sail and SQLite
+- [ASP.NET Core and EF Core on SQL Server](guides/aspnet-core.md)
 - [Next.js and Nuxt pages](guides/nextjs-nuxt.md)
 - [Frameworks with an OpenAPI description](guides/openapi.md): Spring Boot,
   ASP.NET, FastAPI, NestJS, Quarkus, Micronaut, Magento and others

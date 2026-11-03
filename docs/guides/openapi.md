@@ -99,5 +99,7 @@ data.
 - **Magento**: Magento keeps its URL in the database; set `base_url` to the
   store's URL. `/rest/all` would also write to every store view, so `init`
   uses the default store view.
+- **ASP.NET with EF Core on SQL Server**: see
+  [ASP.NET Core and EF Core on SQL Server](aspnet-core.md).
 - **ASP.NET template**: it returns random data; the first `run` refuses the
   baseline and proposes exact rules (`-?\d+` for the temperature).
