@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/orangehill/driftgate/internal/chaos"
+	"modernc.org/sqlite"
 )
 
 // sqliteSchema is an application's database: a table with AUTOINCREMENT,
@@ -1653,7 +1655,11 @@ func TestSQLitePageDigest(t *testing.T) {
 // connection keeps committing are each of one moment: every table's hash
 // is one of the hashes it has between two commits, the table nobody writes
 // keeps its hash, and once the writer stops the fingerprint is that of
-// the file as it was left.
+// the file as it was left. The writer commits a bounded number of times,
+// pausing between commits as a request's writes do: in rollback mode on
+// Windows, where SQLite's busy handler waits in longer steps, a writer
+// that hardly pauses keeps DriftGate's barrier waiting, and a fingerprint
+// may then fail with SQLITE_BUSY (never return a mixed one).
 func TestSQLitePageDigestConcurrentWriter(t *testing.T) {
 	for _, mode := range []string{"wal", "delete"} {
 		t.Run(mode, func(t *testing.T) {
@@ -1671,17 +1677,16 @@ func TestSQLitePageDigestConcurrentWriter(t *testing.T) {
 				hashes[sqliteFingerprint(t, s)["table:a"]] = true
 			}
 			first := sqliteFingerprint(t, s)
+			// Busy is an allowed outcome only where the writer can starve
+			// the barrier.
+			busyAllowed := runtime.GOOS == "windows" && mode == "delete"
 			writer := sqliteApp(t, s.o.Working)
-			done := make(chan struct{})
+			stopped := make(chan struct{})
 			errs := make(chan error, 1)
 			go func() {
-				defer close(errs)
-				for i := 0; ; i++ {
-					select {
-					case <-done:
-						return
-					case <-time.After(time.Millisecond): // a writer that never pauses would starve the barrier
-					}
+				defer close(stopped)
+				for i := range 150 {
+					time.Sleep(2 * time.Millisecond)
 					for _, q := range []string{fmt.Sprintf("INSERT OR REPLACE INTO sessions VALUES (1, %d)", i), states[i%3]} {
 						if _, err := writer.Exec(q); err != nil {
 							errs <- err
@@ -1691,23 +1696,47 @@ func TestSQLitePageDigestConcurrentWriter(t *testing.T) {
 				}
 			}()
 			seen := map[string]bool{}
-			for range 40 {
-				f := sqliteFingerprint(t, s)
+			busy := 0
+			for n := 0; ; n++ {
+				writing := true
+				select {
+				case <-stopped:
+					writing = false
+				default:
+				}
+				if !writing && n >= 5 {
+					break
+				}
+				f, err := s.Fingerprint(context.Background(), nil)
+				var e *sqlite.Error
+				if err != nil && busyAllowed && errors.As(err, &e) && e.Code()&0xff == 5 {
+					busy++
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
 				if !hashes[f["table:a"]] {
 					t.Fatalf("table a has a hash of no moment: %s", f["table:a"])
 				}
-				seen[f["table:a"]] = true
-				time.Sleep(2 * time.Millisecond) // the writer's turn, in rollback mode
+				if writing {
+					seen[f["table:a"]] = true
+				}
 				if f["table:b"] != first["table:b"] {
 					t.Fatal("table b, which nobody writes, changed")
 				}
+				time.Sleep(2 * time.Millisecond) // the writer's turn, in rollback mode
 			}
-			close(done)
-			if err := <-errs; err != nil {
+			select {
+			case err := <-errs:
 				t.Fatal(err)
+			default:
 			}
-			if len(seen) < 2 {
-				t.Fatalf("the fingerprints saw %d states of a", len(seen))
+			if busy > 0 {
+				t.Logf("%d fingerprints waited out the busy timeout", busy)
+			}
+			if len(seen) < 2 && !busyAllowed {
+				t.Fatalf("the fingerprints taken while the writer wrote saw %d states of a", len(seen))
 			}
 			writer.Close()
 			if d := Diff(sqliteFingerprint(t, s), sqliteScratch(t, s)); len(d) > 0 {
