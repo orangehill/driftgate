@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -61,10 +63,11 @@ var sqlServerRefused = map[string]string{
 // TCP is accepted: Windows, Kerberos and Entra sign-in, named pipes, shared
 // memory, a named instance without a port (it would ask the SQL Server
 // Browser over UDP), read-only intent and failover partners are refused.
-// encrypt=disable (no TLS even for the password) is refused; a URL without
-// encrypt gets encrypt=true, which verifies the server's certificate (the
-// driver alone would encrypt only the sign-in, without checking the
-// certificate). No error carries the DSN or the password.
+// A URL without encrypt gets encrypt=true, as appconf.Convert gives a
+// hand-written one. encrypt=disable (no TLS even for the password) is
+// refused, and with encrypt=false a server that answers it cannot encrypt
+// is refused before the sign-in (sqlServerTLSGuard). No error carries the
+// DSN or the password.
 func sqlServerConfig(dsn string) (msdsn.Config, error) {
 	var none msdsn.Config
 	if !strings.HasPrefix(strings.ToLower(dsn), "sqlserver://") {
@@ -126,7 +129,7 @@ func sqlServerConfig(dsn string) (msdsn.Config, error) {
 	case "":
 		q.Set(msdsn.Encrypt, "true")
 	case "disable":
-		return none, errors.New("dsn: encrypt=disable would send the password without TLS; use encrypt=true (or false, which still encrypts the sign-in)")
+		return none, errors.New("dsn: encrypt=disable would send the password without TLS; use encrypt=true (or false, which encrypts only the sign-in and refuses a server that cannot encrypt)")
 	}
 	if p := strings.ToLower(q.Get(msdsn.Protocol)); p != "" && p != "tcp" {
 		return none, errors.New("dsn: only the tcp protocol is supported")
@@ -157,10 +160,13 @@ SET QUOTED_IDENTIFIER ON; SET NUMERIC_ROUNDABORT OFF; SET TRANSACTION ISOLATION 
 // not the addresses the driver would otherwise resolve itself, so
 // dbx.AllowDial checks the name and connects to the address it checked
 // (no DNS rebinding). Only TCP is dialled: the driver would ask the SQL
-// Server Browser over UDP for a named instance without a port.
+// Server Browser over UDP for a named instance without a port. Unless the
+// connection is TLS from its first byte (encrypt=strict), the server's
+// PRELOGIN answer is checked first (sqlServerTLSGuard).
 type sqlServerDialer struct {
-	host string
-	dial dbx.DialFunc
+	host   string
+	dial   dbx.DialFunc
+	strict bool
 }
 
 func (d sqlServerDialer) HostName() string { return d.host }
@@ -169,11 +175,142 @@ func (d sqlServerDialer) DialContext(ctx context.Context, network, addr string) 
 	if !strings.HasPrefix(network, "tcp") {
 		return nil, fmt.Errorf("SQL Server: %s connections are not made (only TCP to host:port)", network)
 	}
+	var c net.Conn
+	var err error
 	if d.dial == nil {
 		var nd net.Dialer
-		return nd.DialContext(ctx, network, addr)
+		c, err = nd.DialContext(ctx, network, addr)
+	} else {
+		c, err = d.dial(ctx, network, addr)
 	}
-	return d.dial(ctx, network, addr)
+	if err != nil || d.strict {
+		return c, err
+	}
+	return &sqlServerTLSGuard{Conn: c}, nil
+}
+
+// The TDS values sqlServerTLSGuard reads: a packet's header, the type of
+// the server's reply, and the PRELOGIN options.
+const (
+	tdsHeader          = 8
+	tdsReply           = 0x04
+	tdsOptEncryption   = 0x01
+	tdsOptTraceID      = 0x05
+	tdsOptTerminator   = 0xff
+	tdsEncryptNotSup   = 0x02
+	tdsPreloginMaxSize = 1 << 16
+)
+
+// errSQLServerNoTLS refuses a server that answers it cannot encrypt.
+var errSQLServerNoTLS = errors.New("SQL Server: the server answered that it does not support encryption (PRELOGIN ENCRYPT_NOT_SUP); DriftGate never signs in without TLS, so the password is not sent")
+
+// sqlServerTLSGuard keeps the password from going out without TLS. With
+// encrypt=false go-mssqldb encrypts only the sign-in, and when the
+// server's PRELOGIN answer says ENCRYPT_NOT_SUP it skips TLS altogether
+// and sends the LOGIN7 packet, password and all, in clear: an active
+// attacker in between, or a hostile server, would get it. The guard reads
+// the server's first message (the PRELOGIN answer, which comes before the
+// driver sends anything else) whole, as the driver frames it, and fails
+// the connection when an ENCRYPTION option says ENCRYPT_NOT_SUP or the
+// answer cannot be read as one; otherwise it hands the bytes to the driver
+// unchanged and passes everything after them through. Only the driver's
+// goroutine reads a connection.
+type sqlServerTLSGuard struct {
+	net.Conn
+	checked bool
+	pending []byte
+}
+
+func (g *sqlServerTLSGuard) Read(p []byte) (int, error) {
+	if !g.checked {
+		msg, err := readSQLServerPrelogin(g.Conn)
+		if err != nil {
+			g.Conn.Close()
+			return 0, err
+		}
+		g.checked, g.pending = true, msg
+	}
+	if len(g.pending) > 0 {
+		n := copy(p, g.pending)
+		g.pending = g.pending[n:]
+		return n, nil
+	}
+	return g.Conn.Read(p)
+}
+
+// readSQLServerPrelogin reads the server's PRELOGIN answer: its packets,
+// up to one whose status is not 0 (as the driver ends a message), and
+// checks it (checkSQLServerPrelogin). It returns the packets as they came.
+func readSQLServerPrelogin(r io.Reader) ([]byte, error) {
+	var raw, body []byte
+	for {
+		h := make([]byte, tdsHeader)
+		if _, err := io.ReadFull(r, h); err != nil {
+			return nil, err
+		}
+		size := int(binary.BigEndian.Uint16(h[2:4]))
+		if size < tdsHeader || len(raw)+size > tdsPreloginMaxSize {
+			return nil, errors.New("SQL Server: the server's PRELOGIN answer is not a valid TDS packet")
+		}
+		pkt := make([]byte, size)
+		copy(pkt, h)
+		if _, err := io.ReadFull(r, pkt[tdsHeader:]); err != nil {
+			return nil, err
+		}
+		if len(raw) == 0 && h[0] != tdsReply {
+			return nil, errors.New("SQL Server: the server did not answer PRELOGIN")
+		}
+		raw, body = append(raw, pkt...), append(body, pkt[tdsHeader:]...)
+		if h[1] != 0 {
+			break
+		}
+	}
+	if err := checkSQLServerPrelogin(body); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// checkSQLServerPrelogin reads the options of a PRELOGIN answer as the
+// driver does (a 5-byte entry per option: token, offset, length; 0xff
+// ends them; TRACEID carries no data) and fails when one cannot be read,
+// when there is no ENCRYPTION option, or when any says ENCRYPT_NOT_SUP:
+// the driver takes the last one, the guard refuses on any.
+func checkSQLServerPrelogin(b []byte) error {
+	invalid := errors.New("SQL Server: the server's PRELOGIN answer cannot be read")
+	found := false
+	for off := 0; ; off += 5 {
+		if off >= len(b) {
+			return invalid
+		}
+		token := b[off]
+		if token == tdsOptTerminator {
+			break
+		}
+		if off+5 >= len(b) {
+			return invalid
+		}
+		if token == tdsOptTraceID {
+			continue
+		}
+		at, n := int(binary.BigEndian.Uint16(b[off+1:])), int(binary.BigEndian.Uint16(b[off+3:]))
+		if at+n > len(b) || at >= len(b) {
+			return invalid
+		}
+		if token == tdsOptEncryption {
+			if n < 1 {
+				return invalid
+			}
+			if b[at] == tdsEncryptNotSup {
+				return errSQLServerNoTLS
+			}
+			found = true
+		}
+	}
+	if !found {
+		return invalid
+	}
+	return nil
 }
 
 // sqlServerConns is how many connections share a full fingerprint.
@@ -199,7 +336,7 @@ func (s *SQLServer) pool(db string) *sql.DB {
 	cfg.Database = db
 	c := mssql.NewConnectorConfig(cfg)
 	c.SessionInitSQL = sqlServerSessionSQL
-	c.Dialer = sqlServerDialer{host: cfg.Host, dial: s.o.Dial}
+	c.Dialer = sqlServerDialer{host: cfg.Host, dial: s.o.Dial, strict: cfg.Encryption == msdsn.EncryptionStrict}
 	p := sql.OpenDB(c)
 	p.SetMaxOpenConns(2 * sqlServerConns)
 	p.SetMaxIdleConns(sqlServerConns + 1)
