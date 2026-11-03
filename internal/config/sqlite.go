@@ -91,10 +91,10 @@ func sameSQLiteFile(root, named, working string) bool {
 func checkSQLiteDSN(root, variable, dsn, working string) error {
 	file, err := appconf.SQLiteFile(root, variable, dsn)
 	if err != nil {
-		return invalid{fmt.Errorf("dsn: %w", err)}
+		return invalid{err}
 	}
 	if !sameSQLiteFile(root, file, working) {
-		return invalid{fmt.Errorf("dsn: it names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the DSN", file, working, file, working, file)}
+		return invalid{fmt.Errorf("it names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the DSN", file, working, file, working, file)}
 	}
 	return nil
 }

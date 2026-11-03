@@ -96,7 +96,7 @@ func TestReadDSNSQLite(t *testing.T) {
 	for _, v := range []string{"file:other.sqlite", "sqlite:////srv/db.sqlite", "mysql://root:s3cr3t@db:3306/", "Data Source=db.sqlite;Password=s3cr3t", ":memory:", "file://remote/db.sqlite"} {
 		t.Setenv("DG_TEST_SQLITE_DSN", v)
 		_, err := c.ReadDSN(context.Background(), root)
-		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "s3cr3t") {
+		if err == nil || !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "s3cr3t") || strings.HasPrefix(err.Error(), "dsn:") {
 			t.Errorf("%s: %v", v, err)
 		}
 	}

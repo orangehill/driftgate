@@ -192,7 +192,7 @@ func (c Component) checkNamed(root, named string) error {
 		where += " " + r.Key
 	}
 	if c.Driver == SQLite {
-		return invalid{fmt.Errorf("dsn: %s names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the setting", where, named, c.Working, named, c.Working, named)}
+		return invalid{fmt.Errorf("%s names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the setting", where, named, c.Working, named, c.Working, named)}
 	}
-	return invalid{fmt.Errorf("dsn: %s names the database %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s (and pristine:), or change the setting", where, named, c.Working, named, c.Working, named)}
+	return invalid{fmt.Errorf("%s names the database %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s (and pristine:), or change the setting", where, named, c.Working, named, c.Working, named)}
 }
