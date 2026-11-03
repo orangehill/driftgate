@@ -320,6 +320,13 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 			if !slices.Contains(tc.after, status) {
 				t.Fatalf("working database after the kill: %s, want one of %v", status, tc.after)
 			}
+			if strings.HasPrefix(status, "OFFLINE") {
+				// A seed refuses it, keeps the record, and names what
+				// brings it back.
+				if r := p.must(t, 3, "seed"); !strings.Contains(r.err, "is OFFLINE; run a capture or a restore first") {
+					t.Errorf("seed of the database the kill left offline: %v", r)
+				}
+			}
 			if status == ssWritable {
 				// Before the commit, or before the database went offline,
 				// nothing changed; after the restore, it is pristine.
