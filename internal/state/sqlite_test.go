@@ -378,6 +378,27 @@ func TestSQLiteRestoreAtomic(t *testing.T) {
 	}
 }
 
+// sqlitePython is a Python 3 with its own SQLite, for the tests of locking
+// between processes: python3, or python where that is Python 3 (Windows).
+// "" when there is none; DRIFTGATE_TEST_PYTHON=1 (CI) makes that a
+// failure, so the tests never pass there without the other process.
+func sqlitePython(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{"python3", "python"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		if out, err := exec.Command(path, "-I", "-c", "import sqlite3, sys; print(sys.version_info[0])").Output(); err == nil && strings.TrimSpace(string(out)) == "3" {
+			return path
+		}
+	}
+	if os.Getenv("DRIFTGATE_TEST_PYTHON") != "" {
+		t.Fatal("DRIFTGATE_TEST_PYTHON is set, but there is no Python 3 with sqlite3")
+	}
+	return ""
+}
+
 // TestSQLiteRestoreSeenByOpenConnections: a connection the application
 // keeps open (in this process, and in a Python process when there is
 // one) reads the restored rows at once, in WAL and in rollback mode.
@@ -401,7 +422,7 @@ func TestSQLiteRestoreSeenByOpenConnections(t *testing.T) {
 			var py *exec.Cmd
 			var pyIn *os.File
 			var pyOut *bufio.Reader
-			if python, err := exec.LookPath("python3"); err == nil {
+			if python := sqlitePython(t); python != "" {
 				script := filepath.Join(t.TempDir(), "holder.py")
 				os.WriteFile(script, []byte(`import sqlite3, sys
 c = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=10)
@@ -1068,8 +1089,8 @@ func TestSQLiteExcludedAbsent(t *testing.T) {
 // it. While one component holds the write lock, a second one opening the
 // same file (and seeding from it) leaves another process locked out.
 func TestSQLiteKeepsLocks(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
+	python := sqlitePython(t)
+	if python == "" {
 		t.Skip("no python3")
 	}
 	for _, mode := range []string{"delete", "wal"} {
