@@ -234,7 +234,11 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzSQLiteRestore -fuzztime=60s ./internal/state/
 
   # SQL Server: the driver's tests against SQL Server 2022 (Developer), also
-  # for pull requests. The image starts slowly; the tests wait for it.
+  # for pull requests, with the race detector; the end-to-end and crash
+  # tests (the whole matrix outside pull requests), the restore fuzzer, and
+  # the TLS check against a server with a certificate of its own (a second
+  # container the script starts). The image starts slowly; the health check
+  # waits for it.
   sqlserver:
     runs-on: ubuntu-latest
     services:
@@ -259,6 +263,55 @@ jobs:
           go-version-file: go.mod
       - name: Test
         run: go test -race -count=1 -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
+      # Every driftgate process the tests start would run under the race
+      # detector too; they run without it, as in the sqlite job.
+      - name: End to end and crashes
+        env:
+          DRIFTGATE_CHAOS: ${{ github.event_name != 'pull_request' && 'full' || '' }}
+        run: go test -count=1 -run SQLServer ./tools/e2e/
+      - name: Fuzz the SQL Server restore
+        run: go test -run='^$' -fuzz=FuzzSQLServerRestore -fuzztime=60s ./internal/state/
+      - name: TLS
+        run: tools/e2e/sqlserver-tls.sh
+
+  # SQL Server 2019 and 2025, as the databases job does for MySQL and
+  # PostgreSQL: not for pull requests. sqlcmd moved to mssql-tools18 in the
+  # newer images; the health check takes either.
+  sqlserver-versions:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["2019-latest", "2025-latest"]
+    name: sqlserver (${{ matrix.version }})
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.version }}
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Dg-Passw0rd-2026
+        ports: ["14331:1433"]
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b"
+          --health-interval=5s --health-retries=30
+    env:
+      DRIFTGATE_TEST_SQLSERVER: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true
+      DRIFTGATE_CHAOS: full
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -count=1 -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
+      - name: TLS
+        env:
+          IMAGE: mcr.microsoft.com/mssql/server:${{ matrix.version }}
+        run: tools/e2e/sqlserver-tls.sh
 
   # Windows: the packages that need no database, and the parts written for
   # it (the store lock, process groups). A cross-compiled build (build)
