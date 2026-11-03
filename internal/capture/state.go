@@ -82,6 +82,7 @@ type pristineFile struct {
 	Working     string            `json:"working"`
 	Pristine    string            `json:"pristine"`
 	Created     string            `json:"created"`
+	PristineID  string            `json:"pristine_id,omitempty"` // pristineIdentifier; none for other components and in a file of an earlier release
 	Fingerprint state.Fingerprint `json:"fingerprint"`
 }
 
@@ -280,6 +281,20 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		if pf.Driver != sc.Driver || pf.Working != sc.Working || pf.Pristine != sc.Pristine {
 			t.close()
 			return nil, envErr("state %s: the pristine copy was made for another configuration; run driftgate seed", c.Name())
+		}
+		// The record is of one pristine copy; a seed that keeps its record
+		// in another store (another project or machine on the same server,
+		// a checkout with its own DRIFTGATE_STORE) may have replaced it.
+		if pi, ok := c.(pristineIdentifier); ok && pf.PristineID != "" {
+			id, err := pi.PristineID(ctx)
+			if err != nil {
+				t.close()
+				return nil, envErr("state %s: %v", c.Name(), err)
+			}
+			if id != pf.PristineID {
+				t.close()
+				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
+			}
 		}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)
@@ -504,9 +519,15 @@ type SeedOptions struct {
 }
 
 // seededFingerprinter is a component that fingerprints its pristine copy
-// (state.SQLite).
+// (state.SQLite, state.SQLServer).
 type seededFingerprinter interface {
 	SeededFingerprint(ctx context.Context) (state.Fingerprint, error)
+}
+
+// pristineIdentifier is a component that names its pristine copy, new with
+// every seed (state.SQLServer: the backup in its mark).
+type pristineIdentifier interface {
+	PristineID(ctx context.Context) (string, error)
 }
 
 // Seed runs the seed commands, which load the data into the working state,
@@ -559,8 +580,8 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 			return envErr("seed of %s failed: %v", c.Name(), err)
 		}
 		// The record is of the pristine copy itself where the component
-		// can read it (SQLite): the working data may have moved on since
-		// the copy was made, while the application kept writing.
+		// can read it (SQLite, SQL Server): the working data may have moved
+		// on since the copy was made, while the application kept writing.
 		fingerprint := c.Fingerprint
 		if pc, ok := c.(seededFingerprinter); ok {
 			fingerprint = func(ctx context.Context, _ []string) (state.Fingerprint, error) { return pc.SeededFingerprint(ctx) }
@@ -571,6 +592,11 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,
 			Created: time.Now().UTC().Format(time.RFC3339), Fingerprint: f}
+		if pi, ok := c.(pristineIdentifier); ok {
+			if pf.PristineID, err = pi.PristineID(ctx); err != nil {
+				return envErr("state %s: %v", c.Name(), err)
+			}
+		}
 		if err := snapshot.WriteJSON(path, pf); err != nil {
 			return err
 		}

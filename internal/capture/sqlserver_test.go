@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -411,4 +412,104 @@ func TestCaptureSQLServerWholeDatabase(t *testing.T) {
 	if add := runs["a"]["add-after-report"]; add.Status != 201 || add.Body.SHA256 != runs["a"]["add"].Body.SHA256 {
 		t.Errorf("add after the view: %d, body like add: %v", add.Status, add.Body.SHA256 == runs["a"]["add"].Body.SHA256)
 	}
+}
+
+// TestSeedSQLServerWhileWriting: the application writes right after the
+// seed's backup; the record is of the pristine copy (SeededFingerprint),
+// not of the working database the write moved on, so the capture's
+// restores pass their check and bring back the copy's rows.
+func TestSeedSQLServerWhileWriting(t *testing.T) {
+	s := newSQLServerCapture(t)
+	app := newSQLServerApp(t, s.open(t, s.work))
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	p := s.project(t, srv.URL)
+	chaos.At = func(point string) {
+		if point == "state.sqlserver.seed.backup" {
+			app.mu.Lock()
+			defer app.mu.Unlock()
+			if _, err := app.db.Exec("INSERT INTO users (email) VALUES (N'written-during-seed@x')"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { chaos.At = nil })
+	ctx := context.Background()
+	var out bytes.Buffer
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed: %v\n%s", err, out.String())
+	}
+	chaos.At = nil
+	if n := app.count(t, "users"); n != 3 {
+		t.Fatalf("%d users after the seed, want the 2 copied and the one written during it", n)
+	}
+	captureSQLServer(t, p, sqlServerCatalog(false), "a", &out)
+	if n := app.count(t, "users"); n != 2 {
+		t.Errorf("%d users after the capture, want the 2 of the pristine copy", n)
+	}
+}
+
+// TestSQLServerPristineReplaced: the record of a seed names the pristine
+// copy it is of. A seed that keeps its record in another store (another
+// checkout on the same databases) replaces the copy; a capture with the
+// first record then stops and asks for a seed instead of trusting a
+// fingerprint of a copy that is gone. A record without the name (an
+// earlier release) is used as it is.
+func TestSQLServerPristineReplaced(t *testing.T) {
+	s := newSQLServerCapture(t)
+	app := newSQLServerApp(t, s.open(t, s.work))
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+	var out bytes.Buffer
+	p := s.project(t, srv.URL)
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed: %v\n%s", err, out.String())
+	}
+	matches, _ := filepath.Glob(filepath.Join(p.Layout.Pristine, "db-*.json"))
+	if len(matches) != 1 {
+		t.Fatalf("records %v, want one", matches)
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf pristineFile
+	if err := json.Unmarshal(raw, &pf); err != nil || pf.PristineID == "" {
+		t.Fatalf("record without the pristine copy's name (%v): %s", err, raw)
+	}
+	var mark string
+	if err := s.master.QueryRow("SELECT CAST(value AS nvarchar(4000)) FROM [" + s.work + "_pristine].sys.extended_properties WHERE class = 0 AND name = N'driftgate_pristine'").Scan(&mark); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(mark), strings.ToLower(pf.PristineID)) {
+		t.Fatalf("record names %s, the mark is %s", pf.PristineID, mark)
+	}
+
+	other := s.project(t, srv.URL) // its own store
+	if err := Seed(ctx, other, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed of the other checkout: %v\n%s", err, out.String())
+	}
+	out.Reset()
+	_, err = Run(ctx, p, sqlServerCatalog(false), Options{Tag: "a", Restore: "each", Out: &out})
+	if err == nil || !strings.Contains(err.Error(), "the pristine copy is not the one driftgate seed recorded here: another seed replaced it") ||
+		!strings.Contains(err.Error(), "run driftgate seed") {
+		t.Fatalf("capture after another seed replaced the pristine copy: %v\n%s", err, out.String())
+	}
+
+	// The record of an earlier release has no name: no check.
+	pf.PristineID = ""
+	if err := snapshot.WriteJSON(matches[0], pf); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(matches[0]); strings.Contains(string(raw), "pristine_id") {
+		t.Fatalf("an empty name is written: %s", raw)
+	}
+	captureSQLServer(t, p, sqlServerCatalog(false), "b", &out)
+
+	// A seed with the first store records the copy anew.
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed again: %v\n%s", err, out.String())
+	}
+	captureSQLServer(t, p, sqlServerCatalog(false), "c", &out)
 }
