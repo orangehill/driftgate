@@ -141,10 +141,13 @@ func (q *ssSequence) def() string {
 // ssValues are where the identity columns and sequences stand: what they
 // hand out next. They change without a change of the catalog, some even
 // without a record in the log (a rolled-back INSERT, NEXT VALUE FOR from
-// a sequence's cache), so every fingerprint reads them (ssValuesSQL).
+// a sequence's cache), so every fingerprint reads them (ssValuesSQL). With
+// them the database's options and scoped configurations (ssDatabaseItem):
+// ALTER DATABASE moves no modify_date the catalog guard reads.
 type ssValues struct {
 	ident map[int64][2]string // table: last_value ("NULL"), IDENT_CURRENT when last_value is NULL
 	seq   map[int64][3]string // sequence: current_value, last_used_value ("NULL"), is_exhausted
+	db    []string            // options and scoped configurations, sorted
 	hash  string
 }
 
@@ -154,12 +157,24 @@ SELECT c.object_id, ISNULL(CONVERT(nvarchar(40), c.last_value), N'NULL'),
        ISNULL(CASE WHEN c.last_value IS NULL THEN CONVERT(nvarchar(40), IDENT_CURRENT(QUOTENAME(OBJECT_SCHEMA_NAME(c.object_id)) + N'.' + QUOTENAME(OBJECT_NAME(c.object_id)))) END, N'')
   FROM sys.identity_columns c WHERE OBJECTPROPERTY(c.object_id, 'IsUserTable') = 1;
 SELECT object_id, CONVERT(nvarchar(40), current_value), ISNULL(CONVERT(nvarchar(40), last_used_value), N'NULL'), CAST(is_exhausted AS nvarchar(1))
-  FROM sys.sequences WHERE is_ms_shipped = 0;`
+  FROM sys.sequences WHERE is_ms_shipped = 0;
+SELECT CONCAT(N'option compatibility ', compatibility_level, N' collation ', collation_name, N' read_committed_snapshot ', is_read_committed_snapshot_on,
+       N' snapshot_isolation ', CASE WHEN is_read_only = 1 THEN -1 ELSE snapshot_isolation_state END, N' ansi_null_default ', is_ansi_null_default_on, N' ansi_nulls ', is_ansi_nulls_on,
+       N' ansi_padding ', is_ansi_padding_on, N' ansi_warnings ', is_ansi_warnings_on, N' arithabort ', is_arithabort_on,
+       N' concat_null_yields_null ', is_concat_null_yields_null_on, N' numeric_roundabort ', is_numeric_roundabort_on,
+       N' quoted_identifier ', is_quoted_identifier_on, N' recursive_triggers ', is_recursive_triggers_on, N' cursor_close_on_commit ', is_cursor_close_on_commit_on,
+       N' local_cursor_default ', is_local_cursor_default, N' parameterization_forced ', is_parameterization_forced, N' date_correlation ', is_date_correlation_on,
+       N' elevate_to_snapshot ', is_memory_optimized_elevate_to_snapshot_on, N' containment ', containment, N' language ', default_language_lcid,
+       N' fulltext_language ', default_fulltext_language_lcid, N' nested_triggers ', is_nested_triggers_on, N' transform_noise_words ', is_transform_noise_words_on,
+       N' two_digit_year_cutoff ', two_digit_year_cutoff) COLLATE DATABASE_DEFAULT
+  FROM sys.databases WHERE database_id = DB_ID()
+UNION ALL SELECT CONCAT(N'scoped configuration ', name, N' ', CONVERT(nvarchar(4000), value), N' ', CONVERT(nvarchar(4000), value_for_secondary)) COLLATE DATABASE_DEFAULT
+  FROM sys.database_scoped_configurations;`
 
 // ssValueSets are the scanners of ssValuesSQL's result sets; done hashes
 // the values once they are read.
 func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
-	v.ident, v.seq = map[int64][2]string{}, map[int64][3]string{}
+	v.ident, v.seq, v.db = map[int64][2]string{}, map[int64][3]string{}, nil
 	sets = []func(*sql.Rows) error{
 		func(r *sql.Rows) error {
 			var id int64
@@ -177,6 +192,14 @@ func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
 				return err
 			}
 			v.seq[id] = x
+			return nil
+		},
+		func(r *sql.Rows) error {
+			var line string
+			if err := r.Scan(&line); err != nil {
+				return err
+			}
+			v.db = append(v.db, line)
 			return nil
 		},
 	}
@@ -197,6 +220,10 @@ func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
 		slices.Sort(ids)
 		for _, id := range ids {
 			fmt.Fprintf(h, "s %d %s\n", id, v.seq[id])
+		}
+		sort.Strings(v.db)
+		for _, l := range v.db {
+			fmt.Fprintf(h, "d %s\n", l)
 		}
 		v.hash = hex.EncodeToString(h.Sum(nil))
 	}
@@ -243,14 +270,27 @@ func (inv *ssInventory) apply(v *ssValues) {
 		q.Current, q.LastUsed, q.Exhausted = x[0], sql.NullString{String: x[1], Valid: x[1] != "NULL"}, x[2] == "1"
 		inv.Defs[q.Item] += "\ncurrent " + x[0] + " last " + x[1] + " exhausted " + x[2]
 	}
+	if len(v.db) > 0 {
+		inv.Defs[ssDatabaseItem] += "\n" + strings.Join(v.db, "\n")
+	}
 }
 
 // ssObjectKinds names the item kind of an object type of sys.objects.
 var ssObjectKinds = map[string]string{
 	"V": "view", "P": "procedure", "PC": "procedure",
 	"FN": "function", "IF": "function", "TF": "function", "FS": "function", "FT": "function",
-	"TR": "trigger",
+	"TR": "trigger", "R": "rule", "D": "default", // a default of CREATE DEFAULT (bound with sp_bindefault)
 }
+
+// ssDatabaseItem is the item of the database itself: its users and roles
+// with their members, the permissions and extended properties that belong
+// to no other item (on the database, on dbo and the other built-in
+// schemas…), and the options that change what a query does (ssValuesSQL:
+// compatibility level, collation, snapshot isolation, the ANSI defaults…)
+// with the database scoped configurations. A restore restores it only
+// with the whole database. Statistics are left out on purpose: they change
+// how a query runs, not what it returns.
+const ssDatabaseItem = "database:"
 
 // ssCatalog is the batch inventory reads, one result set per query, in
 // the order of the scanners in inventory. %[1]s is the ledger type of a
@@ -272,6 +312,9 @@ SELECT c.object_id, c.column_id, c.name,
        c.is_filestream, ISNULL(c.graph_type, 0), ISNULL(QUOTENAME(SCHEMA_NAME(xc.schema_id)) + N'.' + QUOTENAME(xc.name), N''),
        ISNULL(cc.definition, N''), ISNULL(CAST(cc.is_persisted AS int), 0), ISNULL(dc.name, N''), ISNULL(dc.definition, N''),
        ISNULL(mc.masking_function, N''),
+       ISNULL(QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(c.rule_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(c.rule_object_id, 0))), N''),
+       CASE WHEN c.default_object_id <> 0 AND dc.object_id IS NULL
+            THEN ISNULL(QUOTENAME(OBJECT_SCHEMA_NAME(c.default_object_id)) + N'.' + QUOTENAME(OBJECT_NAME(c.default_object_id)), N'?') ELSE N'' END,
        ISNULL(CONVERT(nvarchar(40), ic.seed_value), N''), ISNULL(CONVERT(nvarchar(40), ic.increment_value), N''),
        ISNULL(CAST(ic.is_not_for_replication AS int), 0)
   FROM sys.columns c JOIN sys.tables t ON t.object_id = c.object_id
@@ -321,7 +364,7 @@ SELECT o.object_id, RTRIM(o.type), s.name, o.name, o.parent_object_id, ISNULL(m.
                         WITHIN GROUP (ORDER BY e.type) FROM sys.trigger_events e WHERE e.object_id = o.object_id), N'')
   FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
   LEFT JOIN sys.sql_modules m ON m.object_id = o.object_id LEFT JOIN sys.triggers tr ON tr.object_id = o.object_id
- WHERE o.is_ms_shipped = 0 AND o.type IN ('V', 'P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT', 'TR');
+ WHERE o.is_ms_shipped = 0 AND o.type IN ('V', 'P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT', 'TR', 'R', 'D') AND (o.type <> 'D' OR o.parent_object_id = 0);
 SELECT t.object_id, t.name, t.is_disabled, ISNULL(m.definition, N''),
        ISNULL((SELECT STRING_AGG(CONVERT(nvarchar(max), e.type_desc COLLATE DATABASE_DEFAULT + CASE WHEN e.is_first = 1 THEN N' first' WHEN e.is_last = 1 THEN N' last' ELSE N'' END), N', ')
                         WITHIN GROUP (ORDER BY e.type) FROM sys.trigger_events e WHERE e.object_id = t.object_id), N'')
@@ -341,22 +384,55 @@ SELECT t.user_type_id, SCHEMA_NAME(t.schema_id), t.name, ISNULL(TYPE_NAME(t.syst
                  LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
                 WHERE tt.user_type_id = t.user_type_id) END, N''),
        ISNULL(CASE WHEN t.is_assembly_type = 1 THEN (SELECT a.name COLLATE DATABASE_DEFAULT + N' ' + at.assembly_class COLLATE DATABASE_DEFAULT FROM sys.assembly_types at JOIN sys.assemblies a ON a.assembly_id = at.assembly_id
-                WHERE at.user_type_id = t.user_type_id) END, N'')
+                WHERE at.user_type_id = t.user_type_id) END, N''),
+       ISNULL(N' rule ' + QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(t.rule_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(t.rule_object_id, 0))), N'')
+       + ISNULL(N' bound default ' + QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(t.default_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(t.default_object_id, 0))), N'')
   FROM sys.types t WHERE t.is_user_defined = 1;
 SELECT object_id, SCHEMA_NAME(schema_id), name, ISNULL(base_object_name, N'') FROM sys.synonyms WHERE is_ms_shipped = 0;
 SELECT schema_id, name, ISNULL(QUOTENAME(USER_NAME(principal_id)), N'') FROM sys.schemas WHERE schema_id > 4 AND schema_id < 16384;
 SELECT p.class, p.major_id, N'grant ' + p.state_desc COLLATE DATABASE_DEFAULT + N' ' + p.permission_name COLLATE DATABASE_DEFAULT + N' to ' + ISNULL(QUOTENAME(USER_NAME(p.grantee_principal_id)), N'?')
-       + CASE WHEN p.class = 1 AND p.minor_id > 0 THEN N' column ' + ISNULL(QUOTENAME(COL_NAME(p.major_id, p.minor_id)), N'?') ELSE N'' END
-  FROM sys.database_permissions p WHERE p.class IN (1, 3, 6);
+       + CASE WHEN p.class = 1 AND p.minor_id > 0 THEN N' column ' + ISNULL(QUOTENAME(COL_NAME(p.major_id, p.minor_id)), N'?') ELSE N'' END + N' on ' + CASE p.class WHEN 0 THEN N'database'
+         WHEN 1 THEN ISNULL(QUOTENAME(OBJECT_SCHEMA_NAME(p.major_id)) + N'.' + QUOTENAME(OBJECT_NAME(p.major_id)), N'?')
+         WHEN 3 THEN N'schema ' + ISNULL(QUOTENAME(SCHEMA_NAME(p.major_id)), N'?')
+         WHEN 4 THEN N'principal ' + ISNULL(QUOTENAME(USER_NAME(p.major_id)), N'?')
+         WHEN 6 THEN N'type ' + ISNULL(QUOTENAME(TYPE_NAME(p.major_id)), N'?')
+         WHEN 10 THEN N'xml schema collection ' + ISNULL((SELECT QUOTENAME(x.name) FROM sys.xml_schema_collections x WHERE x.xml_collection_id = p.major_id), N'?')
+         ELSE CONCAT(p.class_desc COLLATE DATABASE_DEFAULT, N' ', p.major_id) END
+  FROM sys.database_permissions p;
 SELECT e.class, e.major_id, N'property ' + QUOTENAME(e.name)
-       + CASE WHEN e.class = 1 AND e.minor_id > 0 THEN N' column ' + ISNULL(QUOTENAME(COL_NAME(e.major_id, e.minor_id)), N'?') ELSE N'' END
+       + CASE WHEN e.class = 1 AND e.minor_id > 0 THEN N' column ' + ISNULL(QUOTENAME(COL_NAME(e.major_id, e.minor_id)), N'?')
+              WHEN e.minor_id > 0 THEN CONCAT(N' minor ', e.minor_id) ELSE N'' END + N' on ' + CASE e.class WHEN 0 THEN N'database'
+         WHEN 1 THEN ISNULL(QUOTENAME(OBJECT_SCHEMA_NAME(e.major_id)) + N'.' + QUOTENAME(OBJECT_NAME(e.major_id)), N'?')
+         WHEN 3 THEN N'schema ' + ISNULL(QUOTENAME(SCHEMA_NAME(e.major_id)), N'?')
+         WHEN 4 THEN N'principal ' + ISNULL(QUOTENAME(USER_NAME(e.major_id)), N'?')
+         WHEN 6 THEN N'type ' + ISNULL(QUOTENAME(TYPE_NAME(e.major_id)), N'?')
+         WHEN 10 THEN N'xml schema collection ' + ISNULL((SELECT QUOTENAME(x.name) FROM sys.xml_schema_collections x WHERE x.xml_collection_id = e.major_id), N'?')
+         ELSE CONCAT(e.class_desc COLLATE DATABASE_DEFAULT, N' ', e.major_id) END
        + N' ' + ISNULL(CAST(SQL_VARIANT_PROPERTY(e.value, 'BaseType') AS nvarchar(128)) COLLATE DATABASE_DEFAULT
          + N' ' + ISNULL(CAST(SQL_VARIANT_PROPERTY(e.value, 'Collation') AS nvarchar(128)) COLLATE DATABASE_DEFAULT, N'')
          + N' ' + CONVERT(varchar(max), CAST(e.value AS varbinary(8000)), 1), N'NULL')
-  FROM sys.extended_properties e WHERE e.class IN (1, 3, 6);
+  FROM sys.extended_properties e WHERE NOT (e.class = 0 AND e.name = N'driftgate_pristine');
 SELECT pr.target_object_id, QUOTENAME(SCHEMA_NAME(p.schema_id)) + N'.' + QUOTENAME(p.name), p.is_enabled, p.is_schema_bound, pr.predicate_type,
        ISNULL(pr.operation_desc COLLATE DATABASE_DEFAULT, N''), ISNULL(pr.predicate_definition, N'')
-  FROM sys.security_predicates pr JOIN sys.security_policies p ON p.object_id = pr.object_id;`
+  FROM sys.security_predicates pr JOIN sys.security_policies p ON p.object_id = pr.object_id;
+SELECT CONCAT(N'principal ', QUOTENAME(name), N' ', type COLLATE DATABASE_DEFAULT, N' ', authentication_type_desc COLLATE DATABASE_DEFAULT,
+              N' schema ', ISNULL(QUOTENAME(default_schema_name), N''), N' owner ', ISNULL(QUOTENAME(USER_NAME(owning_principal_id)), N''),
+              N' sid ', CONVERT(varchar(200), sid, 1)) COLLATE DATABASE_DEFAULT
+  FROM sys.database_principals WHERE principal_id > 4 AND is_fixed_role = 0
+UNION ALL SELECT CONCAT(N'member ', QUOTENAME(USER_NAME(role_principal_id)), N' ', QUOTENAME(USER_NAME(member_principal_id))) COLLATE DATABASE_DEFAULT
+  FROM sys.database_role_members;
+SELECT 0, N'partition_function:' + pf.name, CONCAT(pf.type_desc COLLATE DATABASE_DEFAULT, N' right ', pf.boundary_value_on_right, N' parameters ',
+       (SELECT STRING_AGG(CONVERT(nvarchar(max), CONCAT(TYPE_NAME(pp.user_type_id), N'(', pp.max_length, N',', pp.precision, N',', pp.scale, N') ', pp.collation_name COLLATE DATABASE_DEFAULT)), N', ')
+               WITHIN GROUP (ORDER BY pp.parameter_id) FROM sys.partition_parameters pp WHERE pp.function_id = pf.function_id),
+       N' values ', (SELECT STRING_AGG(CONVERT(varchar(max), CONCAT(CAST(SQL_VARIANT_PROPERTY(rv.value, 'BaseType') AS varchar(128)), ' ', CONVERT(varchar(max), CAST(rv.value AS varbinary(8000)), 1))), ', ')
+               WITHIN GROUP (ORDER BY rv.boundary_id) FROM sys.partition_range_values rv WHERE rv.function_id = pf.function_id)) COLLATE DATABASE_DEFAULT
+  FROM sys.partition_functions pf
+UNION ALL SELECT 0, N'partition_scheme:' + ps.name, CONCAT(N'function ', QUOTENAME(pf.name), N' to ',
+       (SELECT STRING_AGG(CONVERT(nvarchar(max), QUOTENAME(ds.name)), N', ') WITHIN GROUP (ORDER BY dd.destination_id)
+          FROM sys.destination_data_spaces dd JOIN sys.data_spaces ds ON ds.data_space_id = dd.data_space_id WHERE dd.partition_scheme_id = ps.data_space_id)) COLLATE DATABASE_DEFAULT
+  FROM sys.partition_schemes ps JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+UNION ALL SELECT xml_collection_id, N'xml_schema:' + SCHEMA_NAME(schema_id) + N'.' + name, CONVERT(nvarchar(max), XML_SCHEMA_NAMESPACE(SCHEMA_NAME(schema_id), name)) COLLATE DATABASE_DEFAULT
+  FROM sys.xml_schema_collections WHERE xml_collection_id > 1;`
 
 // inventory reads the catalog of the database c is connected to, without
 // the values (apply). A table of a type DriftGate cannot fingerprint is
@@ -378,6 +454,7 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 	objects := map[int64]string{} // object id → item, for permissions and properties
 	schemas := map[int64]string{}
 	types := map[int64]string{}
+	xmlSchemas := map[int64]string{}
 	table := func(id int64) *ssTable { return inv.byID[id] }
 	// Item names are schema.name without quoting: two objects ([a.b].c and
 	// a.[b.c]) may come out alike, and are refused rather than mixed up.
@@ -417,12 +494,12 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 		func(r *sql.Rows) error { // columns, in column order
 			var id int64
 			var col ssColumn
-			var declared, collation, xmlSchema, computedDef, defaultName, defaultDef, mask, seed, increment string
+			var declared, collation, xmlSchema, computedDef, defaultName, defaultDef, mask, rule, bound, seed, increment string
 			var precision, scale, persisted, notForRepl int
 			var rowguid, sparse, hidden, masked, filestream bool
 			if err := r.Scan(&id, &col.ID, &col.Name, &col.Type, &col.CLR, &declared, &col.MaxLength, &precision, &scale, &collation,
 				&col.Nullable, &col.Identity, &col.Computed, &rowguid, &sparse, &col.ColumnSet, &col.Generated, &hidden, &masked, &col.Encrypted,
-				&filestream, &col.Graph, &xmlSchema, &computedDef, &persisted, &defaultName, &defaultDef, &mask, &seed, &increment, &notForRepl); err != nil {
+				&filestream, &col.Graph, &xmlSchema, &computedDef, &persisted, &defaultName, &defaultDef, &mask, &rule, &bound, &seed, &increment, &notForRepl); err != nil {
 				return err
 			}
 			t := table(id)
@@ -442,6 +519,12 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			}
 			if defaultName != "" {
 				line += " default " + qs(defaultName) + " " + defaultDef
+			}
+			if rule != "" {
+				line += " rule " + rule
+			}
+			if bound != "" {
+				line += " bound default " + bound
 			}
 			for _, f := range []struct {
 				on   bool
@@ -562,10 +645,10 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 		},
 		func(r *sql.Rows) error { // user-defined types
 			var id int64
-			var schema, name, base, collation, columns, assembly string
+			var schema, name, base, collation, columns, assembly, bindings string
 			var maxLength, precision, scale int
 			var nullable, tableType bool
-			if err := r.Scan(&id, &schema, &name, &base, &maxLength, &precision, &scale, &collation, &nullable, &tableType, &columns, &assembly); err != nil {
+			if err := r.Scan(&id, &schema, &name, &base, &maxLength, &precision, &scale, &collation, &nullable, &tableType, &columns, &assembly, &bindings); err != nil {
 				return err
 			}
 			item := "type:" + schema + "." + name
@@ -573,7 +656,7 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 				return err
 			}
 			types[id] = item
-			add(item, fmt.Sprintf("type %s %d %d %d %s null %s table %s (%s) %s", base, maxLength, precision, scale, collation, b(nullable), b(tableType), columns, assembly))
+			add(item, fmt.Sprintf("type %s %d %d %d %s null %s table %s (%s) %s%s", base, maxLength, precision, scale, collation, b(nullable), b(tableType), columns, assembly, bindings))
 			return nil
 		},
 		func(r *sql.Rows) error { // synonyms
@@ -638,6 +721,29 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			add(strconv.FormatInt(id, 10), fmt.Sprintf("security policy %s enabled %s schemabinding %s %s %s %s", policy, b(enabled), b(bound), predicate, operation, def))
 			return nil
 		},
+		func(r *sql.Rows) error { // users, roles and role members
+			var line string
+			if err := r.Scan(&line); err != nil {
+				return err
+			}
+			add(ssDatabaseItem, line)
+			return nil
+		},
+		func(r *sql.Rows) error { // partition functions and schemes, XML schema collections
+			var id int64
+			var item, def string
+			if err := r.Scan(&id, &item, &def); err != nil {
+				return err
+			}
+			if err := claim(item, item); err != nil {
+				return err
+			}
+			if strings.HasPrefix(item, "xml_schema:") {
+				xmlSchemas[id] = item
+			}
+			add(item, def)
+			return nil
+		},
 	}
 	if err := readSets(ctx, c, fmt.Sprintf(ssCatalog, ledger), sets...); err != nil {
 		return nil, err
@@ -653,6 +759,8 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			return schemas[n]
 		case "6":
 			return types[n]
+		case "10":
+			return xmlSchemas[n]
 		}
 		return ""
 	}
@@ -661,7 +769,11 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 		item := key
 		switch {
 		case strings.Contains(key, "/"):
-			item = byClass(key)
+			// What belongs to no item (the database, dbo and the other
+			// built-in schemas, users…) belongs to the database's.
+			if item = byClass(key); item == "" {
+				item = ssDatabaseItem
+			}
 		case !strings.Contains(key, ":"): // an object id: indexes and constraints of a table or view
 			n, _ := strconv.ParseInt(key, 10, 64)
 			item = objects[n]
@@ -671,6 +783,9 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 		}
 	}
 	lines = byItem
+	if lines[ssDatabaseItem] == nil {
+		lines[ssDatabaseItem] = []string{} // always an item: the options are added (apply)
+	}
 	sort.Slice(inv.Tables, func(i, j int) bool { return inv.Tables[i].Item < inv.Tables[j].Item })
 	for _, t := range inv.Tables {
 		if t.Excluded {

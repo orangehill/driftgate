@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +65,9 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 		if inv, err = s.inventory(ctx, c); err != nil {
 			return nil, err
 		}
+	}
+	if vals, err = s.readOnlyValues(ctx, db, vals); err != nil {
+		return nil, err
 	}
 	inv.apply(vals)
 	want := func(item string) bool { return items == nil || contains(items, item) }
@@ -127,6 +131,26 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 		}
 	}
 	return out, nil
+}
+
+// readOnlyValues gives a read-only database (the pristine copy) the
+// snapshot isolation setting of the working database it was made of, from
+// its mark: SQL Server reports it on for any read-only database (the
+// values read -1 then). Without a mark it stays -1.
+func (s *SQLServer) readOnlyValues(ctx context.Context, db string, v *ssValues) (*ssValues, error) {
+	const unknown = " snapshot_isolation -1 "
+	i := slices.IndexFunc(v.db, func(l string) bool { return strings.Contains(l, unknown) })
+	if i < 0 {
+		return v, nil
+	}
+	m, err := s.readMark(ctx, db)
+	if err != nil || m == nil || m.Snapshot == nil {
+		return v, err
+	}
+	w := *v
+	w.db = slices.Clone(v.db)
+	w.db[i] = strings.Replace(w.db[i], unknown, fmt.Sprintf(" snapshot_isolation %d ", *m.Snapshot), 1)
+	return &w, nil
 }
 
 // integerTypes are the key types a table is split by.

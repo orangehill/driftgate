@@ -90,13 +90,17 @@ const ssGuardSQL = `
 SELECT CONCAT(N'o ', object_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.objects WHERE is_ms_shipped = 0
 UNION ALL SELECT CONCAT(N't ', object_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.triggers WHERE parent_class = 0
 UNION ALL SELECT CONCAT(N'p ', class, N' ', major_id, N' ', minor_id, N' ', grantee_principal_id, N' ', grantor_principal_id, N' ', type COLLATE DATABASE_DEFAULT, N' ', state COLLATE DATABASE_DEFAULT) COLLATE DATABASE_DEFAULT
-  FROM sys.database_permissions WHERE class IN (1, 3, 6)
+  FROM sys.database_permissions
 UNION ALL SELECT CONCAT(N'e ', class, N' ', major_id, N' ', minor_id, N' ', name COLLATE DATABASE_DEFAULT, N' ', CAST(SQL_VARIANT_PROPERTY(value, 'BaseType') AS nvarchar(128)) COLLATE DATABASE_DEFAULT,
          N' ', CAST(SQL_VARIANT_PROPERTY(value, 'Collation') AS nvarchar(128)) COLLATE DATABASE_DEFAULT, N' ', CONVERT(varchar(max), CAST(value AS varbinary(8000)), 1)) COLLATE DATABASE_DEFAULT
-  FROM sys.extended_properties WHERE class IN (1, 3, 6)
+  FROM sys.extended_properties WHERE NOT (class = 0 AND name = N'driftgate_pristine')
 UNION ALL SELECT CONCAT(N's ', schema_id, N' ', name, N' ', principal_id) COLLATE DATABASE_DEFAULT FROM sys.schemas
-UNION ALL SELECT CONCAT(N'y ', user_type_id, N' ', schema_id, N' ', name) COLLATE DATABASE_DEFAULT FROM sys.types WHERE is_user_defined = 1
-UNION ALL SELECT CONCAT(N'u ', principal_id, N' ', name) COLLATE DATABASE_DEFAULT FROM sys.database_principals
+UNION ALL SELECT CONCAT(N'y ', user_type_id, N' ', schema_id, N' ', name, N' ', rule_object_id, N' ', default_object_id) COLLATE DATABASE_DEFAULT FROM sys.types WHERE is_user_defined = 1
+UNION ALL SELECT CONCAT(N'm ', role_principal_id, N' ', member_principal_id) COLLATE DATABASE_DEFAULT FROM sys.database_role_members
+UNION ALL SELECT CONCAT(N'f ', function_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.partition_functions
+UNION ALL SELECT CONCAT(N'd ', partition_scheme_id, N' ', destination_id, N' ', data_space_id) COLLATE DATABASE_DEFAULT FROM sys.destination_data_spaces
+UNION ALL SELECT CONCAT(N'x ', xml_collection_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.xml_schema_collections
+UNION ALL SELECT CONCAT(N'u ', principal_id, N' ', name, N' ', type COLLATE DATABASE_DEFAULT, N' ', default_schema_name, N' ', owning_principal_id, N' ', CONVERT(varchar(200), sid, 1)) COLLATE DATABASE_DEFAULT FROM sys.database_principals
 UNION ALL SELECT CONCAT(N'a ', assembly_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.assemblies;
 SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects WHERE is_ms_shipped = 0 AND modify_date >= DATEADD(second, -2, GETDATE()))
               OR EXISTS (SELECT 1 FROM sys.triggers WHERE parent_class = 0 AND modify_date >= DATEADD(second, -2, GETDATE())) THEN 1 ELSE 0 END;`

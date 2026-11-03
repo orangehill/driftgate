@@ -116,7 +116,7 @@ func TestSQLServerItems(t *testing.T) {
 	for it := range f {
 		items = append(items, it)
 	}
-	want := []string{"function:app.f", "procedure:app.p", "schema:app", "schema:audit", "sequence:app.numbers", "synonym:app.o",
+	want := []string{"database:", "function:app.f", "procedure:app.p", "schema:app", "schema:audit", "sequence:app.numbers", "synonym:app.o",
 		"table:app.lines", "table:app.orders", "trigger:app.tr_orders", "trigger:database.ddl_log", "type:app.money2", "view:app.big"}
 	if !sameItems(items, want) {
 		t.Fatalf("items %v, want %v", items, want)
@@ -435,9 +435,13 @@ func TestSQLServerOpenWrites(t *testing.T) {
 }
 
 // makeSQLServerPristine copies the working database to the pristine one by
-// BACKUP and RESTORE (as a seed does), read-only.
+// BACKUP and RESTORE (as a seed does), marked and read-only.
 func makeSQLServerPristine(t *testing.T, s *SQLServer) {
 	t.Helper()
+	mark, err := s.markValue(context.Background(), "", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
 	master := sqlServerTestDB(t, s.o.DSN, "")
 	var data string
 	if err := master.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(400))").Scan(&data); err != nil {
@@ -453,6 +457,7 @@ func makeSQLServerPristine(t *testing.T, s *SQLServer) {
 		"BACKUP DATABASE " + qs(s.o.Working) + " TO DISK = " + sqlServerString(bak) + " WITH COPY_ONLY, INIT, FORMAT",
 		"RESTORE DATABASE " + qs(s.o.Pristine) + " FROM DISK = " + sqlServerString(bak) + " WITH MOVE " + sqlServerString(s.o.Working) + " TO " +
 			sqlServerString(data+s.o.Pristine+".mdf") + ", MOVE " + sqlServerString(s.o.Working+"_log") + " TO " + sqlServerString(data+s.o.Pristine+".ldf"),
+		"EXEC " + qs(s.o.Pristine) + ".sys.sp_addextendedproperty @name = N'driftgate_pristine', @value = " + sqlServerString(mark),
 		"ALTER DATABASE " + qs(s.o.Pristine) + " SET READ_ONLY WITH ROLLBACK IMMEDIATE",
 	}
 	for _, q := range stmts {
@@ -703,7 +708,8 @@ func TestSQLServerNoPasswordInErrors(t *testing.T) {
 // extended properties, a schema's owner).
 func TestSQLServerCatalogCache(t *testing.T) {
 	s, db := newSQLServerTest(t, Options{})
-	mustExec(t, db, "CREATE TABLE a (id int PRIMARY KEY, v int)", "CREATE SCHEMA app", "CREATE USER someone WITHOUT LOGIN")
+	mustExec(t, db, "CREATE TABLE a (id int PRIMARY KEY, v int)", "CREATE SCHEMA app", "CREATE USER someone WITHOUT LOGIN",
+		"CREATE PARTITION FUNCTION pf (int) AS RANGE LEFT FOR VALUES (1)", "CREATE PARTITION SCHEME ps AS PARTITION pf ALL TO ([PRIMARY])")
 	settle := func() { time.Sleep(2100 * time.Millisecond) } // older than the guard's window
 	settle()
 	mustSQLServerFingerprint(t, s)
@@ -721,6 +727,11 @@ func TestSQLServerCatalogCache(t *testing.T) {
 		{"EXEC sp_addextendedproperty N'p', N'x', N'SCHEMA', N'dbo', N'TABLE', N'a', N'COLUMN', N'v'", "table:dbo.a"},
 		{"EXEC sp_updateextendedproperty N'p', N'y', N'SCHEMA', N'dbo', N'TABLE', N'a', N'COLUMN', N'v'", "table:dbo.a"},
 		{"ALTER AUTHORIZATION ON SCHEMA::app TO someone", "schema:app"},
+		{"GRANT CREATE TABLE TO someone", "database:"},
+		{"DENY SELECT ON SCHEMA::dbo TO someone", "database:"},
+		{"ALTER ROLE db_datareader ADD MEMBER someone", "database:"},
+		{"EXEC sp_addextendedproperty @name = N'appver', @value = N'2'", "database:"},
+		{"ALTER PARTITION SCHEME ps NEXT USED [PRIMARY]; ALTER PARTITION FUNCTION pf() SPLIT RANGE (5)", ""},
 		{"ALTER TABLE a ADD w int NULL", "table:dbo.a"}, // within the window
 	} {
 		f := mustSQLServerFingerprint(t, s)
@@ -729,7 +740,7 @@ func TestSQLServerCatalogCache(t *testing.T) {
 		}
 		mustExec(t, db, tc.stmt)
 		g := mustSQLServerFingerprint(t, s)
-		if d := Diff(f, g); !reflect.DeepEqual(d, []string{tc.item}) {
+		if d := Diff(f, g); tc.item != "" && !reflect.DeepEqual(d, []string{tc.item}) || len(d) == 0 {
 			t.Errorf("%s: changed %v, want %s", tc.stmt, d, tc.item)
 		}
 		if full := sqlServerFull(t, s); !reflect.DeepEqual(g, full) {
@@ -1012,5 +1023,75 @@ func TestSQLServerTornRead(t *testing.T) {
 	}
 	if r.err == nil && !reflect.DeepEqual(r.f, now) {
 		t.Fatalf("the fingerprint is of no state the database had: %v", Diff(r.f, now))
+	}
+}
+
+// TestSQLServerDatabaseItem: changes outside tables and routines (users,
+// roles, permissions on the database and on dbo, the database's options,
+// rules and bound defaults, partitions, XML schema collections) show in
+// the fingerprint, and one of the database itself is restored with the
+// whole database.
+func TestSQLServerDatabaseItem(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE t (id int PRIMARY KEY, v int NULL)", "INSERT INTO t VALUES (1, 1)", "CREATE USER u0 WITHOUT LOGIN",
+		"CREATE RULE r0 AS @v > 0", "CREATE DEFAULT d0 AS 42")
+	p := pristineSQLServer(t, s)
+	if d := Diff(mustSQLServerFingerprint(t, s), p); len(d) > 0 {
+		t.Fatalf("the working database and its pristine copy differ in %v", d)
+	}
+	for _, tc := range []struct{ stmt, item string }{
+		{"CREATE USER u1 WITHOUT LOGIN", "database:"},
+		{"CREATE ROLE r1", "database:"},
+		{"ALTER ROLE db_datareader ADD MEMBER u0", "database:"},
+		{"GRANT CREATE TABLE TO u0", "database:"},
+		{"DENY SELECT ON SCHEMA::dbo TO u0", "database:"},
+		{"GRANT SELECT ON dbo.t TO u0", "table:dbo.t"},
+		{"EXEC sp_addextendedproperty @name = N'appver', @value = N'2'", "database:"},
+		{"ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE", "database:"},
+		{"ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 140", "database:"},
+		{"ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON", "database:"},
+		{"ALTER DATABASE CURRENT SET ARITHABORT ON", "database:"},
+		{"ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = 1", "database:"},
+		{"CREATE PARTITION FUNCTION pf (int) AS RANGE LEFT FOR VALUES (1)", "partition_function:pf"},
+		{"CREATE XML SCHEMA COLLECTION xs AS N'<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"a\"/></xsd:schema>'", "xml_schema:dbo.xs"},
+		{"CREATE RULE rpos AS @v > 0", "rule:dbo.rpos"},
+		{"EXEC sp_bindrule 'r0', 't.v'", "table:dbo.t"},
+		{"CREATE DEFAULT dfl AS 42", "default:dbo.dfl"},
+		{"EXEC sp_bindefault 'd0', 't.v'", "table:dbo.t"},
+		{"CREATE STATISTICS st ON t (v)", ""}, // statistics are left out on purpose
+	} {
+		mustExec(t, db, tc.stmt)
+		d := Diff(sqlServerFull(t, s), p)
+		if tc.item == "" {
+			if len(d) > 0 {
+				t.Errorf("%s: changed %v", tc.stmt, d)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(d, []string{tc.item}) {
+			t.Errorf("%s: changed %v, want %s", tc.stmt, d, tc.item)
+		}
+		whole := restoreSQLServer(t, s, db, log, p)
+		if !strings.HasPrefix(tc.item, "table:") && !whole {
+			t.Errorf("%s: restored item by item", tc.stmt)
+		}
+	}
+}
+
+// TestSQLServerSnapshotSetting: a read-only pristine copy reports snapshot
+// isolation on whatever it is set to; the mark keeps the working
+// database's setting, so the two compare as they are.
+func TestSQLServerSnapshotSetting(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{}, "ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON", "CREATE TABLE t (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	if d := Diff(mustSQLServerFingerprint(t, s), p); len(d) > 0 {
+		t.Fatalf("the working database and its pristine copy differ in %v", d)
+	}
+	mustExec(t, db, "ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION OFF")
+	if d := Diff(sqlServerFull(t, s), p); !reflect.DeepEqual(d, []string{"database:"}) {
+		t.Fatalf("changed %v", d)
+	}
+	if !restoreSQLServer(t, s, db, log, p) {
+		t.Fatal("restored item by item")
 	}
 }

@@ -321,6 +321,10 @@ type sqlServerMark struct {
 	Fallback string `json:"fallback,omitempty"`
 	Created  string `json:"created"`
 	Broker   bool   `json:"broker,omitempty"`
+	// Snapshot is the working database's ALLOW_SNAPSHOT_ISOLATION
+	// (snapshot_isolation_state) when the copy was made: a read-only
+	// database reports it on, whatever it was set to (readOnlyValues).
+	Snapshot *int `json:"snapshot_isolation,omitempty"`
 }
 
 // readMark reads the mark of a database; nil when it has none. The
@@ -352,7 +356,19 @@ func (s *SQLServer) markValue(ctx context.Context, fallback, created string) (st
 	if err != nil {
 		return "", err
 	}
-	b, err := json.Marshal(sqlServerMark{Working: s.o.Working, Server: info.Name, Fallback: fallback, Created: created})
+	m := sqlServerMark{Working: s.o.Working, Server: info.Name, Fallback: fallback, Created: created}
+	c, err := s.conn(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	var snapshot int
+	if err := c.QueryRowContext(ctx, "SELECT snapshot_isolation_state FROM sys.databases WHERE name = @p1 AND is_read_only = 0", s.o.Working).Scan(&snapshot); err == nil {
+		m.Snapshot = &snapshot
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	b, err := json.Marshal(m)
 	return string(b), err
 }
 
