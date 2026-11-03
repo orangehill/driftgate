@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/chaos"
 )
@@ -546,6 +547,31 @@ func TestSQLServerRestoreNothing(t *testing.T) {
 	}
 }
 
+// benchRestore changes the working database (change), restores items and
+// fingerprints them as the tracker does, b.N times after one to warm up,
+// and reports the time of a restore alone.
+func benchRestore(b *testing.B, s *SQLServer, change func(n int), items func(n int) []string) {
+	ctx := context.Background()
+	mustSQLServerFingerprint(b, s)
+	var took time.Duration
+	for n := range b.N + 1 { // the first one warms up (connections, catalogs)
+		change(n)
+		start := time.Now()
+		if err := s.Restore(ctx, items(n)); err != nil {
+			b.Fatal(err)
+		}
+		if n == 0 {
+			b.ResetTimer()
+		} else {
+			took += time.Since(start)
+		}
+		if _, err := s.Fingerprint(ctx, items(n)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(took.Microseconds())/1000/float64(b.N), "ms/restore")
+}
+
 // BenchmarkSQLServerRestoreSmall: one row of one table of ten changed and
 // restored (the budget is 30 ms).
 func BenchmarkSQLServerRestoreSmall(b *testing.B) {
@@ -555,17 +581,8 @@ func BenchmarkSQLServerRestoreSmall(b *testing.B) {
 			fmt.Sprintf("INSERT INTO t%d (v, s) SELECT TOP (100) object_id, name FROM sys.all_objects", i))
 	}
 	s, db, _ := newSQLServerSeeded(b, Options{}, setup...)
-	ctx := context.Background()
-	n := 0
-	for b.Loop() {
-		b.StopTimer()
-		n++
-		sqlServerExec(b, db, fmt.Sprintf("UPDATE t%d SET v = %d WHERE id = 1", n%10, n))
-		b.StartTimer()
-		if err := s.Restore(ctx, []string{fmt.Sprintf("table:dbo.t%d", n%10)}); err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchRestore(b, s, func(n int) { sqlServerExec(b, db, fmt.Sprintf("UPDATE t%d SET v = %d WHERE id = 1", n%10, n+1)) },
+		func(n int) []string { return []string{fmt.Sprintf("table:dbo.t%d", n%10)} })
 }
 
 // BenchmarkSQLServerRestoreDelta: one row of a table of a million changed
@@ -575,17 +592,10 @@ func BenchmarkSQLServerRestoreDelta(b *testing.B) {
 		"CREATE TABLE big (id int PRIMARY KEY, v int NULL, s nvarchar(50) NULL, f float NULL, d datetime2 NULL)",
 		`WITH n AS (SELECT TOP (1000000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c)
 		 INSERT INTO big WITH (TABLOCK) SELECT i, i % 1000, CONCAT(N'name ', i), i * 1.5, DATEADD(second, i, '2020-01-01') FROM n`)
-	ctx := context.Background()
-	n := 0
-	for b.Loop() {
-		b.StopTimer()
-		n++
-		sqlServerExec(b, db, fmt.Sprintf("UPDATE big SET v = -%d WHERE id = %d", n, n*7919%1000000+1))
-		b.StartTimer()
-		if err := s.Restore(ctx, []string{"table:dbo.big"}); err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchRestore(b, s, func(n int) {
+		sqlServerExec(b, db, fmt.Sprintf("UPDATE big SET v = -%d WHERE id = %d", n+1, (n+1)*7919%1000000+1))
+	},
+		func(int) []string { return []string{"table:dbo.big"} })
 }
 
 // BenchmarkSQLServerFallback: a restore of the whole (small) database
@@ -594,15 +604,9 @@ func BenchmarkSQLServerFallback(b *testing.B) {
 	s, db, _ := newSQLServerSeeded(b, Options{Exclude: []string{"sessions"}},
 		"CREATE TABLE t (id int IDENTITY PRIMARY KEY, v int NULL)", "INSERT INTO t (v) SELECT TOP (1000) object_id FROM sys.all_objects",
 		"CREATE TABLE sessions (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM t")
-	ctx := context.Background()
-	n := 0
-	for b.Loop() {
-		b.StopTimer()
-		n++
+	benchRestore(b, s, func(n int) {
+		db.SetMaxIdleConns(0) // the restore ended the sessions
+		db.SetMaxIdleConns(2)
 		sqlServerExec(b, db, fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS n FROM t", n), fmt.Sprintf("INSERT INTO sessions VALUES (%d)", n))
-		b.StartTimer()
-		if err := s.Restore(ctx, []string{"view:dbo.v"}); err != nil {
-			b.Fatal(err)
-		}
-	}
+	}, func(int) []string { return []string{"view:dbo.v"} })
 }

@@ -90,7 +90,7 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 	if len(items) == 0 {
 		return nil
 	}
-	err = s.restoreItems(ctx, items)
+	err = s.restoreItems(ctx, items, mark)
 	var fb *ssFallback
 	if errors.As(err, &fb) {
 		fmt.Fprintf(s.o.Log, "state %s: %s; restoring the whole database from the pristine copy's backup\n", s.o.Name, fb.why)
@@ -175,6 +175,50 @@ func (s *SQLServer) catalog(ctx context.Context, c *sql.Conn) (*ssInventory, err
 		return nil, err
 	}
 	inv.apply(v)
+	return inv, nil
+}
+
+// ssPristineCatalog is the catalog of the pristine copy whose mark names
+// the backup set fallback.
+type ssPristineCatalog struct {
+	fallback string
+	inv      *ssInventory
+}
+
+// pristineCatalog reads the pristine copy's catalog once per copy.
+func (s *SQLServer) pristineCatalog(ctx context.Context, mark *sqlServerMark) (*ssInventory, error) {
+	if s.pcat != nil && mark.Fallback != "" && s.pcat.fallback == mark.Fallback {
+		return s.pcat.inv, nil
+	}
+	c, err := s.conn(ctx, s.o.Pristine)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	inv, err := s.catalog(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	s.pcat = &ssPristineCatalog{fallback: mark.Fallback, inv: inv}
+	return inv, nil
+}
+
+// workingCatalog is catalog for the working database: the inventory the
+// last fingerprint read when the catalog did not change since (the guard
+// of sqlserver_reuse.go), with the values read now.
+func (s *SQLServer) workingCatalog(ctx context.Context, c *sql.Conn) (*ssInventory, error) {
+	sig, err := s.signals(ctx, c, false, true, false)
+	if err != nil {
+		return nil, err
+	}
+	inv := s.cached(sig)
+	if inv == nil {
+		if inv, err = s.inventory(ctx, c); err != nil {
+			return nil, err
+		}
+		s.cache(sig, inv)
+	}
+	inv.apply(sig.values)
 	return inv, nil
 }
 
@@ -334,6 +378,10 @@ func (s *SQLServer) planRestore(winv, pinv *ssInventory, items []string, facts *
 			}
 			rt := &ssRestoreTable{w: wt, p: pt, clear: "DELETE"}
 			truncatable := facts.truncatable(wt.ID)
+			// TRUNCATE where it is needed or saves time: it changes the
+			// table's modify_date, so the next fingerprint and restore
+			// read the catalog again (sqlserver_reuse.go).
+			large := truncatable && wt.Rows >= sqlServerDeltaRows
 			if pt.Identity != nil {
 				var ok bool
 				if rt.clear, rt.reseed, ok = ssIdentityPlan(pt.Identity, wt.Identity, pt.Rows == 0, truncatable); !ok {
@@ -342,7 +390,10 @@ func (s *SQLServer) planRestore(winv, pinv *ssInventory, items []string, facts *
 				if rt.reseed != "" && !ssInteger.MatchString(rt.reseed) {
 					return nil, fallback("the identity value of %s cannot be written", item)
 				}
-			} else if truncatable {
+				if rt.clear == "TRUNCATE" && pt.Identity.Last.Valid && !large {
+					rt.clear = "DELETE" // the table gets rows: last_value is not NULL either way
+				}
+			} else if large {
 				rt.clear = "TRUNCATE"
 			}
 			rt.delta = pt.Key != nil && pt.Rows >= sqlServerDeltaRows && (pt.Identity == nil || pt.Identity.Last.Valid)
@@ -496,13 +547,8 @@ func (s *SQLServer) tolerate(ctx context.Context, c *sql.Conn, g *ssGuard) (stri
 
 // restoreItems restores items one by one (see above), or returns an
 // ssFallback before it changed anything.
-func (s *SQLServer) restoreItems(ctx context.Context, items []string) error {
-	pc, err := s.conn(ctx, s.o.Pristine)
-	if err != nil {
-		return err
-	}
-	pinv, err := s.catalog(ctx, pc)
-	pc.Close()
+func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlServerMark) error {
+	pinv, err := s.pristineCatalog(ctx, mark)
 	if err != nil {
 		return err
 	}
@@ -519,7 +565,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string) error {
 			s.forget()
 		}
 	}()
-	winv, err := s.catalog(ctx, c)
+	winv, err := s.workingCatalog(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -681,29 +727,44 @@ func ssKeyJoin(key []string, a, b string) string {
 const ssParallel = " OPTION (USE HINT ('ENABLE_PARALLEL_PLAN_PREFERENCE'))"
 
 // findChanged finds the keys of the changed rows of every large table of
-// the plan (delta): rows whose encoding (sqlServerRow, as the fingerprint
-// reads them) differs from the pristine copy's row with the same key, and
-// rows with a key on one side only. They go into a temporary table of the
-// connection. A table where more than a quarter of the rows changed is
-// copied whole.
+// the plan (delta): rows with a column whose encoding (sqlServerColumn,
+// as the fingerprint reads it) differs from the pristine copy's row with
+// the same key, and rows with a key on one side only. They go into a
+// temporary table of the connection. A table where more than a quarter of
+// the rows changed is copied whole. Each column is compared on its own:
+// the rows' whole encodings are varbinary(max), which SQL Server compares
+// several times slower.
 func (s *SQLServer) findChanged(ctx context.Context, c *sql.Conn, plan *ssRestorePlan) error {
 	n := 0
 	for _, rt := range plan.tables {
 		if !rt.delta {
 			continue
 		}
-		row, err := sqlServerRow(rt.p.Columns)
-		if err != nil {
-			continue // copied whole: the copy does not need the encoding
-		}
-		n++
-		k := fmt.Sprintf("#dg_k%d", n)
-		var keys, wkeys, pkeys []string
+		var keys, wkeys, pkeys, parts, differ []string
 		for _, col := range rt.p.Key {
 			keys = append(keys, qs(col))
 			wkeys = append(wkeys, "w."+qs(col))
 			pkeys = append(pkeys, "p."+qs(col))
 		}
+		usable := true
+		for _, col := range rt.p.Columns {
+			if !col.hashed() {
+				continue
+			}
+			part, err := sqlServerColumn(col)
+			if err != nil || col.Encrypted {
+				usable = false // copied whole: a copy does not need the encoding
+				break
+			}
+			name := qs(fmt.Sprintf("dg c%d", len(parts)+1))
+			parts = append(parts, part+" AS "+name)
+			differ = append(differ, "w."+name+" <> p."+name)
+		}
+		if !usable {
+			continue
+		}
+		n++
+		k := fmt.Sprintf("#dg_k%d", n)
 		list := strings.Join(keys, ", ")
 		w, p := rt.w.qname(), qs(s.o.Pristine)+"."+rt.p.qname()
 		// UNION ALL: the temporary table gets the key columns' types and
@@ -711,20 +772,22 @@ func (s *SQLServer) findChanged(ctx context.Context, c *sql.Conn, plan *ssRestor
 		if _, err := c.ExecContext(ctx, fmt.Sprintf("SELECT TOP (0) %s INTO %s FROM %s UNION ALL SELECT TOP (0) %s FROM %s", list, k, p, list, p)); err != nil {
 			return err
 		}
-		differ := fmt.Sprintf("INSERT INTO %s SELECT %s FROM (SELECT %s, %s AS dg_r FROM %s) w JOIN (SELECT %s, %s AS dg_r FROM %s) p ON %s WHERE w.dg_r <> p.dg_r OR DATALENGTH(w.dg_r) <> DATALENGTH(p.dg_r)",
-			k, strings.Join(wkeys, ", "), list, row, w, list, row, p, ssKeyJoin(rt.p.Key, "w", "p"))
-		_, err = c.ExecContext(ctx, differ+ssParallel)
-		if sqlServerNumber(err) == 10715 { // not a valid hint (older servers)
-			_, err = c.ExecContext(ctx, differ)
-		}
-		if err != nil {
-			return err
+		cols := strings.Join(append(keys, parts...), ", ")
+		on := ssKeyJoin(rt.p.Key, "w", "p")
+		changed := fmt.Sprintf("INSERT INTO %s SELECT %s FROM (SELECT %s FROM %s) w LEFT JOIN (SELECT %s FROM %s) p ON %s WHERE %s",
+			k, strings.Join(wkeys, ", "), cols, w, cols, p, on, strings.Join(append([]string{"p." + keys[0] + " IS NULL"}, differ...), " OR "))
+		gone := fmt.Sprintf("INSERT INTO %s SELECT %s FROM %s p WHERE NOT EXISTS (SELECT 1 FROM %s w WHERE %s)", k, strings.Join(pkeys, ", "), p, w, on)
+		for _, q := range []string{changed, gone} {
+			_, err := c.ExecContext(ctx, q+ssParallel)
+			if sqlServerNumber(err) == 10715 { // not a valid hint (older servers)
+				_, err = c.ExecContext(ctx, q)
+			}
+			if err != nil {
+				return err
+			}
 		}
 		var count int64
-		err = c.QueryRowContext(ctx, fmt.Sprintf(`INSERT INTO %[1]s SELECT %[2]s FROM %[3]s w WHERE NOT EXISTS (SELECT 1 FROM %[4]s p WHERE %[5]s);
-INSERT INTO %[1]s SELECT %[6]s FROM %[4]s p WHERE NOT EXISTS (SELECT 1 FROM %[3]s w WHERE %[5]s);
-SELECT COUNT_BIG(*) FROM %[1]s`, k, strings.Join(wkeys, ", "), w, p, ssKeyJoin(rt.p.Key, "w", "p"), strings.Join(pkeys, ", "))).Scan(&count)
-		if err != nil {
+		if err := c.QueryRowContext(ctx, "SELECT COUNT_BIG(*) FROM "+k).Scan(&count); err != nil {
 			return err
 		}
 		if count*4 <= rt.p.Rows {

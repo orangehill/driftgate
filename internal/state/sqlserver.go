@@ -56,6 +56,9 @@ type SQLServer struct {
 	// (sqlserver_fingerprint.go, rowversionMoved).
 	rvMax      map[string][]byte
 	rvPristine map[string]string
+	// The pristine copy's catalog, read once per copy: it is read-only,
+	// and a new copy has a new mark (sqlserver_restore.go).
+	pcat *ssPristineCatalog
 }
 
 // NewSQLServer connects to the server. o.DSN is a sqlserver:// URL of the
