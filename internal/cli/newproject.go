@@ -271,6 +271,20 @@ func describe(d appconf.Database) string {
 // dsnEnv is the variable state: names when a setting cannot be referenced.
 const dsnEnv = "DG_DB_DSN"
 
+// mysqlSeed is the example of seed: in the commented configuration.
+const mysqlSeed = `#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql app"]`
+
+// sqliteSeed is the example of seed: for an SQLite database whose working
+// file is working: a dump read into the file in place, which the
+// application keeps open (a copy over it would leave the application on
+// the old file).
+func sqliteSeed(working string) string {
+	if working == "" {
+		working = "database.sqlite"
+	}
+	return fmt.Sprintf(`#   - ["sqlite3", %q, ".read dump.sql"]`, working)
+}
+
 // stateBlock is state: for driftgate.yaml with the database d: a reference
 // to the setting, never its value. A setting that cannot be referenced
 // (only in this shell's environment) takes the DSN from dsnEnv. The block
@@ -332,7 +346,9 @@ func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 		b.WriteString("# found in the project's settings: driftgate setup turns it on (it asks before it creates the pristine copy), or uncomment it\n")
 	}
 	for _, l := range lines {
-		if off && !strings.HasPrefix(strings.TrimSpace(l), "#") {
+		// SQLite's comments inside the block are commented with it, so they
+		// stay in line.
+		if off && (!strings.HasPrefix(strings.TrimSpace(l), "#") || d.Driver == appconf.SQLite) {
 			l = "# " + l
 		}
 		b.WriteString(l + "\n")
@@ -390,6 +406,9 @@ func (dr *draft) configText() string {
 			}
 		}
 		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.excludeTables()...) + "\n" + text[end:]
+		if dr.db.Driver == appconf.SQLite {
+			text = strings.Replace(text, mysqlSeed, sqliteSeed(workingOf(*dr.db)), 1)
+		}
 	}
 	if d.block != "" {
 		text += "\n# Found: " + strings.Join(d.kinds, ", ") + "\n" + d.block

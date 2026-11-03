@@ -52,7 +52,8 @@ func TestSetupSQLite(t *testing.T) {
 }
 
 // TestInitSQLite: init writes the SQLite state: commented out, with the
-// framework's own tables proposed for exclude:.
+// framework's own tables proposed for exclude:, the block commented in line
+// and an SQLite example of seed:.
 func TestInitSQLite(t *testing.T) {
 	root := setupDir(t, map[string]string{"artisan": "", ".env": laravelSQLiteEnv("http://shop.test")})
 	code, out, errOut := runCLI(t, "init")
@@ -60,10 +61,14 @@ func TestInitSQLite(t *testing.T) {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
-	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]", "    # pristine: a file of DriftGate's store"} {
+	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]", "\n#     # pristine: a file of DriftGate's store",
+		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("configuration without %q:\n%s", want, raw)
 		}
+	}
+	if strings.Contains(raw, "mysql") {
+		t.Errorf("a MySQL example for an SQLite database:\n%s", raw)
 	}
 }
 
