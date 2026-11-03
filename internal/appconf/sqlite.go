@@ -781,59 +781,17 @@ func (f *finder) composeMount(file string) string {
 // SQLiteExclude proposes the tables of an SQLite database to exclude from
 // state: (never fingerprinted or restored): those the framework of the
 // setting d keeps its own state in, in the same file, as its settings
-// say. Laravel: sessions, cache and cache_locks, jobs, job_batches and
-// failed_jobs, each only when its .env driver is database
-// (SESSION_DRIVER, CACHE_STORE, QUEUE_CONNECTION) on the same connection.
-// Django: django_session with database sessions. why says what the
-// proposal comes from; nil for none.
+// say. Laravel (laravelExclude): sessions, cache and cache_locks, jobs,
+// job_batches, failed_jobs, and Telescope's and Pulse's tables. Django:
+// django_session with database sessions. why says what the proposal comes
+// from; nil for none.
 func SQLiteExclude(root string, d Database, env Lookup) (tables []string, why string) {
 	if d.Driver != SQLite {
 		return nil, ""
 	}
 	switch d.Ref.Source {
 	case Dotenv:
-		if _, err := localPath(root, "artisan"); err != nil {
-			return nil, ""
-		}
-		raw, err := readFile(root, d.Ref.File)
-		if err != nil {
-			return nil, ""
-		}
-		vals, err := parseDotenv(raw, env)
-		if err != nil {
-			return nil, ""
-		}
-		table := func(key, def string) string {
-			if t := vals[key]; t != "" && printableName(t) == t {
-				return t
-			}
-			return def
-		}
-		var drivers []string
-		uses := func(driverKey, connKey string) bool {
-			if vals[driverKey] != "database" || vals[connKey] != "" && vals[connKey] != vals[dbConnection] {
-				return false
-			}
-			drivers = append(drivers, driverKey+"=database")
-			return true
-		}
-		if uses("SESSION_DRIVER", "SESSION_CONNECTION") {
-			tables = append(tables, table("SESSION_TABLE", "sessions"))
-		}
-		cacheKey := "CACHE_STORE"
-		if _, ok := vals[cacheKey]; !ok {
-			cacheKey = "CACHE_DRIVER" // Laravel 10 and before
-		}
-		if uses(cacheKey, "DB_CACHE_CONNECTION") {
-			tables = append(tables, table("DB_CACHE_TABLE", "cache"), table("DB_CACHE_LOCK_TABLE", "cache_locks"))
-		}
-		if uses("QUEUE_CONNECTION", "DB_QUEUE_CONNECTION") {
-			tables = append(tables, table("DB_QUEUE_TABLE", "jobs"), "job_batches", "failed_jobs")
-		}
-		if len(tables) == 0 {
-			return nil, ""
-		}
-		return tables, strings.Join(drivers, ", ") + " in " + d.Ref.File
+		return laravelExclude(root, d, env)
 	case Python:
 		raw, err := readFile(root, d.Ref.File)
 		if err != nil {
@@ -851,4 +809,119 @@ func SQLiteExclude(root string, d Database, env Lookup) (tables []string, why st
 		return []string{"django_session"}, "Django keeps its sessions in the database (" + d.Ref.File + ")"
 	}
 	return nil, ""
+}
+
+// laravelExclude is SQLiteExclude of a Laravel .env setting of the default
+// connection. A store is proposed when its driver is database on that
+// connection: the .env's SESSION_DRIVER, CACHE_STORE (CACHE_DRIVER before
+// Laravel 11) and QUEUE_CONNECTION, else the default of config/session.php,
+// cache.php and queue.php (env('X', 'database')), else, without that file
+// (Laravel 11 and later publish none), the framework's: database.
+// job_batches and failed_jobs are on the default connection whatever the
+// queue (failed_jobs unless QUEUE_FAILED_DRIVER is null, file or
+// dynamodb); Telescope's and Pulse's tables when composer.json requires
+// them.
+func laravelExclude(root string, d Database, env Lookup) ([]string, string) {
+	if _, err := localPath(root, "artisan"); err != nil {
+		return nil, ""
+	}
+	if d.Ref.Key != "" && !slices.Contains(laravelURLs, d.Ref.Key) {
+		return nil, "" // not the default connection
+	}
+	raw, err := readFile(root, d.Ref.File)
+	if err != nil {
+		return nil, ""
+	}
+	vals, err := parseDotenv(raw, env)
+	if err != nil {
+		return nil, ""
+	}
+	table := func(key, def string) string {
+		if t := vals[key]; t != "" && printableName(t) == t {
+			return t
+		}
+		return def
+	}
+	var tables, why []string
+	// uses reports a store whose driver is database on the default
+	// connection, and says where that comes from.
+	uses := func(config, connKey string, keys ...string) bool {
+		if c := vals[connKey]; c != "" && c != vals[dbConnection] {
+			return false
+		}
+		for _, k := range keys {
+			if v, ok := vals[k]; ok {
+				if v != "database" {
+					return false
+				}
+				why = append(why, k+"=database in "+d.Ref.File)
+				return true
+			}
+		}
+		file := "config/" + config + ".php"
+		src, err := readFile(root, file)
+		if err != nil {
+			why = append(why, keys[0]+" unset: Laravel's default database")
+			return true
+		}
+		for _, k := range keys {
+			if def, ok := phpEnvDefault(string(src), k); ok {
+				if def != "database" {
+					return false
+				}
+				why = append(why, keys[0]+" unset: database by "+file)
+				return true
+			}
+		}
+		return false
+	}
+	if uses("session", "SESSION_CONNECTION", "SESSION_DRIVER") {
+		tables = append(tables, table("SESSION_TABLE", "sessions"))
+	}
+	if uses("cache", "DB_CACHE_CONNECTION", "CACHE_STORE", "CACHE_DRIVER") {
+		tables = append(tables, table("DB_CACHE_TABLE", "cache"), table("DB_CACHE_LOCK_TABLE", "cache_locks"))
+	}
+	if uses("queue", "DB_QUEUE_CONNECTION", "QUEUE_CONNECTION") {
+		tables = append(tables, table("DB_QUEUE_TABLE", "jobs"))
+	}
+	tables = append(tables, "job_batches")
+	switch vals["QUEUE_FAILED_DRIVER"] {
+	case "null", "file", "dynamodb":
+	default:
+		tables = append(tables, "failed_jobs")
+	}
+	why = append(why, "job_batches and failed_jobs are on the default connection")
+	if composer, err := readFile(root, "composer.json"); err == nil {
+		if strings.Contains(string(composer), `"laravel/telescope"`) {
+			tables = append(tables, "telescope_entries", "telescope_entries_tags", "telescope_monitoring")
+			why = append(why, "Telescope")
+		}
+		if strings.Contains(string(composer), `"laravel/pulse"`) {
+			tables = append(tables, "pulse_values", "pulse_entries", "pulse_aggregates")
+			why = append(why, "Pulse")
+		}
+	}
+	return tables, strings.Join(why, ", ")
+}
+
+// phpEnvDefault reads the default of env('KEY', 'default') in a PHP
+// configuration file.
+func phpEnvDefault(src, key string) (string, bool) {
+	for _, q := range []string{"'", `"`} {
+		i := strings.Index(src, "env("+q+key+q)
+		if i < 0 {
+			continue
+		}
+		rest := strings.TrimLeft(src[i+len("env("+q+key+q):], " \t\r\n")
+		rest, ok := strings.CutPrefix(rest, ",")
+		if !ok {
+			return "", false
+		}
+		v, after, ok := rubyString(rest) // a quoted PHP string reads the same
+		if !ok || !strings.HasPrefix(strings.TrimSpace(after), ")") {
+			return "", false
+		}
+		return v, true
+	}
+	return "", false
 }

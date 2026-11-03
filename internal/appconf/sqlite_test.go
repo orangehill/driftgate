@@ -372,24 +372,41 @@ func TestSQLiteFind(t *testing.T) {
 }
 
 // TestSQLiteExclude: the tables the framework keeps its own state in, in
-// the same file, proposed for exclude: Laravel's only for a store whose
-// .env driver is database on the same connection; Django's sessions.
+// the same file, proposed for exclude: Laravel's for a store whose driver
+// is database on the default connection, by .env, config/*.php or the
+// framework's default; job_batches and failed_jobs always (unless failed
+// jobs go elsewhere); Telescope's; Django's sessions.
 func TestSQLiteExclude(t *testing.T) {
+	all := []string{"sessions", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs"}
+	l10 := map[string]string{
+		"config/session.php": "<?php return ['driver' => env('SESSION_DRIVER', 'file')];",
+		"config/cache.php":   "<?php return ['default' => env(\"CACHE_DRIVER\", \"file\")];",
+		"config/queue.php":   "<?php return ['default' => env('QUEUE_CONNECTION', 'database')];",
+	}
 	for _, c := range []struct {
-		env  string
-		want []string
+		env    string
+		config map[string]string
+		want   []string
+		why    string
 	}{
-		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n",
-			[]string{"sessions", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs"}},
-		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_DRIVER=database\nDB_CACHE_TABLE=app_cache\nQUEUE_CONNECTION=redis\n", []string{"app_cache", "cache_locks"}},
-		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nSESSION_CONNECTION=other\n", nil},
-		{"DB_CONNECTION=sqlite\n", nil},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n", nil, all, "SESSION_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\n", nil, all, "SESSION_DRIVER unset: Laravel's default database"}, // Laravel 11: no config/*.php
+		{"DB_CONNECTION=sqlite\n", l10, []string{"jobs", "job_batches", "failed_jobs"}, "QUEUE_CONNECTION unset: database by config/queue.php"},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_DRIVER=database\nDB_CACHE_TABLE=app_cache\nQUEUE_CONNECTION=redis\nQUEUE_FAILED_DRIVER=null\n", nil,
+			[]string{"app_cache", "cache_locks", "job_batches"}, "CACHE_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\nSESSION_CONNECTION=other\nDB_CACHE_CONNECTION=other\nDB_QUEUE_CONNECTION=other\n", nil, []string{"job_batches", "failed_jobs"}, "on the default connection"},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n", map[string]string{"composer.json": `{"require": {"laravel/telescope": "^5.0"}}`},
+			[]string{"job_batches", "failed_jobs", "telescope_entries", "telescope_entries_tags", "telescope_monitoring"}, "Telescope"},
 	} {
-		root := sqliteProject(t, map[string]string{"artisan": "", ".env": c.env})
+		files := map[string]string{"artisan": "", ".env": c.env}
+		for k, v := range c.config {
+			files[k] = v
+		}
+		root := sqliteProject(t, files)
 		d := Find(root, nil).Databases[0]
 		got, why := SQLiteExclude(root, d, nil)
-		if !reflect.DeepEqual(got, c.want) || (len(got) > 0) != strings.Contains(why, "=database in .env") {
-			t.Errorf("%q: %q (%s), want %q", c.env, got, why, c.want)
+		if !reflect.DeepEqual(got, c.want) || !strings.Contains(why, c.why) {
+			t.Errorf("%q: %q (%s), want %q (%s)", c.env, got, why, c.want, c.why)
 		}
 	}
 	settings := "INSTALLED_APPS = ['django.contrib.sessions']\nDATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': 'db.sqlite3'}}\n"
