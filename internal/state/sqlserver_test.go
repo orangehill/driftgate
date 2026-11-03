@@ -254,6 +254,14 @@ func TestCheckSQLServerQuery(t *testing.T) {
 		"SELECT * FROM otherdb.dbo.t",
 		"SELECT * FROM otherdb..t",
 		"SELECT * FROM srv.db.dbo.t",
+		"SELECT sql FROM sys.syscacheobjects",
+		"SELECT * FROM sysprocesses",
+		"SELECT * FROM sys.[SysLockInfo]",
+		"SELECT * FROM sys.sysperfinfo",
+		"SELECT * FROM sys.sysopentapes",
+		"SELECT * FROM sys.sysoledbusers",
+		"SELECT * FROM sys.remote_logins",
+		"SELECT * FROM sysremotelogins",
 	} {
 		if err := checkSQLServerQuery(q); err == nil {
 			t.Errorf("%q accepted", q)

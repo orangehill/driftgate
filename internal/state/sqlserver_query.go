@@ -36,15 +36,19 @@ var sqlServerDenied = map[string]bool{
 
 // sqlServerSystem are system functions and views a query may not name,
 // bare or quoted: they read server files and other servers, and logins'
-// passwords; sqlServerSystemPrefixes start the names of system procedures
-// and of the functions and views that read files, the log, traces or
-// other sessions.
+// passwords, and the old compatibility views that show what the dm_ views
+// do (with VIEW SERVER STATE or VIEW SERVER PERFORMANCE STATE: every
+// session, its SQL text in the plan cache, its locks); sqlServerSystemPrefixes
+// start the names of system procedures and of the functions and views that
+// read files, the log, traces or other sessions.
 var (
 	sqlServerSystem = map[string]bool{
 		"openrowset": true, "opendatasource": true, "openquery": true, "openxml": true, "pwdencrypt": true, "pwdcompare": true,
 		"loginproperty": true, "login_token": true, "user_token": true,
 		"sql_logins": true, "syslogins": true, "sysxlogins": true, "linked_logins": true, "credentials": true,
 		"database_scoped_credentials": true, "master_key_passwords": true, "server_principal_credentials": true,
+		"sysoledbusers": true, "remote_logins": true, "sysremotelogins": true,
+		"syscacheobjects": true, "sysprocesses": true, "syslockinfo": true, "sysperfinfo": true, "sysopentapes": true,
 	}
 	sqlServerSystemPrefixes = []string{"sp_", "xp_", "fn_", "dm_"}
 )
