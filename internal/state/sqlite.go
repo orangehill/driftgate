@@ -26,8 +26,10 @@ import (
 // Two rules keep the locks of the application's connections intact: every
 // connection opens the file through an escaped file: URI (a plain name loses
 // its query, so mode=ro would open the file writable), and the process never
-// opens and closes the working or pristine file itself while a connection to
-// it is open (closing a file drops every POSIX lock the process holds on it).
+// opens and closes the working or pristine file itself (closing a file drops
+// every POSIX lock the process holds on it, also those of another
+// component's connections): files are only looked at with os.Stat, and
+// SQLite itself tells whether one is a database.
 type SQLite struct {
 	o  Options
 	id os.FileInfo // the working file the connections were opened on
@@ -41,6 +43,7 @@ type SQLite struct {
 	// not move main's data_version.
 	last   Fingerprint
 	dv, sv int64
+	stamp  sqliteStamp
 	own    bool
 	reused bool
 	// scanned lists the tables the last fingerprint read row by row (the
@@ -58,9 +61,6 @@ type SQLite struct {
 // sqliteConns is how many connections besides main share a full
 // fingerprint's reading of the tables.
 var sqliteConns = 4
-
-// sqliteHeader starts every SQLite database file.
-const sqliteHeader = "SQLite format 3\x00"
 
 // sqlitePristine is the schema name the pristine file is attached as for a
 // restore.
@@ -132,30 +132,57 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
-// sqliteFile checks that path is an SQLite database file and returns its
-// identity. It opens the file, so it is called only while no connection of
-// the process has the file open.
+// sqliteFile checks, without opening it, that path is a file that can be
+// a database (not a folder, not empty) and returns its identity; whether it
+// is an SQLite database is up to SQLite (sqliteCheck).
 func sqliteFile(path string) (os.FileInfo, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
+	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
 	if fi.IsDir() {
 		return nil, errors.New("is a folder")
 	}
-	head := make([]byte, len(sqliteHeader))
-	if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, []byte(sqliteHeader)) {
-		if fi.Size() == 0 {
-			return nil, errors.New("is empty (run the application's migrations first)")
-		}
-		return nil, errors.New("is not an SQLite database")
+	if fi.Size() == 0 {
+		return nil, errors.New("is empty (run the application's migrations first)")
 	}
 	return fi, nil
+}
+
+// sqliteCheck reads the schema of the file a connection is open on, which
+// fails for a file that is no SQLite database.
+func sqliteCheck(ctx context.Context, q queryer) error {
+	var n int64
+	err := q.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema").Scan(&n)
+	if se := (*sqlite.Error)(nil); errors.As(err, &se) && se.Code()&0xff == sqliteNotADB {
+		return errNotSQLite
+	}
+	return err
+}
+
+var errNotSQLite = errors.New("is not an SQLite database")
+
+// sqliteNotADB is SQLITE_NOTADB.
+const sqliteNotADB = 26
+
+// sqliteStamp is what the file system says about the working file and its
+// -wal file: a change SQLite was not told about (a copy written over the
+// file) shows there, not in data_version.
+type sqliteStamp struct {
+	size, walSize   int64
+	mtime, walMtime int64
+	wal             bool
+}
+
+func (s *SQLite) stampNow() sqliteStamp {
+	var st sqliteStamp
+	if fi, err := os.Stat(s.o.Working); err == nil {
+		st.size, st.mtime = fi.Size(), fi.ModTime().UnixNano()
+	}
+	if fi, err := os.Stat(s.o.Working + "-wal"); err == nil {
+		st.wal, st.walSize, st.walMtime = true, fi.Size(), fi.ModTime().UnixNano()
+	}
+	return st
 }
 
 // sqliteURI writes an absolute path as a file: URI with the given query
@@ -223,7 +250,13 @@ func (s *SQLite) open() error {
 	db.SetMaxOpenConns(2 + sqliteConns)
 	db.SetMaxIdleConns(2 + sqliteConns)
 	c, err := db.Conn(context.Background())
+	if err == nil {
+		err = sqliteCheck(context.Background(), c)
+	}
 	if err != nil {
+		if c != nil {
+			c.Close()
+		}
 		db.Close()
 		return fmt.Errorf("state %s: working database file %s: %v", s.o.Name, s.o.Working, err)
 	}
@@ -245,8 +278,14 @@ func (s *SQLite) current() error {
 	if os.SameFile(fi, s.id) {
 		return nil
 	}
-	s.forget()
 	s.sums = nil
+	return s.reopen()
+}
+
+// reopen opens the connections again: nothing they cached of the file is
+// kept, nor the fingerprint the next one could be reused from.
+func (s *SQLite) reopen() error {
+	s.forget()
 	s.main.Close()
 	s.db.Close()
 	return s.open()
@@ -279,6 +318,17 @@ func ql(text string) string { return `'` + strings.ReplaceAll(text, `'`, `''`) +
 // pristine copy.
 func sqliteInternal(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), "sqlite_") || name == pristineTable
+}
+
+// asciiLower folds a name as SQLite compares names: A–Z only.
+func asciiLower(name string) string {
+	b := []byte(name)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // sqliteTable is a table of the schema: its CREATE statement, the CREATE
@@ -323,8 +373,8 @@ func (o Options) excludedTable(name string, owner string) bool {
 
 // objects reads the schema of a database file (schema: main or the
 // attached pristine file). Tables of SQLite and DriftGate, temporary
-// objects and excluded ones are left out; excluded ordinary tables are
-// listed apart.
+// objects and excluded tables and views are left out; excluded tables are
+// listed apart. Indexes and triggers name their table as the table does.
 func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqliteObjects, error) {
 	o := &sqliteObjects{tables: map[string]*sqliteTable{}, views: map[string]string{}, triggers: map[string]sqliteTrigger{}, seq: map[string]any{}}
 	kinds := map[string]string{}
@@ -383,7 +433,21 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 		}
 		return best
 	}
-	excludedTable := map[string]bool{}
+	// SQLite names are ASCII-case-insensitive, and an index or trigger
+	// keeps the table name as its statement wrote it (ON USERS for users):
+	// it is looked up by the table's own name.
+	canon := map[string]string{}
+	for _, e := range all {
+		if e.kind == "table" || e.kind == "view" {
+			canon[asciiLower(e.name)] = e.name
+		}
+	}
+	table := func(name string) string {
+		if c, ok := canon[asciiLower(name)]; ok {
+			return c
+		}
+		return name
+	}
 	for _, e := range all {
 		if e.kind != "table" {
 			continue
@@ -397,7 +461,6 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			own = owner(e.name)
 		}
 		if s.o.excludedTable(e.name, own) {
-			excludedTable[e.name] = true
 			if !shadow { // a virtual table's delete empties its shadow tables
 				o.excluded = append(o.excluded, e.name)
 			}
@@ -409,7 +472,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 	for _, e := range all {
 		switch e.kind {
 		case "index":
-			if t := o.tables[e.table]; t != nil && e.sql != "" {
+			if t := o.tables[table(e.table)]; t != nil && e.sql != "" {
 				t.indexes = append(t.indexes, e.sql)
 			}
 		case "view":
@@ -418,10 +481,10 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 				o.vorder = append(o.vorder, e.name)
 			}
 		case "trigger":
-			if !excludedTable[e.table] && !s.o.excluded(e.table) {
-				o.triggers[e.name] = sqliteTrigger{table: e.table, sql: e.sql}
-				o.torder = append(o.torder, e.name)
-			}
+			// Every trigger is an item, an excluded table's too: its body
+			// may write any table.
+			o.triggers[e.name] = sqliteTrigger{table: table(e.table), sql: e.sql}
+			o.torder = append(o.torder, e.name)
 		}
 	}
 	for _, t := range o.tables {
@@ -439,7 +502,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 				rows.Close()
 				return nil, err
 			}
-			o.seq[name] = seq
+			o.seq[table(name)] = seq
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -532,8 +595,7 @@ func sqliteAuthorize(action sqlite.AuthorizerActionCode, arg1, arg2, _, _ string
 // Query runs a read-only query (see CheckQuery and sqliteCheckQuery) on the
 // pristine file, opened read-only, in defensive mode and with an
 // authorizer that lets only reads compile. Values come back as SQLite holds
-// them: a DATETIME column's text is not parsed into a time (the query is
-// wrapped so its columns carry no declared type).
+// them: a DATETIME column's text is not parsed into a time.
 func (s *SQLite) Query(ctx context.Context, query string) ([]string, error) {
 	if err := sqliteCheckQuery(query); err != nil {
 		return nil, err
@@ -565,16 +627,23 @@ func (s *SQLite) Query(ctx context.Context, query string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	cols, err := rows.Columns()
-	rows.Close()
+	types, err := rows.ColumnTypes()
 	if err != nil {
+		rows.Close()
 		return nil, err
 	}
-	if len(cols) == 0 {
-		return nil, fmt.Errorf("sql: the query returns no columns")
+	if len(types) == 0 || !sqliteTimeTypes[types[0].DatabaseTypeName()] {
+		defer rows.Close()
+		return firstColumn(rows)
 	}
-	names := make([]string, len(cols))
-	for i := range cols {
+	// The driver reads the text of a column declared DATE, DATETIME or
+	// TIMESTAMP as a time, and no longer as the text it is: the first
+	// column is read through a CTE, whose +column has no declared type.
+	// (SQLite keeps the order of a CTE used once; a query whose first
+	// column is no such column does not depend on it.)
+	rows.Close()
+	names := make([]string, len(types))
+	for i := range types {
 		names[i] = fmt.Sprintf("dg_%d", i+1)
 	}
 	rows, err = c.QueryContext(ctx, "WITH dg_query("+strings.Join(names, ", ")+") AS ("+q+") SELECT +dg_1 FROM dg_query")
@@ -584,3 +653,7 @@ func (s *SQLite) Query(ctx context.Context, query string) ([]string, error) {
 	defer rows.Close()
 	return firstColumn(rows)
 }
+
+// sqliteTimeTypes are the declared types whose text the driver reads as a
+// time.
+var sqliteTimeTypes = map[string]bool{"DATE": true, "DATETIME": true, "TIMESTAMP": true}

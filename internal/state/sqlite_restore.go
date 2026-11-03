@@ -159,16 +159,18 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 	// Triggers: of every table or view written or replaced, and the ones
 	// named. They are dropped first, so none fires, and the pristine
 	// file's are created at the end.
-	trigTables := set(tables)
-	for _, t := range fill {
-		trigTables[t] = true
+	// Keyed by the folded name: a trigger may name its table in another
+	// case, and a table renamed only in case is two items.
+	trigTables := map[string]bool{}
+	for _, t := range append(append([]string{}, tables...), fill...) {
+		trigTables[asciiLower(t)] = true
 	}
 	for v := range dropViews {
-		trigTables[v] = true
+		trigTables[asciiLower(v)] = true
 	}
 	named := set(triggerItems)
 	for _, name := range work.torder {
-		if tr := work.triggers[name]; trigTables[tr.table] || named[name] {
+		if tr := work.triggers[name]; trigTables[asciiLower(tr.table)] || named[name] {
 			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS main."+qs(name)); err != nil {
 				return fmt.Errorf("trigger %s: %w", name, err)
 			}
@@ -240,7 +242,7 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 	}
 	for _, name := range pris.torder {
 		tr := pris.triggers[name]
-		if !trigTables[tr.table] && !named[name] {
+		if !trigTables[asciiLower(tr.table)] && !named[name] {
 			continue
 		}
 		exists, err := sqliteExists(ctx, c, tr.table)
@@ -313,17 +315,18 @@ func copySQL(t *sqliteTable, cols *sqliteColumns) string {
 	return q
 }
 
-// sqliteExists reports whether main has a table or view of that name.
+// sqliteExists reports whether main has a table or view of that name (in
+// any case, as SQLite looks names up).
 func sqliteExists(ctx context.Context, c *sql.Conn, name string) (bool, error) {
 	var n int
-	err := c.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name = ?", name).Scan(&n)
+	err := c.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name = ? COLLATE NOCASE", name).Scan(&n)
 	return n > 0, err
 }
 
 // tableErr names the table of a failed statement, and the missing module
 // of a virtual table.
 func tableErr(name string, t *sqliteTable, err error) error {
-	if t != nil && t.virtual && strings.Contains(err.Error(), "no such module") {
+	if (t == nil || t.virtual) && strings.Contains(err.Error(), "no such module") {
 		return fmt.Errorf("virtual table %s: %w (DriftGate's SQLite does not have this module; add the table to exclude)", name, err)
 	}
 	return fmt.Errorf("table %s: %w", name, err)

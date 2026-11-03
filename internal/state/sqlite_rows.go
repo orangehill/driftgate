@@ -70,8 +70,10 @@ func (s *SQLite) Rows(ctx context.Context, items []string) (Rows, error) {
 
 // sqliteReadRows reads every row of a query into key → column → value
 // hash. A value is hashed with its storage class (appendValue); in the key
-// it is written as text: a number in decimal, a text as it is, a blob in
-// hex (x'…'), NULL as \x00NULL.
+// it is written as an SQL literal, so no two keys read alike: an integer in
+// decimal, a real with a point or an exponent, a text quoted ('…'), a blob
+// in hex (x'…'), NULL. Two rows with the same key (a primary key SQLite
+// lets be NULL) are an error: one would hide the other.
 func sqliteReadRows(ctx context.Context, c queryer, query string, cols, pk []string) (map[string]map[string]string, error) {
 	rows, err := c.QueryContext(ctx, query)
 	if err != nil {
@@ -98,7 +100,11 @@ func sqliteReadRows(ctx context.Context, c queryer, query string, cols, pk []str
 		for _, k := range pk {
 			key = append(key, k+"="+keyText(byName[k]))
 		}
-		out[strings.Join(key, ",")] = row
+		k := strings.Join(key, ",")
+		if _, dup := out[k]; dup {
+			return nil, fmt.Errorf("two rows have the same primary key (%s)", k)
+		}
+		out[k] = row
 	}
 	return out, rows.Err()
 }
@@ -106,13 +112,17 @@ func sqliteReadRows(ctx context.Context, c queryer, query string, cols, pk []str
 func keyText(v any) string {
 	switch x := v.(type) {
 	case nil:
-		return "\x00NULL"
+		return "NULL"
 	case int64:
 		return strconv.FormatInt(x, 10)
 	case float64:
-		return strconv.FormatFloat(x, 'g', -1, 64)
+		f := strconv.FormatFloat(x, 'g', -1, 64)
+		if !strings.ContainsAny(f, ".eIN") { // 1 → 1.0; Inf and NaN stay
+			f += ".0"
+		}
+		return f
 	case string:
-		return x
+		return ql(x)
 	case []byte:
 		return "x'" + hex.EncodeToString(x) + "'"
 	}

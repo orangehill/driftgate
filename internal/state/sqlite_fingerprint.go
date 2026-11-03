@@ -26,8 +26,9 @@ import (
 //  1. Reused: when no other connection committed since the last full
 //     fingerprint (PRAGMA data_version of the connection kept open, which
 //     SQLite moves for commits of any process, in WAL and rollback mode),
-//     the schema version is the same, the file is the same and DriftGate
-//     did not restore since, the last fingerprint is returned as it was.
+//     the schema version is the same, the file is the same, its size and
+//     time (and its -wal file's) are too, and DriftGate did not restore
+//     since, the last fingerprint is returned as it was.
 //  2. Page digest: a table whose pages (every page of its b-tree, read
 //     through dbstat and sqlite_dbpage) hash to what they hashed to when its
 //     rows were last read, with the same CREATE statement, has the same
@@ -44,7 +45,8 @@ import (
 // CREATE statement only, its rows being in its shadow tables), view:<name>,
 // trigger:<name>, pragma:user_version and pragma:application_id. SQLite's
 // own tables (sqlite_sequence, sqlite_stat*), temporary objects, excluded
-// tables (and their triggers) and the mark of a pristine copy are no items.
+// tables and the mark of a pristine copy are no items; the triggers of an
+// excluded table are (their body may write any table).
 
 // sqliteSum is the row hash of a table, with the CREATE statement it was
 // read under and the digest of the pages it was read from.
@@ -86,8 +88,19 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (Fingerprint, 
 		release()
 		return nil, err
 	}
+	stamp := s.stampNow()
 	if s.last != nil && !s.own && dv == s.dv && sv == s.sv {
 		release()
+		if stamp != s.stamp {
+			// The file changed without a commit SQLite saw (a copy
+			// written over it): the connections may hold its old pages.
+			// Opened again, they read it anew; the row hashes stay, as
+			// a page digest is of the bytes now read.
+			if err := s.reopen(); err != nil {
+				return nil, err
+			}
+			return s.Fingerprint(ctx, items)
+		}
 		s.reused = true
 		f := maps.Clone(s.last)
 		if items != nil {
@@ -114,7 +127,7 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (Fingerprint, 
 		return nil, err
 	}
 	if items == nil {
-		s.last, s.dv, s.sv, s.own = maps.Clone(f), dv, sv, false
+		s.last, s.dv, s.sv, s.stamp, s.own = maps.Clone(f), dv, sv, stamp, false
 	}
 	return f, nil
 }

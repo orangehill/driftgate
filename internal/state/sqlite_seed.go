@@ -11,9 +11,8 @@ import (
 )
 
 // Seed copies the working file into a new pristine file. VACUUM INTO
-// writes the copy (one moment of the working file, read while a write
-// transaction of DriftGate's keeps the application's writes waiting) into
-// a new file next to the pristine one; there it gets the mark
+// writes the copy (one moment of the working file, read once a write the
+// application had under way has ended) into a new file next to the pristine one; there it gets the mark
 // (pristineTable), the excluded tables lose their rows (their triggers do
 // not fire) and the journal mode becomes DELETE. Only then is the file
 // renamed over the old pristine file, so a seed that stops before leaves
@@ -31,29 +30,22 @@ func (s *SQLite) Seed(ctx context.Context) error {
 		return err
 	}
 	tmp := s.o.Pristine + sqliteNew
-	for _, f := range []string{tmp, tmp + "-journal", tmp + "-wal", tmp + "-shm"} {
-		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err // left by a seed that stopped
-		}
+	if err := removeNew(tmp); err != nil {
+		return err // left by a seed that stopped
 	}
-	if err := s.vacuumInto(ctx, tmp); err != nil {
-		os.Remove(tmp)
+	err := s.vacuumInto(ctx, tmp)
+	if err == nil {
+		err = s.prepare(ctx, tmp)
+	}
+	if err == nil {
+		err = syncFile(tmp)
+	}
+	if err == nil && s.o.Replacing != nil {
+		err = s.o.Replacing()
+	}
+	if err != nil {
+		removeNew(tmp)
 		return err
-	}
-	if err := s.prepare(ctx, tmp); err != nil {
-		os.Remove(tmp)
-		os.Remove(tmp + "-journal")
-		return err
-	}
-	if err := syncFile(tmp); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if s.o.Replacing != nil {
-		if err := s.o.Replacing(); err != nil {
-			os.Remove(tmp)
-			return err
-		}
 	}
 	chaos.Point("state.sqlite.seed")
 	// What SQLite left next to the old pristine file would be read as the
@@ -71,33 +63,40 @@ func (s *SQLite) Seed(ctx context.Context) error {
 	return nil
 }
 
-// vacuumInto writes the working file's content into a new file. A write
-// transaction on another connection is held meanwhile: it waits for the
-// application's write under way, and keeps the next one waiting until the
-// copy is made.
+// vacuumInto writes the working file's content into a new file. A
+// BEGIN IMMEDIATE first waits for a write the application has under way;
+// the copy then reads a moment of its own without holding the write lock,
+// so the application's writers are not kept waiting while it is made.
 func (s *SQLite) vacuumInto(ctx context.Context, path string) error {
-	lock, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if _, err := lock.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	defer lock.ExecContext(context.Background(), "ROLLBACK")
 	c, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	if _, err := c.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return err
+	}
 	if _, err := c.ExecContext(ctx, "VACUUM main INTO ?", path); err != nil {
 		return fmt.Errorf("state %s: copy of %s: %w", s.o.Name, s.o.Working, err)
 	}
 	return nil
 }
 
+// removeNew removes the new file of a seed and what SQLite kept next to it.
+func removeNew(path string) error {
+	for _, f := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // prepare makes the copy at path a pristine file: the mark, the excluded
-// tables without rows, the journal mode DELETE (a pristine file is only
+// tables without rows (and without their bytes in free pages), the journal mode DELETE (a pristine file is only
 // read; a -wal file next to it would be one more file to keep with it).
 func (s *SQLite) prepare(ctx context.Context, path string) error {
 	db, err := sqliteOpen(path, []string{"mode=rw", "_pragma=foreign_keys(0)", "_pragma=trusted_schema(0)"})
@@ -110,8 +109,13 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 		return err
 	}
 	defer c.Close()
-	if _, err := c.ExecContext(ctx, "PRAGMA journal_mode = DELETE"); err != nil {
-		return err
+	// secure_delete overwrites what the deletes free: the rows of excluded
+	// tables (sessions, tokens) do not stay in the pristine file's free
+	// pages.
+	for _, q := range []string{"PRAGMA journal_mode = DELETE", "PRAGMA secure_delete = ON"} {
+		if _, err := c.ExecContext(ctx, q); err != nil {
+			return err
+		}
 	}
 	if _, err := c.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
@@ -135,19 +139,16 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 		}
 	}
 	if len(objs.excluded) > 0 {
-		// The triggers of excluded tables are no items of objs: read them
-		// with every other, so they are dropped and made again around the
-		// deletes.
-		all := &SQLite{o: Options{Name: s.o.Name}}
-		every, err := all.objects(ctx, c, "main")
-		if err != nil {
-			return err
+		// The triggers of the excluded tables are dropped around the
+		// deletes, so none fires.
+		excluded := map[string]bool{}
+		for _, t := range objs.excluded {
+			excluded[asciiLower(t)] = true
 		}
-		excluded := set(objs.excluded)
 		var trigs []string
-		for _, name := range every.torder {
-			if tr := every.triggers[name]; excluded[tr.table] {
-				trigs = append(trigs, every.triggers[name].sql)
+		for _, name := range objs.torder {
+			if tr := objs.triggers[name]; excluded[asciiLower(tr.table)] {
+				trigs = append(trigs, tr.sql)
 				if _, err := c.ExecContext(ctx, "DROP TRIGGER main."+qs(name)); err != nil {
 					return err
 				}
@@ -155,7 +156,7 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 		}
 		for _, t := range objs.excluded {
 			if _, err := c.ExecContext(ctx, "DELETE FROM main."+qs(t)); err != nil {
-				return tableErr(t, every.tables[t], err)
+				return tableErr(t, nil, err)
 			}
 		}
 		for _, q := range trigs {
@@ -191,14 +192,20 @@ func (s *SQLite) checkPristine(ctx context.Context) error {
 	if fi.Size() == 0 {
 		return nil
 	}
-	if _, err := sqliteFile(s.o.Pristine); err != nil {
-		return fmt.Errorf("state %s: file %s, named as the pristine copy, was not made by driftgate seed (it %v), so it is not replaced; delete it yourself or name another pristine file", s.o.Name, s.o.Pristine, err)
+	notMade := func(why error) error {
+		return fmt.Errorf("state %s: file %s, named as the pristine copy, was not made by driftgate seed (it %v), so it is not replaced; delete it yourself or name another pristine file", s.o.Name, s.o.Pristine, why)
 	}
 	db, err := sqliteOpen(s.o.Pristine, sqliteReadOnly)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	if err := sqliteCheck(ctx, db); err != nil {
+		if errors.Is(err, errNotSQLite) {
+			return notMade(err)
+		}
+		return fmt.Errorf("state %s: pristine file %s: %v", s.o.Name, s.o.Pristine, err)
+	}
 	var objects, marked int
 	if err := db.QueryRowContext(ctx, `SELECT
 			(SELECT count(*) FROM sqlite_schema WHERE name <> ? AND name NOT LIKE 'sqlite\_%' ESCAPE '\'),
