@@ -118,6 +118,9 @@ func fromSQLiteValue(v string) (parts, error) {
 		if strings.EqualFold(kv, "mode=memory") {
 			return parts{}, errMemory
 		}
+		if err := sqliteUnlocked(kv); err != nil {
+			return parts{}, err
+		}
 	}
 	if auth, ok := strings.CutPrefix(rest, "//"); ok {
 		host, name, _ := strings.Cut(auth, "/")
@@ -151,6 +154,28 @@ func fromSQLiteValue(v string) (parts, error) {
 	}
 	p.name = rest
 	return p, nil
+}
+
+// sqliteUnlocked refuses a parameter of an SQLite URI that leaves the
+// application's connections without the locks DriftGate's restores and
+// seeds take (nolock, immutable, a VFS without POSIX or Windows locks):
+// the application would read and write the file while DriftGate rewrites
+// it.
+func sqliteUnlocked(kv string) error {
+	k, v, _ := strings.Cut(strings.ToLower(kv), "=")
+	on := v == "1" || v == "true" || v == "yes" || v == "on"
+	var why string
+	switch {
+	case k == "nolock" && on:
+		why = "nolock=" + v
+	case k == "immutable" && on:
+		why = "immutable=" + v
+	case k == "vfs" && (strings.HasSuffix(v, "-none") || v == "unix-dotfile" || v == "unix-excl" || v == "unix-namedsem"):
+		why = "vfs=" + v
+	default:
+		return nil
+	}
+	return fmt.Errorf("the SQLite URI sets %s: the application's connections then do not take the locks DriftGate's restores take, and would read and write the file while it is restored; remove it from the setting", why)
 }
 
 // percentDecode decodes the %HH of a file: URI, as SQLite does (and of a

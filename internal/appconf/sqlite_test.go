@@ -38,6 +38,7 @@ func TestSQLiteValues(t *testing.T) {
 		"sqlite:///database/app.sqlite":         "database/app.sqlite",
 		"sqlite:////var/app.sqlite":             "/var/app.sqlite",
 		"sqlite+pysqlite:///db.sqlite3?mode=ro": "db.sqlite3",
+		"file:app.db?nolock=0&vfs=unix":         "app.db",
 		"sqlite:db.sqlite3":                     "db.sqlite3",
 		"sqlite3:storage/development.sqlite3":   "storage/development.sqlite3",
 		"sqlite3:///srv/app.sqlite3":            "/srv/app.sqlite3",
@@ -64,6 +65,11 @@ func TestSQLiteValues(t *testing.T) {
 		"sqlite3:":                           "names no file",
 		"Data Source=x.db;Mode=Memory;X=1":   ":memory:",
 		"Filename=;Mode=ReadWriteCreate;X=1": "names no SQLite file",
+		"file:app.db?nolock=1":               "sets nolock=1",
+		"file:app.db?mode=rw&immutable=1":    "sets immutable=1",
+		"file:app.db?VFS=unix-none":          "sets vfs=unix-none",
+		"file:///C:/app.db?vfs=win32-none":   "sets vfs=win32-none",
+		"sqlite:///app.db?vfs=unix-dotfile":  "sets vfs=unix-dotfile",
 	} {
 		_, err := fromValue(v)
 		if err == nil || !strings.Contains(err.Error(), want) {
