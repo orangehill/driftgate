@@ -27,9 +27,13 @@ type draft struct {
 
 	db      *appconf.Database // state: db; nil for none
 	dbIndex int               // the setting of dbs it was made from
-	enable  bool              // state: is written on, not commented out (setup)
-	url     string            // target.base_url; empty: the framework's default
-	urlFrom string            // where url comes from, for the messages
+	// exclude are the tables state: excludes (SQLite: the framework's own,
+	// setup's question); excludeAsked says the question was asked.
+	exclude      []string
+	excludeAsked bool
+	enable       bool   // state: is written on, not commented out (setup)
+	url          string // target.base_url; empty: the framework's default
+	urlFrom      string // where url comes from, for the messages
 }
 
 // newDraft locates a new project (config.Locate) and reads its folder. A
@@ -190,12 +194,19 @@ func rankDatabases(dbs []appconf.Database) []appconf.Database {
 func disagree(dbs []appconf.Database) (a, b appconf.Database, ok bool) {
 	for i, x := range dbs {
 		for _, y := range dbs[i+1:] {
-			if x.Ref.Source != appconf.Compose && y.Ref.Source != appconf.Compose && server(x) != server(y) {
+			if x.Ref.Source != appconf.Compose && y.Ref.Source != appconf.Compose && server(x) != server(y) && !sqliteSiblings(x, y) {
 				return x, y, true
 			}
 		}
 	}
 	return a, b, false
+}
+
+// sqliteSiblings reports two SQLite files of one setting (Rails' primary
+// and queue databases): two databases of the application, not settings
+// that disagree.
+func sqliteSiblings(x, y appconf.Database) bool {
+	return x.Driver == appconf.SQLite && y.Driver == appconf.SQLite && x.Ref.Source == y.Ref.Source && x.Ref.File == y.Ref.File && x.Ref.Key != y.Ref.Key
 }
 
 // rankURLs orders the addresses found, best first, each once: a port a
@@ -229,11 +240,14 @@ func where(d appconf.Database) string {
 
 // describe is a database setting in one line, without its password.
 func describe(d appconf.Database) string {
-	driver, name := d.Driver, d.Name
+	driver, name := d.Driver, workingOf(d)
 	if driver == "" {
 		driver = "driver unknown"
 	}
-	if name == "" {
+	switch {
+	case name == "" && d.Driver == appconf.SQLite:
+		name = "(no database file named)"
+	case name == "":
 		name = "(no database named)"
 	}
 	s := driver + " " + name
@@ -261,17 +275,14 @@ const dsnEnv = "DG_DB_DSN"
 // (only in this shell's environment) takes the DSN from dsnEnv. The block
 // is commented out unless on, and when the setting gives no driver or
 // database name, with what to do.
-func stateBlock(d appconf.Database, on bool) string {
+func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 	dsn := flow(config.SecretFor(d.Ref))
 	comment := "from " + where(d) + ", read when a command runs; the password stays there"
 	if d.Ref.IsZero() {
 		dsn = flow(config.Secret{Env: dsnEnv})
 		comment = "set " + dsnEnv + " to the DSN (mysql://user:pass@host:3306/ or postgres://…)"
 	}
-	working := d.Name
-	if d.Driver == appconf.SQLite {
-		working = d.Path
-	}
+	working := workingOf(d)
 	lines := []string{
 		"state:                                    # restored at the start and before requests that change data",
 		"  db:",
@@ -290,12 +301,19 @@ func stateBlock(d appconf.Database, on bool) string {
 	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
-	lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
+	if len(exclude) > 0 {
+		lines = append(lines, "    exclude: "+flow(exclude)+"   # the framework's own tables in the same file: never compared or restored")
+	} else {
+		lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
+	}
 	var missing []string
 	if d.Driver == "" {
 		missing = append(missing, "driver (mysql, postgres, sqlite or sqlserver)")
 	}
-	if working == "" {
+	switch {
+	case working == "" && d.Driver == appconf.SQLite:
+		missing = append(missing, "working (the database file the application uses, relative to the project root)")
+	case working == "":
 		missing = append(missing, "working (the database the application uses)")
 	}
 	var b strings.Builder
@@ -367,7 +385,7 @@ func (dr *draft) configText() string {
 				others.WriteString("# also found: " + describe(o) + "\n")
 			}
 		}
-		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable) + "\n" + text[end:]
+		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.excludeTables()...) + "\n" + text[end:]
 	}
 	if d.block != "" {
 		text += "\n# Found: " + strings.Join(d.kinds, ", ") + "\n" + d.block
