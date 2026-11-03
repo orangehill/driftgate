@@ -1120,3 +1120,37 @@ func TestSQLServerSeededFingerprintQuiet(t *testing.T) {
 		})
 	}
 }
+
+// TestSQLServerWorkingNotOnline: a working database left OFFLINE or
+// RESTORING (a restore that was stopped) fingerprints as different from
+// the pristine copy, so the restore that follows brings it back.
+func TestSQLServerWorkingNotOnline(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{}, "CREATE TABLE t (id int PRIMARY KEY)", "INSERT INTO t VALUES (1)")
+	p := pristineSQLServer(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	var data string
+	if err := master.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(400))").Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	bak := strings.TrimRight(data, "/") + "/" + s.o.Working + "_nr.bak"
+	mustExec(t, master, "BACKUP DATABASE "+qs(s.o.Working)+" TO DISK = "+sqlServerString(bak)+" WITH COPY_ONLY, INIT, FORMAT")
+	defer master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(bak))
+	mustSQLServerFingerprint(t, s) // a pinned connection, ended by what follows
+	for _, tc := range []struct{ state, stmt string }{
+		{"OFFLINE", "ALTER DATABASE " + qs(s.o.Working) + " SET OFFLINE WITH ROLLBACK IMMEDIATE"},
+		{"RESTORING", "ALTER DATABASE " + qs(s.o.Working) + " SET SINGLE_USER WITH ROLLBACK IMMEDIATE; RESTORE DATABASE " + qs(s.o.Working) +
+			" FROM DISK = " + sqlServerString(bak) + " WITH REPLACE, NORECOVERY"},
+	} {
+		mustExec(t, master, tc.stmt)
+		f := mustSQLServerFingerprint(t, s)
+		if s.Reused() || s.last != nil {
+			t.Fatalf("%s: a fingerprint was reused or kept", tc.state)
+		}
+		if d := Diff(f, p); !contains(d, "database:") {
+			t.Fatalf("%s: the fingerprint matches the pristine copy's (%v)", tc.state, d)
+		}
+		restoreSQLServer(t, s, db, log, p)
+		db.SetMaxIdleConns(0)
+		db.SetMaxIdleConns(2)
+	}
+}

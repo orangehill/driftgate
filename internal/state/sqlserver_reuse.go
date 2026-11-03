@@ -263,8 +263,18 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 	}
 	c, err := s.pinned(ctx)
 	if err != nil {
-		if d, derr := s.database(ctx, s.o.Working); derr == nil && d == nil {
+		d, derr := s.database(ctx, s.o.Working)
+		switch {
+		case derr != nil:
+		case d == nil:
 			return Fingerprint{}, nil
+		case d.State != "ONLINE":
+			// OFFLINE or RESTORING after a restore that was stopped: its
+			// items cannot be read, and it is not the pristine copy. The
+			// database's item says so (no real definition hashes alike),
+			// so the restore that follows brings the database back.
+			s.forget()
+			return Fingerprint{ssDatabaseItem: hash([]byte("\x00the working database is " + d.State))}, nil
 		}
 		return nil, err
 	}
