@@ -1,7 +1,7 @@
 # DriftGate as a container image: one static binary on a minimal base.
 #
 #   docker build -t driftgate \
-#     --build-arg VERSION=v1.0.1 --build-arg COMMIT=$(git rev-parse HEAD) \
+#     --build-arg VERSION=v1.0.2 --build-arg COMMIT=$(git rev-parse HEAD) \
 #     --build-arg DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 #   docker run --rm -v "$PWD:/work" --network host driftgate run
 #

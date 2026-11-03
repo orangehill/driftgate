@@ -278,17 +278,17 @@ published from the `release` environment. Each release has:
 Verify the signature first, then the checksum:
 
 ```sh
-gh release download v1.0.1 --repo orangehill/driftgate \
+gh release download v1.0.2 --repo orangehill/driftgate \
   --pattern driftgate-linux-amd64 --pattern 'SHA256SUMS*'
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.1 \
+  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 gh attestation verify driftgate-linux-amd64 --repo orangehill/driftgate
 ```
 
-The GitHub Action does the same for `version: v1.0.1` or `version: latest`:
+The GitHub Action does the same for `version: v1.0.2` or `version: latest`:
 it sets up a pinned cosign, verifies the signature with the identity of the
 action's repository at that tag and the checksum, and installs nothing when
 either fails. `version: source` builds from the action's own source.
@@ -300,7 +300,7 @@ Rebuilding a tag with the Go version from `go.mod` gives the same SHA-256:
 ```sh
 pkg=github.com/orangehill/driftgate/internal/cli
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w \
-  -X $pkg.Version=v1.0.1 -X $pkg.Commit=$(git rev-parse HEAD) \
+  -X $pkg.Version=v1.0.2 -X $pkg.Commit=$(git rev-parse HEAD) \
   -X $pkg.Date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" \
   -o driftgate-linux-amd64 ./cmd/driftgate
 ```

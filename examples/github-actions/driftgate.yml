@@ -77,7 +77,7 @@ jobs:
       - name: DriftGate
         id: driftgate
         # Pin a release tag or a commit SHA.
-        uses: orangehill/driftgate@v1.0.1
+        uses: orangehill/driftgate@v1.0.2
         with:
           junit: driftgate-junit.xml
           # Private bodies (personal data) never leave the machine that
