@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -431,6 +432,96 @@ func TestSQLServerOpenWrites(t *testing.T) {
 	}
 	if full := sqlServerFull(t, s); !reflect.DeepEqual(g, full) {
 		t.Fatalf("differs from a full fingerprint: %v", Diff(g, full))
+	}
+}
+
+// TestSQLServerExcludedWrites: an application writing to an excluded
+// table and sequence all the time, or holding a transaction open on it,
+// does not keep a fingerprint from being made, and the fingerprint is
+// that of the other tables. A transaction open on a table that is not
+// excluded is waited for, and the wait is told.
+func TestSQLServerExcludedWrites(t *testing.T) {
+	log := &ssLog{}
+	s, db := newSQLServerTest(t, Options{Exclude: []string{"audit", "app.jobs*"}, Log: log})
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the test login cannot read the server's performance state")
+	}
+	mustExec(t, db, "CREATE SCHEMA app", "CREATE TABLE a (id int PRIMARY KEY, v int)", "INSERT INTO a VALUES (1, 1)",
+		"CREATE TABLE audit (id int IDENTITY PRIMARY KEY, v nvarchar(100))", "CREATE TABLE app.jobs (id uniqueidentifier PRIMARY KEY, n bigint)",
+		"CREATE SEQUENCE app.jobs_seq")
+	defer func(d, e time.Duration) { sqlServerOpenWait, sqlServerOpenTell = d, e }(sqlServerOpenWait, sqlServerOpenTell)
+	sqlServerOpenWait = 3 * time.Second
+	want := mustSQLServerFingerprint(t, s)
+
+	ctx, stop := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; ctx.Err() == nil; n++ {
+			db.ExecContext(ctx, "INSERT INTO audit VALUES (N'x'); INSERT INTO app.jobs VALUES (NEWID(), NEXT VALUE FOR app.jobs_seq)")
+			if n%10 == 0 {
+				db.ExecContext(ctx, "DELETE TOP (5) FROM audit; UPDATE TOP (3) app.jobs SET n = n + 1")
+			}
+			time.Sleep(time.Duration(5+n%20) * time.Millisecond)
+		}
+	}()
+	for i := range 8 {
+		if i == 4 {
+			mustExec(t, db, "UPDATE a SET v = 2")
+			want = sqlServerFull(t, s)
+		}
+		f, err := s.Fingerprint(context.Background(), nil)
+		if err != nil {
+			stop()
+			wg.Wait()
+			t.Fatalf("fingerprint %d while an excluded table is written: %v", i, err)
+		}
+		if !reflect.DeepEqual(f, want) {
+			stop()
+			wg.Wait()
+			t.Fatalf("fingerprint %d: %v", i, Diff(want, f))
+		}
+	}
+	stop()
+	wg.Wait()
+
+	// A transaction open on excluded tables only is not waited for.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("INSERT INTO audit VALUES (N'open'); INSERT INTO app.jobs VALUES (NEWID(), NEXT VALUE FOR app.jobs_seq)"); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	f := mustSQLServerFingerprint(t, s)
+	if d := time.Since(began); d > sqlServerOpenWait/2 {
+		t.Fatalf("waited %s for a transaction open on excluded tables only", d)
+	}
+	if s.last == nil || !reflect.DeepEqual(f, want) {
+		t.Fatalf("with a transaction open on excluded tables only: kept %v, %v", s.last != nil, Diff(want, f))
+	}
+	// One that also wrote to a table that is not excluded is waited for,
+	// and said so.
+	sqlServerOpenTell = 100 * time.Millisecond
+	if _, err := tx.Exec("UPDATE a SET v = 3"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(time.Second)
+		done <- tx.Commit()
+	}()
+	f = mustSQLServerFingerprint(t, s)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if full := sqlServerFull(t, s); !reflect.DeepEqual(f, full) || reflect.DeepEqual(f, want) {
+		t.Fatalf("the open write was not waited for: %v", Diff(full, f))
+	}
+	if !strings.Contains(log.String(), "waiting for a transaction holding a lock on dbo.a to end") {
+		t.Fatalf("the wait is not told: %q", log.String())
 	}
 }
 

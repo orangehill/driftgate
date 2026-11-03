@@ -148,15 +148,18 @@ type ssValues struct {
 	ident map[int64][2]string // table: last_value ("NULL"), IDENT_CURRENT when last_value is NULL
 	seq   map[int64][3]string // sequence: current_value, last_used_value ("NULL"), is_exhausted
 	db    []string            // options and scoped configurations, sorted
-	hash  string
+	// hash is of the values of the tables and sequences that are not
+	// excluded (ident and seq hold those too): the application may write
+	// to an excluded table while a fingerprint reads the others.
+	hash string
 }
 
-// ssValuesSQL reads the values, in two result sets (ssValueSets).
+// ssValuesSQL reads the values, in three result sets (ssValueSets).
 const ssValuesSQL = `
-SELECT c.object_id, ISNULL(CONVERT(nvarchar(40), c.last_value), N'NULL'),
+SELECT c.object_id, OBJECT_SCHEMA_NAME(c.object_id), OBJECT_NAME(c.object_id), ISNULL(CONVERT(nvarchar(40), c.last_value), N'NULL'),
        ISNULL(CASE WHEN c.last_value IS NULL THEN CONVERT(nvarchar(40), IDENT_CURRENT(QUOTENAME(OBJECT_SCHEMA_NAME(c.object_id)) + N'.' + QUOTENAME(OBJECT_NAME(c.object_id)))) END, N'')
   FROM sys.identity_columns c WHERE OBJECTPROPERTY(c.object_id, 'IsUserTable') = 1;
-SELECT object_id, CONVERT(nvarchar(40), current_value), ISNULL(CONVERT(nvarchar(40), last_used_value), N'NULL'), CAST(is_exhausted AS nvarchar(1))
+SELECT object_id, SCHEMA_NAME(schema_id), name, CONVERT(nvarchar(40), current_value), ISNULL(CONVERT(nvarchar(40), last_used_value), N'NULL'), CAST(is_exhausted AS nvarchar(1))
   FROM sys.sequences WHERE is_ms_shipped = 0;
 SELECT CONCAT(N'option compatibility ', compatibility_level, N' collation ', collation_name, N' read_committed_snapshot ', is_read_committed_snapshot_on,
        N' snapshot_isolation ', CASE WHEN is_read_only = 1 THEN -1 ELSE snapshot_isolation_state END, N' ansi_null_default ', is_ansi_null_default_on, N' ansi_nulls ', is_ansi_nulls_on,
@@ -172,25 +175,36 @@ UNION ALL SELECT CONCAT(N'scoped configuration ', name, N' ', CONVERT(nvarchar(4
   FROM sys.database_scoped_configurations;`
 
 // ssValueSets are the scanners of ssValuesSQL's result sets; done hashes
-// the values once they are read.
-func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
+// the values once they are read, without those of the tables and
+// sequences excluded says are (nil: none).
+func ssValueSets(v *ssValues, excluded func(schema, name string) bool) (sets []func(*sql.Rows) error, done func()) {
 	v.ident, v.seq, v.db = map[int64][2]string{}, map[int64][3]string{}, nil
+	skip := map[int64]bool{}
+	note := func(id int64, schema, name sql.NullString) {
+		if excluded != nil && schema.Valid && name.Valid && excluded(schema.String, name.String) {
+			skip[id] = true
+		}
+	}
 	sets = []func(*sql.Rows) error{
 		func(r *sql.Rows) error {
 			var id int64
+			var schema, n sql.NullString
 			var x [2]string
-			if err := r.Scan(&id, &x[0], &x[1]); err != nil {
+			if err := r.Scan(&id, &schema, &n, &x[0], &x[1]); err != nil {
 				return err
 			}
+			note(id, schema, n)
 			v.ident[id] = x
 			return nil
 		},
 		func(r *sql.Rows) error {
 			var id int64
+			var schema, n sql.NullString
 			var x [3]string
-			if err := r.Scan(&id, &x[0], &x[1], &x[2]); err != nil {
+			if err := r.Scan(&id, &schema, &n, &x[0], &x[1], &x[2]); err != nil {
 				return err
 			}
+			note(id, schema, n)
 			v.seq[id] = x
 			return nil
 		},
@@ -207,7 +221,9 @@ func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
 		h := sha256.New()
 		ids := make([]int64, 0, len(v.ident))
 		for id := range v.ident {
-			ids = append(ids, id)
+			if !skip[id] {
+				ids = append(ids, id)
+			}
 		}
 		slices.Sort(ids)
 		for _, id := range ids {
@@ -215,7 +231,9 @@ func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
 		}
 		ids = ids[:0]
 		for id := range v.seq {
-			ids = append(ids, id)
+			if !skip[id] {
+				ids = append(ids, id)
+			}
 		}
 		slices.Sort(ids)
 		for _, id := range ids {
@@ -230,10 +248,10 @@ func ssValueSets(v *ssValues) (sets []func(*sql.Rows) error, done func()) {
 	return sets, done
 }
 
-// values reads the values on c.
+// values reads the values on c (hash: of all of them).
 func values(ctx context.Context, c *sql.Conn) (*ssValues, error) {
 	v := &ssValues{}
-	sets, done := ssValueSets(v)
+	sets, done := ssValueSets(v, nil)
 	if err := readSets(ctx, c, ssValuesSQL, sets...); err != nil {
 		return nil, err
 	}

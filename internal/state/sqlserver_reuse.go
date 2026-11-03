@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,9 @@ import (
 // What a fingerprint keeps for the next one is read before any table, so a
 // write made while the tables are read shows next time. A transaction that
 // wrote and is still open is waited for (up to sqlServerOpenWait): its rows
-// are not read under READ COMMITTED, and its commit moves no counter. The
+// are not read under READ COMMITTED, and its commit moves no counter. One
+// whose every write lock is on excluded tables (and the system tables and
+// extents any insert locks) is not: those tables are not read. The
 // table signatures and values are read again after the tables: when they
 // moved, or a write transaction was still open, the tables are read again
 // (up to sqlServerAttempts times), so no fingerprint mixes rows from before
@@ -51,6 +54,10 @@ import (
 // sqlServerOpenWait is how long a fingerprint waits for open write
 // transactions to end.
 var sqlServerOpenWait = 10 * time.Second
+
+// sqlServerOpenTell is how long a fingerprint waits for open write
+// transactions before it says so.
+var sqlServerOpenTell = 2 * time.Second
 
 // sqlServerBeforeScan, when set, runs between the signals and the tables a
 // fingerprint reads (tests: a write made meanwhile).
@@ -74,6 +81,7 @@ type ssSignals struct {
 	values *ssValues
 	guard  string // the catalog (ssGuardSQL); "" when it changed in the last seconds
 	open   bool   // a transaction that wrote to the database is open
+	lock   string // a table such a transaction holds a lock on, or ""
 	start  string // when the server started (sqlServerInfo.Start)
 	tables map[int64]string
 }
@@ -111,14 +119,16 @@ SELECT CAST(log_end_lsn AS nvarchar(64)) FROM sys.dm_db_log_stats(DB_ID());`
 
 // ssTablesSQL reads the signature of every table in three result sets,
 // joined by object id (signals; as one query the optimizer reads the
-// counters once per table): the table's dates, rows and index write
-// counters; a db_owner reads them. ssUsageSQL adds the statements that
-// wrote to every table, then whether a transaction that wrote to the
-// database is open: after them, so one that wrote before the signatures
-// shows. It needs VIEW SERVER PERFORMANCE STATE.
+// counters once per table): the table's name and dates, rows and index
+// write counters; a db_owner reads them. ssUsageSQL adds the statements
+// that wrote to every table, then the transactions that wrote to the
+// database and are open, with the objects they hold a write lock on (a
+// row per transaction and object; NULL: a lock on no object, or none):
+// after them, so one that wrote before the signatures shows. It needs VIEW
+// SERVER PERFORMANCE STATE.
 const (
 	ssTablesSQL = `
-SELECT object_id, CONCAT(CONVERT(varchar(30), create_date, 121), ' ', CONVERT(varchar(30), modify_date, 121)) FROM sys.objects WHERE type = 'U' AND is_ms_shipped = 0;
+SELECT object_id, SCHEMA_NAME(schema_id), name, CONCAT(CONVERT(varchar(30), create_date, 121), ' ', CONVERT(varchar(30), modify_date, 121)) FROM sys.objects WHERE type = 'U' AND is_ms_shipped = 0;
 SELECT object_id, CAST(SUM(rows) AS varchar(20)) FROM sys.partitions WHERE index_id IN (0, 1) GROUP BY object_id;
 SELECT object_id, CONCAT(SUM(leaf_insert_count), ' ', SUM(leaf_delete_count), ' ', SUM(leaf_update_count), ' ', SUM(leaf_ghost_count),
        ' ', SUM(nonleaf_insert_count + nonleaf_delete_count + nonleaf_update_count), ' ', SUM(leaf_allocation_count + nonleaf_allocation_count), ' ', COUNT(*))
@@ -126,9 +136,63 @@ SELECT object_id, CONCAT(SUM(leaf_insert_count), ' ', SUM(leaf_delete_count), ' 
 	ssUsageSQL = `
 SELECT object_id, CONCAT(SUM(user_updates), ' ', CONVERT(varchar(30), MAX(last_user_update), 121))
   FROM sys.dm_db_index_usage_stats WHERE database_id = DB_ID() GROUP BY object_id;
-SELECT COUNT(*) FROM sys.dm_tran_database_transactions
- WHERE database_id = DB_ID() AND database_transaction_type = 1 AND database_transaction_log_record_count > 0;`
+SELECT DISTINCT t.transaction_id, o.type, OBJECT_SCHEMA_NAME(o.object_id), o.name, l.resource_type
+  FROM sys.dm_tran_database_transactions t
+  LEFT JOIN (SELECT k.request_owner_id, k.resource_type,
+                    CASE WHEN k.resource_type = N'OBJECT' THEN k.resource_associated_entity_id
+                         WHEN k.resource_type IN (N'PAGE', N'KEY', N'RID', N'HOBT') THEN (SELECT p.object_id FROM sys.partitions p WHERE p.hobt_id = k.resource_associated_entity_id)
+                         WHEN k.resource_type = N'ALLOCATION_UNIT' THEN (SELECT p.object_id FROM sys.allocation_units a JOIN sys.partitions p ON p.partition_id = a.container_id
+                                                                        WHERE a.allocation_unit_id = k.resource_associated_entity_id) END AS object_id
+               FROM sys.dm_tran_locks k
+              WHERE k.resource_database_id = DB_ID() AND k.request_owner_type = N'TRANSACTION'
+                AND k.request_mode NOT IN (N'S', N'IS', N'Sch-S', N'RangeS-S', N'NULL')) l ON l.request_owner_id = t.transaction_id
+  LEFT JOIN sys.objects o ON o.object_id = l.object_id
+ WHERE t.database_id = DB_ID() AND t.database_transaction_type = 1 AND t.database_transaction_log_record_count > 0;`
 )
+
+// ssDMLSystemTables are the system tables any INSERT, UPDATE, DELETE or
+// TRUNCATE (of an excluded table too) takes a write lock on: where an
+// identity stands, a sequence's value, the allocation of rows.
+var ssDMLSystemTables = map[string]bool{"syscolpars": true, "sysobjvalues": true, "sysallocunits": true, "sysrowsets": true, "sysrscols": true}
+
+// ssOpenLock is a write lock an open transaction holds (ssUsageSQL).
+type ssOpenLock struct {
+	kind, schema, name, resource sql.NullString
+}
+
+// openWrites reports whether open transactions (their write locks, by
+// transaction) may have written to what a fingerprint reads, and names a
+// table one of them holds a lock on. A transaction that is passed over
+// holds a write lock on an excluded table or sequence, and otherwise only
+// on the system tables and extents such a write locks (DDL locks more).
+func (s *SQLServer) openWrites(locks map[int64][]ssOpenLock) (open bool, table string) {
+	for _, ls := range locks {
+		excluded, other := false, ""
+		for _, l := range ls {
+			switch kind := strings.TrimSpace(l.kind.String); {
+			case (kind == "U" || kind == "SO") && s.excluded(l.schema.String, l.name.String):
+				excluded = true
+			case kind == "S" && ssDMLSystemTables[l.name.String]:
+			case !l.kind.Valid && l.resource.String == "EXTENT":
+			case l.name.Valid:
+				other = l.schema.String + "." + l.name.String
+			default:
+				other = "?"
+			}
+		}
+		if excluded && other == "" {
+			continue
+		}
+		open = true
+		if table == "" || table == "?" {
+			table = other
+		}
+	}
+	if table == "?" {
+		table = ""
+	}
+	return open, table
+}
 
 // sqlServerAttempts is how often a fingerprint reads the tables before it
 // gives up on a database that changes while it is read.
@@ -146,11 +210,12 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 		batch = ssLogSQL
 		sets = append(sets, func(r *sql.Rows) error { return r.Scan(&sig.lsn) })
 	}
-	valueSets, done := ssValueSets(sig.values)
+	valueSets, done := ssValueSets(sig.values, s.excluded)
 	batch += ssValuesSQL
 	sets = append(sets, valueSets...)
 	var lines []string
-	var recent, open int
+	var recent int
+	locks := map[int64][]ssOpenLock{}
 	if guard {
 		batch += ssGuardSQL
 		sets = append(sets, func(r *sql.Rows) error {
@@ -171,7 +236,18 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 			batch += ssUsageSQL
 			n = 4
 		}
-		for i := range n {
+		sets = append(sets, func(r *sql.Rows) error {
+			var id int64
+			var schema, name, v string
+			if err := r.Scan(&id, &schema, &name, &v); err != nil {
+				return err
+			}
+			if !s.excluded(schema, name) { // what changes there is never read
+				parts[0][id] = v
+			}
+			return nil
+		})
+		for i := 1; i < n; i++ {
 			sets = append(sets, func(r *sql.Rows) error {
 				var id int64
 				var v string
@@ -183,7 +259,15 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 			})
 		}
 		if s.info.Perf {
-			sets = append(sets, func(r *sql.Rows) error { return r.Scan(&open) })
+			sets = append(sets, func(r *sql.Rows) error {
+				var tx int64
+				var l ssOpenLock
+				if err := r.Scan(&tx, &l.kind, &l.schema, &l.name, &l.resource); err != nil {
+					return err
+				}
+				locks[tx] = append(locks[tx], l)
+				return nil
+			})
 		}
 	}
 	if err := readSets(ctx, c, batch, sets...); err != nil {
@@ -201,7 +285,7 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 		}
 		sig.guard = hex.EncodeToString(h.Sum(nil))
 	}
-	sig.open = open > 0
+	sig.open, sig.lock = s.openWrites(locks)
 	return sig, nil
 }
 
@@ -216,11 +300,20 @@ func (l *ssLast) same(sig *ssSignals) bool {
 // database is open, up to sqlServerOpenWait. With one still open, the
 // signals say so (open).
 func (s *SQLServer) settled(ctx context.Context, c *sql.Conn) (*ssSignals, error) {
-	deadline := time.Now().Add(sqlServerOpenWait)
+	start := time.Now()
+	deadline, told := start.Add(sqlServerOpenWait), false
 	for {
 		sig, err := s.signals(ctx, c, s.info.Perf, true, true)
 		if err != nil || !sig.open || time.Now().After(deadline) {
 			return sig, err
+		}
+		if !told && time.Since(start) >= sqlServerOpenTell {
+			told = true
+			on := ""
+			if sig.lock != "" {
+				on = " holding a lock on " + sig.lock
+			}
+			fmt.Fprintf(s.o.Log, "state %s: waiting for a transaction%s to end (up to %s): it wrote to %s and is still open\n", s.o.Name, on, sqlServerOpenWait, s.o.Working)
 		}
 		select {
 		case <-ctx.Done():
