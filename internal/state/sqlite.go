@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"modernc.org/sqlite" // registers the "sqlite" driver
+
+	"github.com/orangehill/driftgate/internal/glob"
 )
 
 // SQLite is an SQLite database file. The pristine copy is a second file,
@@ -358,17 +360,32 @@ type sqliteObjects struct {
 	tables   map[string]*sqliteTable
 	order    []string // tables in schema order
 	excluded []string // excluded tables (not the shadow tables of an excluded virtual table)
-	views    map[string]string
-	vorder   []string
-	triggers map[string]sqliteTrigger
-	torder   []string
-	seq      map[string]any // sqlite_sequence: table → seq
+	// exvirtual holds the statement of every excluded virtual table, and
+	// exshadow lists the shadow tables of those (a seed's cleaning).
+	exvirtual map[string]string
+	exshadow  []string
+	views     map[string]string
+	vorder    []string
+	triggers  map[string]sqliteTrigger
+	torder    []string
+	seq       map[string]any // sqlite_sequence: table → seq
 }
 
 // excludedTable reports whether a table is excluded: by name, or as a
 // shadow table of an excluded virtual table.
 func (o Options) excludedTable(name string, owner string) bool {
-	return o.excluded(name) || owner != "" && o.excluded(owner)
+	return o.sqliteExcluded(name) || owner != "" && o.sqliteExcluded(owner)
+}
+
+// sqliteExcluded is excluded for SQLite, whose names are ASCII-case-
+// insensitive: exclude: sessions also names a table made as Sessions.
+func (o Options) sqliteExcluded(name string) bool {
+	for _, g := range o.Exclude {
+		if glob.Match(asciiLower(g), asciiLower(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // objects reads the schema of a database file (schema: main or the
@@ -376,7 +393,7 @@ func (o Options) excludedTable(name string, owner string) bool {
 // objects and excluded tables and views are left out; excluded tables are
 // listed apart. Indexes and triggers name their table as the table does.
 func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqliteObjects, error) {
-	o := &sqliteObjects{tables: map[string]*sqliteTable{}, views: map[string]string{}, triggers: map[string]sqliteTrigger{}, seq: map[string]any{}}
+	o := &sqliteObjects{tables: map[string]*sqliteTable{}, views: map[string]string{}, triggers: map[string]sqliteTrigger{}, seq: map[string]any{}, exvirtual: map[string]string{}}
 	kinds := map[string]string{}
 	noRowid := map[string]bool{}
 	rows, err := q.QueryContext(ctx, "SELECT name, type, wr FROM pragma_table_list WHERE schema = ?", schema)
@@ -461,7 +478,13 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			own = owner(e.name)
 		}
 		if s.o.excludedTable(e.name, own) {
-			if !shadow { // a virtual table's delete empties its shadow tables
+			switch {
+			case shadow:
+				o.exshadow = append(o.exshadow, e.name)
+			case virtual[e.name]:
+				o.excluded = append(o.excluded, e.name)
+				o.exvirtual[e.name] = e.sql
+			default:
 				o.excluded = append(o.excluded, e.name)
 			}
 			continue
@@ -476,7 +499,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 				t.indexes = append(t.indexes, e.sql)
 			}
 		case "view":
-			if !s.o.excluded(e.name) {
+			if !s.o.sqliteExcluded(e.name) {
 				o.views[e.name] = e.sql
 				o.vorder = append(o.vorder, e.name)
 			}

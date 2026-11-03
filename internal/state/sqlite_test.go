@@ -1108,6 +1108,47 @@ func TestSQLiteExcludedAbsent(t *testing.T) {
 	}
 }
 
+// TestSQLiteExcludedLeavesNoTrace: nothing of an excluded table's rows is
+// in the pristine file's bytes: not in free pages, not in the samples of
+// index keys ANALYZE keeps (sqlite_stat4), and not in the pages of an
+// excluded full-text index, whose delete would only add delete markers.
+func TestSQLiteExcludedLeavesNoTrace(t *testing.T) {
+	for _, analyze := range []string{"ANALYZE", "PRAGMA optimize = 0x10002"} {
+		t.Run(analyze, func(t *testing.T) {
+			stmts := []string{
+				"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+				"INSERT INTO users VALUES (1, 'kept-user')",
+				"CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT)",
+				"CREATE INDEX sessions_payload ON sessions (payload)",
+				"CREATE VIRTUAL TABLE Secret_Fts USING fts5 (body)",
+				"INSERT INTO secret_fts VALUES ('ftsleakword hunter2leak')",
+			}
+			for i := range 60 {
+				stmts = append(stmts, fmt.Sprintf("INSERT INTO sessions VALUES ('SESSIONTOKEN%03d', 'PAYLOADLEAK%03d')", i, i))
+			}
+			s, app := sqliteSchemaFixture(t, "wal", []string{"sessions", "secret_fts"}, append(stmts, analyze)...)
+			if n := count(t, app, "SELECT count(*) FROM sqlite_stat1 WHERE tbl = 'sessions'"); n == 0 {
+				t.Fatalf("%s kept no statistics of sessions: the test tests nothing", analyze)
+			}
+			raw, err := os.ReadFile(s.o.Pristine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range []string{"SESSIONTOKEN", "PAYLOADLEAK", "ftsleakword", "hunter2leak"} {
+				if bytes.Contains(raw, []byte(w)) {
+					t.Errorf("%s is in the pristine file", w)
+				}
+			}
+			if !bytes.Contains(raw, []byte("kept-user")) {
+				t.Error("the pristine file lost a table that is not excluded")
+			}
+			if got, err := s.Query(context.Background(), "SELECT count(*) FROM sqlite_stat1 WHERE tbl IN ('sessions', 'secret_fts')"); err != nil || len(got) != 1 || got[0] != "0" {
+				t.Errorf("statistics of excluded tables in the pristine file: %v %v", got, err)
+			}
+		})
+	}
+}
+
 // TestSQLiteKeepsLocks: DriftGate never opens and closes a database file
 // itself: that would drop the locks of every connection of the process to
 // it. While one component holds the write lock, a second one opening the

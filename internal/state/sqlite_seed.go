@@ -2,10 +2,12 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/orangehill/driftgate/internal/chaos"
 )
@@ -154,9 +156,18 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 				}
 			}
 		}
+		// A virtual table is made again instead: a delete from a full-text
+		// index only adds delete markers, and its terms stay in the pages
+		// of its shadow tables.
 		for _, t := range objs.excluded {
-			if _, err := c.ExecContext(ctx, "DELETE FROM main."+qs(t)); err != nil {
-				return tableErr(t, nil, err)
+			stmts := []string{"DELETE FROM main." + qs(t)}
+			if def, ok := objs.exvirtual[t]; ok {
+				stmts = []string{"DROP TABLE main." + qs(t), def}
+			}
+			for _, q := range stmts {
+				if _, err := c.ExecContext(ctx, q); err != nil {
+					return tableErr(t, nil, err)
+				}
 			}
 		}
 		for _, q := range trigs {
@@ -164,11 +175,44 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 				return err
 			}
 		}
+		// ANALYZE's statistics of the excluded tables and their indexes:
+		// sqlite_stat4 (and stat3) keep samples of index keys, real values.
+		if err := dropStats(ctx, c, append(append([]string{}, objs.excluded...), objs.exshadow...)); err != nil {
+			return err
+		}
 	}
 	if _, err := c.ExecContext(ctx, "COMMIT"); err != nil {
 		return err
 	}
 	committed = true
+	return nil
+}
+
+// dropStats deletes the statistics ANALYZE kept of the tables (and their
+// indexes) from whichever of sqlite_stat1, sqlite_stat3 and sqlite_stat4
+// the file has.
+func dropStats(ctx context.Context, c *sql.Conn, tables []string) error {
+	if len(tables) == 0 {
+		return nil
+	}
+	in := make([]string, len(tables))
+	args := make([]any, len(tables))
+	for i, t := range tables {
+		in[i], args[i] = "?", asciiLower(t)
+	}
+	for _, stat := range []string{"sqlite_stat1", "sqlite_stat3", "sqlite_stat4"} {
+		var n int
+		if err := c.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_schema WHERE type = 'table' AND name = ?", stat).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		q := "DELETE FROM main." + stat + " WHERE lower(tbl) IN (" + strings.Join(in, ", ") + ")"
+		if _, err := c.ExecContext(ctx, q, args...); err != nil {
+			return fmt.Errorf("%s: %w", stat, err)
+		}
+	}
 	return nil
 }
 
