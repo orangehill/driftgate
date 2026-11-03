@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -76,14 +77,22 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 		return err
 	}
 	if w.State != "ONLINE" {
-		fmt.Fprintf(s.o.Log, "state %s: working database %s is %s; restoring the whole database from the pristine copy's backup\n", s.o.Name, s.o.Working, w.State)
-		return s.restoreDatabase(ctx, mark, w)
+		whole, err := s.notOnline(ctx, w)
+		if err != nil {
+			return err
+		}
+		if whole {
+			return s.restoreWhole(ctx, mark, w)
+		}
+		if w, err = s.database(ctx, s.o.Working); err != nil {
+			return err
+		}
 	}
 	if err := s.recoverExcluded(ctx, w); err != nil {
 		return err
 	}
 	if items == nil {
-		if items, err = s.differing(ctx); err != nil {
+		if items, err = s.differing(ctx, mark); err != nil {
 			return err
 		}
 	}
@@ -94,28 +103,133 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 	var fb *ssFallback
 	if errors.As(err, &fb) {
 		fmt.Fprintf(s.o.Log, "state %s: %s; restoring the whole database from the pristine copy's backup\n", s.o.Name, fb.why)
-		return s.restoreDatabase(ctx, mark, w)
+		return s.restoreWhole(ctx, mark, w)
 	}
 	return err
 }
 
+// notOnline decides what a restore does with a working database w that is
+// not online: true restores the whole database. A restore of the whole
+// database that stopped halfway left it restoring or offline, with the
+// rows of excluded tables saved when there are any; it is unusable until
+// a restore completes it. One the user took offline is brought online
+// first, so its excluded rows can be saved. Any other state, with tables
+// excluded whose rows DriftGate has not saved, is refused: a restore would
+// lose them.
+func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, error) {
+	saved, err := s.leftSave(ctx, w)
+	switch {
+	case err != nil:
+		return false, err
+	case saved || w.State == "RESTORING" && len(s.o.Exclude) == 0:
+		fmt.Fprintf(s.o.Log, "state %s: working database %s is %s: a restore of the whole database stopped halfway, and the database is unusable until this restore completes it\n", s.o.Name, s.o.Working, w.State)
+		return true, nil
+	case w.State == "OFFLINE":
+		fmt.Fprintf(s.o.Log, "state %s: working database %s is offline; bringing it online\n", s.o.Name, s.o.Working)
+		c, err := s.conn(ctx, "")
+		if err != nil {
+			return false, err
+		}
+		defer c.Close()
+		_, err = c.ExecContext(ctx, "ALTER DATABASE "+qs(s.o.Working)+" SET ONLINE")
+		return false, err
+	case len(s.o.Exclude) == 0:
+		fmt.Fprintf(s.o.Log, "state %s: working database %s is %s; restoring the whole database from the pristine copy's backup\n", s.o.Name, s.o.Working, w.State)
+		return true, nil
+	}
+	return false, fmt.Errorf("state %s: working database %s is %s, and DriftGate has not saved the rows of its excluded tables, which a restore of the whole database would lose; bring it online (or drop it, if those rows do not matter) and restore again", s.o.Name, s.o.Working, w.State)
+}
+
+// restoreWhole restores the whole database and checks every item against
+// the pristine copy's fingerprint: a restore of the whole database
+// changes items the caller did not name.
+func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) error {
+	if err := s.restoreDatabase(ctx, mark, w); err != nil {
+		return err
+	}
+	p, err := s.pristineFingerprint(ctx, mark)
+	if err != nil {
+		return err
+	}
+	f, err := s.Fingerprint(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if d := Diff(f, p); len(d) > 0 {
+		return fmt.Errorf("state %s: after a restore of the whole database %d items differ from the pristine copy: %v", s.o.Name, len(d), limitItems(d, 20))
+	}
+	return nil
+}
+
+func limitItems(items []string, n int) []string {
+	if len(items) > n {
+		return append(items[:n:n], "…")
+	}
+	return items
+}
+
 // differing lists the items in which the working database and the
 // pristine copy differ.
-func (s *SQLServer) differing(ctx context.Context) ([]string, error) {
+func (s *SQLServer) differing(ctx context.Context, mark *sqlServerMark) ([]string, error) {
 	w, err := s.Fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
+	}
+	p, err := s.pristineFingerprint(ctx, mark)
+	if err != nil {
+		return nil, err
+	}
+	return Diff(w, p), nil
+}
+
+// SeededFingerprint is the fingerprint of the pristine copy itself, with
+// the items named as the working database's: the record of a seed. The
+// working database fingerprinted after the seed would differ from the
+// copy by every write made since its backup.
+func (s *SQLServer) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+	mark, err := s.pristineMark(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p, err := s.pristineFingerprint(ctx, mark)
+	if err != nil {
+		return nil, err
+	}
+	return maps.Clone(p), nil
+}
+
+// PristineID names the pristine copy: the backup set GUID in its mark,
+// new with every seed. A record of the copy's fingerprint kept with it
+// shows whether the copy is still the one recorded.
+func (s *SQLServer) PristineID(ctx context.Context) (string, error) {
+	mark, err := s.pristineMark(ctx)
+	if err != nil {
+		return "", err
+	}
+	return mark.Fallback, nil
+}
+
+// pristineFingerprint fingerprints the pristine copy, once per copy (it is
+// read-only).
+func (s *SQLServer) pristineFingerprint(ctx context.Context, mark *sqlServerMark) (Fingerprint, error) {
+	inv, err := s.pristineCatalog(ctx, mark)
+	if err != nil {
+		return nil, err
+	}
+	if s.pcat.f != nil {
+		return s.pcat.f, nil
 	}
 	c, err := s.conn(ctx, s.o.Pristine)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	p, err := s.fingerprint(ctx, c, s.o.Pristine, nil, nil, nil, nil)
+	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return Diff(w, p.f), nil
+	s.pcat.f = fp.f
+	return fp.f, nil
 }
 
 // pristineMark checks the pristine copy before a restore: it exists, Seed
@@ -148,7 +262,10 @@ func (s *SQLServer) pristineMark(ctx context.Context) (*sqlServerMark, error) {
 		return nil, fmt.Errorf("state %s: database %s is the pristine copy of %s, not of %s; run driftgate seed or name another pristine database", s.o.Name, s.o.Pristine, m.Working, s.o.Working)
 	case m.Server != info.Name:
 		return nil, fmt.Errorf("state %s: pristine database %s was made on server %s, not on %s; run driftgate seed", s.o.Name, s.o.Pristine, m.Server, info.Name)
+	case s.seen != "" && !strings.EqualFold(m.Fallback, s.seen):
+		return nil, fmt.Errorf("state %s: pristine database %s was replaced by another seed while DriftGate ran (backup %s, not %s); run the command again", s.o.Name, s.o.Pristine, m.Fallback, s.seen)
 	}
+	s.seen = m.Fallback
 	if !d.ReadOnly || d.UserAccess != "MULTI_USER" {
 		s.closePool(s.o.Pristine)
 		c, err := s.conn(ctx, "")
@@ -183,6 +300,7 @@ func (s *SQLServer) catalog(ctx context.Context, c *sql.Conn) (*ssInventory, err
 type ssPristineCatalog struct {
 	fallback string
 	inv      *ssInventory
+	f        Fingerprint // pristineFingerprint, once read
 }
 
 // pristineCatalog reads the pristine copy's catalog once per copy.
@@ -596,7 +714,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 		batch += ssStatements(g.checks) + ssStatements(g.triggers)
 	}
 	if _, err := c.ExecContext(ctx, batch); err != nil {
-		return fmt.Errorf("state %s: restore: %w", s.o.Name, err)
+		return fmt.Errorf("state %s: restore: %w%s", s.o.Name, err, s.blockers(err))
 	}
 	if len(g.tolerant) > 0 {
 		on, err := s.tolerate(ctx, c, g)
@@ -637,6 +755,37 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 	c.Close()
 	s.restored(items)
 	return nil
+}
+
+// blockers names, after a lock waited for too long (1222), the other
+// sessions with an open transaction in the working database, as far as
+// the login may see them (all with VIEW SERVER STATE).
+func (s *SQLServer) blockers(err error) string {
+	if sqlServerNumber(err) != 1222 {
+		return ""
+	}
+	c, cerr := s.conn(context.Background(), "")
+	if cerr != nil {
+		return ""
+	}
+	defer c.Close()
+	rows, qerr := c.QueryContext(context.Background(), `SELECT TOP (5) CONCAT(N'session ', session_id, ISNULL(N' (' + NULLIF(program_name, N'') + N')', N''), ISNULL(N' on ' + NULLIF(host_name, N''), N''), ISNULL(N' as ' + NULLIF(login_name, N''), N''))
+		FROM sys.dm_exec_sessions WHERE database_id = DB_ID(@p1) AND session_id <> @@SPID AND is_user_process = 1 AND open_transaction_count > 0`, s.o.Working)
+	if qerr != nil {
+		return ""
+	}
+	defer rows.Close()
+	var list []string
+	for rows.Next() {
+		var l string
+		if rows.Scan(&l) == nil {
+			list = append(list, l)
+		}
+	}
+	if len(list) == 0 {
+		return " (another session holds locks on the tables; the login cannot see which without VIEW SERVER STATE)"
+	}
+	return " (open transactions: " + strings.Join(list, "; ") + ")"
 }
 
 // check compares where the identity columns and sequences of the plan

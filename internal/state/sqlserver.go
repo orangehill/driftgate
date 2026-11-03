@@ -59,6 +59,10 @@ type SQLServer struct {
 	// The pristine copy's catalog, read once per copy: it is read-only,
 	// and a new copy has a new mark (sqlserver_restore.go).
 	pcat *ssPristineCatalog
+	// seen is the backup set GUID of the pristine copy this component
+	// fingerprinted, seeded or restored from first: another one means
+	// another seed replaced the copy meanwhile (pristineMark).
+	seen string
 }
 
 // NewSQLServer connects to the server. o.DSN is a sqlserver:// URL of the
@@ -308,12 +312,15 @@ const sqlServerMarkName = "driftgate_pristine"
 // sqlServerMark is the value of the mark, as JSON: the working database
 // the copy was made of, the server (@@SERVERNAME), the backup set GUID of
 // the fallback backup made of the copy (RESTORE HEADERONLY BackupSetGUID),
-// and when it was made (RFC 3339).
+// when it was made (RFC 3339), and whether the working database had
+// Service Broker on (a restore of the whole database that stopped
+// halfway no longer shows it).
 type sqlServerMark struct {
 	Working  string `json:"working"`
 	Server   string `json:"server"`
 	Fallback string `json:"fallback,omitempty"`
 	Created  string `json:"created"`
+	Broker   bool   `json:"broker,omitempty"`
 }
 
 // readMark reads the mark of a database; nil when it has none. The

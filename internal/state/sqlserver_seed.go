@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -143,7 +144,10 @@ func (s *SQLServer) Seed(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("state %s: %s: %w", s.o.Name, slot, err)
 	}
-	if err := s.writeMark(ctx, newDB, guid); err != nil {
+	if err := s.shrinkLog(ctx, m, newDB, w.Recovery); err != nil {
+		return err
+	}
+	if err := s.writeMark(ctx, newDB, guid, w.Broker); err != nil {
 		return err
 	}
 	chaos.Point("state.sqlserver.seed.marked")
@@ -172,7 +176,38 @@ func (s *SQLServer) Seed(ctx context.Context) error {
 		ok = ok || strings.Contains(q, "MODIFY NAME")
 	}
 	s.forgetPristine()
+	s.seen = guid
 	return nil
+}
+
+// shrinkLog shrinks the log of the new copy db once its backup is made
+// (the backup keeps the working database's log size, which a restore of
+// the whole database gives the working database again): the copy is
+// read-only and needs none of it. The recovery model is the working
+// database's again after.
+func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery string) error {
+	if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qs(db)+" SET RECOVERY SIMPLE"); err != nil {
+		return err
+	}
+	c, err := s.conn(ctx, db)
+	if err != nil {
+		return err
+	}
+	_, err = c.ExecContext(ctx, `CHECKPOINT;
+DECLARE @f int = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1);
+WHILE @f IS NOT NULL BEGIN
+  DBCC SHRINKFILE (@f, 1) WITH NO_INFOMSGS;
+  SET @f = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1 AND file_id > @f);
+END`)
+	c.Close()
+	s.closePool(db)
+	if err != nil {
+		return fmt.Errorf("state %s: shrinking the log of %s: %w", s.o.Name, db, err)
+	}
+	if recovery != "" && recovery != "SIMPLE" {
+		_, err = m.ExecContext(ctx, "ALTER DATABASE "+qs(db)+" SET RECOVERY "+recovery)
+	}
+	return err
 }
 
 // readMarkIfOnline reads the mark of the pristine database, nil when there
@@ -187,7 +222,8 @@ func (s *SQLServer) readMarkIfOnline(ctx context.Context) (*sqlServerMark, error
 
 // checkSeedable refuses a working database whose pristine copy would not
 // be its copy: a memory-optimized table with DURABILITY = SCHEMA_ONLY
-// that is not excluded (its rows are in no backup), and a server trigger
+// that is not excluded (its rows are in no backup), one with
+// SCHEMA_AND_DATA that is (ssMemoryExcluded), and a server trigger
 // on CREATE, ALTER or DROP DATABASE, which may refuse what a seed and a
 // restore do to the databases (only sysadmin can turn it off).
 func (s *SQLServer) checkSeedable(ctx context.Context) error {
@@ -201,8 +237,12 @@ func (s *SQLServer) checkSeedable(ctx context.Context) error {
 		return err
 	}
 	for _, t := range inv.Tables {
-		if t.MemoryOptimized && t.Durability == "SCHEMA_ONLY" && !t.Excluded {
+		switch {
+		case !t.MemoryOptimized:
+		case t.Durability == "SCHEMA_ONLY" && !t.Excluded:
 			return fmt.Errorf("state %s: table %s.%s is memory-optimized with DURABILITY = SCHEMA_ONLY: its rows are in no backup, so the pristine copy cannot have them; exclude it", s.o.Name, t.Schema, t.Name)
+		case t.Durability != "SCHEMA_ONLY" && t.Excluded:
+			return ssMemoryExcluded(s.o.Name, t)
 		}
 	}
 	var name sql.NullString
@@ -278,13 +318,24 @@ func (s *SQLServer) leaveOutExcluded(ctx context.Context, db string) error {
 }
 
 // writeMark marks db as the pristine copy of the working database whose
-// backup has the GUID fallback. The database's DDL triggers are off
+// backup has the GUID fallback (and whether the working database has
+// Service Broker on). The database's DDL triggers are off
 // meanwhile (sp_addextendedproperty fires them).
-func (s *SQLServer) writeMark(ctx context.Context, db, fallback string) error {
-	mark, err := s.markValue(ctx, fallback, time.Now().UTC().Format(time.RFC3339))
+func (s *SQLServer) writeMark(ctx context.Context, db, fallback string, broker bool) error {
+	value, err := s.markValue(ctx, fallback, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
+	var m sqlServerMark
+	if err := json.Unmarshal([]byte(value), &m); err != nil {
+		return err
+	}
+	m.Broker = broker
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	mark := string(b)
 	c, err := s.conn(ctx, db)
 	if err != nil {
 		return err
