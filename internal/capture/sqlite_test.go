@@ -219,6 +219,7 @@ func TestCaptureSQLite(t *testing.T) {
 			}
 			for id, a := range runs["a"] {
 				b := runs["b"][id]
+				a.Headers, b.Headers = nil, nil // the date header moves on
 				ja, _ := json.Marshal(a)
 				jb, _ := json.Marshal(b)
 				if !bytes.Equal(ja, jb) {
