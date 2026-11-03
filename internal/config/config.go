@@ -379,7 +379,7 @@ type Tokens struct {
 // with a built-in driver, or anything else through restore and fingerprint
 // commands.
 type Component struct {
-	Driver      string   `yaml:"driver,omitempty"` // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
+	Driver      string   `yaml:"driver,omitempty"`   // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
 	DSN         Secret   `yaml:"dsn,omitempty"`      // SQLite: optional, cross-checked with working
 	Working     string   `yaml:"working,omitempty"`  // database the application uses; SQLite: its file, relative to the project root
 	Pristine    string   `yaml:"pristine,omitempty"` // its pristine copy; default <working>_pristine (SQLite: a file of the local store)
