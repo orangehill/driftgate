@@ -127,8 +127,11 @@ func (s *setup) sqliteMissing(p *config.Project, name string, c config.Component
 // this worktree's own file; with a dsn, the setting it names must name a
 // file of this worktree (d, known), which ownDatabase then makes working.
 // That file must exist here (git does not carry it) and must not be the
-// main worktree's. Without a dsn, what Find noted about this worktree's
-// SQLite settings is shown: one may name another file than working.
+// main worktree's. Without a dsn, a worktree whose SQLite settings Find
+// could not take (a file outside it, such as a copied .env's absolute
+// path to the main worktree's file) is refused too, unless one of them
+// names working: the application may run on the main worktree's file,
+// and a run that restores this worktree's would pass without testing it.
 func (s *setup) adoptSQLite(here, main, name string, c config.Component, found appconf.Found, d appconf.Database, known bool) error {
 	var notes []string
 	for _, n := range found.Notes {
@@ -136,17 +139,20 @@ func (s *setup) adoptSQLite(here, main, name string, c config.Component, found a
 			notes = append(notes, n.File+": "+n.Text)
 		}
 	}
+	why := ""
+	if len(notes) > 0 {
+		why = " (" + strings.Join(notes, "; ") + ")"
+	}
 	file := c.Working
 	switch {
 	case !c.DSN.IsZero() && (!known || d.Path == ""):
-		why := ""
-		if len(notes) > 0 {
-			why = " (" + strings.Join(notes, "; ") + ")"
-		}
 		return configErr("state %s: this worktree's setting %s names no database file of this worktree%s; its runs could restore a file the main worktree uses. Give this worktree a file of its own in its settings, then run %s",
 			name, flow(c.DSN), why, s.resume)
 	case known:
 		file = d.Path
+	case len(notes) > 0 && !namesFile(found, c.Working):
+		return configErr("state %s: this worktree's settings name no database file of this worktree%s; the application could run on a file the main worktree uses while its runs restore %s. Give this worktree a file of its own in its settings, then run %s",
+			name, why, c.Working, s.resume)
 	default:
 		for _, n := range notes {
 			fmt.Fprintln(s.out, "note: "+n)
@@ -170,6 +176,17 @@ func (s *setup) adoptSQLite(here, main, name string, c config.Component, found a
 		return configErr("state %s: %s in this worktree is the main worktree's database file; its runs would restore it while the main worktree uses it. Give this worktree a file of its own, then run %s", name, file, s.resume)
 	}
 	return nil
+}
+
+// namesFile reports whether a setting Find took names the SQLite file
+// working.
+func namesFile(found appconf.Found, working string) bool {
+	for _, d := range found.Databases {
+		if d.Driver == appconf.SQLite && d.Path != "" && d.Path == cleanFile(working) {
+			return true
+		}
+	}
+	return false
 }
 
 // ownSQLiteFile offers, for an SQLite state database whose setting names

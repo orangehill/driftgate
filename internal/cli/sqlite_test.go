@@ -149,8 +149,8 @@ state:
 
 // TestSetupSQLiteWorktreeMainFile: a worktree whose .env names the main
 // worktree's file by its absolute path (a copied .env) is refused before
-// anything is written when the configuration reads the setting; without
-// a dsn, setup says what it found.
+// anything is written, whether or not the configuration reads the
+// setting: a false pass is worse than a refusal.
 func TestSetupSQLiteWorktreeMainFile(t *testing.T) {
 	for _, dsn := range []string{"    dsn: {dotenv: .env}\n", ""} {
 		main := setupDir(t, map[string]string{".gitignore": ".env\n.driftgate/\n*.sqlite\n", ".env": "DB_CONNECTION=sqlite\n", "artisan": "",
@@ -167,9 +167,39 @@ func TestSetupSQLiteWorktreeMainFile(t *testing.T) {
 			}
 			continue
 		}
-		if !strings.Contains(out, "note: .env: the SQLite file is outside the project") || taken != nil {
+		if code != ExitConfig || !strings.Contains(errOut, "this worktree's settings name no database file of this worktree (.env: the SQLite file is outside the project") || taken == nil {
 			t.Errorf("without a dsn: %d\n%s\n%s", code, out, errOut)
 		}
+
+		// Its own file in the settings, it takes the project.
+		write(t, filepath.Join(wt, ".env"), "DB_CONNECTION=sqlite\n")
+		if code, out, errOut = runCLI(t, "setup", "--yes"); !strings.Contains(out, "took .driftgate") || strings.Contains(errOut, "names no database file") {
+			t.Errorf("without a dsn, own file: %d\n%s\n%s", code, out, errOut)
+		}
+	}
+}
+
+// TestSQLiteAdoptNotes: without a dsn, a worktree setting Find could not
+// take is refused unless another setting names working; one that names
+// working leaves the note shown.
+func TestSQLiteAdoptNotes(t *testing.T) {
+	here := t.TempDir()
+	write(t, filepath.Join(here, "database", "database.sqlite"), "SQLite format 3\x00")
+	s := &setup{a: &asker{yes: true}, resume: "driftgate setup", out: &strings.Builder{}}
+	c := config.Component{Driver: config.SQLite, Working: "database/database.sqlite"}
+	outside := appconf.Note{File: ".env", Text: "the SQLite file is outside the project; DriftGate restores a file of the project only"}
+	if err := s.adoptSQLite(here, t.TempDir(), "db", c, appconf.Found{Notes: []appconf.Note{outside}}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "name no database file of this worktree") {
+		t.Errorf("outside only: %v", err)
+	}
+	found := appconf.Found{Notes: []appconf.Note{outside}, Databases: []appconf.Database{{Driver: appconf.SQLite, Path: "database/database.sqlite"}}}
+	if err := s.adoptSQLite(here, t.TempDir(), "db", c, found, appconf.Database{}, false); err != nil {
+		t.Errorf("a setting names working: %v", err)
+	}
+	if out := s.out.(*strings.Builder).String(); !strings.Contains(out, "note: .env: the SQLite file is outside the project") {
+		t.Errorf("note not shown: %q", out)
+	}
+	if err := s.adoptSQLite(here, t.TempDir(), "db", c, appconf.Found{}, appconf.Database{}, false); err != nil {
+		t.Errorf("no settings: %v", err)
 	}
 }
 
