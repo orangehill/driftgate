@@ -105,8 +105,12 @@ jobs:
                    END { exit bad }'
       # Coverage of the whole module (-coverpkg), with the databases of this
       # job; the report goes to Coveralls on pushes, never failing the job.
+      # The SQLite end-to-end and crash tests run in the sqlite job, without
+      # the race detector: under it, SQLite (C translated to Go) in every
+      # driftgate process they start takes them from 5 s to 100 s. The
+      # SQLite tests of the packages run here with it.
       - name: Test
-        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -skip '^Test(EndToEnd|Crash\w*)SQLite$' ./...
       - name: Coverage report
         if: github.event_name == 'push' && github.workflow == 'ci'
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
@@ -196,7 +200,10 @@ jobs:
 
   # SQLite: the driver's tests on the three systems the binary runs on, as
   # SQLite's file locking differs between them; the database is a file, so
-  # no service is needed. Also for pull requests.
+  # no service is needed. Also for pull requests. Python's own SQLite is the
+  # application in another process (DRIFTGATE_TEST_PYTHON: its tests fail
+  # rather than skip without it). The end-to-end and crash tests (kill -9
+  # inside a restore and a seed) need a unix; the fuzzer runs on Linux.
   sqlite:
     strategy:
       fail-fast: false
@@ -204,6 +211,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: sqlite (${{ matrix.os }})
+    env:
+      DRIFTGATE_TEST_PYTHON: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -211,9 +220,18 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.x"
       - name: Test
         shell: bash
         run: go test -count=1 -run SQLite ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/config/ ./internal/dbdsn/
+      - name: End to end and crashes
+        if: runner.os != 'Windows'
+        run: go test -count=1 -run SQLite ./tools/e2e/
+      - name: Fuzz the SQLite restore
+        if: runner.os == 'Linux'
+        run: go test -run='^$' -fuzz=FuzzSQLiteRestore -fuzztime=60s ./internal/state/
 
   # SQL Server: the driver's tests against SQL Server 2022 (Developer), also
   # for pull requests. The image starts slowly; the tests wait for it.
@@ -302,7 +320,7 @@ jobs:
           file=driftgate-$GOOS-$GOARCH
           size=$(wc -c < "$file")
           base=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets 2>/dev/null \
-            | jq -r --arg f "$file" '.tagName + " " + ([.assets[] | select(.name == $f) | .size] | first | tostring)' 2>/dev/null || true)
+            | jq -r --arg f "$file" '.tagName + " " + ([.assets[] | select(.name == $f or .name == $f + ".exe") | .size] | first | tostring)' 2>/dev/null || true)
           line="$file: $size bytes"
           if [ -n "$base" ] && [ "${base#* }" != "null" ]; then
             tag=${base% *}; was=${base#* }
