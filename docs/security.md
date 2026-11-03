@@ -166,8 +166,11 @@ to do it.
   Server's TLS is never weaker than the application's client: `Encrypt`
   and `TrustServerCertificate` are passed on, a setting that leaves
   `Encrypt` unset gets the client's own default (encrypted and verified
-  when DriftGate cannot tell the client), the sign-in is encrypted even
-  with `Encrypt` off, and `Strict` is never weakened; a certificate file
+  when DriftGate cannot tell the client; a go-mssqldb URL of the
+  environment or 1Password without `encrypt` is encrypted and verified),
+  the sign-in is encrypted even with `Encrypt` off (a server that answers
+  it cannot encrypt is refused before the password is sent), and `Strict`
+  is never weakened; a certificate file
   a setting names must be inside the project
   ([SQL Server](configuration.md#sql-server)). A
   connection string is never read as a URL or the MySQL driver's form, so

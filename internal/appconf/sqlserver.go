@@ -61,6 +61,9 @@ type sqlServerTLS struct {
 	// The other clients verify it when the server encrypts, as
 	// go-mssqldb does.
 	loginTrust bool
+	// goURL: the setting is a go-mssqldb URL (sqlserver://user:pass@host),
+	// whose client default Convert does not take (see there).
+	goURL bool
 	// tdsRequire: FreeTDS's encryption = require, which encrypts without
 	// verifying unless it is given a CA.
 	tdsRequire bool
@@ -613,7 +616,7 @@ func fromSQLServerURL(v string) (parts, error) {
 	host := u.Hostname()
 	switch scheme {
 	case "sqlserver":
-		p.mssql.client = "false"
+		p.mssql.client, p.mssql.goURL = "false", true
 		for _, k := range sortedKeys(q) {
 			if !slices.Contains(goMSSQLParams, k) && !slices.Contains(goMSSQLTLSParams, k) {
 				return parts{}, errors.New("a parameter of the sqlserver:// URL is not supported (names and values are not shown); it takes database, encrypt, TrustServerCertificate, hostNameInCertificate, certificate, serverCertificate, tlsmin and the connection parameters of go-mssqldb")

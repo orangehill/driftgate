@@ -44,9 +44,12 @@ func TestSQLServerForms(t *testing.T) {
 		{"sqlserver://localhost:1433;database=Shop;user=SA;password=p;encrypt=true;trustServerCertificate=true", "sqlserver://SA:p@localhost:1433?TrustServerCertificate=true&encrypt=true", ""},
 		{"sqlserver://db.prod:1433;database=Shop;user=app;password=p;encrypt=DANGER_PLAINTEXT", "sqlserver://app:p@db.prod:1433?encrypt=false", ""},
 		{"sqlserver://db.prod:1433;database=Shop;user=app;password=p;trustServerCertificateCA=/ca.pem", "sqlserver://app:p@db.prod:1433?certificate=%2Fca.pem&encrypt=true", ""},
-		// go-mssqldb: by default the data is not encrypted, the login is,
-		// without verifying the certificate.
-		{"sqlserver://app:p@db.prod:1433?database=Shop", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", ""},
+		// go-mssqldb's URL of the environment is written for DriftGate:
+		// without encrypt it is encrypted and verified, not taken with the
+		// client's default (which encrypts only the login, unverified).
+		{"sqlserver://app:p@db.prod:1433?database=Shop", "sqlserver://app:p@db.prod:1433?encrypt=true", ""},
+		{"sqlserver://app:p@db.prod:1433?database=Shop&TrustServerCertificate=true", "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=true", ""},
+		{"sqlserver://app:p@db.prod:1433?database=Shop&encrypt=false", "sqlserver://app:p@db.prod:1433?encrypt=false", ""},
 		{"sqlserver://app:p%40q@db.prod/SHOP?database=Shop&port=1533&encrypt=true&TrustServerCertificate=true&app+name=x", "sqlserver://app:p%40q@db.prod:1533?TrustServerCertificate=true&encrypt=true", ""},
 		{"sqlserver://app:p@db.prod?database=Shop&encrypt=strict&certificate=/ca.pem", "sqlserver://app:p@db.prod:1433?certificate=%2Fca.pem&encrypt=strict", ""},
 		// Prisma's and go-mssqldb's plaintext: DriftGate still encrypts the login.
@@ -186,6 +189,10 @@ func TestSQLServerProjects(t *testing.T) {
 			Ref{Source: YAML, File: "config/database.yml", Key: "development"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=true", "shop"},
 		{"Go config.yaml", map[string]string{"config.yaml": "database:\n  url: sqlserver://app:p@db.prod:1433?database=shop&encrypt=true\n"},
 			Ref{Source: YAML, File: "config.yaml", Key: "database"}, nil, "sqlserver://app:p@db.prod:1433?encrypt=true", "shop"},
+		// A Go application's own setting without encrypt: its client,
+		// go-mssqldb, encrypts the login only, without verifying.
+		{"Go config.yaml without encrypt", map[string]string{"config.yaml": "database:\n  url: sqlserver://app:p@db.prod:1433?database=shop\n"},
+			Ref{Source: YAML, File: "config.yaml", Key: "database"}, nil, "sqlserver://app:p@db.prod:1433?TrustServerCertificate=true&encrypt=false", "shop"},
 		{"compose", map[string]string{"compose.yaml": "services:\n  db:\n    image: mcr.microsoft.com/mssql/server:2022-latest\n    environment:\n      MSSQL_SA_PASSWORD: p@ss;w0rd\n      MSSQL_TCP_PORT: \"1533\"\n    ports: [\"14331:1533\"]\n"},
 			Ref{Source: Compose, File: "compose.yaml", Key: "db"}, nil, "sqlserver://sa:p%40ss;w0rd@127.0.0.1:14331?TrustServerCertificate=true&encrypt=true", ""},
 		{"compose on another address", map[string]string{"compose.yaml": "services:\n  db:\n    image: mcr.microsoft.com/mssql/rhel/server:2019-latest\n    environment:\n      SA_PASSWORD: p\n    ports: [\"10.0.0.5:14331:1433\"]\n"},
@@ -495,6 +502,39 @@ func TestSQLServerTLSNeverWeaker(t *testing.T) {
 		}
 		if strings.Contains(cs, "HostNameInCertificate") && !strings.Contains(dsn, "hostNameInCertificate=db.example.com") {
 			t.Errorf("%s: %s lost HostNameInCertificate", cs, dsn)
+		}
+	}
+}
+
+// TestSQLServerConvertGoURLNeverWeaker: a go-mssqldb URL of the
+// environment or 1Password is written for DriftGate, so Convert never
+// makes it weaker than what it says, and one without encrypt is encrypted
+// (verified unless it says TrustServerCertificate).
+func TestSQLServerConvertGoURLNeverWeaker(t *testing.T) {
+	encrypts := []string{"", "true", "false", "strict", "yes", "no", "1", "0", "disable"}
+	trusts := []string{"", "true", "false"}
+	for _, enc := range encrypts {
+		for _, trust := range trusts {
+			q := url.Values{"database": {"Shop"}}
+			if enc != "" {
+				q.Set("encrypt", enc)
+			}
+			if trust != "" {
+				q.Set("TrustServerCertificate", trust)
+			}
+			in := "sqlserver://app:p@db.prod:1433?" + q.Encode()
+			dsn, err := Convert(in, SQLServer)
+			if err != nil {
+				t.Fatalf("%s: %v", in, err)
+			}
+			norm := map[string]string{"": "true", "true": "true", "yes": "true", "1": "true", "false": "false", "no": "false", "0": "false", "strict": "strict", "disable": "disable"}
+			want := tlsStrength(norm[enc], trust == "true" && enc != "strict")
+			if got := goMSSQLStrength(t, dsn); got < want {
+				t.Errorf("%s: %s is weaker (%d < %d)", in, dsn, got, want)
+			}
+			if enc == "" && trust != "true" && dsn != "sqlserver://app:p@db.prod:1433?encrypt=true" {
+				t.Errorf("%s: %s, want encrypt=true and the certificate verified", in, dsn)
+			}
 		}
 	}
 }

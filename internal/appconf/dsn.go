@@ -177,6 +177,12 @@ func Convert(dsn, driver string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if p.mssql.goURL && p.mssql.encrypt == "" {
+			// A go-mssqldb URL here is written for DriftGate, not read from
+			// a Go application's setting: no client's default is kept, it
+			// is encrypted and verified.
+			p.mssql.client, p.mssql.loginTrust = "", false
+		}
 		return p.dsn(driver, "the DSN")
 	}
 	if !strings.HasPrefix(v, "jdbc:") && !connString(v) && (strings.Contains(v, "://") || isDriverForm(v) || !strings.Contains(v, "=")) {

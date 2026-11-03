@@ -842,9 +842,11 @@ read and the URL written anew from what DriftGate reads: go-mssqldb
 ignores a parameter it does not know, so a mistyped `encrypt` would
 otherwise go unnoticed. A URL parameter DriftGate does not know, one
 given twice, and a `;` in the query (percent-encode it as `%3B`) are
-refused. The URL's database is ignored; `working` names it. A DSN you
-write for DriftGate should say `encrypt=true` (or `strict`): without
-`encrypt` a go-mssqldb URL is taken as go-mssqldb takes it (below).
+refused. The URL's database is ignored; `working` names it. A go-mssqldb
+URL of the environment or 1Password is written for DriftGate, not taken
+from an application: without `encrypt` it is encrypted and the
+certificate verified (`encrypt=true`); for a self-signed certificate add
+`TrustServerCertificate=true`.
 
 The TLS DriftGate connects with is never weaker than the application's
 own client. `Encrypt` (`true`, `yes`, `Mandatory`; `false`, `no`,
@@ -864,17 +866,21 @@ DriftGate cannot map is an error, never left out. When the setting leaves
 | mssql-jdbc (10.2 and later) | `jdbc:sqlserver://` | `encrypt=true` |
 | Prisma | `sqlserver://host:1433;database=…` | `encrypt=true` |
 | tedious, node-mssql | `mssql://` | `encrypt=true` |
-| go-mssqldb | `sqlserver://user:pass@host:1433` | `encrypt=false&TrustServerCertificate=true` |
+| go-mssqldb | `sqlserver://user:pass@host:1433` in a Go application's own setting file | `encrypt=false&TrustServerCertificate=true` |
 | FreeTDS (its ODBC driver, `dblib://`, Rails' TinyTDS), pdo_sqlsrv (Laravel), pyodbc without a known driver | | `encrypt=true`: `freetds.conf` or the ODBC driver decides, which DriftGate does not read |
-| an ADO.NET connection string of the environment, any other | | `encrypt=true` |
+| a go-mssqldb URL or an ADO.NET connection string of the environment or 1Password, any other | | `encrypt=true` |
 
 - **`Encrypt` off.** DriftGate still encrypts the sign-in, as every
-  client does, and never connects without TLS (`encrypt=disable`,
-  Prisma's `DANGER_PLAINTEXT` are taken as off). go-mssqldb then verifies
+  client does, and never signs in without TLS (`encrypt=disable`,
+  Prisma's `DANGER_PLAINTEXT` are taken as off): a server that answers it
+  cannot encrypt (`ENCRYPT_NOT_SUP`, which go-mssqldb alone would answer
+  by sending the password in clear) is refused before the password is
+  sent. After the sign-in the data is not encrypted. go-mssqldb verifies
   the certificate the sign-in is encrypted with. For the clients that
   never verify it with `Encrypt` off (System.Data.SqlClient, ODBC Driver
-  17 and earlier, go-mssqldb without `encrypt`, FreeTDS with `encryption
-  = off` or `request`) DriftGate does not either
+  17 and earlier, a Go application's go-mssqldb setting without
+  `encrypt`, FreeTDS with `encryption = off` or `request`) DriftGate does
+  not either
   (`TrustServerCertificate=true`); for the others, a server with a
   self-signed certificate needs `TrustServerCertificate=true` in the
   application's own setting, and `init` and `setup` say so.
