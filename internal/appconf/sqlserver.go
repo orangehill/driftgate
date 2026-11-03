@@ -589,6 +589,10 @@ func fromSQLServerURL(v string) (parts, error) {
 		return parts{}, errURL
 	}
 	scheme := strings.ToLower(u.Scheme)
+	if strings.Contains(u.RawQuery, ";") {
+		// net/url drops a pair holding a ;, and its TLS with it.
+		return parts{}, fmt.Errorf("the query of the %s:// URL holds a ; (percent-encode it as %%3B; the value is not shown)", scheme)
+	}
 	p := parts{driver: SQLServer}
 	p.mssql.read = true
 	p.user = u.User.Username()
@@ -609,11 +613,7 @@ func fromSQLServerURL(v string) (parts, error) {
 		p.mssql.client = "false"
 		for _, k := range sortedKeys(q) {
 			if !slices.Contains(goMSSQLParams, k) && !slices.Contains(goMSSQLTLSParams, k) {
-				name := "a parameter"
-				if printable(k) != "such a" {
-					name = "parameter " + k
-				}
-				return parts{}, fmt.Errorf("%s of the sqlserver:// URL is not supported (the value is not shown)", name)
+				return parts{}, errors.New("a parameter of the sqlserver:// URL is not supported (names and values are not shown); it takes database, encrypt, TrustServerCertificate, hostNameInCertificate, certificate, serverCertificate, tlsmin and the connection parameters of go-mssqldb")
 			}
 		}
 		if q["port"] != "" {

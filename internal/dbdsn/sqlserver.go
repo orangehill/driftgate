@@ -29,12 +29,19 @@ var errSQLServerForm = errors.New("dsn: a SQL Server DSN is a sqlserver:// URL (
 // sqlServerAddr reads the host and port a sqlserver:// URL connects to.
 // No error carries the DSN or a part of it.
 func sqlServerAddr(dsn string) (host, port string, err error) {
-	if len(dsn) < len("sqlserver://") || !strings.EqualFold(dsn[:len("sqlserver://")], "sqlserver://") {
+	// The driver takes the URL form by this prefix only, in lower case;
+	// any other text it reads as an ADO.NET connection string.
+	if !strings.HasPrefix(dsn, "sqlserver://") {
 		return "", "", errSQLServerForm
 	}
 	u, err := url.Parse(dsn)
 	if err != nil || u.Opaque != "" || u.Fragment != "" {
 		return "", "", errURL
+	}
+	if strings.Contains(u.RawQuery, ";") {
+		// net/url drops a key=value pair holding a ; and the driver with
+		// it: encrypt=true;x=y would connect without encryption.
+		return "", "", errors.New("dsn: the query of the sqlserver:// URL holds a ; (percent-encode it as %3B; the DSN is not shown, as it holds the password)")
 	}
 	q := map[string]string{}
 	for k, vs := range u.Query() {
