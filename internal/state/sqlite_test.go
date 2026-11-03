@@ -1735,7 +1735,9 @@ func TestSQLitePageDigestConcurrentWriter(t *testing.T) {
 			if busy > 0 {
 				t.Logf("%d fingerprints waited out the busy timeout", busy)
 			}
-			if len(seen) < 2 && !busyAllowed {
+			// Windows sleeps in steps of its timer (about 15 ms), so there the
+			// writer may finish its commits between two fingerprints.
+			if len(seen) < 2 && runtime.GOOS != "windows" {
 				t.Fatalf("the fingerprints taken while the writer wrote saw %d states of a", len(seen))
 			}
 			writer.Close()
