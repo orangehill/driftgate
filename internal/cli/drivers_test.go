@@ -20,7 +20,7 @@ func TestSetupDrivers(t *testing.T) {
 	if g := grant(config.Component{Driver: config.SQLite, Working: "db.sqlite"}, "u"); g != "" {
 		t.Errorf("sqlite grant: %q", g)
 	}
-	if g := grant(config.Component{Driver: config.SQLServer, Working: "Shop", Pristine: "Shop_pristine"}, "a]b"); g != "ALTER SERVER ROLE [dbcreator] ADD MEMBER [a]]b];" {
+	if g := grant(config.Component{Driver: config.SQLServer, Working: "Shop", Pristine: "Shop_pristine"}, "a]b"); !strings.HasPrefix(g, "USE [master]; ALTER SERVER ROLE [dbcreator] ADD MEMBER [a]]b]; USE [Shop];") {
 		t.Errorf("sqlserver grant: %q", g)
 	}
 	if g := grant(config.Component{Driver: config.MySQL, Working: "shop", Pristine: "shop_pristine"}, "u"); g != "GRANT ALL PRIVILEGES ON `shop_pristine`.* TO 'u'@'%';" {

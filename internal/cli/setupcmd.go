@@ -594,7 +594,7 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	}
 	s.step("pristine copy")
 	found := appconf.Find(p.Root, os.LookupEnv)
-	var lines, grants []string
+	var lines, grants, notes []string
 	for _, name := range names {
 		c := p.State[name]
 		if c.Driver == config.SQLite {
@@ -618,6 +618,12 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 		lines = append(lines, fmt.Sprintf("%s, a copy of %s", pristine, c.Working))
 		if g := grant(c, d.User); g != "" && (!known || !canCreate(d)) {
 			grants = append(grants, g)
+			if c.Driver == config.SQLServer {
+				notes = append(notes, sqlServerFast(d.User))
+			}
+		}
+		if c.Driver == config.SQLServer {
+			notes = append(notes, sqlServerCopy(c))
 		}
 	}
 	if len(names) > 1 {
@@ -633,6 +639,9 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	}
 	if len(grants) > 0 {
 		fmt.Fprintln(s.out, "the pristine copy needs a user that may create a database; if the user of the setting may not, grant it (as an administrator): "+strings.Join(grants, " "))
+	}
+	for _, n := range notes {
+		fmt.Fprintln(s.out, n)
 	}
 	q := "Make the pristine copy now? It creates the database " + strings.Join(lines, "; the database ") + ", and every seed replaces it"
 	ok, err := s.a.confirm(q, "pass --yes to make it")
@@ -658,10 +667,12 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 
 // denied matches the errors of a user without the right to create a
 // database: MySQL and MariaDB 1044 (database), 1142 (table) and 1227
-// (privilege), PostgreSQL 42501.
+// (privilege), PostgreSQL 42501, SQL Server's permission errors (229,
+// 230, 262, 297, 3110, 5011, 15247) and those of a login without a user
+// in the working database (916, 4060, 4063).
 // (A pattern built on first use: setup's code must not slow the start of
 // every other command.)
-var denied = lazy.Regexp(`Error (1044|1142|1227)\b|SQLSTATE 42501`)
+var denied = lazy.Regexp(`Error (1044|1142|1227)\b|SQLSTATE 42501|mssql: [^\n]*\((229|230|262|297|916|3110|4060|4063|5011|15247)\)`)
 
 // interruptible runs a command of setup's that handles the stop signals
 // itself (seed, run): when one came, setup says how to go on rather than

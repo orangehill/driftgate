@@ -178,6 +178,13 @@ func rankDatabases(dbs []appconf.Database) []appconf.Database {
 	}
 	var first, last []appconf.Database
 	for _, c := range compose {
+		if a := app[0]; c.Driver == appconf.SQLServer && a.Driver == appconf.SQLServer && c.Name == "" &&
+			server(c) == server(appconf.Database{Driver: a.Driver, Host: a.Host, Port: a.Port}) {
+			// A SQL Server service names no database (the image has no
+			// setting for one): on the server the application's setting
+			// reaches, it is the application's database.
+			c.Name = a.Name
+		}
 		if canCreate(c) && server(c) == server(app[0]) {
 			first = append(first, c)
 		} else {
@@ -299,6 +306,9 @@ func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 	if d.Ref.IsZero() {
 		dsn = flow(config.Secret{Env: dsnEnv})
 		comment = "set " + dsnEnv + " to the DSN (mysql://user:pass@host:3306/ or postgres://…)"
+		if d.Driver == appconf.SQLServer {
+			comment = "set " + dsnEnv + " to the DSN (sqlserver://user:pass@host:1433?database=" + d.Name + "&encrypt=true)"
+		}
 	}
 	working := workingOf(d)
 	lines := []string{

@@ -51,7 +51,7 @@ func (s *setup) adopt(here, main string) (string, error) {
 		case !known || d.Name == "":
 			return "", configErr("state %s: this worktree's settings do not say which database it runs on, and the main worktree's is %s: a pristine copy made here could replace the main worktree's. Give this worktree a database of its own in its settings (e.g. DB_DATABASE in .env), then run %s",
 				name, c.Working, s.resume)
-		case d.Name == c.Working:
+		case sameDatabase(c.Driver, d.Name, c.Working):
 			return "", configErr("state %s: this worktree's settings name the main worktree's database %s; its runs would restore that database while the main worktree uses it. Give this worktree a database of its own (a copy of %s, e.g. DB_DATABASE=%s_wt in .env), then run %s",
 				name, c.Working, c.Working, c.Working, s.resume)
 		}
