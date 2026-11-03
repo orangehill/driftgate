@@ -611,3 +611,253 @@ func BenchmarkSQLServerFallback(b *testing.B) {
 		sqlServerExec(b, db, fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS n FROM t", n), fmt.Sprintf("INSERT INTO sessions VALUES (%d)", n))
 	}, func(int) []string { return []string{"view:dbo.v"} })
 }
+
+// TestSQLServerRestoreEdges: keys equal only under the collation or with
+// trailing zero bytes, sql_variant types, triggers with an order, identity
+// columns at their type's ends and constraints NOT FOR REPLICATION are
+// restored item by item or as a whole, as the pristine copy has them.
+func TestSQLServerRestoreEdges(t *testing.T) {
+	defer func(n int64) { sqlServerDeltaRows = n }(sqlServerDeltaRows)
+	sqlServerDeltaRows = 100
+	s, db, log := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE audit (id int IDENTITY PRIMARY KEY, w nvarchar(20))",
+		"CREATE TABLE big (k varbinary(10) NOT NULL PRIMARY KEY, c nchar(5) COLLATE Latin1_General_CI_AI NOT NULL, v sql_variant NULL, UNIQUE (c))",
+		`WITH n AS (SELECT TOP (400) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects)
+		 INSERT INTO big SELECT CAST(i AS varbinary(4)), RIGHT(CONCAT('0000', i), 5), CAST(i AS int) FROM n`,
+		"CREATE TRIGGER t1 ON big AFTER INSERT AS INSERT INTO audit (w) VALUES (N't1')",
+		"CREATE TRIGGER t2 ON big AFTER INSERT AS INSERT INTO audit (w) VALUES (N't2')",
+		"EXEC sp_settriggerorder N'dbo.t2', N'First', N'INSERT'",
+		"EXEC sp_settriggerorder N'dbo.t1', N'Last', N'INSERT'",
+		"CREATE TABLE lo (id int IDENTITY(1,1), v int NULL)",
+		"INSERT INTO lo (v) VALUES (1),(2),(3),(4),(5)",
+		"DBCC CHECKIDENT ('lo', RESEED, 2) WITH NO_INFOMSGS",
+		"CREATE TABLE neg (id int IDENTITY(-1,-1) PRIMARY KEY, v int NULL)",
+		"INSERT INTO neg (v) VALUES (1),(2)",
+		"DBCC CHECKIDENT ('neg', RESEED, 10) WITH NO_INFOMSGS",
+		"CREATE TABLE bigid (id bigint IDENTITY(9223372036854775800, 1) PRIMARY KEY, v int NULL)",
+		"INSERT INTO bigid (v) VALUES (1)",
+		"CREATE TABLE dec (id decimal(38,0) IDENTITY(99999999999999999999999999999999999990, 1) PRIMARY KEY, v int NULL)",
+		"INSERT INTO dec (v) VALUES (1)",
+		"CREATE TABLE tiny (id tinyint IDENTITY(254,1) PRIMARY KEY, v int NULL)",
+		"INSERT INTO tiny (v) VALUES (1),(2)",
+		"CREATE TABLE onlydel (id int IDENTITY(5,5) PRIMARY KEY, v int NULL)",
+		"INSERT INTO onlydel (v) VALUES (1)", "DELETE FROM onlydel",
+		"CREATE TABLE par (id int PRIMARY KEY)",
+		"CREATE TABLE kid (id int PRIMARY KEY, p int NULL CONSTRAINT fk REFERENCES par(id) ON DELETE SET NULL NOT FOR REPLICATION, CONSTRAINT ck CHECK NOT FOR REPLICATION (id > 0))",
+		"INSERT INTO par VALUES (1),(2)", "INSERT INTO kid VALUES (1,1)")
+	p := pristineSQLServer(t, s)
+	flags := sqlServerFlags(t, db)
+	sqlServerExec(t, db,
+		"UPDATE big SET k = k + 0x00 WHERE k = CAST(1 AS varbinary(4))", // the same key under =, another value
+		"UPDATE big SET v = CAST(2 AS bigint) WHERE k = CAST(2 AS varbinary(4))",
+		"UPDATE big SET c = N'00003 ' WHERE k = CAST(3 AS varbinary(4))",
+		"UPDATE big SET c = LOWER(N'0000á') WHERE k = CAST(4 AS varbinary(4))",
+		"UPDATE big SET v = CAST(N'5' AS sql_variant) WHERE k = CAST(5 AS varbinary(4))",
+		"INSERT INTO par VALUES (3)", "DELETE FROM par WHERE id = 2")
+	audit := sqlServerInt(t, db, "SELECT COUNT(*) FROM audit")
+	if restoreSQLServer(t, s, db, log, p) {
+		t.Fatal("restored the whole database")
+	}
+	if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM audit"); n != audit {
+		t.Fatalf("triggers fired: %d audit rows, want %d", n, audit)
+	}
+	if got := sqlServerFlags(t, db); got != flags {
+		t.Fatalf("flags %s, want %s", got, flags)
+	}
+	want := map[string]int64{}
+	for _, tb := range []string{"lo", "neg", "bigid", "onlydel"} {
+		want[tb] = nextIdentity(t, db, tb)
+		restoreSQLServer(t, s, db, log, p)
+	}
+	sqlServerExec(t, db, "INSERT INTO lo (v) VALUES (9)", "INSERT INTO neg (v) VALUES (9)", "INSERT INTO bigid (v) VALUES (9)",
+		"INSERT INTO dec (v) VALUES (9)", "DELETE FROM tiny WHERE id = 255", "INSERT INTO onlydel (v) VALUES (9)", "TRUNCATE TABLE onlydel")
+	restoreSQLServer(t, s, db, log, p) // onlydel: last_value without rows needs the whole database
+	for tb, w := range want {
+		if got := nextIdentity(t, db, tb); got != w {
+			t.Errorf("%s: next identity %d, want %d", tb, got, w)
+		}
+		restoreSQLServer(t, s, db, log, p)
+	}
+	if _, err := db.Exec("INSERT INTO tiny (v) VALUES (3)"); err == nil {
+		t.Error("the restored tinyint identity hands out a value past 255")
+	}
+}
+
+// TestSQLServerRestoreFailed: a restore that fails inside its transaction
+// (a foreign key of a table it does not restore) leaves the rows, the
+// constraints' and the triggers' flags as they were.
+func TestSQLServerRestoreFailed(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE par (id int IDENTITY PRIMARY KEY, v int NULL)",
+		"CREATE TABLE kid (id int PRIMARY KEY, p int NULL CONSTRAINT fk REFERENCES par(id))",
+		"INSERT INTO par (v) VALUES (1)",
+		"CREATE TRIGGER par_t ON par AFTER INSERT AS RETURN",
+		"CREATE TRIGGER no_alter ON DATABASE FOR ALTER_TABLE AS BEGIN RAISERROR (N'no', 16, 1); ROLLBACK; END")
+	flags := sqlServerFlags(t, db)
+	sqlServerExec(t, db, "INSERT INTO par (v) VALUES (2)", "INSERT INTO kid VALUES (1, 2)")
+	if err := s.Restore(context.Background(), []string{"table:dbo.par"}); err == nil {
+		t.Fatal("restored par without the row of kid that refers to it")
+	}
+	if got := sqlServerFlags(t, db); got != flags {
+		t.Fatalf("flags %s, want %s", got, flags)
+	}
+	if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM par"); n != 2 {
+		t.Fatalf("%d rows in par, want 2", n)
+	}
+}
+
+// TestSQLServerRestoreNotOnline: a working database the user took offline
+// is brought online and restored, the rows of its excluded tables kept;
+// one restoring that DriftGate did not leave so, with tables excluded, is
+// refused.
+func TestSQLServerRestoreNotOnline(t *testing.T) {
+	ctx := context.Background()
+	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY)", "INSERT INTO users VALUES (1)",
+		"CREATE TABLE sessions (id int PRIMARY KEY)")
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	t.Cleanup(func() {
+		master.Exec("IF DATABASEPROPERTYEX(" + sqlServerString(s.o.Working) + ", 'Status') = 'RESTORING' RESTORE DATABASE " + qms(s.o.Working) + " WITH RECOVERY")
+	})
+	p := pristineSQLServer(t, s)
+	sqlServerExec(t, db, "INSERT INTO sessions VALUES (1),(2),(3)", "INSERT INTO users VALUES (2)")
+	db.SetMaxIdleConns(0)
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" SET OFFLINE WITH ROLLBACK IMMEDIATE")
+	if err := s.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	log.fellBack()
+	db.SetMaxIdleConns(2)
+	if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != 3 {
+		t.Fatalf("%d rows of the excluded table, want 3", n)
+	}
+	if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+		t.Fatalf("%v differ", d)
+	}
+	// Restoring, by someone else's RESTORE … WITH NORECOVERY.
+	var dir string
+	master.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(512))").Scan(&dir)
+	file := ssJoin(dir, s.o.Working+"_user.bak")
+	t.Cleanup(func() { master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(file)) })
+	db.SetMaxIdleConns(0)
+	sqlServerExec(t, master, "BACKUP DATABASE "+qms(s.o.Working)+" TO DISK = "+sqlServerString(file)+" WITH COPY_ONLY, INIT, FORMAT",
+		"ALTER DATABASE "+qms(s.o.Working)+" SET SINGLE_USER WITH ROLLBACK IMMEDIATE",
+		"RESTORE DATABASE "+qms(s.o.Working)+" FROM DISK = "+sqlServerString(file)+" WITH REPLACE, NORECOVERY")
+	if err := s.Restore(ctx, nil); err == nil || !strings.Contains(err.Error(), "has not saved the rows of its excluded tables") {
+		t.Fatalf("restore of a database restoring: %v", err)
+	}
+	if d, _ := s.database(ctx, s.o.Working); d == nil || d.State != "RESTORING" {
+		t.Fatal("the refused restore changed the database")
+	}
+}
+
+// TestSQLServerExcludedChanged: a restore of the whole database refuses,
+// before it changes anything, when an excluded table's columns differ
+// from the pristine copy's (a decimal's scale): its rows would not go back
+// as they are.
+func TestSQLServerExcludedChanged(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE sessions (id int PRIMARY KEY, amount decimal(18,2) NULL, name varchar(20) COLLATE Latin1_General_CI_AS NULL)")
+	for _, change := range []string{
+		"ALTER TABLE sessions ALTER COLUMN amount decimal(18,4) NULL",
+		"ALTER TABLE sessions ALTER COLUMN name varchar(20) COLLATE Latin1_General_CS_AS NULL",
+	} {
+		sqlServerExec(t, db, change, "DELETE FROM sessions", "INSERT INTO sessions VALUES (1, 1.23, 'x')", "ALTER VIEW v AS SELECT id, id AS b FROM users")
+		err := s.Restore(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "is not as in the pristine copy") {
+			t.Fatalf("%s: %v", change, err)
+		}
+		if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != 1 {
+			t.Fatalf("%s: the refused restore changed the excluded table", change)
+		}
+	}
+}
+
+// TestSQLServerExcludedMemoryOptimized: an excluded memory-optimized table
+// with rows that last is refused by the seed (no restore of the whole
+// database could keep them); one with DURABILITY = SCHEMA_ONLY must be
+// excluded, and such a restore empties it.
+func TestSQLServerExcludedMemoryOptimized(t *testing.T) {
+	ctx := context.Background()
+	s, db := newSQLServerTest(t, Options{Exclude: []string{"sessions", "cache"}, Log: &ssLog{}})
+	cleanSQLServerSeed(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	var dir string
+	master.QueryRow("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(512))").Scan(&dir)
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" ADD FILEGROUP mo CONTAINS MEMORY_OPTIMIZED_DATA",
+		"ALTER DATABASE "+qms(s.o.Working)+" ADD FILE (NAME = 'mo1', FILENAME = "+sqlServerString(ssJoin(dir, s.o.Working+"_mo1"))+") TO FILEGROUP mo")
+	sqlServerExec(t, db, "CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE sessions (id int PRIMARY KEY NONCLUSTERED, n int NULL) WITH (MEMORY_OPTIMIZED = ON, DURABILITY = SCHEMA_AND_DATA)")
+	if err := s.Seed(ctx); err == nil || !strings.Contains(err.Error(), "do not exclude it") {
+		t.Fatalf("seed with an excluded memory-optimized table: %v", err)
+	}
+	sqlServerExec(t, db, "DROP TABLE sessions", "CREATE TABLE temp (id int PRIMARY KEY NONCLUSTERED) WITH (MEMORY_OPTIMIZED = ON, DURABILITY = SCHEMA_ONLY)")
+	if err := s.Seed(ctx); err == nil || !strings.Contains(err.Error(), "exclude it") {
+		t.Fatalf("seed with a SCHEMA_ONLY table not excluded: %v", err)
+	}
+	sqlServerExec(t, db, "EXEC sp_rename 'temp', 'cache'")
+	if err := s.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := pristineSQLServer(t, s)
+	sqlServerExec(t, db, "INSERT INTO cache VALUES (1)", "ALTER VIEW v AS SELECT id, id AS b FROM users")
+	if err := s.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxIdleConns(0)
+	db.SetMaxIdleConns(2)
+	if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+		t.Fatalf("%v differ", d)
+	}
+}
+
+// TestSQLServerFallbackStopped: a restore of the whole database stopped
+// during its RESTORE leaves the working database restoring; the next
+// restore completes it, with Service Broker on as it was and the rows of
+// excluded tables kept.
+func TestSQLServerFallbackStopped(t *testing.T) {
+	ctx := context.Background()
+	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"ALTER DATABASE CURRENT SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE",
+		"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE big (id int IDENTITY PRIMARY KEY, pad char(4000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO big (pad) SELECT TOP (60000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+		"CREATE TABLE sessions (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	sqlServerExec(t, db, "INSERT INTO sessions VALUES (1),(2)", "ALTER VIEW v AS SELECT id, id AS b FROM users")
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	chaos.At = func(point string) {
+		if point == "state.sqlserver.restore.offline" {
+			go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+		}
+	}
+	err := s.Restore(cctx, nil)
+	chaos.At = nil
+	w, _ := s.database(ctx, s.o.Working)
+	if err == nil || w == nil || w.State != "RESTORING" {
+		t.Skipf("the RESTORE ended before it was stopped (%v)", err)
+	}
+	if !strings.Contains(err.Error(), "unusable until a restore completes") {
+		t.Errorf("message: %v", err)
+	}
+	if err := s.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "stopped halfway") {
+		t.Errorf("log: %s", log.String())
+	}
+	log.fellBack()
+	db.SetMaxIdleConns(0)
+	db.SetMaxIdleConns(2)
+	if w, _ = s.database(ctx, s.o.Working); w.State != "ONLINE" || !w.Broker {
+		t.Fatalf("working database %s, Service Broker %t", w.State, w.Broker)
+	}
+	if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != 2 {
+		t.Fatalf("%d rows of the excluded table, want 2", n)
+	}
+	if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+		t.Fatalf("%v differ", d)
+	}
+}

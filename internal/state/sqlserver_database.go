@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -234,7 +235,11 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 		restore += ", MOVE " + sqlServerString(f.Logical) + " TO " + sqlServerString(physical)
 	}
 	online := w.State == "ONLINE"
-	if w.Broker && (online || w.State == "OFFLINE") { // a restoring database's flags are not known
+	broker := w.Broker
+	if !online && w.State != "OFFLINE" { // a restoring database's flags are not known: the seed's
+		broker = mark.Broker
+	}
+	if broker {
 		restore += ", ENABLE_BROKER"
 	}
 	saved, err := s.saveExcluded(ctx, w)
@@ -263,7 +268,7 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 		if d, derr := s.database(context.Background(), s.o.Working); derr == nil && d != nil && d.State == "OFFLINE" {
 			m.ExecContext(context.Background(), "ALTER DATABASE "+qms(s.o.Working)+" SET ONLINE")
 		}
-		return fmt.Errorf("state %s: restore of %s from %s: %w", s.o.Name, s.o.Working, path, sqlServerFirst(err))
+		return fmt.Errorf("state %s: restore of %s from %s: %w (the database is unusable until a restore completes; run the restore again)", s.o.Name, s.o.Working, path, sqlServerFirst(err))
 	}
 	chaos.Point("state.sqlserver.restore.restored")
 	if w.State == "ONLINE" || w.State == "OFFLINE" {
@@ -281,7 +286,7 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 
 // endSessions ends every other session in a database (sysadmin only).
 func (s *SQLServer) endSessions(ctx context.Context, m *sql.Conn, id int) {
-	rows, err := m.QueryContext(ctx, "SELECT session_id FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID", id)
+	rows, err := m.QueryContext(ctx, "SELECT session_id FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1", id)
 	if err != nil {
 		return
 	}
@@ -392,14 +397,37 @@ func (s *SQLServer) excludedSequences(ctx context.Context, c *sql.Conn) ([][4]st
 	return out, rows.Err()
 }
 
-// ssColumnsText is what a copy of a table's rows needs to stay the same:
-// its columns, their types and identity.
-func ssColumnsText(t *ssTable) string {
-	var b strings.Builder
-	for _, c := range t.Columns {
-		fmt.Fprintf(&b, "%s %s %d %t %t %t %d;", c.Name, c.Type, c.MaxLength, c.Nullable, c.Identity, c.Computed, c.Generated)
+// ssTableDefsSQL reads, per table, what a copy of its rows needs to stay
+// the same: memory-optimized and durability, and every column with its
+// type (an alias type by name), length, precision, scale, collation,
+// nullability, identity, computed, sparse and XML schema collection.
+const ssTableDefsSQL = `SELECT s.name, t.name, CONCAT(t.is_memory_optimized, N' ', t.durability_desc COLLATE DATABASE_DEFAULT, N' ',
+	(SELECT STRING_AGG(CONVERT(nvarchar(max), CONCAT(QUOTENAME(c.name), N' ', TYPE_NAME(c.user_type_id), N' ', c.max_length, N' ', c.precision, N' ', c.scale,
+		N' ', c.collation_name COLLATE DATABASE_DEFAULT, N' ', c.is_nullable, c.is_identity, c.is_computed, c.is_sparse, c.is_column_set, c.is_rowguidcol, N' ', c.generated_always_type,
+		N' ', ISNULL(x.name COLLATE DATABASE_DEFAULT, N''))), N'; ') WITHIN GROUP (ORDER BY c.column_id)
+	   FROM sys.columns c LEFT JOIN sys.xml_schema_collections x ON x.xml_collection_id = c.xml_collection_id AND c.xml_collection_id <> 0
+	  WHERE c.object_id = t.object_id))
+  FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE t.is_ms_shipped = 0`
+
+// excludedDefs reads the definitions (ssTableDefsSQL) of the excluded
+// tables of the database c is connected to, by item.
+func (s *SQLServer) excludedDefs(ctx context.Context, c *sql.Conn) (map[string]string, error) {
+	rows, err := c.QueryContext(ctx, ssTableDefsSQL)
+	if err != nil {
+		return nil, err
 	}
-	return b.String()
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var schema, name, def string
+		if err := rows.Scan(&schema, &name, &def); err != nil {
+			return nil, err
+		}
+		if s.excluded(schema, name) {
+			out["table:"+schema+"."+name] = def
+		}
+	}
+	return out, rows.Err()
 }
 
 // saveExcluded saves the rows of the excluded tables of the working
@@ -426,11 +454,22 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 	}
 	var tables []*ssTable
 	for _, t := range inv.Tables {
-		if t.Excluded && !t.External {
+		switch {
+		case !t.Excluded || t.External:
+		case t.MemoryOptimized && t.Durability == "SCHEMA_ONLY":
+			// Its rows are in no backup and gone with every restart of
+			// the server; a restore of the whole database empties it.
+			fmt.Fprintf(s.o.Log, "state %s: excluded table %s.%s is memory-optimized with DURABILITY = SCHEMA_ONLY; the restore of the whole database empties it\n", s.o.Name, t.Schema, t.Name)
+		case t.MemoryOptimized:
+			return false, ssMemoryExcluded(s.o.Name, t)
+		default:
 			tables = append(tables, t)
 		}
 	}
-	if len(tables) == 0 && len(seqs) == 0 {
+	// With tables excluded the save is made even when there is nothing to
+	// save: a restore that stops halfway then knows that nothing is lost
+	// (notOnline).
+	if len(tables) == 0 && len(seqs) == 0 && len(s.o.Exclude) == 0 {
 		return false, nil
 	}
 	// The rows go back into the tables as the pristine copy has them.
@@ -438,14 +477,18 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 	if err != nil {
 		return false, err
 	}
-	pinv, err := s.inventory(ctx, pc)
+	pdefs, err := s.excludedDefs(ctx, pc)
 	pc.Close()
 	if err != nil {
 		return false, err
 	}
+	wdefs, err := s.excludedDefs(ctx, c)
+	if err != nil {
+		return false, err
+	}
 	for _, t := range tables {
-		if p := pinv.ByItem[t.Item]; p == nil || ssColumnsText(p) != ssColumnsText(t) {
-			return false, fmt.Errorf("state %s: excluded table %s.%s is not as in the pristine copy (its columns changed, or it is new), so its rows would be lost by a restore of the whole database; run driftgate seed", s.o.Name, t.Schema, t.Name)
+		if p, ok := pdefs[t.Item]; !ok || p != wdefs[t.Item] {
+			return false, fmt.Errorf("state %s: excluded table %s.%s is not as in the pristine copy (it is new, or its columns changed), so a restore of the whole database cannot keep its rows; run driftgate seed", s.o.Name, t.Schema, t.Name)
 		}
 	}
 	fork, err := s.recoveryFork(ctx, w.ID)
@@ -465,7 +508,7 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 		return false, err
 	}
 	defer m.Close()
-	if _, err := m.ExecContext(ctx, "CREATE DATABASE "+qms(dgx)); err != nil {
+	if _, err := m.ExecContext(ctx, "CREATE DATABASE "+qms(dgx)+"; ALTER DATABASE "+qms(dgx)+" SET RECOVERY SIMPLE"); err != nil {
 		return false, fmt.Errorf("state %s: creating %s for the rows of excluded tables: %w", s.o.Name, dgx, err)
 	}
 	// Marked first: a restore that stops from here on leaves a database
@@ -511,6 +554,14 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (boo
 		}
 	}
 	return true, add(0, "complete", fork, nil, nil)
+}
+
+// ssMemoryExcluded refuses an excluded memory-optimized table whose rows
+// are kept (SCHEMA_AND_DATA): SQL Server does not let a transaction that
+// reads it write to another database, so its rows cannot be saved for a
+// restore of the whole database.
+func ssMemoryExcluded(component string, t *ssTable) error {
+	return fmt.Errorf("state %s: excluded table %s.%s is memory-optimized, and the rows of such a table cannot be kept through a restore of the whole database; do not exclude it (or make it DURABILITY = SCHEMA_ONLY)", component, t.Schema, t.Name)
 }
 
 // copyBack copies the saved rows of excluded tables and the saved
@@ -660,8 +711,9 @@ func ssSavedColumns(ctx context.Context, c *sql.Conn, dgx string, n int) ([]stri
 	return out, rows.Err()
 }
 
-// sameFamily reports whether a database is a restored copy of the working
-// database (the same family GUID); it can be read while it is restoring.
+// sameFamily reports whether a database is a copy a seed restored of the
+// working database: the same family GUID (it can be read while the copy
+// is restoring)
 func (s *SQLServer) sameFamily(ctx context.Context, db string) bool {
 	c, err := s.conn(ctx, "")
 	if err != nil {
@@ -671,8 +723,28 @@ func (s *SQLServer) sameFamily(ctx context.Context, db string) bool {
 	var rows, families int
 	err = c.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT family_guid) FROM sys.database_recovery_status
 		WHERE database_id IN (DB_ID(@p1), DB_ID(@p2)) AND family_guid IS NOT NULL`, db, s.o.Working).Scan(&rows, &families)
-	return err == nil && rows == 2 && families == 1
+	if err != nil || rows != 2 || families != 1 {
+		return false
+	}
+	// and every file has a name a seed gives (dg_<8 hex>_<file id>).
+	files, err := c.QueryContext(ctx, "SELECT physical_name FROM sys.master_files WHERE database_id = DB_ID(@p1)", db)
+	if err != nil {
+		return false
+	}
+	defer files.Close()
+	n := 0
+	for files.Next() {
+		var path string
+		if files.Scan(&path) != nil || !ssSeedFile.MatchString(path[strings.LastIndexAny(path, `/\`)+1:]) {
+			return false
+		}
+		n++
+	}
+	return files.Err() == nil && n > 0
 }
+
+// ssSeedFile is the name Seed gives a file of the copy it restores.
+var ssSeedFile = regexp.MustCompile(`^dg_[0-9a-f]{8}_[0-9]+(\.(mdf|ndf|ldf))?$`)
 
 // dropLeft drops a database DriftGate made next to the pristine copy and
 // left behind (<pristine>_dgnew, <pristine>_dgx) when checkPristine allows

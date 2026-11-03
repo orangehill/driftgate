@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -81,11 +82,23 @@ func TestSQLServerSeedMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restore := "RESTORE DATABASE " + qms(dgnew) + " FROM DISK = " + sqlServerString(first) + " WITH RECOVERY"
-	for _, f := range files {
-		restore += ", MOVE " + sqlServerString(f.Logical) + " TO " + sqlServerString(f.Physical+".left")
+	restore := func(name func(f ssBackupFile) string) {
+		q := "RESTORE DATABASE " + qms(dgnew) + " FROM DISK = " + sqlServerString(first) + " WITH RECOVERY"
+		for _, f := range files {
+			q += ", MOVE " + sqlServerString(f.Logical) + " TO " + sqlServerString(f.Physical[:strings.LastIndexAny(f.Physical, `/\`)+1]+name(f))
+		}
+		sqlServerExec(t, master, q)
 	}
-	sqlServerExec(t, master, restore)
+	// A copy of the working database with files of other names is
+	// someone's.
+	restore(func(f ssBackupFile) string { return fmt.Sprintf("mine_%d.%s", f.ID, strings.ToLower(f.Type)) })
+	if err := s.Seed(ctx); err == nil || !strings.Contains(err.Error(), "was not made by driftgate seed") {
+		t.Fatalf("seed over someone's copy of the working database: %v", err)
+	}
+	dropSQLServerDatabase(master, dgnew)
+	restore(func(f ssBackupFile) string {
+		return fmt.Sprintf("dg_0badc0de_%d.%s", f.ID, map[string]string{"D": "mdf", "L": "ldf"}[f.Type])
+	})
 	if err := s.Seed(ctx); err != nil {
 		t.Fatalf("seed over a copy a stopped seed left: %v", err)
 	}
@@ -388,6 +401,125 @@ func TestSQLServerNotSysadmin(t *testing.T) {
 	}
 	if err := user.Restore(ctx, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSQLServerSeededFingerprint: the record of a seed is the pristine
+// copy's fingerprint, whatever the application wrote while the seed ran;
+// a restore of the whole database then brings every table back to it, not
+// only the items it was asked for. A pristine copy another seed replaced
+// meanwhile is not restored from.
+func TestSQLServerSeededFingerprint(t *testing.T) {
+	ctx := context.Background()
+	log := &ssLog{}
+	s, db := newSQLServerTest(t, Options{Log: log})
+	cleanSQLServerSeed(t, s)
+	sqlServerExec(t, db, "CREATE TABLE jobs (id int IDENTITY PRIMARY KEY, at datetime2 DEFAULT SYSUTCDATETIME())", "CREATE TABLE b (id int PRIMARY KEY)")
+	stop, done := make(chan struct{}), make(chan int)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-stop:
+				done <- n
+				return
+			default:
+			}
+			if _, err := db.Exec("INSERT INTO jobs DEFAULT VALUES"); err == nil {
+				n++
+			}
+		}
+	}()
+	err := s.Seed(ctx)
+	close(stop)
+	n := <-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := s.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(record, pristineSQLServer(t, s)); len(d) > 0 {
+		t.Fatalf("the record differs from the pristine copy in %v", d)
+	}
+	if d := Diff(mustSQLServerFingerprint(t, s), record); n > 0 && !contains(d, "table:dbo.jobs") {
+		t.Logf("%d inserts during the seed all made it into its backup", n)
+	}
+	sqlServerExec(t, db, "CREATE VIEW v AS SELECT id FROM b")
+	if !restoreSQLServer(t, s, db, log, record) {
+		t.Fatal("restored item by item")
+	}
+	id, err := s.PristineID(ctx)
+	m, _ := s.readMark(ctx, s.o.Pristine)
+	if err != nil || id == "" || id != m.Fallback {
+		t.Fatalf("PristineID %q, %v; mark %+v", id, err, m)
+	}
+	// Another component seeds anew.
+	other, err := NewSQLServer(s.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Restore(ctx, nil); err == nil || !strings.Contains(err.Error(), "replaced by another seed") {
+		t.Fatalf("restore from a replaced pristine copy: %v", err)
+	}
+}
+
+// TestSQLServerSeedLog: the pristine copy keeps none of the working
+// database's log; a restore of the whole database gives the working
+// database its log size back. The sizes are reported.
+func TestSQLServerSeedLog(t *testing.T) {
+	ctx := context.Background()
+	s, db := newSQLServerTest(t, Options{Exclude: []string{"audit"}, Log: &ssLog{}})
+	cleanSQLServerSeed(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, db, "CREATE TABLE big (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO big (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+		"CREATE TABLE audit (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO audit (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+		"CREATE VIEW v AS SELECT id FROM big")
+	var logName string
+	db.QueryRow("SELECT name FROM sys.database_files WHERE type = 1").Scan(&logName)
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" MODIFY FILE (NAME = "+sqlServerString(logName)+", SIZE = 300MB)")
+	size := func(db string, typ int) int64 {
+		return sqlServerInt(t, master, fmt.Sprintf("SELECT SUM(CAST(size AS bigint)) * 8 / 1024 FROM sys.master_files WHERE type = %d AND database_id = DB_ID(%s)", typ, sqlServerString(db)))
+	}
+	start := time.Now()
+	if err := s.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	took := time.Since(start)
+	m, _ := s.readMark(ctx, s.o.Pristine)
+	c, _ := s.conn(ctx, "")
+	bak, _ := s.fallbackFile(ctx, c, m)
+	rows, err := c.QueryContext(ctx, "RESTORE HEADERONLY FROM DISK = "+sqlServerString(bak))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := ssColumns(rows)
+	c.Close()
+	if err != nil || len(header) != 1 {
+		t.Fatal(err)
+	}
+	var full, compressed int64
+	fmt.Sscan(ssText(header[0]["backupsize"]), &full)
+	fmt.Sscan(ssText(header[0]["compressedbackupsize"]), &compressed)
+	t.Logf("seed of %d MB data (40 MB of it excluded), log %d MB: %s; pristine data %d MB, log %d MB; backup %d MB (%d MB compressed)",
+		size(s.o.Working, 0), size(s.o.Working, 1), took.Round(time.Millisecond), size(s.o.Pristine, 0), size(s.o.Pristine, 1), full>>20, compressed>>20)
+	if l := size(s.o.Pristine, 1); l > 16 {
+		t.Errorf("the pristine copy's log is %d MB", l)
+	}
+	sqlServerExec(t, db, "ALTER VIEW v AS SELECT id, pad FROM big")
+	if err := s.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("after a restore of the whole database: working data %d MB, log %d MB", size(s.o.Working, 0), size(s.o.Working, 1))
+	if l := size(s.o.Working, 1); l < 300 {
+		t.Errorf("the working database's log is %d MB after the restore, not 300", l)
 	}
 }
 
