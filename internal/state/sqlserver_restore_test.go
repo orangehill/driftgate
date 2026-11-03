@@ -61,7 +61,7 @@ func newSQLServerSeeded(t testing.TB, o Options, setup ...string) (*SQLServer, *
 // cleanSQLServerSeed drops, at the end of a test, the databases a seed or
 // restore of s may leave and, as far as the login may, the backup files.
 func cleanSQLServerSeed(t testing.TB, s *SQLServer) {
-	master := sqlServerTestDB(t, s.o.DSN, "")
+	master := sqlServerTestDB(t, sqlServerTestDSN(t), "") // the test server's login: it may delete files
 	t.Cleanup(func() {
 		dropSQLServerDatabase(master, s.o.Pristine+"_dgnew")
 		dropSQLServerDatabase(master, s.o.Pristine+"_dgx")
