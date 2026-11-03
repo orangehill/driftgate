@@ -42,13 +42,17 @@ type SQLite struct {
 	main *sql.Conn
 
 	// The last full fingerprint and the data_version and schema_version it
-	// was read at; own is set by a restore through main, whose commits do
-	// not move main's data_version.
-	last   Fingerprint
-	dv, sv int64
-	stamp  sqliteStamp
-	own    bool
-	reused bool
+	// was read at. A restore commits through main, which does not move
+	// main's data_version: it lists the items it wrote in restored (they
+	// are read again), and sets sv to what it left.
+	last     Fingerprint
+	dv, sv   int64
+	restored map[string]bool
+	reused   bool
+	// seen is main's data_version and the file's stamp when DriftGate last
+	// looked (a fingerprint) or wrote (a restore): a stamp that changed
+	// while data_version did not is a change SQLite did not see.
+	seen sqliteSeen
 	// scanned lists the tables the last fingerprint read row by row (the
 	// others kept their row hash).
 	scanned []string
@@ -183,6 +187,19 @@ type sqliteStamp struct {
 	wal             bool
 }
 
+type sqliteSeen struct {
+	dv    int64
+	stamp sqliteStamp
+	ok    bool
+}
+
+// unseen reports whether the file changed without a commit SQLite saw (a
+// copy written over it) since DriftGate last looked: the connections may
+// hold its old pages, and must be opened again.
+func (s *SQLite) unseen(dv int64, stamp sqliteStamp) bool {
+	return s.seen.ok && dv == s.seen.dv && stamp != s.seen.stamp
+}
+
 func (s *SQLite) stampNow() sqliteStamp {
 	var st sqliteStamp
 	if fi, err := os.Stat(s.o.Working); err == nil {
@@ -310,13 +327,14 @@ func (s *SQLite) current() error {
 // kept, nor the fingerprint the next one could be reused from.
 func (s *SQLite) reopen() error {
 	s.forget()
+	s.seen = sqliteSeen{}
 	s.main.Close()
 	s.db.Close()
 	return s.open()
 }
 
 // forget drops the fingerprint the next one could be reused from.
-func (s *SQLite) forget() { s.last, s.own = nil, false }
+func (s *SQLite) forget() { s.last, s.restored = nil, nil }
 
 func (s *SQLite) Name() string  { return s.o.Name }
 func (s *SQLite) Partial() bool { return true }

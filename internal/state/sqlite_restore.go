@@ -63,6 +63,18 @@ func (s *SQLite) Restore(ctx context.Context, items []string) (err error) {
 			return nil
 		}
 	}
+	if s.seen.ok {
+		dv, err := s.dataVersion(ctx)
+		if err != nil {
+			return err
+		}
+		if s.unseen(dv, s.stampNow()) {
+			// Written through the old pages, the file would be corrupt.
+			if err := s.reopen(); err != nil {
+				return err
+			}
+		}
+	}
 	uri, err := sqliteURI(s.o.Pristine, "mode=ro")
 	if err != nil {
 		return err
@@ -72,9 +84,13 @@ func (s *SQLite) Restore(ctx context.Context, items []string) (err error) {
 		return fmt.Errorf("state %s: pristine file %s: %v", s.o.Name, s.o.Pristine, err)
 	}
 	defer c.ExecContext(context.Background(), "DETACH DATABASE "+sqlitePristine)
-	// Whatever happens next, the next fingerprint reads the file again.
+	// The last fingerprint stays, with the items the restore writes
+	// listed: the next fingerprint reads those again and keeps the rest,
+	// when no other connection committed since the last one was read
+	// (main's data_version, which the restore's own commit does not move).
+	// When the restore fails, the next fingerprint reads everything.
+	last, restored := s.last, s.restored
 	s.forget()
-	s.own = true
 	if _, err := c.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
@@ -84,7 +100,12 @@ func (s *SQLite) Restore(ctx context.Context, items []string) (err error) {
 			c.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-	if err := s.restore(ctx, c, items); err != nil {
+	dv, err := s.dataVersion(ctx)
+	if err != nil {
+		return err
+	}
+	written, err := s.restore(ctx, c, items)
+	if err != nil {
 		return err
 	}
 	chaos.Point("state.sqlite.restore")
@@ -92,19 +113,40 @@ func (s *SQLite) Restore(ctx context.Context, items []string) (err error) {
 		return err
 	}
 	committed = true
+	s.seen = sqliteSeen{dv: dv, stamp: s.stampNow(), ok: true}
+	if last == nil {
+		return nil
+	}
+	// Read after the commit: a commit of another connection in between
+	// moves data_version, and the next fingerprint reads every item.
+	var sv int64
+	if err := c.QueryRowContext(ctx, "PRAGMA main.schema_version").Scan(&sv); err != nil {
+		return nil // the next fingerprint reads every item
+	}
+	if restored == nil {
+		restored = map[string]bool{}
+	}
+	for _, it := range items {
+		restored[it] = true
+	}
+	for _, t := range written {
+		restored["table:"+t] = true
+	}
+	s.last, s.restored, s.sv = last, restored, sv
 	return nil
 }
 
 // restore copies the items from the attached pristine file into main, in
-// the transaction of c.
-func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error {
+// the transaction of c, and returns the tables it dropped, created or
+// filled.
+func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]string, error) {
 	work, err := s.objects(ctx, c, "main")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pris, err := s.objects(ctx, c, sqlitePristine)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tableItems, viewItems, _, triggerItems := splitItems(items)
 
@@ -173,20 +215,20 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 	for _, name := range work.torder {
 		if tr := work.triggers[name]; trigTables[asciiLower(tr.table)] || named[name] {
 			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS main."+qs(name)); err != nil {
-				return fmt.Errorf("trigger %s: %w", name, err)
+				return nil, fmt.Errorf("trigger %s: %w", name, err)
 			}
 		}
 	}
 	for _, v := range work.vorder {
 		if dropViews[v] {
 			if _, err := c.ExecContext(ctx, "DROP VIEW IF EXISTS main."+qs(v)); err != nil {
-				return fmt.Errorf("view %s: %w", v, err)
+				return nil, fmt.Errorf("view %s: %w", v, err)
 			}
 		}
 	}
 	for _, t := range drop {
 		if _, err := c.ExecContext(ctx, "DROP TABLE IF EXISTS main."+qs(t)); err != nil {
-			return tableErr(t, work.tables[t], err)
+			return nil, tableErr(t, work.tables[t], err)
 		}
 	}
 	for _, t := range create {
@@ -195,39 +237,39 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 			// A shadow table its virtual table made just now is left as made.
 			exists, err := sqliteExists(ctx, c, t)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if exists {
 				continue
 			}
 		}
 		if _, err := c.ExecContext(ctx, p.sql); err != nil {
-			return tableErr(t, p, err)
+			return nil, tableErr(t, p, err)
 		}
 		for _, ix := range p.indexes {
 			if _, err := c.ExecContext(ctx, ix); err != nil {
-				return fmt.Errorf("table %s: index: %w", t, err)
+				return nil, fmt.Errorf("table %s: index: %w", t, err)
 			}
 		}
 	}
 	for _, t := range fill {
 		if err := copyRows(ctx, c, pris.tables[t]); err != nil {
-			return fmt.Errorf("table %s: %w", t, err)
+			return nil, fmt.Errorf("table %s: %w", t, err)
 		}
 	}
 	// INSERT … SELECT leaves sqlite_sequence at the working file's value.
 	hasSeq, err := sqliteExists(ctx, c, "sqlite_sequence")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hasSeq {
 		for _, t := range unique(append(append([]string{}, fill...), create...)) {
 			if _, err := c.ExecContext(ctx, "DELETE FROM main.sqlite_sequence WHERE name = ?", t); err != nil {
-				return err
+				return nil, err
 			}
 			if seq, ok := pris.seq[t]; ok {
 				if _, err := c.ExecContext(ctx, "INSERT INTO main.sqlite_sequence (name, seq) VALUES (?, ?)", t, seq); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
@@ -237,7 +279,7 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 	for _, v := range pris.vorder {
 		if createViews[v] {
 			if _, err := c.ExecContext(ctx, pris.views[v]); err != nil {
-				return fmt.Errorf("view %s: %w", v, err)
+				return nil, fmt.Errorf("view %s: %w", v, err)
 			}
 		}
 	}
@@ -248,13 +290,13 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 		}
 		exists, err := sqliteExists(ctx, c, tr.table)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !exists {
 			continue // its table is not restored: the trigger item stays different
 		}
 		if _, err := c.ExecContext(ctx, tr.sql); err != nil {
-			return fmt.Errorf("trigger %s: %w", name, err)
+			return nil, fmt.Errorf("trigger %s: %w", name, err)
 		}
 	}
 	for _, it := range items {
@@ -264,13 +306,13 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) error
 		}
 		var v int64
 		if err := c.QueryRowContext(ctx, "PRAGMA "+sqlitePristine+"."+p).Scan(&v); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := c.ExecContext(ctx, fmt.Sprintf("PRAGMA main.%s = %d", p, v)); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return unique(append(append(append([]string{}, drop...), create...), fill...)), nil
 }
 
 // copyRows empties a table of main and copies the pristine file's rows

@@ -139,7 +139,8 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 // FuzzSQLiteRestore: whatever the application does to the working file, a
 // fingerprint that kept row hashes by page digest equals one read from
 // scratch, and a restore of the items that differ from the pristine file
-// leaves a file equal to it: the same fingerprint, the same rows both ways
+// leaves a file equal to it (also as the fingerprint that reads only what
+// the restore wrote says): the same fingerprint, the same rows both ways
 // (EXCEPT) and the same schema, an intact file, and the excluded table
 // and the triggers' table not written by the restore.
 func FuzzSQLiteRestore(f *testing.F) {
@@ -208,8 +209,12 @@ func FuzzSQLiteRestore(f *testing.F) {
 		if err := s.Restore(ctx, Diff(got, want)); err != nil {
 			t.Fatal(err)
 		}
-		if d := Diff(sqliteFingerprint(t, s), want); len(d) > 0 {
+		restored := sqliteFingerprint(t, s)
+		if d := Diff(restored, want); len(d) > 0 {
 			t.Fatalf("the restore left %v different", d)
+		}
+		if d := Diff(restored, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore differs from one read from scratch in %v", d)
 		}
 		if n := count(t, app, "SELECT count(*) FROM sessions"); n != sessions {
 			t.Fatalf("the restore changed the excluded table: %d rows, had %d", n, sessions)

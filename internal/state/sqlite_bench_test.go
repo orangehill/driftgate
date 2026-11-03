@@ -208,9 +208,10 @@ func BenchmarkSQLiteLaravel(b *testing.B) {
 	}
 }
 
-// BenchmarkSQLiteRestoreCycle: what the capture does for a request that
-// changed a small table: restore it, fingerprint it to check the restore,
-// and take the full fingerprint before the next request.
+// BenchmarkSQLiteRestoreCycle: what the capture does after a request that
+// changed a small table, and the fingerprint that found it: restore it,
+// fingerprint it to check the restore, and take the full fingerprint
+// before the next request.
 func BenchmarkSQLiteRestoreCycle(b *testing.B) {
 	ctx := context.Background()
 	for _, mb := range sqliteBenchSizes() {
@@ -219,6 +220,9 @@ func BenchmarkSQLiteRestoreCycle(b *testing.B) {
 			for range b.N {
 				b.StopTimer()
 				mustExecB(b, app, fmt.Sprintf("UPDATE small3 SET v = %d WHERE id = 5", -sqliteBenchValue.Add(1)))
+				if _, err := s.Fingerprint(ctx, nil); err != nil {
+					b.Fatal(err)
+				}
 				b.StartTimer()
 				if err := s.Restore(ctx, []string{"table:small3"}); err != nil {
 					b.Fatal(err)
@@ -229,6 +233,9 @@ func BenchmarkSQLiteRestoreCycle(b *testing.B) {
 				if _, err := s.Fingerprint(ctx, nil); err != nil {
 					b.Fatal(err)
 				}
+			}
+			if !s.Reused() {
+				b.Fatal("the fingerprint after the restore was not reused")
 			}
 		})
 	}

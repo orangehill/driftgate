@@ -27,9 +27,12 @@ import (
 //  1. Reused: when no other connection committed since the last full
 //     fingerprint (PRAGMA data_version of the connection kept open, which
 //     SQLite moves for commits of any process, in WAL and rollback mode),
-//     the schema version is the same, the file is the same, its size and
-//     time (and its -wal file's) are too, and DriftGate did not restore
-//     since, the last fingerprint is returned as it was.
+//     the schema version is the same and the file is the same, the last
+//     fingerprint is returned as it was. (A file whose size or time, or
+//     its -wal file's, changed while data_version did not was changed
+//     without SQLite: the connections are opened again first.) A restore since (DriftGate's own commits, which
+//     do not move data_version) wrote only the items it lists: those are
+//     read again, the rest is kept.
 //  2. Page digest: a table whose pages (every page of its b-tree when its
 //     rows were last read, as dbstat walked it) hold the bytes they held
 //     then, with the same root page and CREATE statement, has the same rows
@@ -101,18 +104,19 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 		return nil, err
 	}
 	stamp := s.stampNow()
-	if s.last != nil && !s.own && dv == s.dv && sv == s.sv {
+	if s.unseen(dv, stamp) {
 		release()
-		if stamp != s.stamp {
-			// The file changed without a commit SQLite saw (a copy
-			// written over it): the connections may hold its old pages.
-			// Opened again, they read it anew; the row hashes stay, as
-			// a page digest is of the bytes now read.
-			if err := s.reopen(); err != nil {
-				return nil, err
-			}
-			return s.Fingerprint(ctx, items)
+		// Opened again, the connections read the file anew; the row
+		// hashes stay, as a page digest is of the bytes now read.
+		if err := s.reopen(); err != nil {
+			return nil, err
 		}
+		return s.Fingerprint(ctx, items)
+	}
+	s.seen = sqliteSeen{dv: dv, stamp: stamp, ok: true}
+	quiet := s.last != nil && dv == s.dv && sv == s.sv
+	if quiet && len(s.restored) == 0 {
+		release()
 		s.reused = true
 		f := maps.Clone(s.last)
 		if items != nil {
@@ -120,11 +124,24 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 		}
 		return f, nil
 	}
-	extra := int(min(int64(sqliteConns), tables-1))
-	if items != nil {
-		extra = min(extra, len(items)-1)
+	// What is read: every item, the items asked for, or, when only
+	// DriftGate's restores wrote since the last fingerprint, the tables
+	// they wrote, and the views, triggers and pragmas (only their
+	// statements and values are read).
+	var want func(item string) bool
+	n := tables
+	switch {
+	case quiet:
+		want = func(item string) bool {
+			_, known := s.last[item]
+			return s.restored[item] || !strings.HasPrefix(item, "table:") || !known
+		}
+		n = int64(len(s.restored))
+	case items != nil:
+		want = func(item string) bool { return contains(items, item) }
+		n = int64(len(items))
 	}
-	conns, err := s.snapshot(ctx, extra)
+	conns, err := s.snapshot(ctx, int(min(int64(sqliteConns), n-1)))
 	release()
 	if err != nil {
 		return nil, err
@@ -133,13 +150,25 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	if s.sums == nil {
 		s.sums = map[string]sqliteSum{}
 	}
-	f, read, err := s.fingerprint(ctx, conns, "main", items, s.sums)
+	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums)
 	s.scanned = read
 	if err != nil {
 		return nil, err
 	}
-	if items == nil {
-		s.last, s.dv, s.sv, s.stamp, s.own = maps.Clone(f), dv, sv, stamp, false
+	switch {
+	case quiet:
+		// A table the restores wrote that is gone, or any view,
+		// trigger or pragma not read now, is no longer there.
+		last := maps.Clone(s.last)
+		maps.DeleteFunc(last, func(item string, _ string) bool { return want(item) })
+		maps.Copy(last, f)
+		s.last, s.restored = last, nil
+		f = maps.Clone(last)
+		if items != nil {
+			f = f.Subset(items)
+		}
+	case items == nil:
+		s.last, s.dv, s.sv, s.restored = maps.Clone(f), dv, sv, nil
 	}
 	return f, nil
 }
@@ -243,15 +272,18 @@ func (s *SQLite) end(conns []*sql.Conn) {
 }
 
 // fingerprint hashes the items of a schema (main, or the pristine file's)
-// read on conns, which share one snapshot. With sums, a table whose pages
-// did not change keeps its row hash from there, and the row hashes read
-// are kept in it.
-func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, items []string, sums map[string]sqliteSum) (Fingerprint, []string, error) {
+// that want accepts (nil: all of them), read on conns, which share one
+// snapshot. With sums, a table whose pages did not change keeps its row
+// hash from there, and the row hashes read are kept in it.
+func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum) (Fingerprint, []string, error) {
 	objs, err := s.objects(ctx, conns[0], schema)
 	if err != nil {
 		return nil, nil, err
 	}
-	want := func(item string) bool { return items == nil || contains(items, item) }
+	all := want == nil
+	if all {
+		want = func(string) bool { return true }
+	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
 		if want("table:" + name) {
@@ -263,7 +295,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		return nil, nil, err
 	}
 	if sums != nil {
-		if items == nil {
+		if all {
 			clear(sums)
 		}
 		maps.Copy(sums, got)
