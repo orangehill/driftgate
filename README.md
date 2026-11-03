@@ -315,6 +315,10 @@ pull-request comment, in the job summary and as a JUnit file. Full guide:
   [Bisect](docs/guides/bisect.md) ·
   [Recording through a proxy](docs/guides/record.md)
 
+## Author
+
+DriftGate is written and maintained by Slavenko Božić ([@slavenkobozic-ohd](https://github.com/slavenkobozic-ohd)) at [Orange Hill](https://github.com/orangehill).
+
 ## License
 
 Apache 2.0, see [`LICENSE`](LICENSE).
