@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   # The checks of ci.yml itself (one definition): format, vet, staticcheck,
-  # tests, fuzzing, govulncheck, and the size and package gate on the six
+  # tests, fuzzing, govulncheck, the size report and the package gate on the six
   # platforms. MariaDB's userstat stays off here, so its fallback path is
   # tested too.
   check:

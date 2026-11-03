@@ -206,7 +206,7 @@ jobs:
             ./internal/secret/ ./internal/report/ ./internal/baseline/ ./internal/httpx/ ./internal/har/ ./internal/sheet/ ./internal/upload/
           go test -count=1 -run 'TestHelp|TestClassify|TestUsageErrors|TestCompareNamesAreConfiguration|TestImportAndCompare|TestReport|TestHidePrivateValues|TestLockStoreSweep' ./internal/cli/
 
-  # The six platforms, also for pull requests: the size and package gate
+  # The six platforms, also for pull requests: the package gate
   # below must fail before a merge, not on main or in a release.
   build:
     needs: test
