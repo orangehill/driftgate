@@ -754,12 +754,12 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 		}
 		return fallback("%s", why)
 	}
-	own, wait, err := s.ownDDL(ctx, c, g, plan)
+	own, err := s.ownDDL(ctx, c, g, plan)
 	if err != nil {
 		return err
 	}
 	chaos.Point("state.sqlserver.restore")
-	if _, err := c.ExecContext(ctx, wait+"COMMIT"); err != nil {
+	if own, err = s.commitOwn(ctx, c, own); err != nil {
 		return fmt.Errorf("state %s: restore: %w", s.o.Name, err)
 	}
 	s.own = own
@@ -784,42 +784,48 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 // ssModifyDate is a modify_date as CONVERT(varchar(30), …, 121) gives it.
 var ssModifyDate = lazy.Regexp(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}$`)
 
+// sqlServerOwnWait bounds how long a restore's COMMIT waits for the
+// server's clock to pass its own changes of the catalog (ownDDL).
+var sqlServerOwnWait = 50 * time.Millisecond
+
 // ownDDL reads, in the restore's transaction (c), the modify_date of the
 // objects whose definition it changed (ssOwnDDL): the tables it altered or
 // truncated, every object of theirs (constraints, triggers) and the
-// database's DDL triggers. The transaction holds a schema lock on each
-// until it ends, so no other session changes them before, and wait is
-// what makes the COMMIT that follows wait until the server's clock (which
-// sets modify_date) is 10 ms past them, so a change after it has a later
-// modify_date however the clock's time is rounded to datetime's steps of
-// about 3 ms.
-func (s *SQLServer) ownDDL(ctx context.Context, c *sql.Conn, g *ssGuard, plan *ssRestorePlan) (own ssOwnDDL, wait string, err error) {
-	var tables, ddl []string
+// database's DDL triggers. Only dates of
+// the last seconds up to the server's clock now count: the restore's own
+// changes are among them, an older date is not recent anyway, and a date
+// ahead of the clock (another time zone, a clock set back) is never
+// exempted. The transaction holds a schema lock on each until it ends, so
+// no other session changes them before.
+func (s *SQLServer) ownDDL(ctx context.Context, c *sql.Conn, g *ssGuard, plan *ssRestorePlan) (ssOwnDDL, error) {
+	var own ssOwnDDL
+	var objects, ddl []string
 	for id := range g.altered {
-		tables = append(tables, fmt.Sprint(id))
+		objects = append(objects, fmt.Sprint(id))
 	}
 	for _, rt := range plan.tables {
 		if rt.keys == "" && rt.clear == "TRUNCATE" {
-			tables = append(tables, fmt.Sprint(rt.w.ID))
+			objects = append(objects, fmt.Sprint(rt.w.ID))
 		}
 	}
 	for _, id := range g.ddl {
 		ddl = append(ddl, fmt.Sprint(id))
 	}
+	const recent = " AND modify_date BETWEEN DATEADD(second, -5, GETDATE()) AND GETDATE()"
 	var parts []string
-	if len(tables) > 0 {
-		in := strings.Join(tables, ", ")
-		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.objects WHERE object_id IN ("+in+") OR parent_object_id IN ("+in+")")
+	if len(objects) > 0 {
+		in := strings.Join(objects, ", ")
+		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.objects WHERE (object_id IN ("+in+") OR parent_object_id IN ("+in+"))"+recent)
 	}
 	if len(ddl) > 0 {
-		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.triggers WHERE parent_class = 0 AND object_id IN ("+strings.Join(ddl, ", ")+")")
+		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.triggers WHERE parent_class = 0 AND object_id IN ("+strings.Join(ddl, ", ")+")"+recent)
 	}
 	if len(parts) == 0 {
-		return own, "", nil
+		return own, nil
 	}
 	var values []string
 	latest := ""
-	err = readSets(ctx, c, strings.Join(parts, "\nUNION ALL ")+";", func(r *sql.Rows) error {
+	err := readSets(ctx, c, strings.Join(parts, "\nUNION ALL ")+";", func(r *sql.Rows) error {
 		var id int64
 		var date string
 		if err := r.Scan(&id, &date); err != nil {
@@ -833,10 +839,35 @@ func (s *SQLServer) ownDDL(ctx context.Context, c *sql.Conn, g *ssGuard, plan *s
 		return nil
 	})
 	if err != nil || latest == "" {
-		return own, "", err
+		return own, err
 	}
-	own = ssOwnDDL{values: "|" + strings.Join(values, ""), latest: latest, at: time.Now()}
-	return own, "WHILE GETDATE() <= DATEADD(millisecond, 10, CONVERT(datetime, '" + latest + "', 121)) WAITFOR DELAY '00:00:00.001';\n", nil
+	return ssOwnDDL{values: "|" + strings.Join(values, ""), latest: latest}, nil
+}
+
+// commitOwn commits the restore's transaction (c) once the server's clock
+// is 10 ms past the latest of own (ownDDL), so a change after it has a
+// later modify_date however the clock's time is rounded to datetime's
+// steps of about 3 ms. The wait is bounded (sqlServerOwnWait, and a number
+// of rounds should the clock jump); when the clock has not passed by then,
+// the restore commits all the same and returns no own changes: the next
+// fingerprint reads the catalog anew.
+func (s *SQLServer) commitOwn(ctx context.Context, c *sql.Conn, own ssOwnDDL) (ssOwnDDL, error) {
+	if own.latest == "" {
+		_, err := c.ExecContext(ctx, "COMMIT")
+		return ssOwnDDL{}, err
+	}
+	past := "GETDATE() > DATEADD(millisecond, 10, CONVERT(datetime, '" + own.latest + "', 121))"
+	var ok bool
+	err := c.QueryRowContext(ctx, fmt.Sprintf(`DECLARE @dg_until datetime2 = DATEADD(millisecond, %d, SYSUTCDATETIME()), @dg_rounds int = 0;
+WHILE NOT %s AND SYSUTCDATETIME() < @dg_until AND @dg_rounds < 1000000 BEGIN WAITFOR DELAY '00:00:00.001'; SET @dg_rounds += 1; END;
+DECLARE @dg_past bit = CASE WHEN %s THEN 1 ELSE 0 END;
+COMMIT;
+SELECT @dg_past;`, sqlServerOwnWait.Milliseconds(), past, past)).Scan(&ok)
+	if err != nil || !ok {
+		return ssOwnDDL{}, err
+	}
+	own.at = time.Now()
+	return own, nil
 }
 
 // blockers names, after a lock waited for too long (1222), the other

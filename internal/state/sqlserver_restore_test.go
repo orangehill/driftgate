@@ -578,6 +578,38 @@ func TestSQLServerOwnDDL(t *testing.T) {
 	}
 }
 
+// TestSQLServerOwnDDLAhead: a restore whose own catalog changes read
+// later than the server's clock (a modify_date ahead of it) commits after
+// a bounded wait and exempts none of them, instead of holding its locks
+// until the clock gets there.
+func TestSQLServerOwnDDLAhead(t *testing.T) {
+	s, _ := newSQLServerTest(t, Options{}, "")
+	ctx := context.Background()
+	c, err := s.conn(ctx, s.o.Working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, "BEGIN TRANSACTION"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	own, err := s.commitOwn(ctx, c, ssOwnDDL{values: "|1 2099-01-01 00:00:00.000|", latest: "2099-01-01 00:00:00.000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 10*sqlServerOwnWait {
+		t.Errorf("the commit waited %v", d)
+	}
+	if own.values != "" {
+		t.Errorf("own changes ahead of the clock exempted: %+v", own)
+	}
+	var n int
+	if err := c.QueryRowContext(ctx, "SELECT @@TRANCOUNT").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("transactions open after the commit: %d, %v", n, err)
+	}
+}
+
 // TestSQLServerRestoreFallbacks: changes item by item cannot restore
 // restore the whole database, which then fingerprints as the pristine
 // copy; an application's connection fails once and its pool connects
