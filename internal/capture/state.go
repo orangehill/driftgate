@@ -158,9 +158,12 @@ type tracker struct {
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
 	out      io.Writer
-	// ended: the last restore ended the application's sessions with a
-	// database (state.SessionEnder); read by the requests after it.
-	ended atomic.Bool
+	// resends is how many requests may still be sent again after the last
+	// restore (resendAfterRestore): the application's sessions with a
+	// database it ended (state.SessionEnder), each a pooled connection
+	// that fails once; resentAfter says which restore.
+	resends     atomic.Int64
+	resentAfter string
 }
 
 // openComponents connects to every state component, in name order.
@@ -367,7 +370,9 @@ func (t *tracker) markDirty(d map[string][]string) {
 // pristine fingerprint; a command component always runs its restore command.
 func (t *tracker) restore(ctx context.Context) error {
 	defer func(start time.Time) { t.time.Restore += time.Since(start) }(time.Now())
-	t.ended.Store(false)
+	t.resends.Store(0)
+	t.resentAfter = ""
+	ended := 0
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -393,8 +398,11 @@ func (t *tracker) restore(ctx context.Context) error {
 		fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
 		start := time.Now()
 		err := c.Restore(ctx, items)
-		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() {
-			t.ended.Store(true)
+		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
+			n := e.EndedSessions()
+			ended += n
+			t.resends.Add(int64(n))
+			t.resentAfter = fmt.Sprintf("the restore of %s ended %d database %s of the application", c.Name(), ended, plural(ended, "session", "sessions"))
 		}
 		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)

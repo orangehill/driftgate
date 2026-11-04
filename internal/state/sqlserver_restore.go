@@ -68,7 +68,7 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 
 func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {
 	defer func() { err = s.denied(err) }()
-	s.ended = false
+	s.ended = 0
 	if _, err := s.server(ctx); err != nil {
 		return err
 	}
@@ -166,7 +166,6 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 // changes items the caller did not name.
 func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
 	saved, err := s.restoreDatabase(ctx, mark, w)
-	s.ended = true // also after a failure: the database may have gone offline
 	if err != nil {
 		return err
 	}
@@ -1214,6 +1213,19 @@ func (s *SQLServer) waitFullText(ctx context.Context, c *sql.Conn, plan *ssResto
 	}
 }
 
-// EndedSessions reports whether the last Restore restored the whole
-// database, which ends every session in it (state.SessionEnder).
-func (s *SQLServer) EndedSessions() bool { return s.ended }
+// EndedSessions is how many sessions of other programs in the working
+// database the last Restore ended (state.SessionEnder): a restore of the
+// whole database ends every one, which keepOut and the OFFLINE count
+// before. Without VIEW SERVER STATE the login sees only its own sessions,
+// and the count is 0.
+func (s *SQLServer) EndedSessions() int { return s.ended }
+
+// countSessions adds to ended the sessions in database id other than this
+// one (m, in master) that are about to be ended; DriftGate's own in it
+// were closed before (closePool).
+func (s *SQLServer) countSessions(ctx context.Context, m *sql.Conn, id int) {
+	var n int
+	if m.QueryRowContext(ctx, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1", id).Scan(&n) == nil {
+		s.ended += n
+	}
+}

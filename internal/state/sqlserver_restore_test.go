@@ -1747,9 +1747,6 @@ func TestSQLServerRestoreWholeAccessNoExclude(t *testing.T) {
 			if err := s.Restore(ctx, items); err != nil {
 				t.Fatal(err)
 			}
-			if !s.EndedSessions() {
-				t.Fatal("restored item by item")
-			}
 			if w, err := s.database(ctx, s.o.Working); err != nil || w.UserAccess != access {
 				t.Fatalf("the working database is %+v after the restore (%v), want %s", w, err, access)
 			}

@@ -529,6 +529,16 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	} else if !showPrivate && len(req.ParamsFrom) > 0 {
 		hideErrors(res.Drifts) // its path may hold values of a private body
 	}
+	// A request capture sent again after a restore ended the
+	// application's database sessions: never silent.
+	for _, x := range []struct {
+		what string
+		rec  *snapshot.Record
+	}{{"baseline", bRec}, {"capture", cRec}} {
+		if x.rec != nil && x.rec.Resent != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("sent again in the %s: the first answer was %d, after %s", x.what, x.rec.Resent.First, x.rec.Resent.After))
+		}
+	}
 	res.Outcome = report.Pass
 	if len(res.Drifts) > 0 {
 		res.Outcome = report.Drift

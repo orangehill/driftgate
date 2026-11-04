@@ -45,6 +45,7 @@ type junitCase struct {
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
 	Skipped   *junitSkipped `xml:"skipped,omitempty"`
+	SystemOut string        `xml:"system-out,omitempty"` // the result's notes
 }
 
 type junitFailure struct {
@@ -68,7 +69,7 @@ func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 		}
 	}
 	for _, res := range r.Results {
-		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0"}
+		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0", SystemOut: strings.Join(res.Notes, "\n")}
 		switch res.Outcome {
 		case Drift:
 			lines := driftLines(res, maxDrifts, 0)

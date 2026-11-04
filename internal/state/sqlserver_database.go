@@ -275,6 +275,7 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 	}
 	s.closePool(s.o.Working)
 	if online {
+		s.countSessions(ctx, m, w.ID)
 		if info.Sysadmin {
 			// Ending the sessions first saves the ~3 s ROLLBACK IMMEDIATE
 			// waits for each one otherwise; only sysadmin may KILL.
@@ -673,6 +674,7 @@ func (s *SQLServer) keepOut(ctx context.Context, m *sql.Conn, w *sqlServerDataba
 		return nil // RESTRICTED_USER already, or SINGLE_USER: the user's choice
 	}
 	s.closePool(s.o.Working)
+	s.countSessions(ctx, m, w.ID)
 	if s.info.Sysadmin {
 		s.endSessions(ctx, m, w.ID)
 	}

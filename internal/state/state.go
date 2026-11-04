@@ -170,8 +170,8 @@ type Component interface {
 // takes it offline): the application's pooled connections then fail once
 // each, on their next use.
 type SessionEnder interface {
-	// EndedSessions reports whether the last Restore ended them.
-	EndedSessions() bool
+	// EndedSessions is how many of them the last Restore ended.
+	EndedSessions() int
 }
 
 // Command is a component handled entirely by commands of the project.

@@ -163,10 +163,12 @@ with `Database.Migrate()`) restores the whole database from the pristine
 copy's backup, which ends the application's connections: the first
 request on each pooled connection can then fail once, as with any client
 whose server ended its session, and the pool connects again. DriftGate
-sends a `GET` answered with 5xx then again (a 5xx that stays is kept); a
-request that may write is never sent twice, so a write that is the first
-request after such a restore can fail: turn pooling off in development
-(`Pooling=False` in the connection string) when that happens. The log says `restoring the whole database` when it happens. Apply
+sends a read-only `GET` answered with 5xx then once more, as many as
+the sessions the restore ended, and the report notes it (a 5xx that stays
+is kept); a request that changes data is never sent again, so a write
+that is the first request after such a restore can fail: turn pooling
+off in development (`Pooling=False` in the connection string) when that
+happens. The log says `restoring the whole database` when it happens. Apply
 migrations in `seed:` rather than at start-up, and run `driftgate seed`
 after adding one.
 

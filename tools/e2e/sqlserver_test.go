@@ -435,8 +435,8 @@ func TestCrashSeedSQLServer(t *testing.T) {
 
 // TestWholeRestoreSQLServerPool: a restore of the whole database ends the
 // sessions of the application's pool, whose idle connections then fail
-// once. A capture after such a restore must not take that failure for a
-// drift.
+// once. A capture after such a restore sends a GET that failed so once
+// more (within the sessions it ended), and the report says so.
 func TestWholeRestoreSQLServerPool(t *testing.T) {
 	p := sqlServerProject(t, "pool")
 	p.db.SetMaxIdleConns(8)
@@ -449,8 +449,13 @@ func TestWholeRestoreSQLServerPool(t *testing.T) {
 		p.data(t)
 		tag := fmt.Sprintf("w%d", i)
 		p.must(t, 0, "capture", tag)
-		if r := p.run(t, "", "compare", tag, "--against", "c1"); r.code != 0 {
+		r := p.run(t, "", "compare", tag, "--against", "c1")
+		if r.code != 0 {
 			t.Fatalf("%d: a capture after a restore of the whole database drifted: %v", i, r)
+		}
+		// Never silent: the report says which request was sent again.
+		if !strings.Contains(r.out, "sent again in the capture: the first answer was 500, after the restore of db ended") {
+			t.Errorf("%d: the report does not say a request was sent again:\n%s", i, r.out)
 		}
 	}
 	p.clean(t)
