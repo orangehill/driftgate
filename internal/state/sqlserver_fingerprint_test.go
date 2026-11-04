@@ -1290,7 +1290,7 @@ func TestSQLServerDatabaseItem(t *testing.T) {
 		{"GRANT SELECT ON dbo.t TO u0", "table:dbo.t"},
 		{"EXEC sp_addextendedproperty @name = N'appver', @value = N'2'", "database:"},
 		{"ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE", "database:"},
-		{"ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 140", "database:"},
+		{"ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 130", "database:"}, // the default of none of 2017 (140) and later
 		{"ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON", "database:"},
 		{"ALTER DATABASE CURRENT SET ARITHABORT ON", "database:"},
 		{"ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = 1", "database:"},
