@@ -22,11 +22,11 @@ func TestPattern(t *testing.T) {
 		{[]string{"eyJ.a-b_c.x1", "eyJ.ab.c-d_e2"}, `[0-9A-Za-z\-._]+`},
 		{[]string{"11bca30b-0308-4725-9d4e-6f1a2b3c4d5e", "7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d"}, `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`},
 		{[]string{"11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E", "7E2F0C41-5521-4A0B-8C3D-0E9F8A7B6C5D"}, `[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}`},
-		{[]string{"/orders/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E?x=1", "/orders/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d?x=2"}, `/orders/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\?x=\d+`},
+		{[]string{"/orders/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E?x=1", "/orders/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d?x=2"}, `/orders/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\?x=\d`},
 		{[]string{"/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/1", "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/2"}, `/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/\d+`},
 		// A duration and a session cookie: neither keeps the width of
 		// the samples (6ms then 12ms; a longer payload).
-		{[]string{"Response rendered in 6ms at 1", "Response rendered in 6ms at 2"}, `Response rendered in \d+ms at \d+`},
+		{[]string{"Response rendered in 6ms at 1", "Response rendered in 6ms at 2"}, `Response rendered in \d+ms at \d`},
 		{[]string{"x-time: 7ms", "x-time: 12ms"}, `x-time: \d+ms`},
 		{[]string{"s=" + strings.Repeat("aB3", 113) + "; path=/", "s=" + strings.Repeat("Zx9", 113) + "; path=/"}, `s=[0-9A-Za-z]+; path=/`},
 		{[]string{"1700000000", "1700000123"}, `-?\d+`},
@@ -91,5 +91,46 @@ func TestPatternUUIDSameFold(t *testing.T) {
 	}
 	if v := "x/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d/3"; re.MatchString(v) {
 		t.Errorf("%q matches %q, another UUID", got, v)
+	}
+}
+
+// TestPatternNarrow: a proposed format accepts what the samples' own form
+// allows and drifts on what a reviewer would want to see: a new status
+// word, a longer amount or code, a digit that agreed in every sample; a
+// count, a duration and a long token still take any length.
+func TestPatternNarrow(t *testing.T) {
+	for _, c := range []struct {
+		samples, accept, reject []string
+	}{
+		{[]string{"pending", "shipped"}, nil, []string{"failed", "cancelled", "error"}},
+		{[]string{"status: pending", "status: shipped"}, nil, []string{"status: failed", "status: cancelled"}},
+		{[]string{"Total: 12.50 EUR", "Total: 13.75 EUR"}, []string{"Total: 99.10 EUR"}, []string{"Total: 1312.50 EUR", "Total: 3.75 EUR"}},
+		{[]string{"page 1 of 3", "page 2 of 3"}, []string{"page 3 of 3"}, []string{"page 10 of 3", "page 1234567 of 3", "page 1 of 4"}},
+		{[]string{"HTTP 200", "HTTP 201"}, []string{"HTTP 204"}, []string{"HTTP 2010", "HTTP 20"}},
+		{[]string{"code=3", "code=4"}, []string{"code=5"}, []string{"code=500", "code=34"}},
+		{[]string{"2026-11-04T10:00:00Z", "2026-11-04T11:22:33Z"}, []string{"2026-12-05T09:00:00Z"}, []string{"2026-11-04T1:2:3Z", "2026-11-04T10:00:00.123Z"}},
+		{[]string{"ORD-12345", "ORD-12399"}, []string{"ORD-54321"}, []string{"ORD-1", "ORD-123456789"}},
+		{[]string{"ab12cd34ef", "zz99yy88xx"}, nil, []string{"a1", "abcdefghij12345"}},
+		{[]string{"v2beta1x9a", "v3beta2y8b"}, nil, []string{"v3beta2y8bzzzzz"}},
+		{[]string{"1.2.3.4.5", "1.2.3.4.6"}, []string{"1.2.3.4.7"}, []string{"1.2.3.4.66666", "1.2.4.4.5"}},
+		{[]string{"tok_abcdefgh", "tok_ijklmnop"}, []string{"tok_qrstuvwx"}, []string{"tok_a", "tok_abcdefghabcdefghabcdefgh"}},
+		{[]string{"12:01", "12:59"}, []string{"13:15"}, []string{"12:5", "12:5999"}},
+		{[]string{"AB", "CD"}, nil, []string{"ABC", "EF"}},
+		{[]string{"count 7", "count 8"}, []string{"count 70000"}, []string{"count x"}},
+		{[]string{"took 7ms", "took 12ms"}, []string{"took 1500ms"}, []string{"took 7s"}},
+		{[]string{"/jobs/9", "/jobs/12"}, []string{"/jobs/100000"}, []string{"/jobs/x"}},
+	} {
+		p := Pattern(c.samples)
+		re := regexp.MustCompile("^(?:" + p + ")$")
+		for _, v := range append(append([]string{}, c.samples...), c.accept...) {
+			if !re.MatchString(v) {
+				t.Errorf("%q → %s rejects %q", c.samples, p, v)
+			}
+		}
+		for _, v := range c.reject {
+			if re.MatchString(v) {
+				t.Errorf("%q → %s accepts %q", c.samples, p, v)
+			}
+		}
 	}
 }

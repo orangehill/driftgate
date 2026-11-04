@@ -67,45 +67,106 @@ func class(parts []string) string {
 	return "[" + c + "]"
 }
 
-// quantifier is how many characters of class c (class) a run of the parts
-// takes. A fixed width is kept only where it is the value's form, not
-// chance: a field of a date or time (two to four digits, zero-padded), a
-// short code, a hex token (a hash or id has its width). A lone digit is a
-// count that reaches 10, and a longer run of digits or letters (a token, a
-// session cookie, a duration) gets as long as it needs: one more digit or
-// a longer payload is not a change of the contract.
-func quantifier(c string, parts []string) string {
-	lo, hi := -1, 0
+// runFormat is the format of a run of letters and digits that differs
+// between the samples (parts), before and after the literal text around
+// it. It accepts what the samples' own form allows and little more:
+//
+//   - digits keep their width ({n}, or {min,max} of the samples), but for
+//     a count, measure or id that grows: a run after a key such as id or
+//     count, a segment of a path (/jobs/7), or before a unit (ms, s, KB
+//     …), takes \d+;
+//   - letters only are one of the words seen ((?:pending|shipped): a new
+//     status is a change), but a token of eight or more letters of one
+//     width keeps its class and width;
+//   - hex keeps its width (a hash, an id);
+//   - letters and digits keep their width ({n} or {min,max}), but a long
+//     token (16 or more, a session cookie) takes as many as it needs.
+func runFormat(parts []string, before, after string) string {
+	c := class(parts)
+	lo, hi := len(parts[0]), 0
 	for _, p := range parts {
-		n := len(p)
-		if lo < 0 || n < lo {
-			lo = n
+		lo, hi = min(lo, len(p)), max(hi, len(p))
+	}
+	width := func() string {
+		switch {
+		case lo == hi && lo == 1:
+			return ""
+		case lo == hi:
+			return fmt.Sprintf("{%d}", lo)
 		}
-		if n > hi {
-			hi = n
-		}
+		return fmt.Sprintf("{%d,%d}", lo, hi)
+	}
+	letters := true
+	for _, p := range parts {
+		letters = letters && !strings.ContainsAny(p, "0123456789")
 	}
 	switch {
-	case lo != hi:
-		return "+"
-	case c == `\d` && lo == 1:
-		return "+"
-	case lo == 1:
-		return ""
-	case lo <= 4 || c == `[0-9a-f]`:
-		return fmt.Sprintf("{%d}", lo)
+	case c == `\d`:
+		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) {
+			return `\d+`
+		}
+		return c + width()
+	case letters && !(lo == hi && lo >= 8):
+		return alternation(parts)
+	case c == `[0-9a-f]`, hi < 16:
+		return c + width()
 	}
-	return "+"
+	return c + "+"
 }
 
-// digitsIn is the format of a run of n digits inside a word that is the
-// same in every sample (5ms, 29T10): only the digits vary, and their
-// width as quantifier takes it.
-func digitsIn(n int) string {
-	if n >= 2 && n <= 4 {
-		return fmt.Sprintf(`\d{%d}`, n)
+// pathID reports digits that are a segment of a path (/jobs/7/, /jobs/7?):
+// an id, which grows.
+func pathID(before, after string) bool {
+	return strings.HasSuffix(before, "/") && (after == "" || after[0] == '/' || after[0] == '?' || after[0] == '#')
+}
+
+// alternation matches exactly the distinct parts.
+func alternation(parts []string) string {
+	seen := map[string]bool{}
+	var list []string
+	for _, p := range parts {
+		if !seen[p] {
+			seen[p] = true
+			list = append(list, regexp.QuoteMeta(p))
+		}
 	}
-	return `\d+`
+	sort.Strings(list)
+	return "(?:" + strings.Join(list, "|") + ")"
+}
+
+var (
+	// counterKey ends the text before a run of digits that counts or
+	// names something and grows: id 7, count=12, "views": 3.
+	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes)["']?\s*[:=]?\s*["']?$`)
+	// unitAfter starts the text after a run of digits that measures
+	// something: 12ms, 3 s, 512KB.
+	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
+	// timeLike is a value with a date or a time in it, whose digits that
+	// agree in the samples agree only by chance (the same day, hour).
+	timeLike = lazy.Regexp(`\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b`)
+)
+
+// digitsIn is the format of the digits inside a word that is the same in
+// every sample (29T10 of a time, 5ms): \d+ before a unit (a duration
+// grows), else their width.
+func digitsIn(word string) string {
+	q := regexp.QuoteMeta(word)
+	var b strings.Builder
+	last := 0
+	for _, m := range digitRun().FindAllStringIndex(q, -1) {
+		b.WriteString(q[last:m[0]])
+		switch n := m[1] - m[0]; {
+		case unitAfter().MatchString(q[m[1]:]):
+			b.WriteString(`\d+`)
+		case n == 1:
+			b.WriteString(`\d`)
+		default:
+			fmt.Fprintf(&b, `\d{%d}`, n)
+		}
+		last = m[1]
+	}
+	b.WriteString(q[last:])
+	return b.String()
 }
 
 // Pattern returns a format for the values, or "" when they are all equal.
@@ -192,17 +253,36 @@ func Pattern(values []string) string {
 			if equal && !allDigits(parts[0]) {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
-				b.WriteString(digitRun().ReplaceAllStringFunc(regexp.QuoteMeta(parts[0]), func(d string) string {
-					return digitsIn(len(d))
-				}))
+				b.WriteString(digitsIn(parts[0]))
 				continue
 			}
-			if sub := byKind(parts); sub != "" {
+			if equal && !timeLike().MatchString(values[0]) {
+				// Digits that agree in every sample stay (page 1 of 3); in a
+				// date or time they agree by chance (the same day).
+				b.WriteString(regexp.QuoteMeta(parts[0]))
+				continue
+			}
+			if sub := byKind(parts, timeLike().MatchString(values[0])); sub != "" {
 				b.WriteString(sub)
 				continue
 			}
-			c := class(parts)
-			b.WriteString(c + quantifier(c, parts))
+			// The word before the run with what separates them (count 7),
+			// and what follows it up to the next word (12 ms).
+			before, after := "", ""
+			k := j - 1
+			for ; k >= 0 && !toks[0][k].run; k-- {
+				before = toks[0][k].text + before
+			}
+			if k >= 0 {
+				before = toks[0][k].text + before
+			}
+			for k := j + 1; k < len(toks[0]); k++ {
+				after += toks[0][k].text
+				if toks[0][k].run {
+					break
+				}
+			}
+			b.WriteString(runFormat(parts, before, after))
 		}
 	} else {
 		// One class for everything: letters and digits by range, the rest
@@ -337,7 +417,7 @@ var (
 // byKind describes runs of letters and digits that differ but share their
 // build (896Z, 112Z): digits as \d, letters that agree as they are, letters
 // that differ as a class. It returns "" when the builds differ (a hex token).
-func byKind(parts []string) string {
+func byKind(parts []string, timey bool) string {
 	// A run of hex digits only is a token (a hash, an id): its build is chance.
 	hexOnly := true
 	for _, p := range parts {
@@ -372,13 +452,20 @@ func byKind(parts []string) string {
 			equal = equal && col[i] == col[0]
 		}
 		switch {
-		case digits:
-			b.WriteString(`\d` + quantifier(`\d`, col))
+		case equal && digits && timey: // the same day or hour by chance (04T10)
+			if len(col[0]) == 1 {
+				b.WriteString(`\d`)
+			} else {
+				fmt.Fprintf(&b, `\d{%d}`, len(col[0]))
+			}
 		case equal:
 			b.WriteString(regexp.QuoteMeta(col[0]))
 		default:
-			c := class(col)
-			b.WriteString(c + quantifier(c, col))
+			after := ""
+			if j+1 < len(split[0]) {
+				after = split[0][j+1] // 896Z, 12ms
+			}
+			b.WriteString(runFormat(col, "", after))
 		}
 	}
 	return b.String()
