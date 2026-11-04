@@ -1103,7 +1103,11 @@ excluded tables is lost. Limits of that:
   user of the database;
 - a restore stopped while the database is `RESTRICTED_USER` (DriftGate
   killed) leaves it so until the next restore or capture lets every login
-  in again (`ALTER DATABASE … SET MULTI_USER` does it by hand).
+  in again (`ALTER DATABASE … SET MULTI_USER` does it by hand);
+- a working database you made `RESTRICTED_USER` (or `SINGLE_USER`)
+  yourself is not let in afterwards: DriftGate notes the user access it
+  found in `<pristine>_dgx` and sets `MULTI_USER` only when it was that
+  (a `SINGLE_USER` database ends `RESTRICTED_USER`).
 
 Measured on small databases, such a restore takes about 0.8 s. A
 restore of the whole database that stops halfway leaves the working
