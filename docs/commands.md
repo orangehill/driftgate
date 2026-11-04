@@ -415,7 +415,9 @@ count as one). A method is covered only by a request that should succeed;
 error variants (`not-found`, `invalid-param` …) do not cover it. Exclude a
 route on purpose in `.driftgate/exclusions.yaml`, with a reason. It also
 reports requests that reach no route, stale exclusions and routes without a
-sample body.
+sample body. An exclusion `init` wrote for the framework (Debugbar,
+Telescope, Horizon …) is not reported stale while it keeps `init`'s
+reason: the project need not have that part.
 
 ```
 $ driftgate coverage
@@ -628,7 +630,13 @@ failure): a rule whose requests are all gone or renamed (`no request`),
 or one whose values did not change this time (`no change`). A rule listed
 comparison after comparison is probably stale: the value it names was
 renamed or removed. With `--only` or `--target`, rules of the requests
-not compared are not listed.
+not compared are not listed. A rule `init` wrote for the framework (a
+throttle's `x-ratelimit-*`) is not listed while it keeps `init`'s reason.
+
+Groups are numbered by size, the ones the default view leaves out (only
+in requests whose status changed) after the ones it lists, so the listed
+groups start at [1]; `review --group N` and `accept group:N` use the same
+numbers.
 
 ```
 $ driftgate compare before --only 'get-*'

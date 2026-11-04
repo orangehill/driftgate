@@ -386,6 +386,7 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 		excl.Routes = kept
 	}
 	c := routes.Check(inv, cat, excl)
+	c.Stale = staleExclusions(excl, c.Stale)
 	code := ExitClean
 	if len(c.Uncovered) > 0 {
 		code = ExitDrift

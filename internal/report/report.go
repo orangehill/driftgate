@@ -298,6 +298,15 @@ func Build(tag, against string, results []Result) *Report {
 		r.Groups[i].N = i + 1
 	}
 	r.summarize()
+	// The groups the default view leaves out (only in requests whose
+	// status changed) come last, so the ones it lists are numbered from
+	// [1] on, as review and accept group:N read them.
+	if hidden := r.hiddenGroups(); len(hidden) > 0 {
+		sort.SliceStable(r.Groups, func(i, j int) bool { return !hidden[r.Groups[i].N] && hidden[r.Groups[j].N] })
+		for i := range r.Groups {
+			r.Groups[i].N = i + 1
+		}
+	}
 	return r
 }
 

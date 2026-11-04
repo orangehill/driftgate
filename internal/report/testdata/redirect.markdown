@@ -8,8 +8,8 @@
 
 #### What changed
 
-- [4] 1 drift in 1 request: header location is new
-- [6] 1 drift in 1 request: status changed (200 → 302)
+- [1] 1 drift in 1 request: header location is new
+- [2] 1 drift in 1 request: status changed (200 → 302)
    - 1 request: 200 → 302 to http://localhost:8080: `home`
 
 _6 more groups only in requests whose status changed, summarized there; `driftgate review` lists them._

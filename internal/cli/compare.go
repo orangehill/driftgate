@@ -320,7 +320,7 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		r.Level, r.Mode, r.Created = p.Level.String(), p.Mode, time.Now().UTC().Format(time.RFC3339)
 		r.SkipPrivate = o.skipPrivate
 		r.Origins = notes
-		r.UnusedRules = allow.Unused(o.only != "" || o.someTargets)
+		r.UnusedRules = unusedRules(allow, allow.Unused(o.only != "" || o.someTargets))
 		r.Timings = report.CompareTimings(results, timings(base), timings(cur))
 		if o.override != nil {
 			r.Level = o.override.String()

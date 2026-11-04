@@ -64,21 +64,21 @@ DRIFT  news-0
 
 Groups:
   [1] 6 drifts in 6 requests: status changed (for example 200 → 302)
-  [2] 8 drifts in 4 requests: element html>head>meta[*] is new
-  [3] 4 drifts in 4 requests: element html>body>a is new
-  [4] 4 drifts in 4 requests: element html>body>h1 is missing
-  [5] 4 drifts in 4 requests: header location is new
-  [6] 4 drifts in 4 requests: header vary is missing
-  [7] 4 drifts in 4 requests: text of html>body changed ("<h1> <p>" → "Redirecting to <a> .")
-  [8] 4 drifts in 4 requests: text of html>head>title changed (for example "Home" → "Redirecting to /login")
-  [9] 3 drifts in 3 requests: header x-total is missing
-  [10] 3 drifts in 3 requests: header content-type changed value (for example ["application/json"] → ["application/problem+json"])
-  [11] 2 drifts in 2 requests: the same values with a different layout of whitespace
-  [12] 2 drifts in 2 requests: $.exception is new
-  [13] 2 drifts in 2 requests: $.message is new
-  [14] 2 drifts in 2 requests: $.data is missing
-  [15] 2 drifts in 2 requests: $.status changed value ("ok" → "error")
-  [16] 1 drift in 1 request: $.data[*].id changed type int → string
-  [17] 1 drift in 1 request: $.title changed value ("Notes" → "Notes news-0")
+  [2] 4 drifts in 4 requests: header location is new
+  [3] 3 drifts in 3 requests: header x-total is missing
+  [4] 3 drifts in 3 requests: header content-type changed value (for example ["application/json"] → ["application/problem+json"])
+  [5] 1 drift in 1 request: $.data[*].id changed type int → string
+  [6] 1 drift in 1 request: $.title changed value ("Notes" → "Notes news-0")
+  [7] 8 drifts in 4 requests: element html>head>meta[*] is new
+  [8] 4 drifts in 4 requests: element html>body>a is new
+  [9] 4 drifts in 4 requests: element html>body>h1 is missing
+  [10] 4 drifts in 4 requests: header vary is missing
+  [11] 4 drifts in 4 requests: text of html>body changed ("<h1> <p>" → "Redirecting to <a> .")
+  [12] 4 drifts in 4 requests: text of html>head>title changed (for example "Home" → "Redirecting to /login")
+  [13] 2 drifts in 2 requests: the same values with a different layout of whitespace
+  [14] 2 drifts in 2 requests: $.exception is new
+  [15] 2 drifts in 2 requests: $.message is new
+  [16] 2 drifts in 2 requests: $.data is missing
+  [17] 2 drifts in 2 requests: $.status changed value ("ok" → "error")
 
 run against baseline:local: 7 compared, 0 passed, 7 drifted, 0 skipped, 0 observed

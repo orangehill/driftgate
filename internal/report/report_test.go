@@ -105,7 +105,9 @@ func TestLocateAndText(t *testing.T) {
 	r.Text(&b, 20)
 	out := b.String()
 	for _, want := range []string{
-		"[1] 6 drifts in 3 requests: $.data[*].id changed type int → string\n      GET /api/news/{id}  App\\Http\\Controllers\\NewsController@show  app/Http/Controllers/NewsController.php:42\n",
+		// Only in requests whose status changed: after the groups the
+		// default view lists.
+		"[3] 6 drifts in 3 requests: $.data[*].id changed type int → string\n      GET /api/news/{id}  App\\Http\\Controllers\\NewsController@show  app/Http/Controllers/NewsController.php:42\n",
 		"GET /faq  src/app/faq/page.tsx\n", // the action is the file: once
 	} {
 		if !strings.Contains(out, want) {
@@ -178,7 +180,7 @@ func TestMarkdown(t *testing.T) {
 		"### DriftGate: ✗ 4 of 5 compared requests drifted\n",
 		"| 5 | 1 | 4 | 1 | 1 |",
 		"#### What changed",
-		`1. 6 drifts in 3 requests: $.data\[\*\].id changed type int → string`,
+		`3. 6 drifts in 3 requests: $.data\[\*\].id changed type int → string`,
 		"<details><summary><code>news-`0`</code> — 5 drifts</summary>",
 		"<details><summary>2 skipped or observed</summary>",
 	} {
