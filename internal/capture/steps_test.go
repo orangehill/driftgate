@@ -68,23 +68,23 @@ func TestUploadsReadWhenSent(t *testing.T) {
 
 // TestStepOutputNotLogged: when a command step fails, the log shows what
 // it wrote to standard error, not its output, which is its body: private,
-// or public but not scanned for personal data yet.
+// or public but not scanned for personal data yet; its command shows no
+// secret.
 func TestStepOutputNotLogged(t *testing.T) {
 	for _, storage := range []string{snapshot.Private, snapshot.Public} {
 		var log bytes.Buffer
 		r := &runner{p: &config.Project{Root: t.TempDir()}, log: &log}
 		res := r.command(context.Background(), catalog.Request{ID: "export", Storage: storage, Output: true,
-			Command: []string{"sh", "-c", "printf 'marko%sexample.rs\\n' @; echo export failed >&2; exit 3"}})
+			Command: []string{"sh", "-c", "MYSQL_PWD=S3cret true; printf 'marko%sexample.rs\\n' @; echo export failed >&2; exit 3"}})
 		if res.Record.Exit == nil || *res.Record.Exit != 3 {
 			t.Fatalf("%s: %+v", storage, res.Record)
 		}
-		if !strings.Contains(log.String(), "export failed") || strings.Contains(log.String(), "marko@") {
+		if !strings.Contains(log.String(), "export failed") || strings.Contains(log.String(), "marko@") || !strings.Contains(log.String(), "MYSQL_PWD=***") || strings.Contains(log.String(), "S3cret") {
 			t.Fatalf("%s: log %q", storage, log.String())
 		}
 	}
 }
 
-// TestCommandLine: driftgate seed shows the whole command it runs.
 // TestCommandLine: driftgate seed shows the whole command it runs, its
 // passwords and secrets as ***; a reference to a variable stays.
 func TestCommandLine(t *testing.T) {
