@@ -521,6 +521,24 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 	}
 }
 
+// RetryInTransition runs f again while it fails with SQL Server's error
+// 927 or 952 (a database in the middle of a restore, or in transition),
+// up to 30 seconds: for the queries of tests and test applications on a
+// server where other databases are restored meanwhile, which SQL Server
+// 2019 and earlier let stop a statement of any database (retryOthers).
+func RetryInTransition(f func() error) error {
+	deadline := time.Now().Add(30 * time.Second)
+	wait := 20 * time.Millisecond
+	for {
+		err := f()
+		if n := sqlServerNumber(err); n != 927 && n != 952 || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(wait)
+		wait = min(2*wait, time.Second)
+	}
+}
+
 // sqlServerFirst reports the first message of a server error: SQL Server
 // ends a failed BACKUP or RESTORE with a generic one ("BACKUP DATABASE is
 // terminating abnormally", 3013) after the one that says why.

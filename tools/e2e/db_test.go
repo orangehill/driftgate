@@ -16,6 +16,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/orangehill/driftgate/internal/demo"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // The databases of these tests are named dge2e_*: no other test package
@@ -53,7 +54,9 @@ func openMySQL(t *testing.T, dsn, db string) *sql.DB {
 func sqlExec(t *testing.T, db *sql.DB, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		// On SQL Server 2019 and earlier another test's RESTORE may stop a
+		// statement (927, 952); MySQL and PostgreSQL never return those.
+		if err := state.RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}

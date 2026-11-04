@@ -132,7 +132,7 @@ func newSQLServerApp(t *testing.T, db *sql.DB) *sqlServerApp {
 		"CREATE TABLE sessions (id int IDENTITY PRIMARY KEY, path nvarchar(200))",
 		"INSERT INTO users (email) VALUES (N'a@x'), (N'b@x')",
 	} {
-		if _, err := db.Exec(s); err != nil {
+		if err := state.RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
@@ -146,39 +146,56 @@ func (a *sqlServerApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.errs = append(a.errs, r.Method+" "+r.URL.Path+": "+err.Error())
 		http.Error(w, err.Error(), 500)
 	}
-	if _, err := a.db.Exec("INSERT INTO sessions (path) VALUES (@p1)", r.URL.Path); err != nil {
+	// On SQL Server 2019 and earlier another test's RESTORE may stop a
+	// statement (927, 952): the application tries it again, so a capture
+	// does not see a 500 that no change of DriftGate's made.
+	retry := state.RetryInTransition
+	if err := retry(func() error { _, err := a.db.Exec("INSERT INTO sessions (path) VALUES (@p1)", r.URL.Path); return err }); err != nil {
 		fail(err)
 		return
 	}
 	status, body := 200, ""
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/users":
-		rows, err := a.db.Query("SELECT id, email FROM users ORDER BY id")
+		var users []string
+		err := retry(func() error {
+			users = nil
+			rows, err := a.db.Query("SELECT id, email FROM users ORDER BY id")
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var id int
+				var email string
+				rows.Scan(&id, &email)
+				users = append(users, fmt.Sprintf("%d:%s", id, email))
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			fail(err)
 			return
 		}
-		var users []string
-		for rows.Next() {
-			var id int
-			var email string
-			rows.Scan(&id, &email)
-			users = append(users, fmt.Sprintf("%d:%s", id, email))
-		}
-		rows.Close()
 		body = fmt.Sprintf(`{"users":%q}`, strings.Join(users, ","))
 	case r.Method == "POST" && r.URL.Path == "/users":
 		var in struct{ Email string }
 		json.NewDecoder(r.Body).Decode(&in)
 		var id, n int
-		if err := a.db.QueryRow("INSERT INTO users (email) OUTPUT INSERTED.id VALUES (@p1)", in.Email).Scan(&id); err != nil {
+		if err := retry(func() error {
+			return a.db.QueryRow("INSERT INTO users (email) OUTPUT INSERTED.id VALUES (@p1)", in.Email).Scan(&id)
+		}); err != nil {
 			status, body = 409, `{"error":"taken"}`
 			break
 		}
-		a.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&n)
+		retry(func() error { return a.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&n) })
 		status, body = 201, fmt.Sprintf(`{"id":%d,"count":%d}`, id, n)
 	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/users/"):
-		res, err := a.db.Exec("DELETE FROM users WHERE id = @p1", strings.TrimPrefix(r.URL.Path, "/users/"))
+		var res sql.Result
+		err := retry(func() (err error) {
+			res, err = a.db.Exec("DELETE FROM users WHERE id = @p1", strings.TrimPrefix(r.URL.Path, "/users/"))
+			return err
+		})
 		if err != nil {
 			fail(err)
 			return
@@ -188,7 +205,10 @@ func (a *sqlServerApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "POST" && r.URL.Path == "/report":
 		// A migration of the application's: an object a restore of the
 		// tables cannot bring back, so the whole database is restored.
-		if _, err := a.db.Exec("CREATE VIEW user_report AS SELECT COUNT(*) AS n FROM dbo.users"); err != nil {
+		if err := retry(func() error {
+			_, err := a.db.Exec("CREATE VIEW user_report AS SELECT COUNT(*) AS n FROM dbo.users")
+			return err
+		}); err != nil {
 			fail(err)
 			return
 		}
@@ -207,7 +227,7 @@ func (a *sqlServerApp) count(t *testing.T, table string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var n int
-	if err := a.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
+	if err := state.RetryInTransition(func() error { return a.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n) }); err != nil {
 		t.Fatal(err)
 	}
 	return n

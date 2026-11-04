@@ -59,7 +59,7 @@ func mysqlServers(t *testing.T) []string {
 func mustExec(t *testing.T, db *sql.DB, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		if err := RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}

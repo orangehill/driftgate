@@ -140,26 +140,37 @@ func (p *ssProject) data(t *testing.T) string {
 		"SELECT 'ident', 0, CONCAT(IDENT_CURRENT('faq'), '/', IDENT_CURRENT('faq_log'))",
 		"SELECT 'big', id, CONVERT(nvarchar(64), HASHBYTES('SHA2_256', b), 2) FROM big ORDER BY id",
 	} {
-		rows, err := db.Query(q)
+		var lines, bigs []string
+		err := state.RetryInTransition(func() error {
+			lines, bigs = nil, nil
+			rows, err := db.Query(q)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var what, v string
+				var id int
+				if err := rows.Scan(&what, &id, &v); err != nil {
+					return err
+				}
+				if what == "big" {
+					bigs = append(bigs, fmt.Sprintf("%d %s\n", id, v))
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("%s %d %s\n", what, id, v))
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
-		for rows.Next() {
-			var what, v string
-			var id int
-			if err := rows.Scan(&what, &id, &v); err != nil {
-				t.Fatal(err)
-			}
-			if what == "big" {
-				fmt.Fprintf(big, "%d %s\n", id, v)
-				continue
-			}
-			fmt.Fprintf(&b, "%s %d %s\n", what, id, v)
+		for _, l := range bigs {
+			big.Write([]byte(l))
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
+		for _, l := range lines {
+			b.WriteString(l)
 		}
-		rows.Close()
 	}
 	fmt.Fprintf(&b, "big %x\n", big.Sum(nil))
 	return b.String()
@@ -169,7 +180,7 @@ func (p *ssProject) data(t *testing.T) string {
 func (p *ssProject) sessions(t *testing.T) int {
 	t.Helper()
 	var n int
-	if err := p.master.QueryRow("SELECT COUNT(*) FROM [" + p.work + "].dbo.sessions").Scan(&n); err != nil {
+	if err := state.RetryInTransition(func() error { return p.master.QueryRow("SELECT COUNT(*) FROM [" + p.work + "].dbo.sessions").Scan(&n) }); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -179,16 +190,16 @@ func (p *ssProject) sessions(t *testing.T) int {
 // there is none).
 func (p *ssProject) status(t *testing.T, db string) string {
 	t.Helper()
-	var state, access string
+	var st, access string
 	var ro bool
-	err := p.master.QueryRow("SELECT state_desc, user_access_desc, is_read_only FROM sys.databases WHERE name = @p1", db).Scan(&state, &access, &ro)
+	err := p.master.QueryRow("SELECT state_desc, user_access_desc, is_read_only FROM sys.databases WHERE name = @p1", db).Scan(&st, &access, &ro)
 	if err == sql.ErrNoRows {
 		return ""
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("%s %s read-only=%v", state, access, ro)
+	return fmt.Sprintf("%s %s read-only=%v", st, access, ro)
 }
 
 const (

@@ -65,7 +65,7 @@ func sqlServerName() string {
 func sqlServerExec(t *testing.T, db *sql.DB, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		if err := state.RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}

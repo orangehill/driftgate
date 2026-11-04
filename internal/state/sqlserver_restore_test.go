@@ -140,7 +140,7 @@ func restoreSQLServer(t testing.TB, s *SQLServer, db *sql.DB, log *ssLog, p Fing
 func sqlServerInt(t testing.TB, db *sql.DB, q string) int64 {
 	t.Helper()
 	var n sql.NullInt64
-	if err := db.QueryRow(q).Scan(&n); err != nil {
+	if err := RetryInTransition(func() error { return db.QueryRow(q).Scan(&n) }); err != nil {
 		t.Fatalf("%s: %v", q, err)
 	}
 	return n.Int64
