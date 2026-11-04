@@ -20,7 +20,11 @@ import (
 // The encoding starts with a varbinary(max) operand: SQL Server cuts the
 // result of varbinary(n) + varbinary(n) at 8000 bytes without an error,
 // which would hash only the start of a long row. A value that may reach
-// 8000 bytes starts its own part with one too.
+// 8000 bytes starts its own part with one too. A row whose parts together
+// cannot pass 8000 bytes (every column of a type with a bound, the sum of
+// the bounds with 5 bytes per part at most 8000) is the same bytes as a
+// varbinary(n): SQL Server reads and sends such a value faster than a
+// varbinary(max).
 
 // ssColumn is a column of a table as the encoding needs it.
 type ssColumn struct {
@@ -151,6 +155,31 @@ func (c ssColumn) long() bool {
 	return c.CLR // the other types are a few bytes
 }
 
+// bound is the most bytes a column's value (sqlServerValue) takes, from
+// the type of the expression; 0 when the value has no such bound below
+// 8000 bytes.
+func (c ssColumn) bound() int {
+	switch c.Type {
+	case "bit", "tinyint":
+		return 1
+	case "smallint":
+		return 2
+	case "int", "smallmoney", "real":
+		return 4
+	case "bigint", "money", "float", "timestamp":
+		return 8
+	case "uniqueidentifier", "date", "time", "datetime2", "datetimeoffset", "datetime", "smalldatetime":
+		return 16
+	case "decimal", "numeric":
+		return 64
+	case "char", "varchar", "nchar", "nvarchar", "binary", "varbinary":
+		if c.MaxLength >= 0 && !c.long() {
+			return max(c.MaxLength, 1)
+		}
+	}
+	return 0
+}
+
 // sqlServerPart encodes one value v (varbinary): 0x00 for NULL, else 0x01,
 // the length in 4 bytes and the bytes. long starts it with a
 // varbinary(max) operand (see above).
@@ -174,21 +203,40 @@ func sqlServerColumn(c ssColumn) (string, error) {
 // sqlServerRow is the expression of a row's encoding: its hashed columns
 // (ssColumn.hashed) in the order of the table.
 func sqlServerRow(cols []ssColumn) (string, error) {
-	parts := []string{"CAST(0x AS varbinary(max))"}
+	parts, bound, err := sqlServerParts(cols)
+	if err != nil {
+		return "", err
+	}
+	if bound > 0 && bound <= 8000 {
+		return "CAST(" + strings.Join(parts, "\n + ") + fmt.Sprintf(" AS varbinary(%d))", bound), nil
+	}
+	return strings.Join(append([]string{"CAST(0x AS varbinary(max))"}, parts...), "\n + "), nil
+}
+
+// sqlServerParts are the encoded parts of a row's hashed columns and the
+// most bytes they take together, 0 when a column has no bound.
+func sqlServerParts(cols []ssColumn) (parts []string, bound int, err error) {
+	bounded := true
 	for _, c := range cols {
 		if !c.hashed() {
 			continue
 		}
 		if c.Encrypted {
-			return "", fmt.Errorf("column %s is encrypted with Always Encrypted, which DriftGate does not support", c.Name)
+			return nil, 0, fmt.Errorf("column %s is encrypted with Always Encrypted, which DriftGate does not support", c.Name)
 		}
 		p, err := sqlServerColumn(c)
 		if err != nil {
-			return "", err
+			return nil, 0, err
 		}
 		parts = append(parts, p)
+		b := c.bound()
+		bounded = bounded && b > 0
+		bound += 5 + b // 0x01 (0x00 for NULL), the length and the value
 	}
-	return strings.Join(parts, "\n + "), nil
+	if !bounded {
+		bound = 0
+	}
+	return parts, bound, nil
 }
 
 // ssSum hashes a multiset of rows: the count and, of every row's SHA-256,

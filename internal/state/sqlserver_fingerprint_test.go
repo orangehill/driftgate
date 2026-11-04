@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
@@ -115,6 +116,79 @@ func TestSQLServerEncoding(t *testing.T) {
 				t.Errorf("%v in another order hashes differently", tc.a)
 			}
 		})
+	}
+}
+
+// TestSQLServerBoundedRow: a row encoded as a varbinary(n) is the same
+// bytes as encoded as a varbinary(max), up to a bound of exactly 8000
+// bytes; a row that may be longer is encoded as a varbinary(max).
+func TestSQLServerBoundedRow(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{}, "COLLATE SQL_Latin1_General_CP1_CI_AS")
+	sqlServerExec(t, db, `CREATE TABLE e (id int PRIMARY KEY, ti tinyint NULL, si smallint NULL, b bigint NULL, bt bit NULL, f float NULL, r real NULL,
+		m money NULL, sm smallmoney NULL, g uniqueidentifier NULL, dm decimal(38, 10) NULL, n numeric(5, 2) NULL, dt date NULL, tm time(7) NULL,
+		d2 datetime2(7) NULL, d datetime NULL, sd smalldatetime NULL, dto datetimeoffset(7) NULL, c char(3) NULL, nc nchar(3) NULL,
+		v varchar(10) NULL, nv nvarchar(10) NULL, bn binary(4) NULL, vb varbinary(10) NULL)`,
+		"INSERT INTO e (id) VALUES (1)",
+		`INSERT INTO e VALUES (2, 0, -32768, -9223372036854775808, 0, -1e0 * 0e0, CAST(-1e0 * 0e0 AS real), -922337203685477.5808, -214748.3648,
+			'00000000-0000-0000-0000-000000000000', -9999999999999999999999999999.9999999999, -0.01, '0001-01-01', '00:00:00', '0001-01-01', '1753-01-01', '1900-01-01',
+			'0001-01-01T00:00:00-14:00', '', N'', '', N'', 0x, 0x)`,
+		`INSERT INTO e VALUES (3, 255, 32767, 9223372036854775807, 1, 1.7976931348623157e308, CAST(3.4e38 AS real), 922337203685477.5807, 214748.3647,
+			'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF', 9999999999999999999999999999.9999999999, 999.99, '9999-12-31', '23:59:59.9999999', '9999-12-31T23:59:59.9999999',
+			'9999-12-31T23:59:59.997', '2079-06-06', '9999-12-31T23:59:59.9999999+14:00', 'a', N'á', 'abcdefghij', N'ábcdéfghij', 0x01, 0x01000000000000000000)`,
+		`INSERT INTO e VALUES (4, 1, 1, 1, 1, 0e0, CAST(0 AS real), 0, 0, NEWID(), 0, 0, '2020-01-01', '12:00', '2020-01-01', '2020-01-01', '2020-01-01',
+			'2020-01-01T12:00:00+02:00', 'a  ', N'a ', 'a ', N'a ', 0x00000000, 0x00)`,
+		"CREATE TABLE at8000 (id int PRIMARY KEY, v varbinary(7986) NULL)",
+		"INSERT INTO at8000 VALUES (1, CAST(CAST(REPLICATE(CAST('a' AS varchar(max)), 7985) AS varbinary(max)) + 0x01 AS varbinary(7986))), (2, NULL), (3, 0x)",
+		"CREATE TABLE over8000 (id int PRIMARY KEY, v varbinary(7987) NULL)",
+		"INSERT INTO over8000 VALUES (1, CAST(CAST(REPLICATE(CAST('a' AS varchar(max)), 7986) AS varbinary(max)) + 0x01 AS varbinary(7987)))")
+	ctx := context.Background()
+	c, err := s.conn(ctx, s.o.Working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	inv, err := s.inventory(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for table, bound := range map[string]int{"e": 0, "at8000": 8000, "over8000": 0} {
+		tb := inv.ByItem["table:dbo."+table]
+		row, err := sqlServerRow(tb.Columns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts, n, err := sqlServerParts(tb.Columns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case bound != 0 && n != bound:
+			t.Fatalf("%s: bound %d, want %d", table, n, bound)
+		case table == "over8000" && (n != 8001 || !strings.HasPrefix(row, "CAST(0x AS varbinary(max))")):
+			t.Fatalf("%s (bound %d) is not encoded as a varbinary(max): %s", table, n, row)
+		case table != "over8000" && strings.Contains(row, "max"):
+			t.Fatalf("%s is not bounded: %s", table, row)
+		}
+		maxed := "CAST(0x AS varbinary(max)) + " + strings.Join(parts, " + ")
+		rows, err := c.QueryContext(ctx, "SELECT "+row+", "+maxed+" FROM "+table+" ORDER BY id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for rows.Next() {
+			var a, b []byte
+			if err := rows.Scan(&a, &b); err != nil {
+				t.Fatal(err)
+			}
+			count++
+			if !bytes.Equal(a, b) {
+				t.Errorf("%s row %d: %x, as varbinary(max) %x", table, count, a, b)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil || count == 0 {
+			t.Fatalf("%s: %d rows, %v", table, count, err)
+		}
 	}
 }
 
