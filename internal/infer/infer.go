@@ -81,7 +81,7 @@ func class(parts []string) string {
 //   - hex keeps its width (a hash, an id);
 //   - letters and digits keep their width ({n} or {min,max}), but a long
 //     token (16 or more, a session cookie) takes as many as it needs.
-func runFormat(parts []string, before, after string) string {
+func runFormat(parts []string, before, after string, grow bool) string {
 	c := class(parts)
 	lo, hi := len(parts[0]), 0
 	for _, p := range parts {
@@ -102,7 +102,7 @@ func runFormat(parts []string, before, after string) string {
 	}
 	switch {
 	case c == `\d`:
-		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) {
+		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) || suffixedID().MatchString(before) || grow {
 			return `\d+`
 		}
 		return c + width()
@@ -113,6 +113,10 @@ func runFormat(parts []string, before, after string) string {
 	}
 	return c + "+"
 }
+
+// grows reports values whose digits all count up: a version (v1.2.3) or a
+// range of a list (Showing 1-10 of 120).
+var grows = lazy.Regexp(`(?i)\bv\d+\.\d+\.\d+|showing \d+\s*[-–]\s*\d+ of \d+`)
 
 // pathID reports digits that are a segment of a path (/jobs/7/, /jobs/7?):
 // an id, which grows.
@@ -137,7 +141,9 @@ func alternation(parts []string) string {
 var (
 	// counterKey ends the text before a run of digits that counts or
 	// names something and grows: id 7, count=12, "views": 3.
-	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes)["']?\s*[:=]?\s*["']?$`)
+	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes|total\w*|\w*_?pages|of)["']?\s*[:=]?\s*["']?$`)
+	// suffixedID ends the text before the digits of an id such as user_42.
+	suffixedID = lazy.Regexp(`(?i)(?:^|[^a-z0-9])[a-z]+_$`)
 	// unitAfter starts the text after a run of digits that measures
 	// something: 12ms, 3 s, 512KB.
 	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
@@ -149,14 +155,14 @@ var (
 // digitsIn is the format of the digits inside a word that is the same in
 // every sample (29T10 of a time, 5ms): \d+ before a unit (a duration
 // grows), else their width.
-func digitsIn(word string) string {
+func digitsIn(word string, grow bool) string {
 	q := regexp.QuoteMeta(word)
 	var b strings.Builder
 	last := 0
 	for _, m := range digitRun().FindAllStringIndex(q, -1) {
 		b.WriteString(q[last:m[0]])
 		switch n := m[1] - m[0]; {
-		case unitAfter().MatchString(q[m[1]:]):
+		case grow, unitAfter().MatchString(q[m[1]:]):
 			b.WriteString(`\d+`)
 		case n == 1:
 			b.WriteString(`\d`)
@@ -187,15 +193,21 @@ func Pattern(values []string) string {
 	// Numbers: any integer or decimal, signed, since a value that changes by
 	// itself can take any of them.
 	ints, decimals := true, true
+	negative := false
 	for _, v := range values {
 		ints = ints && integer().MatchString(v)
 		decimals = decimals && decimal().MatchString(v)
+		negative = negative || strings.HasPrefix(v, "-")
 	}
 	switch {
-	case ints:
+	case ints && negative:
 		return `-?\d+`
-	case decimals:
+	case ints:
+		return `\d+`
+	case decimals && negative:
 		return `-?\d+(?:\.\d+)?`
+	case decimals:
+		return `\d+(?:\.\d+)?`
 	}
 	toks := make([][]token, len(values))
 	for i, v := range values {
@@ -253,7 +265,11 @@ func Pattern(values []string) string {
 			if equal && !allDigits(parts[0]) {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
-				b.WriteString(digitsIn(parts[0]))
+				b.WriteString(digitsIn(parts[0], grows().MatchString(values[0])))
+				continue
+			}
+			if equal && grows().MatchString(values[0]) {
+				b.WriteString(`\d+`) // the total of a range, a part of a version
 				continue
 			}
 			if equal && !timeLike().MatchString(values[0]) {
@@ -282,7 +298,7 @@ func Pattern(values []string) string {
 					break
 				}
 			}
-			b.WriteString(runFormat(parts, before, after))
+			b.WriteString(runFormat(parts, before, after, grows().MatchString(values[0])))
 		}
 	} else {
 		// One class for everything: letters and digits by range, the rest
@@ -465,7 +481,7 @@ func byKind(parts []string, timey bool) string {
 			if j+1 < len(split[0]) {
 				after = split[0][j+1] // 896Z, 12ms
 			}
-			b.WriteString(runFormat(col, "", after))
+			b.WriteString(runFormat(col, "", after, false))
 		}
 	}
 	return b.String()

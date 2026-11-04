@@ -13,9 +13,9 @@ func TestPattern(t *testing.T) {
 	}{
 		{[]string{"2026-10-29 10:00:01", "2026-10-29 10:00:07"}, `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`},
 		{[]string{"Wed, 29 Oct 2026 09:00:01 GMT", "Wed, 29 Oct 2026 09:00:02 GMT"}, `[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`},
-		{[]string{"9", "10"}, `-?\d+`},
+		{[]string{"9", "10"}, `\d+`},
 		{[]string{"-5", "23"}, `-?\d+`},
-		{[]string{"1.5", "12"}, `-?\d+(?:\.\d+)?`},
+		{[]string{"1.5", "12"}, `\d+(?:\.\d+)?`},
 		{[]string{"3f9a.c01d", "77b2.e4ff"}, `[0-9a-f]{4}\.[0-9a-f]{4}`},
 		{[]string{"XSRF-TOKEN=ab12; path=/", "XSRF-TOKEN=cd34; path=/"}, `XSRF-TOKEN=[0-9a-f]{4}; path=/`},
 		{[]string{"2026-10-29T10:27:08.896Z", "2026-10-29T10:27:09.112Z"}, `\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z`},
@@ -29,7 +29,7 @@ func TestPattern(t *testing.T) {
 		{[]string{"Response rendered in 6ms at 1", "Response rendered in 6ms at 2"}, `Response rendered in \d+ms at \d`},
 		{[]string{"x-time: 7ms", "x-time: 12ms"}, `x-time: \d+ms`},
 		{[]string{"s=" + strings.Repeat("aB3", 113) + "; path=/", "s=" + strings.Repeat("Zx9", 113) + "; path=/"}, `s=[0-9A-Za-z]+; path=/`},
-		{[]string{"1700000000", "1700000123"}, `-?\d+`},
+		{[]string{"1700000000", "1700000123"}, `\d+`},
 		{[]string{"id ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34", "id 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"}, `id [0-9a-f]{40}`},
 		{[]string{"same", "same"}, ``},
 		{[]string{"abc", ""}, `[a-z]*`},
@@ -104,7 +104,7 @@ func TestPatternNarrow(t *testing.T) {
 	}{
 		{[]string{"pending", "shipped"}, nil, []string{"failed", "cancelled", "error"}},
 		{[]string{"status: pending", "status: shipped"}, nil, []string{"status: failed", "status: cancelled"}},
-		{[]string{"Total: 12.50 EUR", "Total: 13.75 EUR"}, []string{"Total: 99.10 EUR"}, []string{"Total: 1312.50 EUR", "Total: 3.75 EUR"}},
+		{[]string{"Total: 12.50 EUR", "Total: 13.75 EUR"}, []string{"Total: 99.10 EUR", "Total: 1312.50 EUR", "Total: 3.75 EUR"}, []string{"Total: 12.5 EUR"}},
 		{[]string{"page 1 of 3", "page 2 of 3"}, []string{"page 3 of 3"}, []string{"page 10 of 3", "page 1234567 of 3", "page 1 of 4"}},
 		{[]string{"HTTP 200", "HTTP 201"}, []string{"HTTP 204"}, []string{"HTTP 2010", "HTTP 20"}},
 		{[]string{"code=3", "code=4"}, []string{"code=5"}, []string{"code=500", "code=34"}},
@@ -119,6 +119,14 @@ func TestPatternNarrow(t *testing.T) {
 		{[]string{"count 7", "count 8"}, []string{"count 70000"}, []string{"count x"}},
 		{[]string{"took 7ms", "took 12ms"}, []string{"took 1500ms"}, []string{"took 7s"}},
 		{[]string{"/jobs/9", "/jobs/12"}, []string{"/jobs/100000"}, []string{"/jobs/x"}},
+		// Totals, pages, suffixed ids, versions and ranges grow; a number
+		// none of whose samples is negative stays non-negative.
+		{[]string{"total_pages=3", "total_pages=4"}, []string{"total_pages=120"}, nil},
+		{[]string{"user_42", "user_7"}, []string{"user_100000"}, []string{"user_x"}},
+		{[]string{"v1.2.3", "v1.3.0"}, []string{"v10.20.30"}, []string{"v1.2"}},
+		{[]string{"Showing 1-10 of 120", "Showing 11-20 of 120"}, []string{"Showing 101-110 of 1500"}, nil},
+		{[]string{"9", "10"}, []string{"123"}, []string{"-1"}},
+		{[]string{"-1", "10"}, []string{"-123"}, nil},
 	} {
 		p := Pattern(c.samples)
 		re := regexp.MustCompile("^(?:" + p + ")$")
