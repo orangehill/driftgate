@@ -309,7 +309,7 @@ func seedExample(d appconf.Database, laravel bool) string {
 	case appconf.Postgres:
 		return fmt.Sprintf(`#   - ["pg_restore", "--clean", "--if-exists", "--no-owner", "-d", %q, "dump.pgdump"]   # or ["psql", "-q", "-d", %q, "-f", "dump.sql"]`, name, name)
 	case appconf.SQLServer:
-		return fmt.Sprintf(`#   - ["sh", "-c", "sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -b -Q \"RESTORE DATABASE [%s] FROM DISK = N'/var/opt/mssql/backup/%s.bak' WITH REPLACE\""]`, name, name)
+		return fmt.Sprintf(`#   - ["sh", "-c", "sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -b -Q \"RESTORE DATABASE [%s] FROM DISK = N'/var/opt/mssql/data/%s.bak' WITH REPLACE\""]`, name, name)
 	}
 	return fmt.Sprintf(`#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql %s"]`, name)
 }

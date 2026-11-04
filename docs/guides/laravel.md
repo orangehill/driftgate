@@ -171,10 +171,11 @@ DB_TRUST_SERVER_CERTIFICATE=true
 ```
 
 - `DB_ENCRYPT` and `DB_TRUST_SERVER_CERTIFICATE` count only when
-  `config/database.php` passes them on. Laravel 11 and later have no
-  `config/database.php` until `php artisan config:publish database`
-  writes it; uncomment the `encrypt` and `trust_server_certificate` lines
-  of the `sqlsrv` connection there. Without them DriftGate takes the
+  `config/database.php` passes them on: uncomment the `encrypt` and
+  `trust_server_certificate` lines of its `sqlsrv` connection (Laravel
+  ships them commented out). Laravel 11 and 12 start without the file
+  until `php artisan config:publish database` writes it; Laravel 13
+  ships it. Without them DriftGate takes the
   client's own default and verifies the container's self-signed
   certificate, which fails.
 - Make the database and the application's login with the container's

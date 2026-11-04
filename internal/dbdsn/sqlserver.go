@@ -58,10 +58,11 @@ func sqlServerAddr(dsn string) (host, port string, err error) {
 	if v, ok := q["port"]; ok {
 		// The value is shown only when it is a port number: the DSN
 		// holds the password.
-		p := "<port>"
-		if n, err := strconv.ParseUint(v, 10, 16); err == nil && n > 0 {
-			p = strconv.FormatUint(n, 10)
+		n, err := strconv.ParseUint(v, 10, 16)
+		if err != nil || n == 0 {
+			return "", "", errors.New("dsn: the sqlserver:// URL takes the port after its host, not as the port parameter: write sqlserver://user:password@host:<port> and remove the port parameter (host,<port> is the form of a connection string's Server, which a sqlserver:// URL does not take)")
 		}
+		p := strconv.FormatUint(n, 10)
 		return "", "", fmt.Errorf("dsn: the sqlserver:// URL takes the port after its host, not as the port parameter: write sqlserver://user:password@host:%s and remove port=%s (host,%s is the form of a connection string's Server, which a sqlserver:// URL does not take)", p, p, p)
 	}
 	if _, ok := q["server"]; ok {

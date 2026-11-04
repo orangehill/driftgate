@@ -150,6 +150,7 @@ by the seed). The pristine cache is a copy of the file:
           pristine-cache-files: |
             database/migrations/**
             database/seeders/**
+            database/factories/**
             driftgate.yaml
           pristine-cache-key: sqlite
           pristine-dump: cp database/database.sqlite "$DRIFTGATE_PRISTINE_DIR/app.sqlite"

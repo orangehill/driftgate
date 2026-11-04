@@ -43,7 +43,7 @@ func TestSQLServerRefused(t *testing.T) {
 		{"sqlserver://sa:s3crpw@db:1433?server=db2", "server parameter"},
 		{"sqlserver://sa:s3crpw@db:1433?port=1533", "write sqlserver://user:password@host:1533 and remove port=1533"},
 		{"sqlserver://sa:s3crpw@db?port=1533", "write sqlserver://user:password@host:1533 and remove port=1533"},
-		{"sqlserver://sa:s3crpw@db?port=s3crpw", "write sqlserver://user:password@host:<port> and remove port=<port>"},
+		{"sqlserver://sa:s3crpw@db?port=s3crpw", "write sqlserver://user:password@host:<port> and remove the port parameter"},
 		{"sqlserver://sa:s3crpw@db:1433?encrypt=true&Encrypt=false", "a parameter twice"},
 		{"sqlserver://sa:s3crpw@db:1433?encrypt=s3crpw", "encrypt must be"},
 		{"sqlserver://sa:s3crpw@db:1433?TrustServerCertificate=s3crpw", "TrustServerCertificate must be"},

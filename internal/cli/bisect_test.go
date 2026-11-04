@@ -382,4 +382,10 @@ bisect:
 	if code != ExitConfig || !strings.Contains(errOut, "bisect does not support SQLite state") || !strings.Contains(errOut, "database/database.sqlite") {
 		t.Errorf("%d %s", code, errOut)
 	}
+	// Before asking for bisect.checkout, which would not help.
+	raw, _ := os.ReadFile(cfg)
+	write(t, cfg, strings.Replace(string(raw), "bisect:\n  checkout: [\"true\"]\n", "", 1))
+	if code, _, errOut := runCLI(t, "bisect", "HEAD~1", "HEAD", "--config", cfg); code != ExitConfig || !strings.Contains(errOut, "bisect does not support SQLite state") {
+		t.Errorf("without bisect.checkout: %d %s", code, errOut)
+	}
 }

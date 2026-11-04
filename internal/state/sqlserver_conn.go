@@ -396,7 +396,8 @@ func discard(c *sql.Conn) {
 // without SQL Server never has it; the runtime applies a GODEBUG set at run
 // time (os.Setenv). A value of x509negativeserial the user set in GODEBUG
 // is kept, as are the other settings there. The processes DriftGate starts
-// (seed commands, hooks) inherit it.
+// (seed commands, hooks) inherit it. NewSQLServer calls it; code that
+// connects to SQL Server without a component (tests) calls it first.
 func AllowNegativeSerial() { allowNegativeSerial() }
 
 var allowNegativeSerial = sync.OnceFunc(func() {
