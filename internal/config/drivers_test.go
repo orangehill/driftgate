@@ -40,6 +40,13 @@ func TestSQLiteAndSQLServerValidation(t *testing.T) {
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Restore: []string{"x"}}, err: "without a driver"},
 		{comp: Component{Driver: "sqlite", DSN: Secret{Env: "X", Key: "k"}, Working: "db.sqlite"}, err: "dsn: "},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sess*"}, RowTracking: []string{"sessions"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"Sess*"}, RowTracking: []string{"sessions"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sessions"}, RowTracking: []string{"SESSIONS"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"\u00c9t\u00e9"}, RowTracking: []string{"\u00e9t\u00e9"}}, driver: SQLite}, // ASCII letters only
+		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"Sessions"}, RowTracking: []string{"dbo.sessions"}}, err: "is excluded"},
+		{comp: Component{Driver: "mssql", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"DBO.Sess*"}, RowTracking: []string{"sessions"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"sales.*"}, RowTracking: []string{"Sales.Orders"}}, err: "is excluded"},
+		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"sales.*"}, RowTracking: []string{"orders"}}, driver: SQLServer, pristine: "Shop_pristine"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sessions", "job_batches", "cache_*"}}, driver: SQLite}, // tables the file may not have
 		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop"}, driver: SQLServer, pristine: "Shop_pristine"},
 		{comp: Component{Driver: "mssql", DSN: Secret{Env: "X"}, Working: "Shop", Pristine: "ShopClean"}, driver: SQLServer, pristine: "ShopClean"},

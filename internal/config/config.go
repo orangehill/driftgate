@@ -429,13 +429,49 @@ func (c Component) validate() error {
 		return errors.New("restore and fingerprint commands are for components without a driver")
 	}
 	for _, t := range c.RowTracking {
-		for _, g := range c.Exclude {
-			if glob.Match(g, t) {
-				return fmt.Errorf("row_tracking table %s is excluded", t)
-			}
+		if c.trackedExcluded(t) {
+			return fmt.Errorf("row_tracking table %s is excluded", t)
 		}
 	}
 	return nil
+}
+
+// trackedExcluded reports whether a glob of exclude matches row_tracking
+// table t as the driver's component matches it: SQLite in ASCII without
+// case, SQL Server without case and with or without the schema (dbo for
+// a table named without one), the others as written.
+func (c Component) trackedExcluded(t string) bool {
+	names, fold := []string{t}, func(s string) string { return s }
+	switch c.Driver {
+	case SQLite:
+		fold = asciiLower
+	case SQLServer, "mssql":
+		fold = strings.ToLower
+		schema, name, ok := strings.Cut(t, ".")
+		if !ok {
+			schema, name = "dbo", t
+		}
+		names = []string{schema + "." + name, name}
+	}
+	for _, g := range c.Exclude {
+		for _, n := range names {
+			if glob.Match(fold(g), fold(n)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// asciiLower lowers the ASCII letters of s only, as SQLite compares names.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // validateServer checks a component of a database server: MySQL, MariaDB,
