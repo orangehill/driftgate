@@ -43,3 +43,16 @@ func TestSQLiteSettingNamesFile(t *testing.T) {
 		t.Errorf("database %q, %v", db, err)
 	}
 }
+
+// TestSQLiteSymfonyProjectDir: Symfony's DATABASE_URL names the file under
+// %kernel.project_dir%, the project's folder.
+func TestSQLiteSymfonyProjectDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DATABASE_URL=\"sqlite:///%kernel.project_dir%/var/data.db\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Ref{Source: Dotenv, File: ".env", Key: "DATABASE_URL"}
+	if _, db, err := r.Read(root, SQLite, nil); err != nil || db != "var/data.db" {
+		t.Errorf("database %q, %v", db, err)
+	}
+}

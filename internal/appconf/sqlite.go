@@ -312,6 +312,11 @@ func resolveSQLite(root string, r Ref, p parts) (parts, error) {
 	if sqliteAbs(name) {
 		return sqliteResolved(root, r, p, "", name)
 	}
+	if rest, ok := strings.CutPrefix(name, "%kernel.project_dir%/"); ok {
+		// Symfony's DATABASE_URL (sqlite:///%kernel.project_dir%/var/data.db):
+		// the parameter is the project's folder.
+		return sqliteResolved(root, r, p, "", rest)
+	}
 	base, cwd := "", true
 	switch r.Source {
 	case Dotenv, Env:
