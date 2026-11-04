@@ -87,16 +87,24 @@ func (s *Server) viewCount(id int) int {
 		return s.views[id]
 	}
 	var v int
-	s.db.QueryRow("SELECT views FROM news WHERE id = ?", id).Scan(&v)
+	if err := s.db.QueryRow("SELECT views FROM news WHERE id = ?", id).Scan(&v); err != nil {
+		panic(dbError{err})
+	}
 	return v
 }
+
+// dbError is a failed query of the demo's database: ServeHTTP answers it
+// with 500, as a framework does.
+type dbError struct{ err error }
 
 func (s *Server) addView(id int) {
 	if s.db == nil {
 		s.views[id]++
 		return
 	}
-	s.db.Exec("UPDATE news SET views = views + 1 WHERE id = ?", id)
+	if _, err := s.db.Exec("UPDATE news SET views = views + 1 WHERE id = ?", id); err != nil {
+		panic(dbError{err})
+	}
 }
 
 func (s *Server) addFAQ(created string) (int, error) {
@@ -149,6 +157,14 @@ func (s *Server) write(w http.ResponseWriter, status int, v any) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if e := recover(); e != nil {
+			if _, ok := e.(dbError); !ok {
+				panic(e)
+			}
+			s.write(w, 500, map[string]any{"message": "Server Error"})
+		}
+	}()
 	if s.serveFiles(w, r) {
 		return
 	}

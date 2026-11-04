@@ -1095,7 +1095,13 @@ where the pristine copy's stands. Such a restore:
 
 The application's pooled connections to the working database are ended:
 the first use of each one can fail once (go-mssqldb reports `Read: EOF`,
-other clients a closed connection), and the pool connects again. From
+other clients a closed connection), and the pool connects again. Such a
+failure is usually a 500 from the application: a `GET` (or `HEAD`)
+answered with 5xx after such a restore is sent again, up to 8 times, and
+a 5xx that stays is kept as the answer. A request that may write is never
+sent twice; if the first one after the restore fails this way, let the
+application's pool check a connection before it uses it, or keep no idle
+connections. From
 step 2 until the rows are copied back the working database is
 `RESTRICTED_USER`: the application cannot connect, so none of its writes to
 excluded tables is lost. Limits of that:

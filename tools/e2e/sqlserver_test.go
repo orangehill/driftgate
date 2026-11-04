@@ -303,8 +303,10 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 			if tc.view {
 				// A restore of the whole database ends the application's
 				// sessions: an idle connection kept would fail the first
-				// request after it (the demo answers it with 0 views). The
-				// capture tests cover a pool that connects again.
+				// request after it (the demo answers it with 500), which
+				// a kill between the restore and the requests does not
+				// leave DriftGate the chance to send again
+				// (TestWholeRestoreSQLServerPool covers that).
 				p.db.SetMaxIdleConns(0)
 			}
 			p.must(t, 0, "seed")
@@ -416,4 +418,27 @@ func TestCrashSeedSQLServer(t *testing.T) {
 			p.clean(t)
 		})
 	}
+}
+
+// TestWholeRestoreSQLServerPool: a restore of the whole database ends the
+// sessions of the application's pool, whose idle connections then fail
+// once. A capture after such a restore must not take that failure for a
+// drift.
+func TestWholeRestoreSQLServerPool(t *testing.T) {
+	p := sqlServerProject(t, "pool")
+	p.db.SetMaxIdleConns(8)
+	p.must(t, 0, "seed")
+	p.must(t, 0, "capture", "c1")
+	for i := range 3 {
+		// The application's pool holds idle connections into the
+		// database the restore takes offline.
+		sqlExec(t, p.db, "CREATE VIEW faq_count AS SELECT COUNT(*) AS n FROM dbo.faq")
+		p.data(t)
+		tag := fmt.Sprintf("w%d", i)
+		p.must(t, 0, "capture", tag)
+		if r := p.run(t, "", "compare", tag, "--against", "c1"); r.code != 0 {
+			t.Fatalf("%d: a capture after a restore of the whole database drifted: %v", i, r)
+		}
+	}
+	p.clean(t)
 }

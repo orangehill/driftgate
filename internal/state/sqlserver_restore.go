@@ -64,6 +64,7 @@ var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 // pristine copy; nil means every item that differs.
 func (s *SQLServer) Restore(ctx context.Context, items []string) (err error) {
 	defer func() { err = s.denied(err) }()
+	s.ended = false
 	if _, err := s.server(ctx); err != nil {
 		return err
 	}
@@ -156,6 +157,7 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 // changes items the caller did not name.
 func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
 	saved, err := s.restoreDatabase(ctx, mark, w)
+	s.ended = true // also after a failure: the database may have gone offline
 	if err != nil {
 		return err
 	}
@@ -1177,3 +1179,7 @@ func (s *SQLServer) waitFullText(ctx context.Context, c *sql.Conn, plan *ssResto
 		}
 	}
 }
+
+// EndedSessions reports whether the last Restore restored the whole
+// database, which ends every session in it (state.SessionEnder).
+func (s *SQLServer) EndedSessions() bool { return s.ended }

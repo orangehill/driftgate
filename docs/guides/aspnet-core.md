@@ -162,7 +162,11 @@ procedure, a new table, a migration the application applies at start-up
 with `Database.Migrate()`) restores the whole database from the pristine
 copy's backup, which ends the application's connections: the first
 request on each pooled connection can then fail once, as with any client
-whose server ended its session, and the pool connects again. The log says `restoring the whole database` when it happens. Apply
+whose server ended its session, and the pool connects again. DriftGate
+sends a `GET` answered with 5xx then again (a 5xx that stays is kept); a
+request that may write is never sent twice, so a write that is the first
+request after such a restore can fail: keep no idle connections in
+development (`Max Pool Size`) or let the pool check them. The log says `restoring the whole database` when it happens. Apply
 migrations in `seed:` rather than at start-up, and run `driftgate seed`
 after adding one.
 

@@ -165,6 +165,15 @@ type Component interface {
 	Close() error
 }
 
+// SessionEnder is a Component whose Restore may end the application's own
+// sessions with the database (SQL Server's restore of the whole database
+// takes it offline): the application's pooled connections then fail once
+// each, on their next use.
+type SessionEnder interface {
+	// EndedSessions reports whether the last Restore ended them.
+	EndedSessions() bool
+}
+
 // Command is a component handled entirely by commands of the project.
 type Command struct {
 	name        string

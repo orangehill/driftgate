@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/orangehill/driftgate/internal/appconf"
@@ -156,6 +157,9 @@ type tracker struct {
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
 	out      io.Writer
+	// ended: the last restore ended the application's sessions with a
+	// database (state.SessionEnder); read by the requests after it.
+	ended atomic.Bool
 }
 
 // openComponents connects to every state component, in name order.
@@ -362,6 +366,7 @@ func (t *tracker) markDirty(d map[string][]string) {
 // pristine fingerprint; a command component always runs its restore command.
 func (t *tracker) restore(ctx context.Context) error {
 	defer func(start time.Time) { t.time.Restore += time.Since(start) }(time.Now())
+	t.ended.Store(false)
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -386,7 +391,11 @@ func (t *tracker) restore(ctx context.Context) error {
 		}
 		fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
 		start := time.Now()
-		if err := c.Restore(ctx, items); err != nil {
+		err := c.Restore(ctx, items)
+		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() {
+			t.ended.Store(true)
+		}
+		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
 		got, err := c.Fingerprint(ctx, items)

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -815,8 +816,26 @@ func (r *runner) send(ctx context.Context, req catalog.Request) httpx.Result {
 			s.limits.wait(ctx, req.Method+" "+pu.Path)
 		}
 	}
-	return s.client.Do(ctx, req, r.tokens[req.Identity])
+	res := s.client.Do(ctx, req, r.tokens[req.Identity])
+	// After a restore that ended the application's sessions with its
+	// database (SQL Server's restore of the whole database), each pooled
+	// connection of the application fails once, on its next use: a GET
+	// answered with 5xx then is sent again, up to sessionRetries times. A
+	// 5xx that stays is what the application answers, and is kept. A
+	// request that may write is never sent twice.
+	for try := 0; try < sessionRetries && (req.Method == http.MethodGet || req.Method == http.MethodHead) && r.tr != nil && r.tr.ended.Load() &&
+		res.Record != nil && res.Record.Error == "" && res.Record.Status >= 500 && ctx.Err() == nil; try++ {
+		fmt.Fprintf(r.log, "%s: %d after a restore of the whole database ended the application's database sessions; sending it again\n", req.ID, res.Record.Status)
+		res.Release()
+		res = s.client.Do(ctx, req, r.tokens[req.Identity])
+	}
+	return res
 }
+
+// sessionRetries bounds how often a GET is sent again after a restore
+// that ended the application's database sessions: once per pooled
+// connection that may still fail, as many as a pool usually keeps idle.
+const sessionRetries = 8
 
 // valueFrom reads a value from the response of an earlier request of this
 // capture.
