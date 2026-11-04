@@ -390,6 +390,24 @@ func (s *SQLServer) fingerprintOnce(ctx context.Context, items []string) (Finger
 	return f, err
 }
 
+// workingOffline reports an error 942 whose own message names the working
+// database ("Database '<working>' cannot be opened because it is
+// offline"), not one that names it elsewhere in the error's text.
+func (s *SQLServer) workingOffline(err error) bool {
+	if sqlServerNumber(err) != 942 {
+		return false
+	}
+	for _, e := range sqlServerErrors(err) {
+		if e.Number != 942 {
+			continue
+		}
+		if m := ssDatabaseNamed().FindStringSubmatch(e.Message); m != nil && strings.EqualFold(strings.ReplaceAll(m[1], "''", "'"), s.o.Working) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fingerprint, error) {
 	info, err := s.server(ctx)
 	if err != nil {
@@ -400,7 +418,7 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 	}
 	c, err := s.pinned(ctx)
 	if err != nil {
-		if m := ssDatabaseNamed().FindStringSubmatch(err.Error()); m != nil && sqlServerNumber(err) == 942 && strings.EqualFold(strings.ReplaceAll(m[1], "''", "'"), s.o.Working) {
+		if s.workingOffline(err) {
 			// 942: "Database '<working>' cannot be opened because it is
 			// offline", without a look at sys.databases, which another
 			// database's restore may stop (927, 952).

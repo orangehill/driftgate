@@ -478,38 +478,66 @@ var ssDatabaseNamed = lazy.Regexp(`Database '((?:[^']|'')+)'`)
 // restored, created or renamed: even a three-part name of its own
 // database (an item restore's INSERT … SELECT FROM [pristine].…) or a
 // connection to it, when the other's name comes up in the lookup.
+//
+// Every 927 and 952 the error carries (each message of a server error,
+// each error wrapped or joined) must name another database: one that
+// names this component's, or names none, is not retried.
 func (s *SQLServer) othersTransition(err error) (string, bool) {
 	if n := sqlServerNumber(err); n != 927 && n != 952 {
 		return "", false
 	}
-	// The name in the message of the 927 or 952 itself, not another one
-	// of the error or of the text it is wrapped in.
-	var e mssql.Error
-	if !errors.As(err, &e) {
-		var p *mssql.Error
-		if !errors.As(err, &p) || p == nil {
+	other := ""
+	for _, e := range sqlServerErrors(err) {
+		if e.Number != 927 && e.Number != 952 {
+			continue
+		}
+		// The name in the message of the 927 or 952 itself, not another
+		// one of the error or of the text it is wrapped in.
+		m := ssDatabaseNamed().FindStringSubmatch(e.Message)
+		if m == nil {
 			return "", false
 		}
-		e = *p
-	}
-	msg := e.Message
-	for _, x := range e.All {
-		if x.Number == 927 || x.Number == 952 {
-			msg = x.Message
-			break
+		name := strings.ReplaceAll(m[1], "''", "'")
+		for _, own := range []string{s.o.Working, s.o.Pristine, s.o.Pristine + "_dgnew", s.excludedDB()} {
+			if strings.EqualFold(name, own) {
+				return "", false
+			}
+		}
+		if other == "" {
+			other = name
 		}
 	}
-	m := ssDatabaseNamed().FindStringSubmatch(msg)
-	if m == nil {
-		return "", false
-	}
-	name := strings.ReplaceAll(m[1], "''", "'")
-	for _, own := range []string{s.o.Working, s.o.Pristine, s.o.Pristine + "_dgnew", s.excludedDB()} {
-		if strings.EqualFold(name, own) {
-			return "", false
+	return other, other != ""
+}
+
+// sqlServerErrors are the messages of every server error in err: each
+// one's own and every message it carries (mssql.Error.All), in wrapped and
+// joined errors alike.
+func sqlServerErrors(err error) []mssql.Error {
+	var out []mssql.Error
+	var walk func(error)
+	walk = func(err error) {
+		switch e := err.(type) {
+		case nil:
+			return
+		case mssql.Error:
+			out = append(append(out, e), e.All...)
+		case *mssql.Error:
+			if e != nil {
+				out = append(append(out, *e), e.All...)
+			}
+		}
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, x := range u.Unwrap() {
+				walk(x)
+			}
 		}
 	}
-	return name, true
+	walk(err)
+	return out
 }
 
 // retryOthers runs f again while it fails because another database of

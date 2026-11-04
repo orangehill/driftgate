@@ -382,6 +382,22 @@ func TestSQLServerOthersTransition(t *testing.T) {
 		{fmt.Errorf("restore of Database 'other': %w", mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}), false},
 		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore.",
 			All: []mssql.Error{{Number: 3013, Message: "Database 'other' stopped"}, {Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}}}, false},
+		// Every 927 and 952 must name another database: the last message
+		// (Number, Message) or an earlier one that names this component's,
+		// in one error, joined or wrapped, is not retried.
+		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore.",
+			All: []mssql.Error{{Number: 952, Message: "Database 'other' is in transition. Try the statement later."}, {Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}}}, false},
+		{mssql.Error{Number: 952, Message: "Database 'other' is in transition. Try the statement later.",
+			All: []mssql.Error{{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, {Number: 952, Message: "Database 'other' is in transition. Try the statement later."}}}, false},
+		{errors.Join(other, mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened."}), false},
+		{fmt.Errorf("x: %w", errors.Join(mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened."}, other)), false},
+		{errors.Join(other, mssql.Error{Number: 952, Message: "Database 'another' is in transition."}), true},
+		{&mssql.Error{Number: 927, Message: other.Message}, true},
+		{&mssql.Error{Number: 927, Message: "Database 'Shop_pristine' cannot be opened."}, false},
+		{mssql.Error{Number: 927, Message: "Database 'SHOP' cannot be opened."}, false},
+		{mssql.Error{Number: 927, Message: "Database 'Shop_pristine_dgx' cannot be opened."}, false},
+		{mssql.Error{Number: 952, Message: "is in transition",
+			All: []mssql.Error{other, {Number: 952, Message: "is in transition"}}}, false},
 	} {
 		if _, got := s.othersTransition(c.err); got != c.want {
 			t.Errorf("%v: %t", c.err, got)
@@ -407,5 +423,33 @@ func TestSQLServerOthersTransition(t *testing.T) {
 	calls = 0
 	if err := s.retryOthers(context.Background(), func() error { calls++; return other }); err == nil || calls < 2 {
 		t.Errorf("past the wait: %d calls, %v", calls, err)
+	}
+}
+
+// TestSQLServerWorkingOffline: a fingerprint takes the working database
+// for offline only from a 942 whose own message names it.
+func TestSQLServerWorkingOffline(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	offline := func(db string) mssql.Error {
+		return mssql.Error{Number: 942, Message: "Database '" + db + "' cannot be opened because it is offline."}
+	}
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{offline("Shop"), true},
+		{fmt.Errorf("pinning: %w", offline("shop")), true},
+		{offline("other"), false},
+		{fmt.Errorf("Database 'Shop' x: %w", offline("other")), false},
+		{mssql.Error{Number: 942, Message: offline("other").Message, All: []mssql.Error{{Number: 5701, Message: "Changed database context to 'Shop'."}, offline("other")}}, false},
+		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened."}, false},
+	} {
+		if got := s.workingOffline(c.err); got != c.want {
+			t.Errorf("%v: %t", c.err, got)
+		}
 	}
 }
