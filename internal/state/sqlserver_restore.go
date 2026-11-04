@@ -40,6 +40,10 @@ import (
 // identity or sequence that does not end up where the pristine copy's
 // stands — restores the whole database instead (sqlserver_database.go).
 
+// sqlServerAfterDiff, when set, runs after a restore found the changed
+// rows of its large tables (tests: a write made meanwhile).
+var sqlServerAfterDiff func()
+
 // sqlServerDeltaRows is the size from which a table with a primary key is
 // restored by its changed rows only.
 var sqlServerDeltaRows int64 = 5000
@@ -720,15 +724,34 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 		c.Close()
 		return nil
 	}
-	if err := s.findChanged(ctx, c, plan); err != nil {
-		return err
+	// The changed rows are found in the restore's transaction, under an
+	// exclusive lock of each table: a write between the comparison and
+	// the restore would otherwise stay.
+	batch := "BEGIN TRANSACTION;\n"
+	var locks string
+	for _, rt := range plan.tables {
+		if rt.delta {
+			locks += "SELECT TOP (1) NULL FROM " + rt.w.qname() + " WITH (TABLOCKX);\n"
+		}
+	}
+	if locks != "" {
+		if _, err := c.ExecContext(ctx, batch+locks); err != nil {
+			return fmt.Errorf("state %s: restore: %w%s", s.o.Name, err, s.blockers(err))
+		}
+		batch = ""
+		if err := s.findChanged(ctx, c, plan); err != nil {
+			return err
+		}
+		if sqlServerAfterDiff != nil {
+			sqlServerAfterDiff()
+		}
 	}
 	set := map[int64]bool{}
 	for _, rt := range plan.tables {
 		set[rt.w.ID] = true
 	}
 	g := ssGuardFor(winv, set, func(t *ssTable) bool { return t.Excluded }, false)
-	batch := "BEGIN TRANSACTION;\n" + g.offSQL() + s.restoreSQL(plan)
+	batch += g.offSQL() + s.restoreSQL(plan)
 	if len(g.tolerant) == 0 {
 		batch += ssStatements(g.checks) + ssStatements(g.triggers)
 	}

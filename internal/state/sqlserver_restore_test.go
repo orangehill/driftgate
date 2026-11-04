@@ -391,6 +391,31 @@ func TestSQLServerRestoreDelta(t *testing.T) {
 	}
 }
 
+// TestSQLServerRestoreDeltaWrite: a write between the comparison that
+// finds a large table's changed rows and the restore of those rows waits
+// for the restore (the table is locked from before the comparison), so it
+// is never left behind as a change the restore missed.
+func TestSQLServerRestoreDeltaWrite(t *testing.T) {
+	defer func(n int64) { sqlServerDeltaRows = n }(sqlServerDeltaRows)
+	sqlServerDeltaRows = 100
+	s, db, log := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE big (id int PRIMARY KEY, v int NULL)",
+		"INSERT INTO big SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 0 FROM sys.all_objects")
+	p := pristineSQLServer(t, s)
+	sqlServerExec(t, db, "UPDATE big SET v = 1 WHERE id = 1")
+	var during error
+	sqlServerAfterDiff = func() {
+		_, during = db.Exec("SET LOCK_TIMEOUT 0; UPDATE big SET v = 2 WHERE id = 2; SET LOCK_TIMEOUT -1")
+	}
+	defer func() { sqlServerAfterDiff = nil }()
+	if restoreSQLServer(t, s, db, log, p) {
+		t.Fatal("restored the whole database")
+	}
+	if sqlServerNumber(during) != 1222 {
+		t.Fatalf("a write during the restore: %v, want a lock timeout", during)
+	}
+}
+
 // TestSQLServerDeltaCompare: the comparison that finds a delta's changed
 // rows tells apart every two rows the encoding does (key columns too,
 // which the join matches under their collation), and no two equal rows.
