@@ -558,15 +558,20 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if seeded {
 			// A working database that differs from the copy just made
 			// means the application wrote during the seed or right after
-			// it. A write during the copy may leave a copy that mixes
-			// data from before and after it (each table is copied on its
-			// own), which no check can tell from a consistent one.
+			// it. On MySQL/MariaDB a write during the copy may leave a
+			// copy that mixes data from before and after it (each table
+			// is copied on its own), which no check can tell from a
+			// consistent one; a PostgreSQL copy is of one moment.
 			w, err := c.Fingerprint(ctx, nil)
 			if err != nil {
 				return envErr("state %s: fingerprint: %v", c.Name(), err)
 			}
 			if d := state.Diff(w, f); len(d) > 0 {
-				fmt.Fprintf(opt.Out, "warning: %s: the working database differs from the pristine copy just made in %d %s (%v): the application wrote during the seed or right after it; a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write\n", c.Name(), len(d), plural(len(d), "item", "items"), limit(d, 20))
+				advice := "the copy is of one moment and stays the pristine copy"
+				if sc.Driver != config.Postgres {
+					advice = "a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write"
+				}
+				fmt.Fprintf(opt.Out, "warning: %s: the working database differs from the pristine copy just made in %d %s (%v): the application wrote during the seed or right after it; %s\n", c.Name(), len(d), plural(len(d), "item", "items"), limit(d, 20), advice)
 			}
 		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,

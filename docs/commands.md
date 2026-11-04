@@ -258,9 +258,9 @@ Runs the `seed:` commands and keeps a pristine copy of every state database.
 
 `run` seeds by itself when a pristine copy is missing; run `seed` by hand
 after changing the seed data. Run it while the application does not write
-(no queue workers, schedulers or requests): the tables are copied one by
-one, so a write during the copy can leave a pristine copy that mixes data
-from before and after it. `seed` records the fingerprint of the pristine
+(no queue workers, schedulers or requests): MySQL/MariaDB copy the tables
+one by one, so a write during the copy can leave a pristine copy that
+mixes data from before and after it (a PostgreSQL copy is of one moment). `seed` records the fingerprint of the pristine
 copy itself and warns when the working database differs from it right
 after the copy (the application wrote during the seed or just after it).
 Every capture restores the databases to the pristine copy and checks them
