@@ -1,11 +1,21 @@
 package state
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -266,5 +276,80 @@ func TestSQLServerDialerStrictUnguarded(t *testing.T) {
 			t.Errorf("strict %v: guarded %v", strict, guarded)
 		}
 		c.Close()
+	}
+}
+
+// negativeSerialCert is a self-signed certificate whose serial number is
+// negative, as SQL Server 2017 makes its own: one made with serial 0x55,
+// its serial's byte changed to 0xd5 (the signature no longer fits, which
+// parsing does not check).
+func negativeSerialCert(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(0x55), Subject: pkix.Name{CommonName: "localhost"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := bytes.Index(der, []byte{0x02, 0x01, 0x55})
+	if i < 0 {
+		t.Fatal("no serial in the certificate")
+	}
+	der[i+2] = 0xd5
+	return der
+}
+
+// TestNegativeSerialHelper is the process TestNegativeSerial starts with a
+// GODEBUG of its own; it runs only from there. It prints whether the
+// certificate parses before any component, after a MySQL and a PostgreSQL
+// component, and after a SQL Server one, then GODEBUG.
+func TestNegativeSerialHelper(t *testing.T) {
+	if os.Getenv("DG_TEST_NEGATIVE_SERIAL") == "" {
+		t.Skip("run by TestNegativeSerial")
+	}
+	der := negativeSerialCert(t)
+	parses := func() bool { _, err := x509.ParseCertificate(der); return err == nil }
+	before := parses()
+	if c, err := NewMySQL(Options{Name: "m", DSN: "mysql://u:p@127.0.0.1:1/", Working: "w"}); err == nil {
+		c.Close()
+	}
+	if c, err := NewPostgres(Options{Name: "p", DSN: "postgres://u:p@127.0.0.1:1/", Working: "w"}); err == nil {
+		c.Close()
+	}
+	others := parses()
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	fmt.Printf("RESULT %t %t %t %s\n", before, others, parses(), os.Getenv("GODEBUG"))
+}
+
+// TestNegativeSerial: a certificate with a negative serial number parses
+// only once a SQL Server component is made (GODEBUG x509negativeserial=1,
+// applied at run time), never with MySQL or PostgreSQL alone; the other
+// GODEBUG settings stay, and so does a value of it the user set.
+func TestNegativeSerial(t *testing.T) {
+	for _, c := range []struct{ godebug, want string }{
+		{"", "false false true x509negativeserial=1"},
+		{"http2client=0", "false false true http2client=0,x509negativeserial=1"},
+		{"x509negativeserial=0", "false false false x509negativeserial=0"},
+		{"x509negativeserial=1", "true true true x509negativeserial=1"},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestNegativeSerialHelper$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "DG_TEST_NEGATIVE_SERIAL=1", "GODEBUG="+c.godebug)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%q: %v\n%s", c.godebug, err, out)
+		}
+		_, got, _ := strings.Cut(string(out), "RESULT ")
+		got, _, _ = strings.Cut(got, "\n")
+		if got != c.want {
+			t.Errorf("GODEBUG=%q: %q, want %q", c.godebug, got, c.want)
+		}
 	}
 }

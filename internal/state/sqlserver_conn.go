@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 
 	mssql "github.com/microsoft/go-mssqldb"
 	"github.com/microsoft/go-mssqldb/msdsn"
@@ -381,6 +383,32 @@ func discard(c *sql.Conn) {
 	c.Raw(func(any) error { return driver.ErrBadConn })
 	c.Close()
 }
+
+// AllowNegativeSerial lets crypto/x509 parse a certificate whose serial
+// number is negative, as the one SQL Server 2017 makes for itself: Go 1.23
+// and later refuse it by default, also with TrustServerCertificate, and no
+// connection to such a server would work. The certificate is malformed
+// (RFC 5280), not weaker: the chain and the host name are verified as
+// before. It turns on GODEBUG x509negativeserial=1 for the whole process,
+// from the first SQL Server component on (NewSQLServer), so a project
+// without SQL Server never has it; the runtime applies a GODEBUG set at run
+// time (os.Setenv). A value of x509negativeserial the user set in GODEBUG
+// is kept, as are the other settings there. The processes DriftGate starts
+// (seed commands, hooks) inherit it.
+func AllowNegativeSerial() { allowNegativeSerial() }
+
+var allowNegativeSerial = sync.OnceFunc(func() {
+	v := os.Getenv("GODEBUG")
+	for _, kv := range strings.Split(v, ",") {
+		if k, _, _ := strings.Cut(strings.TrimSpace(kv), "="); k == "x509negativeserial" {
+			return
+		}
+	}
+	if v != "" {
+		v += ","
+	}
+	os.Setenv("GODEBUG", v+"x509negativeserial=1")
+})
 
 // sqlServerNumber is the number of a server error (mssql.Error), 0 for any
 // other error.

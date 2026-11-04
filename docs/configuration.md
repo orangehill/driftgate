@@ -776,8 +776,14 @@ Azure SQL Managed Instance or Synapse, whose databases cannot be backed up
 to a file and restored from it. CI tests SQL Server 2017, 2019, 2022 and
 2025 (Developer, on Linux in Docker); SQL Server on Windows is not tested
 there. SQL Server 2017 makes itself a certificate with a negative serial
-number, which Go refuses by default; DriftGate accepts it (the chain and
-host name are verified as for any other).
+number, which Go refuses to read by default (also with
+`TrustServerCertificate`), so no connection to it would work. When a
+command makes its first SQL Server component, DriftGate turns on
+`GODEBUG=x509negativeserial=1` for its own process: from then on, for
+the whole process (the target's HTTPS included, and the commands it
+starts, which inherit it), such a certificate is read; its chain and host
+name are verified as any other's. A project without SQL Server never has
+it, and an `x509negativeserial` you set in `GODEBUG` yourself is kept.
 
 | Key | Type | Meaning |
 |---|---|---|

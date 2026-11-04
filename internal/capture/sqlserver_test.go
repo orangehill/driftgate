@@ -21,6 +21,7 @@ import (
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/snapshot"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // The SQL Server tests take the server from DRIFTGATE_TEST_SQLSERVER, a
@@ -85,6 +86,7 @@ func (s *sqlServerCapture) open(t *testing.T, db string) *sql.DB {
 	q := u.Query()
 	q.Set("database", db)
 	u.RawQuery = q.Encode()
+	state.AllowNegativeSerial() // as NewSQLServer: SQL Server 2017's own certificate
 	d, err := sql.Open("sqlserver", u.String())
 	if err != nil {
 		t.Fatal(err)

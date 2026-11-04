@@ -37,6 +37,7 @@ func sqlServerTestDB(t testing.TB, dsn, database string) *sql.DB {
 	}
 	q.Set("database", database)
 	u.RawQuery = q.Encode()
+	allowNegativeSerial() // as NewSQLServer: SQL Server 2017's own certificate
 	db, err := sql.Open("sqlserver", u.String())
 	if err != nil {
 		t.Fatal(err)

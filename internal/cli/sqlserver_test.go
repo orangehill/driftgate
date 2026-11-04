@@ -12,6 +12,7 @@ import (
 
 	"github.com/orangehill/driftgate/internal/appconf"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // The tests that need a server take it from DRIFTGATE_TEST_SQLSERVER, a
@@ -46,6 +47,7 @@ func sqlServerOpen(t *testing.T, u *url.URL, db, user, password string) *sql.DB 
 	}
 	q.Set("database", db)
 	c.RawQuery = q.Encode()
+	state.AllowNegativeSerial() // as NewSQLServer: SQL Server 2017's own certificate
 	d, err := sql.Open("sqlserver", c.String())
 	if err != nil {
 		t.Fatal(err)

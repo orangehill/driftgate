@@ -78,6 +78,7 @@ func NewSQLServer(o Options) (*SQLServer, error) {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
+	allowNegativeSerial() // before the first TLS handshake
 	cfg, err := sqlServerConfig(o.DSN)
 	if err != nil {
 		return nil, err

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/demo"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // The SQL Server tests take the server from DRIFTGATE_TEST_SQLSERVER, a
@@ -58,6 +59,7 @@ func openSQLServer(t *testing.T, driver, dsn, db string) *sql.DB {
 	q := u.Query()
 	q.Set("database", db)
 	u.RawQuery = q.Encode()
+	state.AllowNegativeSerial() // as DriftGate does: SQL Server 2017's own certificate
 	d, err := sql.Open(driver, u.String())
 	if err != nil {
 		t.Fatal(err)

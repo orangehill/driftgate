@@ -821,6 +821,7 @@ func TestSQLServerRestoreWholeWritten(t *testing.T) {
 	q := u.Query()
 	q.Set("database", s.o.Working)
 	u.RawQuery = q.Encode()
+	allowNegativeSerial()
 	app, err := sql.Open("sqlserver", u.String())
 	if err != nil {
 		t.Fatal(err)
