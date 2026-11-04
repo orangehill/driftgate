@@ -18,47 +18,16 @@ const (
 	SQLServer = "sqlserver"
 )
 
-// detected is the driver and other (driverName) for a database of a
-// DriftGate driver: the driver when appconf reads that database's
-// settings (sqliteReady, sqlServerReady), else other, so the setting is
-// noted as one DriftGate cannot use.
-func detected(driver string) (string, string) {
-	switch {
-	case driver == SQLite && !sqliteReady:
-		return "", "SQLite"
-	case driver == SQLServer && !sqlServerReady:
-		return "", "SQL Server"
-	}
-	return driver, ""
-}
-
 // restores names the databases DriftGate restores, for a message about a
 // setting of another.
 func restores() string {
-	dbs := []string{"MySQL", "MariaDB", "PostgreSQL"}
-	if sqliteReady {
-		dbs = append(dbs, "SQLite")
-	}
-	if sqlServerReady {
-		dbs = append(dbs, "SQL Server")
-	}
-	return "DriftGate restores " + strings.Join(dbs[:len(dbs)-1], ", ") + " and " + dbs[len(dbs)-1]
+	return "DriftGate restores MySQL, MariaDB, PostgreSQL, SQLite and SQL Server"
 }
 
 // driverList names the drivers of the settings appconf reads, for a
 // message asking for one.
 func driverList() string {
-	ds := []string{"mysql", "postgres"}
-	if sqliteReady {
-		ds = append(ds, "sqlite")
-	}
-	if sqlServerReady {
-		ds = append(ds, "sqlserver")
-	}
-	if len(ds) == 2 {
-		return "mysql or postgres"
-	}
-	return strings.Join(ds[:len(ds)-1], ", ") + " or " + ds[len(ds)-1]
+	return "mysql, postgres, sqlite or sqlserver"
 }
 
 // defaultPort is the port a driver's server listens on by default.
@@ -121,9 +90,9 @@ func driverName(name string) (driver, other string) {
 	case "":
 		return "", ""
 	case "sqlite", "sqlite3", "spatialite", "file":
-		return detected(SQLite)
+		return SQLite, ""
 	case "sqlsrv", "sqlserver", "mssql", "dblib":
-		return detected(SQLServer)
+		return SQLServer, ""
 	case "oracle", "oci", "oci8":
 		return "", "Oracle"
 	}
@@ -134,11 +103,11 @@ func driverName(name string) (driver, other string) {
 	case strings.Contains(n, "postgres"):
 		return Postgres, ""
 	case strings.Contains(n, "sqlserver"), strings.Contains(n, "sql_server"): // Django: sql_server.pyodbc
-		return detected(SQLServer)
+		return SQLServer, ""
 	case strings.Contains(n, "h2"), strings.Contains(n, "hsqldb"), strings.Contains(n, "derby"):
 		return "", "an in-memory Java database"
 	case strings.Contains(n, "sqlite"):
-		return detected(SQLite)
+		return SQLite, ""
 	case strings.Contains(n, "oracle"):
 		return "", "Oracle"
 	}

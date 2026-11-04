@@ -21,11 +21,6 @@ import (
 // only its path is looked at (a file SQLite has open in this process loses
 // its locks when another handle of it is closed).
 
-// sqliteReady turns on the reading of SQLite settings: driverName,
-// csprojDriver and the readers then give the driver SQLite, and the
-// functions below read the file.
-const sqliteReady = true
-
 // sqliteDefault is Laravel's database file when DB_DATABASE is not set:
 // database_path('database.sqlite') of config/database.php.
 const sqliteDefault = "database/database.sqlite"

@@ -30,11 +30,6 @@ import (
 // DriftGate cannot tell encrypts and verifies, as current ones do). A
 // value DriftGate cannot map is an error.
 
-// sqlServerReady turns on the reading of SQL Server settings: driverName,
-// csprojDriver and the readers then give the driver SQLServer, and the
-// functions below read the setting.
-const sqlServerReady = true
-
 // sqlServerTLS is what a SQL Server setting says besides the address and
 // the credentials: its TLS, the default of its client, and what Find
 // notes about it.

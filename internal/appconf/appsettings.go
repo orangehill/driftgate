@@ -275,9 +275,9 @@ func csprojDriver(csproj string) (driver, other string) {
 	case strings.Contains(lc, `"npgsql`):
 		return Postgres, ""
 	case strings.Contains(lc, `"microsoft.entityframeworkcore.sqlserver`), strings.Contains(lc, `"microsoft.data.sqlclient`), strings.Contains(lc, `"system.data.sqlclient`):
-		return detected(SQLServer)
+		return SQLServer, ""
 	case strings.Contains(lc, `"microsoft.entityframeworkcore.sqlite`), strings.Contains(lc, `"microsoft.data.sqlite`):
-		return detected(SQLite)
+		return SQLite, ""
 	}
 	return "", ""
 }
