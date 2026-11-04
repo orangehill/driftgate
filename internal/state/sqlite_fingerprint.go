@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -12,10 +13,12 @@ import (
 	"maps"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,19 +29,25 @@ import (
 //  1. Reused: when no other connection committed since the last full
 //     fingerprint (PRAGMA data_version of the connection kept open, which
 //     SQLite moves for commits of any process, in WAL and rollback mode),
-//     the schema version is the same, the file is the same, its size and
-//     time (and its -wal file's) are too, and DriftGate did not restore
-//     since, the last fingerprint is returned as it was.
-//  2. Page digest: a table whose pages (every page of its b-tree, read
-//     through dbstat and sqlite_dbpage) hash to what they hashed to when its
-//     rows were last read, with the same CREATE statement, has the same
-//     rows: its row hash is kept. A changed digest only means a new read,
-//     never a missed change. This is what keeps a fingerprint cheap for an
-//     application that writes on every request (a Laravel session table in
-//     the same file moves data_version every time; excluded, its pages are
-//     not read).
+//     the schema version is the same and the file is the same, the last
+//     fingerprint is returned as it was. (A file whose size or time, or
+//     its -wal file's, changed while data_version did not was changed
+//     without SQLite: the connections are opened again first.) A restore since (DriftGate's own commits, which
+//     do not move data_version) wrote only the items it lists: those are
+//     read again, the rest is kept.
+//  2. Page digest: a table whose pages (every page of its b-tree when its
+//     rows were last read, as dbstat walked it) hold the bytes they held
+//     then, with the same root page and CREATE statement, has the same rows
+//     (see sqlite_pages.go): its row hash is kept. The pages are read
+//     through sqlite_dbpage in one pass over the file; only a table whose
+//     digest changed is walked again and its rows read. A changed digest
+//     only means a new read, never a missed change. This is what keeps a
+//     fingerprint cheap for an application that writes on every request (a
+//     Laravel session table in the same file moves data_version every
+//     time; excluded, its pages are not hashed).
 //  3. Rows: the rows of every other table are read and hashed, spread over
-//     up to sqliteConns more connections that share the same moment.
+//     up to sqliteConns more connections that share the same moment; a
+//     large rowid table in parts, by ranges of rowids (sqliteRead).
 //
 // The items: table:<name> (its CREATE statement, its indexes' CREATE
 // statements, its sqlite_sequence value and its rows; a virtual table its
@@ -49,11 +58,15 @@ import (
 // excluded table are (their body may write any table).
 
 // sqliteSum is the row hash of a table, with the CREATE statement it was
-// read under and the digest of the pages it was read from.
+// read under, its root page, the file header's fields the pages were read
+// by (sqliteHeader), and the pages of its b-tree it was read from (in
+// dbstat's order) with their digest.
 type sqliteSum struct {
 	sql    string
+	root   int64
+	header string
+	pages  []uint32
 	digest [32]byte
-	pages  int
 	rows   []byte
 }
 
@@ -65,6 +78,10 @@ var (
 	sqliteSettle      = 5 * time.Millisecond
 	sqliteSettleTries = 20
 )
+
+// sqliteScanAll is the share of the file's pages from which a page digest
+// reads every page of the file, not only the pages it needs.
+var sqliteScanAll = 0.5
 
 // Fingerprint hashes the working file (see above).
 func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint, err error) {
@@ -90,18 +107,19 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 		return nil, err
 	}
 	stamp := s.stampNow()
-	if s.last != nil && !s.own && dv == s.dv && sv == s.sv {
+	if s.unseen(dv, stamp) {
 		release()
-		if stamp != s.stamp {
-			// The file changed without a commit SQLite saw (a copy
-			// written over it): the connections may hold its old pages.
-			// Opened again, they read it anew; the row hashes stay, as
-			// a page digest is of the bytes now read.
-			if err := s.reopen(); err != nil {
-				return nil, err
-			}
-			return s.Fingerprint(ctx, items)
+		// Opened again, the connections read the file anew; the row
+		// hashes stay, as a page digest is of the bytes now read.
+		if err := s.reopen(); err != nil {
+			return nil, err
 		}
+		return s.Fingerprint(ctx, items)
+	}
+	s.seen = sqliteSeen{dv: dv, stamp: stamp, ok: true}
+	quiet := s.last != nil && dv == s.dv && sv == s.sv
+	if quiet && len(s.restored) == 0 {
+		release()
 		s.reused = true
 		f := maps.Clone(s.last)
 		if items != nil {
@@ -109,11 +127,33 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 		}
 		return f, nil
 	}
-	extra := int(min(int64(sqliteConns), tables-1))
-	if items != nil {
-		extra = min(extra, len(items)-1)
+	// What is read: every item, the items asked for, or, when only
+	// DriftGate's restores wrote since the last fingerprint, the tables
+	// they wrote, and the views, triggers and pragmas (only their
+	// statements and values are read).
+	var want, reread func(item string) bool
+	// present lists the tables the file has now: fingerprint asks want
+	// about each of them.
+	present := map[string]bool{}
+	n := tables
+	switch {
+	case quiet:
+		reread = func(item string) bool {
+			_, known := s.last[item]
+			return s.restored[item] || !strings.HasPrefix(item, "table:") || !known
+		}
+		want = func(item string) bool {
+			if strings.HasPrefix(item, "table:") {
+				present[item] = true
+			}
+			return reread(item)
+		}
+		n = int64(len(s.restored))
+	case items != nil:
+		want = func(item string) bool { return contains(items, item) }
+		n = int64(len(items))
 	}
-	conns, err := s.snapshot(ctx, extra)
+	conns, err := s.snapshot(ctx, int(min(int64(sqliteConns), n-1)))
 	release()
 	if err != nil {
 		return nil, err
@@ -122,13 +162,29 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	if s.sums == nil {
 		s.sums = map[string]sqliteSum{}
 	}
-	f, read, err := s.fingerprint(ctx, conns, "main", items, s.sums)
+	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums)
 	s.scanned = read
 	if err != nil {
 		return nil, err
 	}
-	if items == nil {
-		s.last, s.dv, s.sv, s.stamp, s.own = maps.Clone(f), dv, sv, stamp, false
+	switch {
+	case quiet:
+		// A table the restores wrote that is gone, or any view,
+		// trigger or pragma not read now, is no longer there; nor is a
+		// table the file does not have now, whichever way it went (the
+		// shadow tables of a virtual table a restore dropped).
+		last := maps.Clone(s.last)
+		maps.DeleteFunc(last, func(item string, _ string) bool {
+			return reread(item) || strings.HasPrefix(item, "table:") && !present[item]
+		})
+		maps.Copy(last, f)
+		s.last, s.restored = last, nil
+		f = maps.Clone(last)
+		if items != nil {
+			f = f.Subset(items)
+		}
+	case items == nil:
+		s.last, s.dv, s.sv, s.restored = maps.Clone(f), dv, sv, nil
 	}
 	return f, nil
 }
@@ -232,15 +288,18 @@ func (s *SQLite) end(conns []*sql.Conn) {
 }
 
 // fingerprint hashes the items of a schema (main, or the pristine file's)
-// read on conns, which share one snapshot. With sums, a table whose pages
-// did not change keeps its row hash from there, and the row hashes read
-// are kept in it.
-func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, items []string, sums map[string]sqliteSum) (Fingerprint, []string, error) {
+// that want accepts (nil: all of them), read on conns, which share one
+// snapshot. With sums, a table whose pages did not change keeps its row
+// hash from there, and the row hashes read are kept in it.
+func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum) (Fingerprint, []string, error) {
 	objs, err := s.objects(ctx, conns[0], schema)
 	if err != nil {
 		return nil, nil, err
 	}
-	want := func(item string) bool { return items == nil || contains(items, item) }
+	all := want == nil
+	if all {
+		want = func(string) bool { return true }
+	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
 		if want("table:" + name) {
@@ -252,7 +311,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		return nil, nil, err
 	}
 	if sums != nil {
-		if items == nil {
+		if all {
 			clear(sums)
 		}
 		maps.Copy(sums, got)
@@ -297,98 +356,197 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	return f, read, nil
 }
 
-// tableSums reads the row hash of every table, spread over conns: the
-// largest tables (by their pages at the last reading) first, each to the
-// next free connection. It also returns the tables whose rows it read.
+// tableSums reads the row hash of every table, spread over conns. With
+// sums, the pages of the tables that have a row hash there are read
+// first, and the tables whose pages are unchanged keep it. The others are
+// read: how and, for a rowid table, the range of its rowids; then the
+// walk of their pages (with sums) and their rows, a large rowid table's
+// in parts of whole buckets, the largest parts (by the table's pages at
+// the last reading) first, each to the next free connection. It also
+// returns the tables whose rows it read.
 func (s *SQLite) tableSums(ctx context.Context, conns []*sql.Conn, schema string, tables []*sqliteTable, sums map[string]sqliteSum) (map[string]sqliteSum, []string, error) {
-	order := append([]*sqliteTable{}, tables...)
-	sort.SliceStable(order, func(i, j int) bool { return sums[order[i].name].pages > sums[order[j].name].pages })
-	work := make(chan *sqliteTable, len(order))
-	for _, t := range order {
-		work <- t
-	}
-	close(work)
-	var mu sync.Mutex
 	out := map[string]sqliteSum{}
+	var header string
+	var hashes *sqlitePageHashes
+	order := make([]*sqliteTable, 0, len(tables))
+	if sums != nil {
+		var err error
+		if header, err = sqliteHeader(ctx, conns[0], schema); err != nil {
+			return nil, nil, err
+		}
+		var kept []*sqliteTable
+		var want []uint32
+		for _, t := range tables {
+			if old, ok := sums[t.name]; ok && !t.virtual && old.rows != nil && old.sql == t.sql && old.root == t.root && old.header == header {
+				kept = append(kept, t)
+				want = append(want, old.pages...)
+			}
+		}
+		if len(kept) > 0 {
+			slices.Sort(want)
+			want = slices.Compact(want)
+			var count int64
+			if err := conns[0].QueryRowContext(ctx, "PRAGMA "+qs(schema)+".page_count").Scan(&count); err != nil {
+				return nil, nil, err
+			}
+			// Most of the file: read all of it in order, which also
+			// gives the pages of the tables walked again.
+			if float64(len(want)) >= sqliteScanAll*float64(count) {
+				want = nil
+			}
+			if hashes, err = readPages(ctx, conns, schema, want); err != nil {
+				return nil, nil, err
+			}
+			for _, t := range kept {
+				old := sums[t.name]
+				if d, ok := hashes.digest(old.pages); ok && d == old.digest {
+					out[t.name] = old
+				}
+			}
+		}
+	}
+	for _, t := range tables {
+		if _, ok := out[t.name]; !ok {
+			order = append(order, t)
+		}
+	}
+	type part struct {
+		r      *sqliteRead
+		walk   bool
+		lo, hi int64
+		cost   int
+		pages  []uint32
+		digest [32]byte
+		rows   []byte
+		bucket []sqliteBucket
+	}
+	reads := make([]*sqliteRead, len(order))
+	var parts []*part
+	var mu sync.Mutex
+	err := sqliteEach(ctx, conns, len(order), func(c *sql.Conn, i int) error {
+		t := order[i]
+		if t.virtual {
+			return nil
+		}
+		r, err := sqliteReadOf(ctx, c, schema, t)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.name, err)
+		}
+		reads[i] = r
+		pages := len(sums[t.name].pages)
+		var add []*part
+		if sums != nil {
+			add = append(add, &part{r: r, walk: true, cost: pages})
+		}
+		if r.key < 0 {
+			add = append(add, &part{r: r, cost: pages})
+		} else {
+			lo, hi, ok, err := r.bounds(ctx, c)
+			if err != nil {
+				return fmt.Errorf("%s: %w", t.name, err)
+			}
+			if ok {
+				// Parts of whole buckets: a bucket is read on one
+				// connection.
+				first, last := lo>>sqliteBucketBits, hi>>sqliteBucketBits
+				n := min(last-first+1, int64(4*len(conns)))
+				if pages > 0 && pages < 256 {
+					n = 1
+				}
+				for k := range n {
+					from, to := first+(last-first+1)*k/n, first+(last-first+1)*(k+1)/n-1
+					add = append(add, &part{r: r, lo: from << sqliteBucketBits, hi: to<<sqliteBucketBits | (1<<sqliteBucketBits - 1), cost: pages / int(n)})
+				}
+			}
+		}
+		mu.Lock()
+		parts = append(parts, add...)
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.SliceStable(parts, func(i, j int) bool { return parts[i].cost > parts[j].cost })
+	err = sqliteEach(ctx, conns, len(parts), func(c *sql.Conn, i int) error {
+		p := parts[i]
+		var err error
+		switch {
+		case p.walk:
+			p.pages, p.digest, err = sqliteWalk(ctx, c, schema, p.r.t.name, hashes)
+		case p.r.key < 0:
+			p.rows, err = p.r.hash(ctx, c)
+		default:
+			p.bucket, err = p.r.buckets(ctx, c, p.lo, p.hi)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", p.r.t.name, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	byTable := map[*sqliteRead][]*part{}
+	for _, p := range parts {
+		byTable[p.r] = append(byTable[p.r], p)
+	}
 	var read []string
+	for i, t := range order {
+		sum := sqliteSum{sql: t.sql, root: t.root, header: header}
+		if r := reads[i]; r != nil {
+			read = append(read, t.name)
+			var buckets []sqliteBucket
+			for _, p := range byTable[r] {
+				switch {
+				case p.walk:
+					sum.pages, sum.digest = p.pages, p.digest
+				case r.key < 0:
+					sum.rows = p.rows
+				default:
+					buckets = append(buckets, p.bucket...)
+				}
+			}
+			if r.key >= 0 {
+				sum.rows = r.combine(buckets)
+			}
+		}
+		out[t.name] = sum
+	}
+	return out, read, nil
+}
+
+// sqliteEach runs do(c, i) for i from 0 to n-1, spread over conns: each
+// connection takes the next i when it is free. It stops at the first
+// error.
+func sqliteEach(ctx context.Context, conns []*sql.Conn, n int, do func(c *sql.Conn, i int) error) error {
+	var next atomic.Int64
 	errs := make([]error, len(conns))
 	var wg sync.WaitGroup
-	for i, c := range conns {
+	for k, c := range conns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range work {
-				if ctx.Err() != nil {
-					errs[i] = ctx.Err()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= n {
 					return
 				}
-				sum, fresh, err := tableSum(ctx, c, schema, t, sums)
-				if err != nil {
-					errs[i] = fmt.Errorf("%s: %w", t.name, err)
+				if err := ctx.Err(); err != nil {
+					errs[k] = err
+					next.Store(int64(n))
 					return
 				}
-				mu.Lock()
-				out[t.name] = sum
-				if fresh {
-					read = append(read, t.name)
+				if err := do(c, i); err != nil {
+					errs[k] = err
+					next.Store(int64(n))
+					return
 				}
-				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-	return out, read, errors.Join(errs...)
-}
-
-// tableSum reads the row hash of one table, or keeps the one in sums when
-// its pages and its CREATE statement are what they were; fresh is set when
-// it read the rows.
-func tableSum(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable, sums map[string]sqliteSum) (sum sqliteSum, fresh bool, err error) {
-	sum.sql = t.sql
-	if t.virtual {
-		return sum, false, nil
-	}
-	if sums != nil {
-		if sum.digest, sum.pages, err = sqlitePages(ctx, c, schema, t.name); err != nil {
-			return sum, false, err
-		}
-		if old, ok := sums[t.name]; ok && old.sql == t.sql && old.digest == sum.digest && old.rows != nil {
-			sum.rows = old.rows
-			return sum, false, nil
-		}
-	}
-	sum.rows, err = sqliteRowsHash(ctx, c, schema, t)
-	return sum, true, err
-}
-
-// sqlitePages hashes every page of a table's b-tree (its root, inner,
-// leaf and overflow pages, in the order dbstat walks them) and counts
-// them. Two b-trees whose pages hold the same bytes hold the same rows.
-func sqlitePages(ctx context.Context, c *sql.Conn, schema, table string) ([32]byte, int, error) {
-	rows, err := c.QueryContext(ctx, "SELECT s.pageno, p.data FROM dbstat("+ql(schema)+") AS s JOIN sqlite_dbpage("+ql(schema)+") AS p ON p.pgno = s.pageno WHERE s.name = ?", table)
-	if err != nil {
-		return [32]byte{}, 0, err
-	}
-	defer rows.Close()
-	h := sha256.New()
-	var n [8]byte
-	pages := 0
-	for rows.Next() {
-		var pgno int64
-		var data sql.RawBytes
-		if err := rows.Scan(&pgno, &data); err != nil {
-			return [32]byte{}, 0, err
-		}
-		binary.BigEndian.PutUint64(n[:], uint64(pgno))
-		h.Write(n[:])
-		binary.BigEndian.PutUint64(n[:], uint64(len(data)))
-		h.Write(n[:])
-		h.Write(data)
-		pages++
-	}
-	var d [32]byte
-	h.Sum(d[:0])
-	return d, pages, rows.Err()
+	return errors.Join(errs...)
 }
 
 // sqliteColumns describes how a table's rows are read and copied.
@@ -457,12 +615,34 @@ func readColumns(ctx context.Context, q queryer, schema, table string) (*sqliteC
 	return cols, len(names) > 0, nil
 }
 
-// sqliteRowsHash hashes the rows of a table in key order: rowid order for
-// a rowid table (its rowid included when no column holds it), primary key
-// order for a WITHOUT ROWID table. Every value is hashed with its storage
-// class, so 1, 1.0, '1' and x'31' all differ, as do NULL and an empty text. Generated
-// columns are left out: the CREATE statement says how they are computed.
-func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable) ([]byte, error) {
+// sqliteBucketBits: the rows of a rowid table are hashed in buckets of
+// rowids (rowid >> sqliteBucketBits), so that connections can read the
+// parts of a large table at the same time.
+const sqliteBucketBits = 12
+
+// sqliteRead is how the rows of a table are read: in key order, rowid
+// order for a rowid table (its rowid included when no column holds it),
+// primary key order for a WITHOUT ROWID table. Every value is hashed with
+// its storage class, so 1, 1.0, '1' and x'31' all differ, as do NULL and
+// an empty text. Generated columns are left out: the CREATE statement says
+// how they are computed.
+//
+// The row hash of a rowid table is the hash of the columns read and of its
+// buckets in order, each bucket's number and the hash of its rows. A table
+// whose rowid no name reaches (every name is a column's) and a WITHOUT
+// ROWID table are hashed whole: the columns, then the rows.
+type sqliteRead struct {
+	t     *sqliteTable
+	sel   []string // what is read of a row
+	from  string   // the table, with its schema
+	order string   // the key the rows are read in order of (none: the table's own order)
+	// For a rowid table read in buckets: the rowid's name and where it is
+	// in sel; key is -1 for a table hashed whole.
+	rowid string
+	key   int
+}
+
+func sqliteReadOf(ctx context.Context, c *sql.Conn, schema string, t *sqliteTable) (*sqliteRead, error) {
 	cols, ok, err := readColumns(ctx, c, schema, t.name)
 	if err != nil {
 		return nil, err
@@ -470,46 +650,103 @@ func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTa
 	if !ok {
 		return nil, fmt.Errorf("no such table")
 	}
-	var sel []string
-	order := ""
+	r := &sqliteRead{t: t, key: -1}
 	switch {
 	case t.noRowid:
 		quoted := make([]string, len(cols.pk))
 		for i, k := range cols.pk {
 			quoted[i] = qs(k)
 		}
-		order = strings.Join(quoted, ", ")
+		r.order = strings.Join(quoted, ", ")
 	case cols.ipk != "":
-		order = qs(cols.ipk)
+		r.rowid = qs(cols.ipk)
 	case cols.rowid != "":
-		sel = append(sel, cols.rowid)
-		order = cols.rowid
+		r.sel = append(r.sel, cols.rowid)
+		r.rowid, r.key = cols.rowid, 0
 	}
 	for _, col := range cols.stored {
-		sel = append(sel, "+"+qs(col)) // no declared type: DATETIME text stays text
+		if col == cols.ipk && !t.noRowid {
+			r.key = len(r.sel)
+		}
+		r.sel = append(r.sel, "+"+qs(col)) // no declared type: DATETIME text stays text
 	}
-	q := "SELECT " + strings.Join(sel, ", ") + " FROM " + qs(schema) + "." + qs(t.name)
-	if order != "" {
-		q += " ORDER BY " + order
+	if r.rowid != "" {
+		r.order = r.rowid
+	}
+	r.from = qs(schema) + "." + qs(t.name)
+	return r, nil
+}
+
+// hash reads the rows of a table hashed whole.
+func (r *sqliteRead) hash(ctx context.Context, c *sql.Conn) ([]byte, error) {
+	q := "SELECT " + strings.Join(r.sel, ", ") + " FROM " + r.from
+	if r.order != "" {
+		q += " ORDER BY " + r.order
 	} else {
 		q += " NOT INDEXED" // every rowid name is a column: the table's own order
 	}
-	rows, err := c.QueryContext(ctx, q)
+	h := sha256.New()
+	writeFields(h, r.sel...)
+	buf := make([]byte, 0, 64<<10)
+	err := sqliteScan(ctx, c, q, len(r.sel), func(vals []any) {
+		for _, v := range vals {
+			buf = appendValue(buf, v)
+		}
+		if len(buf) >= 32<<10 {
+			h.Write(buf)
+			buf = buf[:0]
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	h.Write(buf)
+	return h.Sum(nil), nil
+}
+
+// sqliteBucket is the hash of the rows of a bucket.
+type sqliteBucket struct {
+	n   int64
+	sum [32]byte
+}
+
+// bounds reads the lowest and highest rowid of a rowid table; ok is false
+// for an empty table.
+func (r *sqliteRead) bounds(ctx context.Context, c *sql.Conn) (lo, hi int64, ok bool, err error) {
+	var a, b sql.NullInt64
+	err = c.QueryRowContext(ctx, "SELECT min("+r.rowid+"), max("+r.rowid+") FROM "+r.from).Scan(&a, &b)
+	return a.Int64, b.Int64, a.Valid && b.Valid, err
+}
+
+// buckets hashes the rows whose rowid is from lo to hi, which begin and
+// end whole buckets.
+func (r *sqliteRead) buckets(ctx context.Context, c *sql.Conn, lo, hi int64) ([]sqliteBucket, error) {
+	var out []sqliteBucket
 	h := sha256.New()
-	writeFields(h, sel...)
-	vals := make([]any, len(sel))
-	ptrs := make([]any, len(sel))
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
 	buf := make([]byte, 0, 64<<10)
-	for rows.Next() {
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+	cur := int64(0)
+	end := func() {
+		h.Write(buf)
+		buf = buf[:0]
+		b := sqliteBucket{n: cur}
+		h.Sum(b.sum[:0])
+		out = append(out, b)
+		h.Reset()
+	}
+	first := true
+	var bad error
+	q := "SELECT " + strings.Join(r.sel, ", ") + " FROM " + r.from + " WHERE " + r.rowid + " BETWEEN ? AND ? ORDER BY " + r.rowid
+	err := sqliteScan(ctx, c, q, len(r.sel), func(vals []any) {
+		id, ok := vals[r.key].(int64)
+		if !ok {
+			bad = fmt.Errorf("rowid %v is no integer", vals[r.key])
+			return
+		}
+		if n := id >> sqliteBucketBits; first || n != cur {
+			if !first {
+				end()
+			}
+			first, cur = false, n
 		}
 		for _, v := range vals {
 			buf = appendValue(buf, v)
@@ -518,12 +755,65 @@ func sqliteRowsHash(ctx context.Context, c *sql.Conn, schema string, t *sqliteTa
 			h.Write(buf)
 			buf = buf[:0]
 		}
+	}, lo, hi)
+	if err == nil {
+		err = bad
 	}
-	if err := rows.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	h.Write(buf)
-	return h.Sum(nil), nil
+	if !first {
+		end()
+	}
+	return out, nil
+}
+
+// combine is the row hash of a rowid table from its buckets.
+func (r *sqliteRead) combine(buckets []sqliteBucket) []byte {
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].n < buckets[j].n })
+	h := sha256.New()
+	writeFields(h, r.sel...)
+	var b [8]byte
+	for _, k := range buckets {
+		binary.BigEndian.PutUint64(b[:], uint64(k.n))
+		h.Write(b[:])
+		h.Write(k.sum[:])
+	}
+	return h.Sum(nil)
+}
+
+// sqliteScan runs a query and calls row with the values of each row (the
+// slice is reused). The rows are read from the driver itself: through
+// database/sql every blob would be copied once more.
+func sqliteScan(ctx context.Context, c *sql.Conn, query string, n int, row func(vals []any), args ...any) error {
+	return c.Raw(func(dc any) error {
+		q, ok := dc.(driver.QueryerContext)
+		if !ok {
+			return fmt.Errorf("sqlite: no QueryContext on %T", dc)
+		}
+		named := make([]driver.NamedValue, len(args))
+		for i, a := range args {
+			named[i] = driver.NamedValue{Ordinal: i + 1, Value: a}
+		}
+		rows, err := q.QueryContext(ctx, query, named)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		dest := make([]driver.Value, n)
+		vals := make([]any, n)
+		for {
+			if err := rows.Next(dest); err == io.EOF {
+				return nil
+			} else if err != nil {
+				return err
+			}
+			for i, v := range dest {
+				vals[i] = v
+			}
+			row(vals)
+		}
+	})
 }
 
 // appendValue appends one value with its storage class: a tag, then an

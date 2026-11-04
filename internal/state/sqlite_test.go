@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/orangehill/driftgate/internal/chaos"
+	"modernc.org/sqlite"
 )
 
 // sqliteSchema is an application's database: a table with AUTOINCREMENT,
@@ -98,6 +100,18 @@ func sqliteFingerprint(t testing.TB, s *SQLite) Fingerprint {
 	return f
 }
 
+// sqliteScratch is the fingerprint of the working file read from scratch,
+// by a component that keeps no row hash or fingerprint from before.
+func sqliteScratch(t testing.TB, s *SQLite) Fingerprint {
+	t.Helper()
+	fresh, err := NewSQLite(s.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	return sqliteFingerprint(t, fresh)
+}
+
 func sqlitePristineFP(t testing.TB, s *SQLite) Fingerprint {
 	t.Helper()
 	f, err := s.pristineFingerprint(context.Background())
@@ -136,6 +150,7 @@ func TestSQLiteFingerprintAndRestore(t *testing.T) {
 		{"last bit of a real", []string{"UPDATE users SET score = 1.5000000000000002 WHERE id = 1"}, []string{"table:users"}},
 		{"text to blob", []string{"UPDATE tags SET extra = CAST('ab' AS BLOB) WHERE name = 'sql'"}, []string{"table:tags"}},
 		{"null to empty", []string{"UPDATE users SET avatar = '' WHERE id = 2"}, []string{"table:users"}},
+		{"null to empty blob", []string{"UPDATE users SET avatar = x'' WHERE id = 2"}, []string{"table:users"}},
 		{"datetime text", []string{"UPDATE users SET created_at = '2024-01-02T03:04:05' WHERE id = 1"}, []string{"table:users"}},
 		{"generated column", []string{"UPDATE posts SET title = 'hello!' WHERE id = 1"}, []string{"table:posts"}},
 		{"autoincrement", []string{"INSERT INTO users (email) VALUES ('c@x')", "DELETE FROM users WHERE email = 'c@x'"}, []string{"table:users"}},
@@ -183,8 +198,12 @@ func TestSQLiteFingerprintAndRestore(t *testing.T) {
 				if err := s.Restore(ctx, Diff(after, pristine)); err != nil {
 					t.Fatalf("%s: restore: %v", c.name, err)
 				}
-				if d := Diff(sqliteFingerprint(t, s), pristine); len(d) > 0 {
+				restored := sqliteFingerprint(t, s)
+				if d := Diff(restored, pristine); len(d) > 0 {
 					t.Fatalf("%s: the restore left %v different", c.name, d)
+				}
+				if d := Diff(restored, sqliteScratch(t, s)); len(d) > 0 {
+					t.Fatalf("%s: the fingerprint after the restore differs from one from scratch in %v", c.name, d)
 				}
 				if n := count(t, app, "SELECT count(*) FROM audit"); n != audit {
 					t.Errorf("%s: the restore fired triggers: audit has %d rows, had %d", c.name, n, audit)
@@ -502,6 +521,160 @@ print("written", flush=True)
 				}
 			}
 		})
+	}
+}
+
+// sqliteFullTextCheck is what a connection finds in the full-text table
+// docs: the rowids and ranks of a match, and the integrity check.
+const sqliteFullTextCheck = `SELECT (SELECT group_concat(rowid || ':' || printf('%.9e', rank), ',') FROM (SELECT rowid, rank FROM docs WHERE docs MATCH 'alpha OR gamma' ORDER BY rowid)), (SELECT integrity_check FROM pragma_integrity_check)`
+
+// TestSQLiteRestoreFullTextOpenConnections: connections the application
+// keeps open across a restore of a full-text table's shadow tables (two in
+// this process, one in a Python process when there is one) find what the
+// pristine file holds and see an intact file, in WAL and in rollback mode.
+// FTS5 keeps the table's configuration on each connection, and reads it
+// again only when the cookie in the structure record changes, then setting
+// only the settings that have a row: the rank function the restore
+// deleted would stay, and so would the second one set after it, whose
+// cookie is the first one's again.
+func TestSQLiteRestoreFullTextOpenConnections(t *testing.T) {
+	for _, mode := range []string{"wal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			s, app := sqliteSchemaFixture(t, mode, nil,
+				`CREATE VIRTUAL TABLE docs USING fts5 (body)`,
+				`INSERT INTO docs VALUES ('alpha beta'), ('gamma delta'), ('epsilon'), ('alpha gamma'), ('beta alpha alpha'), ('delta'), ('gamma gamma')`)
+			other := sqliteApp(t, s.o.Working)
+			check := func(db *sql.DB) string {
+				var match, ok string
+				if err := db.QueryRow(sqliteFullTextCheck).Scan(&match, &ok); err != nil {
+					t.Fatal(err)
+				}
+				return match + " " + ok
+			}
+			want := check(app)
+			if !strings.HasSuffix(want, " ok") || check(other) != want {
+				t.Fatalf("before: %s, %s", want, check(other))
+			}
+
+			var py *exec.Cmd
+			var pyIn *os.File
+			var pyOut *bufio.Reader
+			pyCheck := func() string {
+				pyIn.WriteString("\n")
+				line, _ := pyOut.ReadString('\n')
+				return strings.TrimSpace(line)
+			}
+			if python := sqlitePython(t); python != "" {
+				script := filepath.Join(t.TempDir(), "holder.py")
+				os.WriteFile(script, []byte(`import sqlite3, sys
+c = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=10)
+for _ in sys.stdin:
+    print(*c.execute(sys.argv[2]).fetchone(), flush=True)
+`), 0o644)
+				py = exec.Command(python, "-I", script, s.o.Working, sqliteFullTextCheck)
+				in, w, _ := os.Pipe()
+				py.Stdin, pyIn = in, w
+				out, err := py.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stderr bytes.Buffer
+				py.Stderr = &stderr
+				if err := py.Start(); err != nil {
+					t.Fatal(err)
+				}
+				in.Close()
+				defer py.Wait()
+				defer pyIn.Close()
+				pyOut = bufio.NewReader(out)
+				if got := pyCheck(); got != want {
+					t.Fatalf("python before: %q, want %q %s", got, want, stderr.String())
+				}
+			} else {
+				t.Log("no python3: the in-process connections only")
+			}
+
+			// Rows deleted, a rolled back write, a delete that finds
+			// nothing, and a new configuration the other connections read.
+			mustExec(t, app, "DELETE FROM docs WHERE rowid % 2 = 1")
+			mustExec(t, app, "BEGIN", "INSERT INTO docs VALUES ('alpha zeta')", "ROLLBACK")
+			mustExec(t, app, "DELETE FROM docs WHERE rowid % 2 = 1", "INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(100.0)')")
+			changed := check(app)
+			if changed == want || check(other) != changed || py != nil && pyCheck() != changed {
+				t.Fatalf("after the changes: %s, %s", changed, check(other))
+			}
+			if err := s.Restore(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := check(app); got != want {
+				t.Errorf("the application's connection finds %q after the restore, want %q", got, want)
+			}
+			if got := check(other); got != want {
+				t.Errorf("the other connection finds %q after the restore, want %q", got, want)
+			}
+			if py != nil {
+				if got := pyCheck(); got != want {
+					t.Errorf("python finds %q after the restore, want %q", got, want)
+				}
+			}
+
+			// The configuration changed again: the cookie is the one the
+			// other connections saw with the first change.
+			mustExec(t, app, "INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(0.01)')")
+			fresh := sqliteApp(t, s.o.Working)
+			want = check(fresh)
+			if want == changed {
+				t.Fatalf("the two configurations rank the same: %s", want)
+			}
+			if got := check(other); got != want {
+				t.Errorf("the other connection finds %q, want %q (a configuration of before)", got, want)
+			}
+			if py != nil {
+				if got := pyCheck(); got != want {
+					t.Errorf("python finds %q, want %q (a configuration of before)", got, want)
+				}
+				pyIn.Close()
+				if err := py.Wait(); err != nil {
+					t.Fatal(err)
+				}
+				py = nil
+			}
+		})
+	}
+}
+
+// TestSQLiteRestoreDropsVirtualTable: a restore that drops a virtual table
+// the application made in place of a plain one drops its shadow tables
+// with it, and the fingerprints after it, which keep what the restore did
+// not write, no longer list them.
+func TestSQLiteRestoreDropsVirtualTable(t *testing.T) {
+	ctx := context.Background()
+	s, app := sqliteSchemaFixture(t, "wal", nil, "CREATE TABLE docs (x)", "INSERT INTO docs VALUES (1)")
+	mustExec(t, app, "DROP TABLE docs", "CREATE VIRTUAL TABLE docs USING fts5 (body)", "INSERT INTO docs VALUES ('a b')")
+	pristine := sqlitePristineFP(t, s)
+	sqliteFingerprint(t, s)
+	if err := s.Restore(ctx, []string{"table:docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, app, "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'docs%'"); n != 1 {
+		t.Fatalf("%d tables named docs… after the restore, want 1", n)
+	}
+	sub, err := s.Fingerprint(ctx, []string{"table:docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(sub, pristine.Subset([]string{"table:docs"})); len(d) > 0 {
+		t.Fatalf("the check of the restored item finds %v different", d)
+	}
+	for range 2 {
+		f := sqliteFingerprint(t, s)
+		if d := Diff(f, pristine); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore (reused: %v) differs from the pristine one in %v", s.reused, d)
+		}
+		if d := Diff(f, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore differs from one read from scratch in %v", d)
+		}
 	}
 }
 
@@ -1396,5 +1569,380 @@ func TestSQLiteSeedCleansUp(t *testing.T) {
 	s.pristine = nil
 	if d := Diff(sqlitePristineFP(t, s), old); len(d) > 0 {
 		t.Fatalf("the failed seed changed the pristine file: %v", d)
+	}
+}
+
+// TestSQLitePageDigest: a fingerprint that keeps row hashes by page
+// digest equals one read from scratch, and sees every change, whatever
+// moves the pages: tables that grow and shrink, overflow chains, pages one
+// table frees and another reuses, root pages auto_vacuum moves when a
+// table is dropped, VACUUM, incremental_vacuum, with pages of 512 to 65536
+// bytes, in WAL mode without a checkpoint and in rollback mode.
+func TestSQLitePageDigest(t *testing.T) {
+	steps := []struct {
+		name  string
+		stmts []string
+		want  []string
+	}{
+		{"grow", []string{"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 300) INSERT INTO a (v) SELECT CASE WHEN i % 7 = 0 THEN randomblob(3000) ELSE 'row ' || i END FROM r"}, []string{"table:a"}},
+		{"excluded", []string{"INSERT INTO sessions VALUES (2, randomblob(5000))"}, nil},
+		{"overflow chain longer", []string{"UPDATE a SET v = randomblob(9000) WHERE id = 7"}, []string{"table:a"}},
+		{"overflow chain same length", []string{"UPDATE a SET v = randomblob(9000) WHERE id = 7"}, []string{"table:a"}},
+		{"one byte of an overflow page", []string{"UPDATE a SET v = CAST(substr(v, 1, 8999) || iif(substr(v, 9000) = x'00', x'01', x'00') AS BLOB) WHERE id = 7"}, []string{"table:a"}},
+		{"shrink", []string{"DELETE FROM a WHERE id > 40"}, []string{"table:a"}},
+		{"freed pages reused by another table", []string{"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 200) INSERT INTO b SELECT 'k' || i, randomblob(200) FROM r"}, []string{"table:b"}},
+		{"pages move from one table to the other", []string{"DELETE FROM b WHERE k > 'k5'", "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 100) INSERT INTO a (v) SELECT randomblob(500) FROM r"}, []string{"table:a", "table:b"}},
+		{"dropped table", []string{"DROP TABLE c"}, []string{"table:c"}},
+		{"new table", []string{"CREATE TABLE c (id INTEGER PRIMARY KEY, v)", "INSERT INTO c VALUES (1, 'one')"}, []string{"table:c"}},
+		{"table dropped before others", []string{"DROP TABLE d"}, []string{"table:d"}},
+		{"incremental_vacuum", []string{"PRAGMA incremental_vacuum"}, nil},
+		{"vacuum", []string{"DELETE FROM a WHERE id % 2 = 0", "VACUUM"}, []string{"table:a"}},
+		{"vacuum alone", []string{"VACUUM"}, nil},
+		{"same rows written again", []string{"DELETE FROM c", "INSERT INTO c VALUES (1, 'one')"}, nil},
+		{"one value", []string{"UPDATE b SET v = x'00' WHERE k = 'k1'"}, []string{"table:b"}},
+	}
+	defer func(v float64) { sqliteScanAll = v }(sqliteScanAll)
+	for _, mode := range []string{"wal", "delete"} {
+		for _, size := range []int{512, 4096, 65536} {
+			for i, av := range []string{"none", "full", "incremental"} {
+				// Every page of the file read, or only those needed.
+				all := (i+size)%2 == 0
+				t.Run(fmt.Sprintf("%s/%d/%s/all=%v", mode, size, av, all), func(t *testing.T) {
+					sqliteScanAll = 2
+					if all {
+						sqliteScanAll = 0
+					}
+					dir := t.TempDir()
+					o := Options{Name: "db", Working: filepath.Join(dir, "app.sqlite"), Pristine: filepath.Join(dir, "pristine.sqlite"), Exclude: []string{"sessions"}}
+					app := sqliteApp(t, o.Working)
+					mustExec(t, app, fmt.Sprintf("PRAGMA page_size = %d", size), "PRAGMA auto_vacuum = "+av,
+						"PRAGMA journal_mode = "+mode, "PRAGMA wal_autocheckpoint = 0",
+						"CREATE TABLE d (id INTEGER PRIMARY KEY, v)", "INSERT INTO d VALUES (1, randomblob(2000))",
+						"CREATE TABLE a (id INTEGER PRIMARY KEY, v)",
+						"CREATE TABLE b (k TEXT PRIMARY KEY, v) WITHOUT ROWID",
+						"CREATE TABLE sessions (id INTEGER PRIMARY KEY, p)",
+						"CREATE TABLE c (id INTEGER PRIMARY KEY, v)", "INSERT INTO c VALUES (1, 'one')",
+						"INSERT INTO sessions VALUES (1, 'x')")
+					s, err := NewSQLite(o)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer s.Close()
+					var got int
+					app.QueryRow("PRAGMA page_size").Scan(&got)
+					if got != size {
+						t.Fatalf("page size %d, want %d", got, size)
+					}
+					before := sqliteFingerprint(t, s)
+					for _, st := range steps {
+						mustExec(t, app, st.stmts...)
+						after := sqliteFingerprint(t, s)
+						if d := Diff(before, after); !slices.Equal(d, st.want) {
+							t.Errorf("%s: changed %v, want %v", st.name, d, st.want)
+						}
+						if d := Diff(after, sqliteScratch(t, s)); len(d) > 0 {
+							t.Fatalf("%s: a fingerprint by page digests differs from one read from scratch in %v", st.name, d)
+						}
+						before = after
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestSQLitePageDigestConcurrentWriter: fingerprints taken while another
+// connection keeps committing are each of one moment: every table's hash
+// is one of the hashes it has between two commits, the table nobody writes
+// keeps its hash, and once the writer stops the fingerprint is that of
+// the file as it was left. The writer commits a bounded number of times,
+// pausing between commits as a request's writes do: in rollback mode on
+// Windows, where SQLite's busy handler waits in longer steps, a writer
+// that hardly pauses keeps DriftGate's barrier waiting, and a fingerprint
+// may then fail with SQLITE_BUSY (never return a mixed one).
+func TestSQLitePageDigestConcurrentWriter(t *testing.T) {
+	for _, mode := range []string{"wal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			s, app := sqliteSchemaFixture(t, mode, []string{"sessions"},
+				"CREATE TABLE a (id INTEGER PRIMARY KEY, v)",
+				"CREATE TABLE b (id INTEGER PRIMARY KEY, v)",
+				"CREATE TABLE sessions (id INTEGER PRIMARY KEY, p)",
+				"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 400) INSERT INTO a SELECT i, 'x' || i FROM r",
+				"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 400) INSERT INTO b SELECT i, randomblob(300) FROM r",
+				"INSERT INTO sessions VALUES (1, 'x')")
+			states := []string{"UPDATE a SET v = 'x' || id", "UPDATE a SET v = CASE WHEN id % 50 = 0 THEN CAST(hex(zeroblob(2500)) || id AS BLOB) ELSE 'y' || id END", "UPDATE a SET v = 'z' || id"}
+			hashes := map[string]bool{} // of a in each state
+			for _, q := range states {
+				mustExec(t, app, q)
+				hashes[sqliteFingerprint(t, s)["table:a"]] = true
+			}
+			first := sqliteFingerprint(t, s)
+			// Busy is an allowed outcome only where the writer can starve
+			// the barrier.
+			busyAllowed := runtime.GOOS == "windows" && mode == "delete"
+			writer := sqliteApp(t, s.o.Working)
+			stopped := make(chan struct{})
+			errs := make(chan error, 1)
+			go func() {
+				defer close(stopped)
+				for i := range 150 {
+					time.Sleep(2 * time.Millisecond)
+					for _, q := range []string{fmt.Sprintf("INSERT OR REPLACE INTO sessions VALUES (1, %d)", i), states[i%3]} {
+						if _, err := writer.Exec(q); err != nil {
+							errs <- err
+							return
+						}
+					}
+				}
+			}()
+			seen := map[string]bool{}
+			busy := 0
+			for n := 0; ; n++ {
+				writing := true
+				select {
+				case <-stopped:
+					writing = false
+				default:
+				}
+				if !writing && n >= 5 {
+					break
+				}
+				f, err := s.Fingerprint(context.Background(), nil)
+				var e *sqlite.Error
+				if err != nil && busyAllowed && errors.As(err, &e) && e.Code()&0xff == 5 {
+					busy++
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !hashes[f["table:a"]] {
+					t.Fatalf("table a has a hash of no moment: %s", f["table:a"])
+				}
+				if writing {
+					seen[f["table:a"]] = true
+				}
+				if f["table:b"] != first["table:b"] {
+					t.Fatal("table b, which nobody writes, changed")
+				}
+				time.Sleep(2 * time.Millisecond) // the writer's turn, in rollback mode
+			}
+			select {
+			case err := <-errs:
+				t.Fatal(err)
+			default:
+			}
+			if busy > 0 {
+				t.Logf("%d fingerprints waited out the busy timeout", busy)
+			}
+			// How many states the fingerprints catch depends on the scheduler
+			// (Windows' coarse timer, -race): the test needs every result to be
+			// one moment, which is checked above, not a given overlap.
+			if len(seen) < 2 {
+				t.Logf("the fingerprints taken while the writer wrote saw %d states of a", len(seen))
+			}
+			writer.Close()
+			if d := Diff(sqliteFingerprint(t, s), sqliteScratch(t, s)); len(d) > 0 {
+				t.Fatalf("after the writer stopped the fingerprint differs from one read from scratch in %v", d)
+			}
+		})
+	}
+}
+
+// TestSQLitePageDigestRootMoved: tables whose root pages are swapped in
+// sqlite_schema have each other's rows, though no page changed.
+func TestSQLitePageDigestRootMoved(t *testing.T) {
+	s, app := sqliteSchemaFixture(t, "delete", nil,
+		"CREATE TABLE x (id INTEGER PRIMARY KEY, v)", "INSERT INTO x VALUES (1, 'x')",
+		"CREATE TABLE y (id INTEGER PRIMARY KEY, v)", "INSERT INTO y VALUES (1, 'y')")
+	before := sqliteFingerprint(t, s)
+	var sv int
+	app.QueryRow("PRAGMA schema_version").Scan(&sv)
+	mustExec(t, app, "PRAGMA writable_schema = ON",
+		"UPDATE sqlite_schema SET rootpage = (SELECT sum(rootpage) FROM sqlite_schema WHERE name IN ('x', 'y')) - rootpage WHERE name IN ('x', 'y')",
+		"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA schema_version = %d", sv+1))
+	if n := count(t, app, "SELECT count(*) FROM x WHERE v = 'y'"); n != 1 {
+		t.Fatalf("the root pages were not swapped (%d)", n)
+	}
+	after := sqliteFingerprint(t, s)
+	if d := Diff(before, after); !slices.Equal(d, []string{"table:x", "table:y"}) {
+		t.Fatalf("changed %v, want x and y", d)
+	}
+}
+
+// TestSQLiteRestoreKeepsFingerprint: after a restore, the fingerprint of
+// the restored items reads only what the restore wrote, and the next full
+// one is reused, when nothing else wrote; a commit of the application
+// before the restore, between it and the check, or after the check, and a
+// file written over before the restore, are all seen.
+func TestSQLiteRestoreKeepsFingerprint(t *testing.T) {
+	cases := []struct {
+		name                 string
+		before, after, later []string // the application's writes
+		reused               bool
+	}{
+		{"quiet", nil, nil, nil, true},
+		{"write before the restore", []string{"UPDATE tags SET n = 9 WHERE name = 'go'"}, nil, nil, false},
+		{"write before the check", nil, []string{"DELETE FROM log WHERE rowid = 3"}, nil, false},
+		{"write after the check", nil, nil, []string{"INSERT INTO users (email) VALUES ('later@x')"}, false},
+		{"restored table written again", nil, []string{"UPDATE posts SET title = 'again' WHERE id = 2"}, nil, false},
+		{"excluded table written", nil, []string{"INSERT INTO sessions VALUES ('s7', 'y')"}, nil, false},
+	}
+	for _, mode := range []string{"wal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			s, app := sqliteFixture(t, mode, Options{})
+			pristine := sqlitePristineFP(t, s)
+			for _, c := range cases {
+				// The application's request changes posts, the view and
+				// a trigger; the capture fingerprints and restores them.
+				mustExec(t, app, "UPDATE posts SET title = 'changed' WHERE id = 1", "DROP VIEW user_posts", "DROP TRIGGER users_gone",
+					"INSERT INTO docs VALUES ('more words')")
+				f := sqliteFingerprint(t, s)
+				items := Diff(f, pristine)
+				mustExec(t, app, c.before...)
+				if err := s.Restore(ctx, items); err != nil {
+					t.Fatal(err)
+				}
+				mustExec(t, app, c.after...)
+				part, err := s.Fingerprint(ctx, items)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d := Diff(part, sqliteScratch(t, s).Subset(items)); len(d) > 0 {
+					t.Fatalf("%s: the check of the restored items differs from a fingerprint from scratch in %v", c.name, d)
+				}
+				mustExec(t, app, c.later...)
+				full := sqliteFingerprint(t, s)
+				if s.Reused() != c.reused {
+					t.Errorf("%s: reused %v, want %v", c.name, s.Reused(), c.reused)
+				}
+				if d := Diff(full, sqliteScratch(t, s)); len(d) > 0 {
+					t.Fatalf("%s: the fingerprint after the restore differs from one from scratch in %v", c.name, d)
+				}
+				// Back to the pristine file for the next case.
+				if err := s.Restore(ctx, Diff(full, pristine)); err != nil {
+					t.Fatal(err)
+				}
+				if d := Diff(sqliteFingerprint(t, s), pristine); len(d) > 0 {
+					t.Fatalf("%s: left %v different", c.name, d)
+				}
+			}
+
+			// Two restores without a fingerprint in between: both are
+			// read again.
+			mustExec(t, app, "UPDATE posts SET title = 'p' WHERE id = 1", "UPDATE tags SET n = 5 WHERE name = 'go'")
+			sqliteFingerprint(t, s)
+			for _, it := range []string{"table:posts", "table:tags"} {
+				if err := s.Restore(ctx, []string{it}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if d := Diff(sqliteFingerprint(t, s), sqliteScratch(t, s)); len(d) > 0 || !slices.Equal(s.scanned, []string{"posts", "tags"}) {
+				t.Fatalf("after two restores: differs in %v, read %v", d, s.scanned)
+			}
+			if sqliteFingerprint(t, s); !s.Reused() {
+				t.Fatal("not reused after two restores and a fingerprint")
+			}
+		})
+	}
+}
+
+// TestSQLiteRestoreAfterOverwrite: a file written over between a
+// fingerprint and a restore, with the change counter the connections last
+// read (no change SQLite sees), is restored through new connections, not
+// through the old pages, and read again after the restore.
+func TestSQLiteRestoreAfterOverwrite(t *testing.T) {
+	ctx := context.Background()
+	s, app := sqliteSchemaFixture(t, "delete", nil,
+		"CREATE TABLE a (id INTEGER PRIMARY KEY, v)", "INSERT INTO a VALUES (1, 1)",
+		"CREATE TABLE b (id INTEGER PRIMARY KEY, v)", "INSERT INTO b VALUES (1, 1)")
+	app.Close()
+	bak := s.o.Working + ".bak"
+	copyFile(t, s.o.Working, bak)
+	b := sqliteApp(t, bak)
+	mustExec(t, b, "UPDATE b SET v = 2")
+	b.Close()
+	a := sqliteApp(t, s.o.Working)
+	mustExec(t, a, "UPDATE a SET v = 2")
+	a.Close()
+	f := sqliteFingerprint(t, s)
+	data, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.o.Working, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Restore(ctx, []string{"table:a"}); err != nil {
+		t.Fatal(err)
+	}
+	after := sqliteFingerprint(t, s)
+	if s.Reused() || after["table:b"] == f["table:b"] {
+		t.Fatalf("the file written over: reused %v, b %s", s.Reused(), after["table:b"])
+	}
+	if d := Diff(after, sqliteScratch(t, s)); len(d) > 0 {
+		t.Fatalf("differs from a fingerprint from scratch in %v", d)
+	}
+	c := sqliteApp(t, s.o.Working)
+	var ok string
+	if err := c.QueryRow("PRAGMA integrity_check").Scan(&ok); err != nil || ok != "ok" {
+		t.Fatalf("integrity_check: %s %v", ok, err)
+	}
+	if n := count(t, c, "SELECT v FROM a") + 10*count(t, c, "SELECT v FROM b"); n != 21 {
+		t.Fatalf("a and b are %d, want 1 and 2", n)
+	}
+}
+
+// TestSQLiteRowBuckets: the rows of a rowid table, read in parts on
+// several connections, hash as they do read on one (the pristine file's
+// fingerprint is read so): rowids at both ends of the integer range,
+// negative ones, ones at the edges of a bucket, hidden rowids, an empty
+// table; and a change in any part is seen.
+func TestSQLiteRowBuckets(t *testing.T) {
+	ctx := context.Background()
+	s, app := sqliteSchemaFixture(t, "wal", nil,
+		"CREATE TABLE dense (id INTEGER PRIMARY KEY, v)",
+		"WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 30000) INSERT INTO dense SELECT i, printf('%.300c', 'a') || i FROM r",
+		"CREATE TABLE edge (id INTEGER PRIMARY KEY, v)",
+		"INSERT INTO edge VALUES (-9223372036854775808, 'min'), (-4097, 'a'), (-4096, 'b'), (-1, 'c'), (0, 'd'), (4095, 'e'), (4096, 'f'), (1099511627776, 'g'), (9223372036854775807, 'max')",
+		"CREATE TABLE hidden (v)",
+		"INSERT INTO hidden (rowid, v) VALUES (-9223372036854775808, 1), (-3, 2), (5000, 3), (9223372036854775807, 4)",
+		"CREATE TABLE empty (id INTEGER PRIMARY KEY, v)")
+	f := sqliteFingerprint(t, s)
+	if d := Diff(f, sqlitePristineFP(t, s)); len(d) > 0 {
+		t.Fatalf("read in parts the working file differs from the pristine one in %v", d)
+	}
+	defer func(n int) { sqliteConns = n }(sqliteConns)
+	sqliteConns = 0
+	if d := Diff(f, sqliteScratch(t, s)); len(d) > 0 {
+		t.Fatalf("read on one connection the rows hash otherwise in %v", d)
+	}
+	sqliteConns = 4
+	for _, c := range []struct{ q, table string }{
+		{"UPDATE dense SET v = 'x' WHERE id = 29999", "table:dense"},
+		{"UPDATE dense SET v = 'x' WHERE id = 1", "table:dense"},
+		{"UPDATE edge SET v = 'X' WHERE id = 9223372036854775807", "table:edge"},
+		{"UPDATE edge SET v = 'X' WHERE id = -9223372036854775808", "table:edge"},
+		{"DELETE FROM edge WHERE id = 4095", "table:edge"},
+		{"INSERT INTO edge VALUES (4095, 'e')", "table:edge"},
+		{"UPDATE hidden SET v = 5 WHERE rowid = -3", "table:hidden"},
+		{"INSERT INTO empty VALUES (7, NULL)", "table:empty"},
+	} {
+		before := sqliteFingerprint(t, s)
+		mustExec(t, app, c.q)
+		after := sqliteFingerprint(t, s)
+		if d := Diff(before, after); !slices.Equal(d, []string{c.table}) {
+			t.Errorf("%s: changed %v, want %s", c.q, d, c.table)
+		}
+		if d := Diff(after, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("%s: differs from a fingerprint from scratch in %v", c.q, d)
+		}
+	}
+	if err := s.Restore(ctx, Diff(sqliteFingerprint(t, s), sqlitePristineFP(t, s))); err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(sqliteFingerprint(t, s), sqlitePristineFP(t, s)); len(d) > 0 {
+		t.Fatalf("after the restore %v differ", d)
 	}
 }

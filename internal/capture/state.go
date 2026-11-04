@@ -396,7 +396,7 @@ func (t *tracker) restore(ctx context.Context) error {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the application wrote while the seed ran, or the pristine copy changed since, run driftgate seed again while the application does not write", c.Name(), len(d), limit(d, 20))
+			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran), run driftgate seed again while the application does not write", c.Name(), len(d), limit(d, 20))
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}

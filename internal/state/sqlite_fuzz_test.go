@@ -42,7 +42,7 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 	a := int(arg)
 	val := []string{fmt.Sprint(a), fmt.Sprintf("%d.25", a), fmt.Sprintf("'t%d'", a), fmt.Sprintf("x'%02x'", a), "NULL", "''"}[a%6]
 	var stmts []string
-	switch op % 24 {
+	switch op % 28 {
 	case 0:
 		stmts = []string{"INSERT INTO t1 (v) VALUES (" + val + ")"}
 	case 1:
@@ -95,7 +95,12 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 			stmts = []string{"VACUUM"}
 		}
 	case 15:
-		stmts = []string{fmt.Sprintf("INSERT INTO docs VALUES ('word%d lorem')", a)}
+		if a%4 == 3 {
+			// A new configuration, which each connection keeps.
+			stmts = []string{fmt.Sprintf("INSERT INTO docs (docs, rank) VALUES ('rank', 'bm25(%d.5)')", a%9)}
+		} else {
+			stmts = []string{fmt.Sprintf("INSERT INTO docs VALUES ('word%d lorem')", a)}
+		}
 	case 16:
 		stmts = []string{"UPDATE t1 SET v = v"}
 	case 17:
@@ -116,6 +121,17 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 		}
 	case 23:
 		stmts = []string{fmt.Sprintf("PRAGMA application_id = %d", a)}
+	case 24:
+		// auto_vacuum changes with the next VACUUM: root pages move when
+		// a table is dropped, free pages leave the file.
+		stmts = []string{"PRAGMA auto_vacuum = " + []string{"NONE", "FULL", "INCREMENTAL"}[a%3], "VACUUM"}
+	case 25:
+		stmts = []string{fmt.Sprintf("PRAGMA incremental_vacuum(%d)", a%8)}
+	case 26:
+		// A new page size (not in WAL mode, where the VACUUM keeps it).
+		stmts = []string{fmt.Sprintf("PRAGMA page_size = %d", 512<<(a%8)), "VACUUM"}
+	case 27:
+		stmts = []string{fmt.Sprintf("DELETE FROM t1 WHERE id > %d", a), fmt.Sprintf("INSERT INTO nr SELECT 'big' || id, id FROM t1 WHERE id %% 3 = %d", a%3)}
 	}
 	for _, q := range stmts {
 		if _, err := db.Exec(q); err != nil && q != "ROLLBACK" {
@@ -128,9 +144,12 @@ func sqliteFuzzOp(db *sql.DB, op, arg byte) {
 // FuzzSQLiteRestore: whatever the application does to the working file, a
 // fingerprint that kept row hashes by page digest equals one read from
 // scratch, and a restore of the items that differ from the pristine file
-// leaves a file equal to it: the same fingerprint, the same rows both ways
+// leaves a file equal to it (also as the fingerprint that reads only what
+// the restore wrote says): the same fingerprint, the same rows both ways
 // (EXCEPT) and the same schema, an intact file, and the excluded table
-// and the triggers' table not written by the restore.
+// and the triggers' table not written by the restore; the application's
+// connection, open all along, matches the full-text table as the pristine
+// file does.
 func FuzzSQLiteRestore(f *testing.F) {
 	tmpl := f.TempDir()
 	work, pristine := filepath.Join(tmpl, "app.sqlite"), filepath.Join(tmpl, "pristine.sqlite")
@@ -154,6 +173,10 @@ func FuzzSQLiteRestore(f *testing.F) {
 		{11, 0, 10, 1, 12, 9, 15, 3, 20, 1, 22, 0},
 		{0, 9, 17, 4, 18, 0, 19, 1, 21, 0, 3, 7, 4, 1},
 		{1, 9, 2, 8, 0, 2, 7, 0, 8, 2, 9, 0, 9, 1, 5, 12, 6, 2, 23, 5},
+		{0, 24, 1, 13, 30, 9, 0, 27, 4, 25, 3, 13, 9, 26, 2, 24, 2, 9, 3, 25, 0},
+		{1, 24, 2, 13, 50, 27, 10, 9, 0, 25, 7, 22, 0, 26, 1, 14, 0},
+		[]byte("\x92\x84\x8bi601"),
+		{1, 15, 3, 20, 1, 21, 0, 15, 4, 15, 7, 2, 1},
 	} {
 		f.Add(seed)
 	}
@@ -195,8 +218,12 @@ func FuzzSQLiteRestore(f *testing.F) {
 		if err := s.Restore(ctx, Diff(got, want)); err != nil {
 			t.Fatal(err)
 		}
-		if d := Diff(sqliteFingerprint(t, s), want); len(d) > 0 {
+		restored := sqliteFingerprint(t, s)
+		if d := Diff(restored, want); len(d) > 0 {
 			t.Fatalf("the restore left %v different", d)
+		}
+		if d := Diff(restored, sqliteScratch(t, s)); len(d) > 0 {
+			t.Fatalf("the fingerprint after the restore differs from one read from scratch in %v", d)
 		}
 		if n := count(t, app, "SELECT count(*) FROM sessions"); n != sessions {
 			t.Fatalf("the restore changed the excluded table: %d rows, had %d", n, sessions)
@@ -206,6 +233,23 @@ func FuzzSQLiteRestore(f *testing.F) {
 		}
 		if n := count(t, app, "SELECT count(*) FROM t3"); n != t3 {
 			t.Fatalf("the restore fired triggers: t3 has %d rows, had %d", n, t3)
+		}
+		// The application's connection, open across the restore, sees an
+		// intact file and matches and ranks as the pristine file does.
+		// (Before the ATTACH below: that makes the connection read the
+		// schema again, and connect its virtual tables anew.)
+		var ok string
+		if err := app.QueryRow("PRAGMA integrity_check").Scan(&ok); err != nil || ok != "ok" {
+			t.Fatalf("integrity_check: %s %v", ok, err)
+		}
+		pdb, err := sqliteOpen(p, sqliteReadOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pm, am := sqliteFuzzMatch(t, pdb), sqliteFuzzMatch(t, app)
+		pdb.Close()
+		if am != pm {
+			t.Fatalf("the application's connection matches %q, the pristine file %q", am, pm)
 		}
 		mustExec(t, app, "ATTACH DATABASE "+ql(p)+" AS p")
 		schema := `SELECT type, name, tbl_name, sql FROM %s.sqlite_schema WHERE name NOT LIKE 'sqlite\_%%' ESCAPE '\' AND name <> 'driftgate_pristine' AND tbl_name <> 'sessions'`
@@ -241,11 +285,18 @@ func FuzzSQLiteRestore(f *testing.F) {
 			}
 		}
 		mustExec(t, app, "DETACH DATABASE p")
-		var ok string
-		if err := app.QueryRow("PRAGMA integrity_check").Scan(&ok); err != nil || ok != "ok" {
-			t.Fatalf("integrity_check: %s %v", ok, err)
-		}
 	})
+}
+
+// sqliteFuzzMatch is what a connection finds in the full-text table: the
+// rowids and ranks of a match.
+func sqliteFuzzMatch(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var m sql.NullString
+	if err := db.QueryRow(`SELECT group_concat(rowid || ':' || printf('%.9e', rank), ',') FROM (SELECT rowid, rank FROM docs WHERE docs MATCH 'alpha OR lorem OR word*' ORDER BY rowid)`).Scan(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.String
 }
 
 func mustExecF(f *testing.F, db *sql.DB, stmts ...string) {

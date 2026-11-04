@@ -42,18 +42,22 @@ type SQLite struct {
 	main *sql.Conn
 
 	// The last full fingerprint and the data_version and schema_version it
-	// was read at; own is set by a restore through main, whose commits do
-	// not move main's data_version.
-	last   Fingerprint
-	dv, sv int64
-	stamp  sqliteStamp
-	own    bool
-	reused bool
+	// was read at. A restore commits through main, which does not move
+	// main's data_version: it lists the items it wrote in restored (they
+	// are read again), and sets sv to what it left.
+	last     Fingerprint
+	dv, sv   int64
+	restored map[string]bool
+	reused   bool
+	// seen is main's data_version and the file's stamp when DriftGate last
+	// looked (a fingerprint) or wrote (a restore): a stamp that changed
+	// while data_version did not is a change SQLite did not see.
+	seen sqliteSeen
 	// scanned lists the tables the last fingerprint read row by row (the
 	// others kept their row hash).
 	scanned []string
 	// sums holds the row hash of every table read by the last fingerprints,
-	// with the digest of the pages it was read from (sqlitePages).
+	// with the pages it was read from and their digest (sqliteSum).
 	sums map[string]sqliteSum
 	// pristine is the fingerprint of the pristine file, with the identity
 	// of the file it was read from.
@@ -183,6 +187,19 @@ type sqliteStamp struct {
 	wal             bool
 }
 
+type sqliteSeen struct {
+	dv    int64
+	stamp sqliteStamp
+	ok    bool
+}
+
+// unseen reports whether the file changed without a commit SQLite saw (a
+// copy written over it) since DriftGate last looked: the connections may
+// hold its old pages, and must be opened again.
+func (s *SQLite) unseen(dv int64, stamp sqliteStamp) bool {
+	return s.seen.ok && dv == s.seen.dv && stamp != s.seen.stamp
+}
+
 func (s *SQLite) stampNow() sqliteStamp {
 	var st sqliteStamp
 	if fi, err := os.Stat(s.o.Working); err == nil {
@@ -310,13 +327,14 @@ func (s *SQLite) current() error {
 // kept, nor the fingerprint the next one could be reused from.
 func (s *SQLite) reopen() error {
 	s.forget()
+	s.seen = sqliteSeen{}
 	s.main.Close()
 	s.db.Close()
 	return s.open()
 }
 
 // forget drops the fingerprint the next one could be reused from.
-func (s *SQLite) forget() { s.last, s.own = nil, false }
+func (s *SQLite) forget() { s.last, s.restored = nil, nil }
 
 func (s *SQLite) Name() string  { return s.o.Name }
 func (s *SQLite) Partial() bool { return true }
@@ -359,6 +377,7 @@ func asciiLower(name string) string {
 // statements of its indexes (sorted), and what kind of table it is.
 type sqliteTable struct {
 	name, sql string
+	root      int64 // its b-tree's root page (0 for a virtual table)
 	indexes   []string
 	virtual   bool // CREATE VIRTUAL TABLE: its rows live in its shadow tables
 	shadow    bool // a table a virtual table keeps its rows in
@@ -435,20 +454,24 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = q.QueryContext(ctx, "SELECT type, name, tbl_name, sql FROM "+qs(schema)+".sqlite_schema ORDER BY rowid")
+	rows, err = q.QueryContext(ctx, "SELECT type, name, tbl_name, sql, rootpage FROM "+qs(schema)+".sqlite_schema ORDER BY rowid")
 	if err != nil {
 		return nil, err
 	}
-	type entry struct{ kind, name, table, sql string }
+	type entry struct {
+		kind, name, table, sql string
+		root                   int64
+	}
 	var all []entry
 	for rows.Next() {
 		var e entry
 		var text sql.NullString
-		if err := rows.Scan(&e.kind, &e.name, &e.table, &text); err != nil {
+		var root sql.NullInt64
+		if err := rows.Scan(&e.kind, &e.name, &e.table, &text, &root); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		e.sql = text.String
+		e.sql, e.root = text.String, root.Int64
 		all = append(all, e)
 	}
 	rows.Close()
@@ -511,7 +534,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			}
 			continue
 		}
-		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, virtual: virtual[e.name], shadow: shadow, noRowid: noRowid[e.name]}
+		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, noRowid: noRowid[e.name]}
 		o.order = append(o.order, e.name)
 	}
 	for _, e := range all {
