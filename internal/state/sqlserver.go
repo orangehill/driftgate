@@ -44,6 +44,7 @@ type SQLServer struct {
 
 	info    *sqlServerInfo // read once (server)
 	checked bool           // the working database passed checkWorking
+	multi   bool           // the working database was not SINGLE_USER at the first fingerprint (checkShared)
 
 	// What the next fingerprint may reuse (sqlserver_reuse.go): the last
 	// full fingerprint, the inventory of the working database with the

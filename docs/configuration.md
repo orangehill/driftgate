@@ -1132,8 +1132,8 @@ excluded tables is lost. Limits of that:
   RESTORE keeps `RESTRICTED_USER` and `SINGLE_USER` is set again after
   the check, but a restore stopped halfway then leaves no note, and the
   database ends as the pristine copy's backup is (`MULTI_USER`). A `SINGLE_USER` database allows one session, and a
-  full fingerprint takes several: a capture then needs the database
-  `MULTI_USER`.
+  fingerprint takes several: a capture of one is refused at its first
+  fingerprint, with what to do (`SET MULTI_USER`).
 
 Measured on small databases, such a restore takes about 0.8 s. A
 restore of the whole database that stops halfway leaves the working

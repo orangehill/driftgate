@@ -1776,3 +1776,41 @@ func waitNoSessions(t *testing.T, master *sql.DB, db string) {
 		}
 	}
 }
+
+// TestSQLServerSingleUserCapture: a capture of a SINGLE_USER working
+// database is refused at its first fingerprint with what to do, and a
+// restore of given items leaves no session of DriftGate's in it, so the
+// application gets the one session it allows.
+func TestSQLServerSingleUserCapture(t *testing.T) {
+	ctx := context.Background()
+	s, db, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE users (id int PRIMARY KEY, n int NOT NULL)", "INSERT INTO users VALUES (1, 1)")
+	p := pristineSQLServer(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	t.Cleanup(func() { master.Exec("ALTER DATABASE " + qms(s.o.Working) + " SET MULTI_USER WITH ROLLBACK IMMEDIATE") })
+	sqlServerExec(t, db, "UPDATE users SET n = 2")
+	items := Diff(mustSQLServerFingerprint(t, s), p)
+	s.closePool(s.o.Working)
+	db.SetMaxIdleConns(0)
+	one := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, one, "ALTER DATABASE "+qms(s.o.Working)+" SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
+	one.Close()
+	waitNoSessions(t, master, s.o.Working)
+
+	o := s.o
+	o.Log = nil
+	fresh, err := NewSQLServer(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if _, err := fresh.Fingerprint(ctx, nil); err == nil || !strings.Contains(err.Error(), "is SINGLE_USER") || !strings.Contains(err.Error(), "SET MULTI_USER") {
+		t.Fatalf("a fingerprint of a SINGLE_USER database: %v", err)
+	}
+	if err := s.Restore(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	waitNoSessions(t, master, s.o.Working)
+	if n := sqlServerInt(t, db, "SELECT n FROM users WHERE id = 1"); n != 1 {
+		t.Fatalf("n = %d after the restore, want 1", n)
+	}
+}

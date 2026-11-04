@@ -85,6 +85,11 @@ func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {
 	if w == nil {
 		return fmt.Errorf("state %s: working database %s does not exist", s.o.Name, s.o.Working)
 	}
+	if w.UserAccess == "SINGLE_USER" {
+		// DriftGate's connection left in the pool would hold the one
+		// session the database allows.
+		defer s.closePool(s.o.Working)
+	}
 	mark, err := s.checkMark(ctx, dbs[1], m)
 	if err != nil {
 		return err

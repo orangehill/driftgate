@@ -368,6 +368,9 @@ func (s *SQLServer) Fingerprint(ctx context.Context, items []string) (f Fingerpr
 }
 
 func (s *SQLServer) fingerprintOnce(ctx context.Context, items []string) (Fingerprint, error) {
+	if err := s.checkShared(ctx); err != nil {
+		return nil, err
+	}
 	s.reused = false
 	pinned := s.work != nil
 	f, err := s.fingerprintWorking(ctx, items)
@@ -577,6 +580,25 @@ func (s *SQLServer) restored(items []string) {
 			delete(s.last.content, id)
 		}
 	}
+}
+
+// checkShared refuses, at the first fingerprint, a working database that
+// is SINGLE_USER: a fingerprint reads it on several sessions, and
+// DriftGate's connection kept for the next one would hold the one session
+// the application needs.
+func (s *SQLServer) checkShared(ctx context.Context) error {
+	if s.multi {
+		return nil
+	}
+	d, err := s.database(ctx, s.o.Working)
+	if err != nil || d == nil {
+		return err
+	}
+	if d.UserAccess == "SINGLE_USER" {
+		return fmt.Errorf("state %s: working database %s is SINGLE_USER: DriftGate reads it on several sessions and the application needs one of its own; make it MULTI_USER (ALTER DATABASE %s SET MULTI_USER) for captures", s.o.Name, s.o.Working, qms(s.o.Working))
+	}
+	s.multi = true
+	return nil
 }
 
 // pinned is the connection to the working database fingerprints read the
