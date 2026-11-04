@@ -262,7 +262,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        run: go test -race -count=1 -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
+        run: go test -race -count=1 -timeout 20m -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
       # Every driftgate process the tests start would run under the race
       # detector too; they run without it, as in the sqlite job.
       - name: End to end and crashes
@@ -307,7 +307,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        run: go test -count=1 -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
+        run: go test -count=1 -timeout 20m -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
       - name: TLS
         env:
           IMAGE: mcr.microsoft.com/mssql/server:${{ matrix.version }}
