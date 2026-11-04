@@ -255,10 +255,14 @@ func testSeedWhileWriting(t *testing.T, driver, dsn string) {
 		}
 	}
 	t.Cleanup(func() { chaos.At = nil })
-	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+	var out strings.Builder
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
 		t.Fatal(err)
 	}
 	chaos.At = nil
+	if w := out.String(); !strings.Contains(w, "warning: db: the working database differs from the pristine copy just made in ") || !strings.Contains(w, "users]") {
+		t.Errorf("seed did not warn of the write during it:\n%s", out.String())
+	}
 	if n := count(); n != 3 {
 		t.Fatalf("%d users after the seed, want the 2 copied and the one written during it", n)
 	}

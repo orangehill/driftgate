@@ -364,7 +364,7 @@ func (t *tracker) restore(ctx context.Context) error {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran), run driftgate seed again while the application does not write", c.Name(), len(d), limit(d, 20))
+			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture", c.Name(), len(d), limit(d, 20))
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
@@ -546,13 +546,28 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		// have moved on since the copy was made, while the application
 		// kept writing.
 		var f state.Fingerprint
-		if pc, ok := c.(seededFingerprinter); ok {
+		pc, seeded := c.(seededFingerprinter)
+		if seeded {
 			f, err = pc.SeededFingerprint(ctx)
 		} else {
 			f, err = c.Fingerprint(ctx, nil)
 		}
 		if err != nil {
 			return envErr("state %s: fingerprint: %v", c.Name(), err)
+		}
+		if seeded {
+			// A working database that differs from the copy just made
+			// means the application wrote during the seed or right after
+			// it. A write during the copy may leave a copy that mixes
+			// data from before and after it (each table is copied on its
+			// own), which no check can tell from a consistent one.
+			w, err := c.Fingerprint(ctx, nil)
+			if err != nil {
+				return envErr("state %s: fingerprint: %v", c.Name(), err)
+			}
+			if d := state.Diff(w, f); len(d) > 0 {
+				fmt.Fprintf(opt.Out, "warning: %s: the working database differs from the pristine copy just made in %d %s (%v): the application wrote during the seed or right after it; a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write\n", c.Name(), len(d), plural(len(d), "item", "items"), limit(d, 20))
+			}
 		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,
 			Created: time.Now().UTC().Format(time.RFC3339), Fingerprint: f}
