@@ -1135,16 +1135,17 @@ excluded tables is lost. Limits of that:
   killed) leaves it so until the next restore or capture lets every login
   in again (`ALTER DATABASE … SET MULTI_USER` does it by hand);
 - a working database you made `RESTRICTED_USER` or `SINGLE_USER` yourself
-  stays so: DriftGate notes the user access it found in `<pristine>_dgx`
-  and gives it back once the restore is checked, also when the next
-  restore completes one that was stopped (`MULTI_USER` lets every login
-  in again; `SINGLE_USER` is set again, ending a `db_owner` session that
-  got in meanwhile). Without excluded tables nothing is saved: the
-  RESTORE keeps `RESTRICTED_USER` and `SINGLE_USER` is set again after
-  the check, but a restore stopped halfway then leaves no note, and the
-  database ends as the pristine copy's backup is (`MULTI_USER`). A `SINGLE_USER` database allows one session, and a
-  fingerprint takes several: a capture of one is refused at its first
-  fingerprint, with what to do (`SET MULTI_USER`).
+  stays so. `RESTRICTED_USER` is kept by the RESTORE itself. `SINGLE_USER`
+  is set again at the end of the restore of the whole database, after its
+  check, and only while the database is still the `RESTRICTED_USER` the
+  RESTORE left (ending a `db_owner` session that got in meanwhile); with
+  excluded tables the user access is noted in `<pristine>_dgx`, so a
+  later restore that completes a stopped one sets it again too, while
+  without excluded tables there is no note, and a restore stopped halfway
+  leaves the database as the pristine copy's backup is (`MULTI_USER`).
+  This concerns a restore of given items (the tracker's); a capture of a
+  `SINGLE_USER` database is refused at its first fingerprint, which reads
+  on several sessions, with what to do (`SET MULTI_USER`).
 
 Measured on small databases, such a restore takes about 0.8 s. A
 restore of the whole database that stops halfway leaves the working
