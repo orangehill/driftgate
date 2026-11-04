@@ -132,6 +132,7 @@ var commands = []commandHelp{
 	}},
 	{name: "review", summary: "drift groups of the last comparison, with the accept command for each", flags: []flagHelp{
 		{name: "group", arg: "N", text: "show this group with every request it touches"},
+		{name: "show-private", text: "show values from private bodies, on your own machine only (never kept)"},
 	}},
 	{name: "accept", args: "<request|glob|group:N>...", summary: "takes drifts of the last comparison into its baseline (mode evolve), with a reason in the acceptance log", flags: []flagHelp{
 		{name: "reason", arg: `"…"`, text: "why the change is right", required: true},

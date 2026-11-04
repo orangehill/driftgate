@@ -7,9 +7,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
 // reviewCmd shows the drift groups of the last comparison, each with an
@@ -19,6 +21,7 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	cfg := fs.String("config", "", "")
 	group := fs.Int("group", 0, "")
+	showPrivate := fs.Bool("show-private", false, "")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return 0, err
@@ -41,6 +44,11 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	why, err := staleComparison(p, r)
 	if err != nil {
 		return 0, err
+	}
+	if *showPrivate && why == "" {
+		if err := showPrivateValues(p, *cfg, r); err != nil {
+			return 0, err
+		}
 	}
 	canAccept := why == "" && p.Mode == config.Evolve
 	switch {
@@ -208,4 +216,79 @@ func linkedGroups(r *report.Report, done map[string]bool) map[int][]int {
 		out[g.N] = ms
 	}
 	return out
+}
+
+// showPrivateValues puts into the drifts of the last comparison r the
+// values its saved report hides, compared again from the two sets
+// (compare --show-private): only the values, so every drift stays in its
+// group; a request whose drifts are not the same ones again keeps them
+// hidden. Nothing is saved.
+func showPrivateValues(p *config.Project, cfg string, r *report.Report) error {
+	_, cat, allow, err := loadProject(cfg)
+	if err != nil {
+		return err
+	}
+	base, baseName, err := resolve(p, r.Against)
+	if err != nil {
+		return err
+	}
+	cur, curName, err := resolve(p, r.Tag)
+	if err != nil {
+		return err
+	}
+	level, err := compare.ParseLevel(r.Level)
+	if err != nil {
+		return configErr("the last comparison: %v", err)
+	}
+	reqs := map[string]catalog.Request{}
+	for _, req := range cat.Requests {
+		reqs[req.ID] = req
+	}
+	var ids []string
+	for _, res := range r.Results {
+		if res.Outcome == report.Drift {
+			ids = append(ids, res.ID)
+		}
+	}
+	for _, s := range []struct {
+		set  *snapshot.Set
+		name string
+	}{{base, baseName}, {cur, curName}} {
+		recs, err := selectRecords(s.set, ids)
+		if err != nil {
+			return err
+		}
+		if err := privateKey(p, s.name, recs); err != nil {
+			return err
+		}
+	}
+	origins, _, err := setOrigins(p, base, cur)
+	if err != nil {
+		return envErr(err)
+	}
+	for i, res := range r.Results {
+		req, ok := reqs[res.ID]
+		if res.Outcome != report.Drift || !ok {
+			continue
+		}
+		l := level
+		if req.Level != "" {
+			if own, err := compare.ParseLevel(req.Level); err == nil && own > l {
+				l = own
+			}
+		}
+		shown, err := compareOne(req, base, cur, origins, allow, l, true)
+		if err != nil {
+			return err
+		}
+		if len(shown.Drifts) != len(res.Drifts) {
+			continue
+		}
+		for j, d := range shown.Drifts {
+			if d.Kind == res.Drifts[j].Kind {
+				r.Results[i].Drifts[j].Baseline, r.Results[i].Drifts[j].Current = d.Baseline, d.Current
+			}
+		}
+	}
+	return nil
 }

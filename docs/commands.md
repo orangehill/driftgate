@@ -583,6 +583,8 @@ driftgate compare <tag> [--against <baseline|tag>]
 ```
 
 Compares a capture with a baseline or another capture (exit 1 on drift).
+`<tag>` `run` is this checkout's capture of `driftgate run` (when no
+baseline or capture is named `run`).
 
 | Flag | Meaning |
 |---|---|
@@ -784,7 +786,7 @@ all, before anything is captured.
 ## review
 
 ```
-driftgate review [--group N]
+driftgate review [--group N] [--show-private]
 ```
 
 Drift groups of the last comparison, with the accept command for each.
@@ -792,6 +794,7 @@ Drift groups of the last comparison, with the accept command for each.
 | Flag | Meaning |
 |---|---|
 | `--group N` | show this group with every request it touches |
+| `--show-private` | show values from private bodies, compared again from the two sets, on your own machine only (never kept) |
 
 It asks nothing (it works in CI). A request is accepted whole, so when its
 drifts fall into several groups, `review` names them together in one

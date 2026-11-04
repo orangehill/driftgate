@@ -52,6 +52,12 @@ func resolve(p *config.Project, name string) (*snapshot.Set, string, error) {
 		return b, "baseline:" + name, nil
 	case c.Exists():
 		return c, "capture:" + name, nil
+	case name == "run":
+		// This checkout's capture of driftgate run (capture:run-<id>).
+		if r, err := p.Capture(runTag(p)); err == nil && r.Exists() {
+			return r, "capture:" + runTag(p), nil
+		}
+		return nil, "", configErr("this checkout has no capture of driftgate run yet")
 	}
 	return nil, "", configErr("no baseline or capture named %q", name)
 }

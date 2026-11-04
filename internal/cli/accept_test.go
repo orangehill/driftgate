@@ -381,9 +381,22 @@ func TestAcceptAfterReview(t *testing.T) {
 	if !strings.Contains(plain, "(private)") {
 		t.Fatal("the demo comparison has no drift in a private body to hide")
 	}
-	runCLI(t, "compare", runTagFor(t, p.cfg), "--config", p.cfg, "--show-private")
+	// run names this checkout's capture of driftgate run, as README writes it.
+	code, shownOut, errOut := runCLI(t, "compare", "run", "--config", p.cfg, "--show-private")
+	if code != ExitDrift || saved() != plain {
+		t.Errorf("compare run --show-private: %d %s, or it saved values the plain comparison does not", code, errOut)
+	}
+	if strings.Contains(shownOut, "(private)") {
+		t.Errorf("compare --show-private still hides values:\n%s", shownOut)
+	}
+	// review --show-private shows them too, in the same groups.
+	_, hidden, _ := runCLI(t, "review", "--config", p.cfg)
+	_, shown, _ := runCLI(t, "review", "--config", p.cfg, "--show-private")
+	if !strings.Contains(hidden, "(private)") || strings.Contains(shown, "(private)") || strings.Count(hidden, "\n[") != strings.Count(shown, "\n[") {
+		t.Errorf("review --show-private:\n%s\nplain:\n%s", shown, hidden)
+	}
 	if saved() != plain {
-		t.Error("compare --show-private saved values the plain comparison does not")
+		t.Error("review --show-private saved values")
 	}
 
 	// Part of the catalog captured: a glob must not drop the rest.
