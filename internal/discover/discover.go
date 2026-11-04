@@ -216,7 +216,7 @@ func runCommand(ctx context.Context, root string, argv []string, stdin []byte, l
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	if err := procx.Run(cmd); err != nil {
-		return nil, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return nil, fmt.Errorf("%s: %w", procx.Line(argv), err)
 	}
 	return out.Bytes(), nil
 }

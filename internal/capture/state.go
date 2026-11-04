@@ -9,10 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +19,7 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
+	"github.com/orangehill/driftgate/internal/procx"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -713,48 +712,6 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 	return true, nil
 }
 
-// commandLine is a command of driftgate.yaml as one line, an argument with
-// a space, quote or backslash (or an empty one) quoted: as the
-// configuration writes it, so what runs is plain to see. A password or
-// secret in it is shown as ***: the value after -p, -P, --password or
-// --pass, of password= or pwd= (a DSN or connection string), of a URL's
-// user:password@, and of an environment-like NAME=value whose name holds
-// PASS, PWD, SECRET or TOKEN. A reference to a variable ($NAME) stays.
-func commandLine(cmd []string) string {
-	parts := make([]string, len(cmd))
-	for i, a := range cmd {
-		if i > 0 && secretFlag[cmd[i-1]] && !strings.HasPrefix(a, "$") {
-			a = "***"
-		}
-		a = redactSecrets(a)
-		if a == "" || strings.ContainsAny(a, " \t\n\"'\\") {
-			a = strconv.Quote(a)
-		}
-		parts[i] = a
-	}
-	return strings.Join(parts, " ")
-}
-
-// secretFlag are the options whose next argument is a password.
-var secretFlag = map[string]bool{"-p": true, "-P": true, "--password": true, "--pass": true}
-
-var secretPatterns = []*regexp.Regexp{
-	// -p secret, -psecret, --password=secret, --pass secret (inside sh -c too)
-	regexp.MustCompile(`((?:^|\s)(?:-p|-P|--password|--pass)(?:=|\s+)?)("[^"$]*"|'[^'$]*'|[^\s"'$-][^\s"']*)`),
-	// password=…, pwd=… (a DSN or connection string), NAME=… with PASS, PWD, SECRET or TOKEN
-	regexp.MustCompile(`(?i)((?:\b|_)(?:password|passwd|pwd|pass|secret|token)[a-z0-9_]*\s*=\s*)("[^"$]*"|'[^'$]*'|[^;&\s"'$][^;&\s"']*)`),
-	// scheme://user:password@
-	regexp.MustCompile(`(://[^:/@\s]*:)([^@\s/$][^@\s/]*)(@)`),
-}
-
-// redactSecrets shows the secrets in a text as *** (commandLine).
-func redactSecrets(s string) string {
-	for i, re := range secretPatterns {
-		repl := "${1}***"
-		if i == 2 {
-			repl = "${1}***${3}"
-		}
-		s = re.ReplaceAllString(s, repl)
-	}
-	return s
-}
+// commandLine is a command of driftgate.yaml as one line, its secrets
+// shown as *** (procx.Line).
+func commandLine(cmd []string) string { return procx.Line(cmd) }

@@ -1397,3 +1397,12 @@ func TestMySQLCountersOff(t *testing.T) {
 		})
 	}
 }
+
+// TestRunErrorHidesSecrets: the error of a failed command names it with
+// its secrets as *** (seed, prepare, a command component's restore).
+func TestRunErrorHidesSecrets(t *testing.T) {
+	err := Run(context.Background(), t.TempDir(), []string{"sh", "-c", "exit 3", "PGPASSWORD=S3cret", "-pS3cret"}, nil, nil)
+	if err == nil || strings.Contains(err.Error(), "S3cret") || !strings.Contains(err.Error(), "PGPASSWORD=***") {
+		t.Fatalf("%v", err)
+	}
+}

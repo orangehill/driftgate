@@ -247,7 +247,7 @@ func Run(ctx context.Context, root string, argv, env []string, log io.Writer) er
 		if log != nil && out.Len() > 0 {
 			fmt.Fprintln(log, strings.Join(lines, "\n"))
 		}
-		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return fmt.Errorf("%s: %w", procx.Line(argv), err)
 	}
 	return nil
 }

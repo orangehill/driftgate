@@ -617,7 +617,7 @@ type runner struct {
 // or a prepare may have changed.
 func (r *runner) prepare(ctx context.Context) error {
 	for _, cmd := range r.p.Prepare {
-		fmt.Fprintf(r.out, "prepare: %s\n", cmd[0])
+		fmt.Fprintf(r.out, "prepare: %s\n", commandLine(cmd))
 		if err := state.Run(ctx, r.p.Root, cmd, r.env, r.log); err != nil {
 			return envErr("prepare: %v", err)
 		}
