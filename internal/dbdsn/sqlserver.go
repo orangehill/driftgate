@@ -2,6 +2,7 @@ package dbdsn
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -54,8 +55,14 @@ func sqlServerAddr(dsn string) (host, port string, err error) {
 		}
 		q[lk] = vs[0]
 	}
-	if _, ok := q["port"]; ok {
-		return "", "", errors.New("dsn: the sqlserver:// URL takes the port in its host (host:1533), not as the port parameter")
+	if v, ok := q["port"]; ok {
+		// The value is shown only when it is a port number: the DSN
+		// holds the password.
+		p := "<port>"
+		if n, err := strconv.ParseUint(v, 10, 16); err == nil && n > 0 {
+			p = strconv.FormatUint(n, 10)
+		}
+		return "", "", fmt.Errorf("dsn: the sqlserver:// URL takes the port after its host, not as the port parameter: write sqlserver://user:password@host:%s and remove port=%s (host,%s is the form of a connection string's Server, which a sqlserver:// URL does not take)", p, p, p)
 	}
 	if _, ok := q["server"]; ok {
 		return "", "", errors.New("dsn: the sqlserver:// URL takes the server as its host, not as the server parameter")
