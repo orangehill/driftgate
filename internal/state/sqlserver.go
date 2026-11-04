@@ -85,6 +85,11 @@ func NewSQLServer(o Options) (*SQLServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.AppName == "go-mssqldb" { // the driver's default: the DSN names none
+		// DriftGate's sessions are told from the application's by it
+		// (countSessions), and a DBA sees whose they are.
+		cfg.AppName = sqlServerAppName
+	}
 	if strings.EqualFold(o.Working, o.Pristine) {
 		return nil, fmt.Errorf("state %s: the pristine database must be another one than %s", o.Name, o.Working)
 	}
@@ -341,6 +346,10 @@ func (d *sqlServerDatabase) refuse(component string) error {
 	}
 	return fmt.Errorf("state %s: database %s %s, which DriftGate does not restore; use a database without it", component, d.Name, why)
 }
+
+// sqlServerAppName is the program name of DriftGate's sessions when the
+// DSN names none.
+const sqlServerAppName = "driftgate"
 
 // systemDatabases are never a working or pristine database.
 var systemDatabases = map[string]bool{"master": true, "model": true, "msdb": true, "tempdb": true, "distribution": true, "resource": true}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -63,12 +64,12 @@ var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 // Restore brings the given items of the working database back to the
 // pristine copy; nil means every item that differs.
 func (s *SQLServer) Restore(ctx context.Context, items []string) error {
+	s.ended = 0 // summed over the runs: each may end sessions
 	return s.retryOthers(ctx, func() error { return s.restore(ctx, items) })
 }
 
 func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {
 	defer func() { err = s.denied(err) }()
-	s.ended = 0
 	if _, err := s.server(ctx); err != nil {
 		return err
 	}
@@ -1220,12 +1221,15 @@ func (s *SQLServer) waitFullText(ctx context.Context, c *sql.Conn, plan *ssResto
 // and the count is 0.
 func (s *SQLServer) EndedSessions() int { return s.ended }
 
-// countSessions adds to ended the sessions in database id other than this
-// one (m, in master) that are about to be ended; DriftGate's own in it
-// were closed before (closePool).
+// countSessions adds to ended the sessions of other programs in database
+// id that are about to be ended. DriftGate's own there (just closed by
+// closePool, they may still be logging out) are told by their program
+// name and process id together: an application in the same process (a
+// test) or another DriftGate is counted.
 func (s *SQLServer) countSessions(ctx context.Context, m *sql.Conn, id int) {
 	var n int
-	if m.QueryRowContext(ctx, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1", id).Scan(&n) == nil {
+	if m.QueryRowContext(ctx, `SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1
+		AND NOT (program_name = @p2 AND host_process_id = @p3)`, id, s.cfg.AppName, os.Getpid()).Scan(&n) == nil {
 		s.ended += n
 	}
 }

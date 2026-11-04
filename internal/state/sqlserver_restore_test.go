@@ -1811,3 +1811,63 @@ func TestSQLServerSingleUserCapture(t *testing.T) {
 		t.Fatalf("n = %d after the restore, want 1", n)
 	}
 }
+
+// TestSQLServerEndedSessions: a restore of the whole database counts the
+// application's sessions it ends, exactly, not DriftGate's own (its pool
+// and pinned connection, just closed), with excluded tables and without.
+func TestSQLServerEndedSessions(t *testing.T) {
+	ctx := context.Background()
+	for _, app := range []int{0, 3} {
+		for _, exclude := range [][]string{nil, {"logs"}} {
+			t.Run(fmt.Sprintf("%d %v", app, exclude), func(t *testing.T) {
+				s, db, _ := newSQLServerSeeded(t, Options{Exclude: exclude},
+					"CREATE TABLE users (id int PRIMARY KEY)", "CREATE TABLE logs (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users")
+				p := pristineSQLServer(t, s)
+				db.SetMaxIdleConns(app)
+				for i := range 3 {
+					// The pool's connections the last restore ended fail once each.
+					for k := 0; ; k++ {
+						if _, err := db.Exec(fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS b FROM users", i)); err == nil {
+							break
+						} else if k == app+1 {
+							t.Fatal(err)
+						}
+					}
+					// app idle sessions of the application's pool, in the database
+					var wg sync.WaitGroup
+					for range app {
+						wg.Go(func() { db.Exec("WAITFOR DELAY '00:00:00.100'") })
+					}
+					wg.Wait()
+					if app == 0 {
+						db.SetMaxIdleConns(0)
+					}
+					waitSessions(t, s, app)
+					items := Diff(mustSQLServerFingerprint(t, s), p) // DriftGate's pool and pinned connection in it
+					if err := s.Restore(ctx, items); err != nil {
+						t.Fatal(err)
+					}
+					if got := s.EndedSessions(); got != app {
+						t.Fatalf("%d: %d sessions ended, want the application's %d", i, got, app)
+					}
+				}
+			})
+		}
+	}
+}
+
+// waitSessions waits until the working database has n user sessions that
+// are not DriftGate's (the ones the test closed have logged out).
+func waitSessions(t *testing.T, s *SQLServer, n int) {
+	t.Helper()
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
+		got := sqlServerInt(t, master, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = DB_ID(N'"+s.o.Working+"') AND is_user_process = 1 AND program_name <> N'"+sqlServerAppName+"'")
+		if got == int64(n) {
+			return
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("%d sessions in the working database, want %d", got, n)
+		}
+	}
+}

@@ -1103,9 +1103,11 @@ The application's pooled connections to the working database are ended:
 the first use of each one can fail once (go-mssqldb reports `Read: EOF`,
 other clients a closed connection), and the pool connects again. Such a
 failure is usually a 500 from the application. DriftGate counts the
-sessions of other programs the restore ends (it sees them with `VIEW
-SERVER STATE`; without it, none) and sends, in the read-only part of the
-next capture, as many requests answered with 5xx once more: a `GET` or
+sessions of other programs the restore ends (not its own; it sees the
+sessions of other logins only with `VIEW SERVER STATE`, and without it
+counts only those of the application that signs in as DriftGate's own
+login) and sends, in the read-only part of the same capture that
+follows its first restore, as many requests answered with 5xx once more: a `GET` or
 `HEAD` to a target on an allowed host, not a `repeat:`, a step of a
 sequence or one the baseline knows writes (a `GET` can write). Each is
 sent at most twice, the second answer is kept (a 5xx that stays is the
