@@ -17,6 +17,7 @@ func TestParallel(t *testing.T) {
 	sizes := []int64{40, 40, 40, 500, 10, 60, 30, 0, 100, 20, 300, 50}
 	var mu sync.Mutex
 	var inWork, most, large, mostLarge int64
+	firstLarge := false // item 3 works
 	// The first large item works until a smaller item starts next to it:
 	// by the order of events, not by how long a sleep lasts (under -race
 	// the smaller items around it could all start and end within one).
@@ -31,9 +32,10 @@ func TestParallel(t *testing.T) {
 		mu.Lock()
 		if big {
 			large++
+			firstLarge = firstLarge || i == 3
 		} else {
 			inWork += sizes[i]
-			if large > 0 {
+			if firstLarge {
 				smallOnce.Do(func() { close(small) })
 			}
 		}
@@ -49,6 +51,7 @@ func TestParallel(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		mu.Lock()
+		firstLarge = firstLarge && i != 3
 		if big {
 			large--
 		} else {
