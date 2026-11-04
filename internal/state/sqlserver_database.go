@@ -34,7 +34,9 @@ import (
 // save is complete and which recovery fork the working database was on:
 // RESTORE starts a new one, so a save left by a restore that stopped is
 // copied back only when the working database was restored since, and
-// dropped otherwise.
+// dropped otherwise. It also notes the working database's user access
+// before the save: the logins are let in again only when it was
+// MULTI_USER (letIn), so a RESTRICTED_USER the user set stays.
 
 // sqlServerCleanup bounds what a restore or seed that failed or was
 // stopped does to leave the databases usable: it runs on a context of its
@@ -579,6 +581,10 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (sav
 		_, err := m.ExecContext(ctx, "INSERT INTO "+manifest+" VALUES (@p1, @p2, @p3, @p4, @p5)", n, kind, item, a, b)
 		return err
 	}
+	// Before keepOut and the RESTORE keep the logins out (letIn).
+	if err := add(-1, "access", w.UserAccess, nil, nil); err != nil {
+		return false, err
+	}
 	if len(tables) > 0 || len(seqs) > 0 {
 		// With <pristine>_dgx made: a restore that stops from here on
 		// lets the logins in again (leftSave, copyBack).
@@ -665,8 +671,11 @@ func (s *SQLServer) keepOut(ctx context.Context, m *sql.Conn, w *sqlServerDataba
 }
 
 // letIn lets every login into the working database again (MULTI_USER)
-// when keepOut or the RESTORE kept them out, on a context of
-// its own (the caller's may be done).
+// when keepOut or the RESTORE kept them out, on a context of its own (the
+// caller's may be done): only when <pristine>_dgx notes that the database
+// was MULTI_USER before the save (saveExcluded). Otherwise DriftGate kept
+// no one out (the save had not begun), or the database was RESTRICTED_USER
+// or SINGLE_USER, the user's choice, and is left as it is.
 func (s *SQLServer) letIn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
 	defer cancel()
@@ -675,6 +684,16 @@ func (s *SQLServer) letIn() error {
 		return err
 	}
 	defer m.Close()
+	var access string
+	err = m.QueryRowContext(ctx, "SELECT item FROM "+qms(s.excludedDB())+".dbo.driftgate_saved WHERE kind = N'access'").Scan(&access)
+	switch n := sqlServerNumber(err); {
+	case errors.Is(err, sql.ErrNoRows), n == 208, n == 911: // no save, or no table or database of it
+		return nil
+	case err != nil:
+		return fmt.Errorf("state %s: reading the user access %s had before the restore: %w", s.o.Name, s.o.Working, err)
+	case access != "MULTI_USER":
+		return nil
+	}
 	_, err = m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET MULTI_USER", s.o.Working)
 	if err != nil {
 		return fmt.Errorf("state %s: letting the application into %s again (ALTER DATABASE … SET MULTI_USER): %w", s.o.Name, s.o.Working, err)
@@ -722,7 +741,7 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 	var list []*entry
 	rows, err := c.QueryContext(ctx, `SELECT m.n, m.kind, m.item, m.a, m.b,
 		CASE WHEN EXISTS (SELECT 1 FROM `+qms(dgx)+`.sys.partitions p WHERE p.object_id = OBJECT_ID(N'`+strings.ReplaceAll(qms(dgx), "'", "''")+`.dbo.t' + CAST(m.n AS nvarchar(10))) AND p.index_id IN (0, 1) AND p.rows > 0) THEN 1 ELSE 0 END
-		FROM `+qms(dgx)+`.dbo.driftgate_saved m WHERE m.kind <> N'complete' ORDER BY m.n`)
+		FROM `+qms(dgx)+`.dbo.driftgate_saved m WHERE m.kind IN (N'table', N'sequence') ORDER BY m.n`)
 	if err != nil {
 		return err
 	}

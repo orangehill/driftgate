@@ -1303,4 +1303,32 @@ func TestSQLServerFallbackStopped(t *testing.T) {
 	if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
 		t.Fatalf("%v differ", d)
 	}
+	if w.UserAccess != "MULTI_USER" {
+		t.Fatalf("the working database is %s after the restore that stopped was completed", w.UserAccess)
+	}
+}
+
+// TestSQLServerRestoreWholeRestricted: a working database the user made
+// RESTRICTED_USER stays so through a restore of the whole database that
+// saves excluded rows (which keeps the logins out meanwhile).
+func TestSQLServerRestoreWholeRestricted(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE sessions (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" SET RESTRICTED_USER WITH ROLLBACK IMMEDIATE")
+	t.Cleanup(func() { master.Exec("ALTER DATABASE " + qms(s.o.Working) + " SET MULTI_USER") })
+	db.SetMaxIdleConns(0)
+	db.SetMaxIdleConns(2)
+	sqlServerExec(t, db, "INSERT INTO sessions VALUES (1)", "ALTER VIEW v AS SELECT id, id AS b FROM users")
+	if !restoreSQLServer(t, s, db, log, p) {
+		t.Fatal("restored item by item")
+	}
+	if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != 1 {
+		t.Fatalf("%d rows of the excluded table, want 1", n)
+	}
+	if w, err := s.database(context.Background(), s.o.Working); err != nil || w.UserAccess != "RESTRICTED_USER" {
+		t.Fatalf("the working database is %v after the restore (%v), not RESTRICTED_USER as the user set it", w, err)
+	}
 }
