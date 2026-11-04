@@ -113,27 +113,31 @@ UNION ALL SELECT CONCAT(N'a ', assembly_id, N' ', CONVERT(varchar(30), modify_da
 
 // ssRecentSQL says whether an object changed in the last two seconds
 // (ssGuardSQL), but for the modify_date values of DriftGate's own last
-// restore in @p1 (ssOwnDDL.values, "|object_id date|…"; a parameter, so
-// the batch is compiled once).
+// restore in @p1 (ssOwnDDL.values, "|object_id date|…") while the
+// server's clock is less than five seconds past the latest of them in @p2
+// (parameters, so the batch is compiled once).
 const ssRecentSQL = `
+DECLARE @dg_own nvarchar(max) = CASE WHEN @p2 <> N'' AND GETDATE() < DATEADD(second, 5, CONVERT(datetime, @p2, 121)) THEN @p1 ELSE N'' END;
 SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects o WHERE o.is_ms_shipped = 0 AND o.modify_date >= DATEADD(second, -2, GETDATE())
-                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @p1) = 0)
+                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @dg_own) = 0)
               OR EXISTS (SELECT 1 FROM sys.triggers o WHERE o.parent_class = 0 AND o.modify_date >= DATEADD(second, -2, GETDATE())
-                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @p1) = 0) THEN 1 ELSE 0 END;`
+                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @dg_own) = 0) THEN 1 ELSE 0 END;`
 
 // ssOwnDDL are the objects DriftGate's last item-level restore changed the
-// definition of (it turned triggers and constraints off and on again),
-// with the modify_date each had when it committed, as
-// "|object_id date|…|"; "" for none. A fingerprint does not take them for a change of the last two
-// seconds: the restore read them in its transaction, while it held the
-// schema lock that any other change of them needs, and committed only once
-// the server's clock had passed them (restoreItems), so any later change
-// has a later modify_date. They are dropped after a few seconds, when
-// they are no longer recent anyway.
+// definition of (it turned triggers and constraints off and on again,
+// restarted sequences), with the modify_date each had when it committed,
+// as "|object_id date|…|"; "" for none. A fingerprint does not take them
+// for a change of the last two seconds: the restore read them in its
+// transaction, while it held the schema lock that any other change of
+// them needs, and committed only once the server's clock had passed them
+// (commitOwn), so any later change has a later modify_date. They are
+// dropped a few seconds after the latest of them by the server's clock
+// (ssRecentSQL), and by DriftGate's, when they are no longer recent
+// anyway.
 type ssOwnDDL struct {
 	values string
-	latest string // the latest of them
-	at     time.Time
+	latest string    // the latest of them, by the server's clock
+	at     time.Time // when the restore committed
 }
 
 // ssLogSQL flushes the log and reads its end (tier 1).
@@ -241,12 +245,12 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 	locks := map[int64][]ssOpenLock{}
 	var args []any
 	if guard {
-		own := ""
+		own, latest := "", ""
 		if time.Since(s.own.at) < 5*time.Second {
-			own = s.own.values
+			own, latest = s.own.values, s.own.latest
 		}
 		batch += ssGuardSQL + ssRecentSQL
-		args = append(args, own)
+		args = append(args, own, latest)
 		sets = append(sets, func(r *sql.Rows) error {
 			var line string
 			if err := r.Scan(&line); err != nil {
