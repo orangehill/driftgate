@@ -938,7 +938,13 @@ func TestSQLServerCatalogCache(t *testing.T) {
 	s, db := newSQLServerTest(t, Options{})
 	mustExec(t, db, "CREATE TABLE a (id int PRIMARY KEY, v int)", "CREATE SCHEMA app", "CREATE USER someone WITHOUT LOGIN",
 		"CREATE PARTITION FUNCTION pf (int) AS RANGE LEFT FOR VALUES (1)", "CREATE PARTITION SCHEME ps AS PARTITION pf ALL TO ([PRIMARY])")
-	settle := func() { time.Sleep(2100 * time.Millisecond) } // older than the guard's window
+	// Until no object changed within the guard's window (most statements
+	// below move no modify_date: no wait after them).
+	settle := func() {
+		if sqlServerInt(t, db, "SELECT COUNT(*) FROM sys.objects WHERE is_ms_shipped = 0 AND modify_date >= DATEADD(second, -2, GETDATE())") > 0 {
+			time.Sleep(2100 * time.Millisecond)
+		}
+	}
 	settle()
 	mustSQLServerFingerprint(t, s)
 	inv := s.inv
