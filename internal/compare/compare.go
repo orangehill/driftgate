@@ -291,6 +291,24 @@ type comparer struct {
 	origins *origins // nil: the sides share their origins
 }
 
+// memberTextMax bounds the text of a key's value in a key-missing or
+// key-extra drift.
+const memberTextMax = 200
+
+// memberText is the value of a key that is missing or new, as JSON (the
+// key itself is in the drift's place): an object or array cut to
+// memberTextMax characters.
+func memberText(v *jsonx.Value) string {
+	if v.Kind != jsonx.Object && v.Kind != jsonx.Array {
+		return v.ScalarText()
+	}
+	t := string(jsonx.Marshal(v, false))
+	if r := []rune(t); len(r) > memberTextMax {
+		t = string(r[:memberTextMax]) + "…"
+	}
+	return t
+}
+
 func (c *comparer) add(kind, where, base, cur string) {
 	c.drifts = append(c.drifts, Drift{Request: c.id, Kind: kind, Where: where, Baseline: base, Current: cur})
 }
@@ -536,14 +554,14 @@ func (c *comparer) object(path string, b, v *jsonx.Value) {
 	seen := map[string]bool{}
 	for _, m := range b.Members {
 		if !seen[m.Key] && nc[m.Key] < nb[m.Key] {
-			c.add(KindKeyMissing, jsonx.KeyPath(path, m.Key), jsonx.Quote(m.Key), "")
+			c.add(KindKeyMissing, jsonx.KeyPath(path, m.Key), memberText(m.Value), "")
 		}
 		seen[m.Key] = true
 	}
 	seen = map[string]bool{}
 	for _, m := range v.Members {
 		if !seen[m.Key] && nb[m.Key] < nc[m.Key] {
-			c.add(KindKeyExtra, jsonx.KeyPath(path, m.Key), "", jsonx.Quote(m.Key))
+			c.add(KindKeyExtra, jsonx.KeyPath(path, m.Key), "", memberText(m.Value))
 		}
 		seen[m.Key] = true
 	}

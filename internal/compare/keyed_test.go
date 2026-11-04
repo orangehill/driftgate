@@ -57,7 +57,7 @@ func TestKeyedArrays(t *testing.T) {
 		{name: "key type change is a type drift in the item", base: users("1"), cur: users(`"1"`),
 			want: "type $.data[id=1].id int → string"},
 		{name: "item without the key", base: users("1", "2"), cur: `{"data":[{"name":"u0"},{"id":1,"name":"u1"},{"id":2,"name":"u2"}]}`,
-			want: "array-length $.data 2 → 3\nkey-missing $.data[0].id \"id\" → \nvalue $.data[0].name \"u1\" → \"u0\"\nvalue $.data[1].id 2 → 1\nvalue $.data[1].name \"u2\" → \"u1\"",
+			want: "array-length $.data 2 → 3\nkey-missing $.data[0].id 1 → \nvalue $.data[0].name \"u1\" → \"u0\"\nvalue $.data[1].id 2 → 1\nvalue $.data[1].name \"u2\" → \"u1\"",
 			note: "$.data: items paired by position, not by id: in the current response item 0 has no id"},
 		{name: "duplicate key", base: users("1", "1"), cur: users("1", "2"),
 			want: "value $.data[1].id 1 → 2\nvalue $.data[1].name \"u1\" → \"u2\"",
