@@ -378,6 +378,10 @@ func TestSQLServerOthersTransition(t *testing.T) {
 		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, false},
 		{mssql.Error{Number: 208, Message: "Database 'x'"}, false},
 		{errors.New("Database 'x' is in transition"), false},
+		// The name of the 927's own message, not one before it.
+		{fmt.Errorf("restore of Database 'other': %w", mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}), false},
+		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore.",
+			All: []mssql.Error{{Number: 3013, Message: "Database 'other' stopped"}, {Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}}}, false},
 	} {
 		if _, got := s.othersTransition(c.err); got != c.want {
 			t.Errorf("%v: %t", c.err, got)

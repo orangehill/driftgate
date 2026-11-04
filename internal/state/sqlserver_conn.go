@@ -482,7 +482,24 @@ func (s *SQLServer) othersTransition(err error) (string, bool) {
 	if n := sqlServerNumber(err); n != 927 && n != 952 {
 		return "", false
 	}
-	m := ssDatabaseNamed().FindStringSubmatch(err.Error())
+	// The name in the message of the 927 or 952 itself, not another one
+	// of the error or of the text it is wrapped in.
+	var e mssql.Error
+	if !errors.As(err, &e) {
+		var p *mssql.Error
+		if !errors.As(err, &p) || p == nil {
+			return "", false
+		}
+		e = *p
+	}
+	msg := e.Message
+	for _, x := range e.All {
+		if x.Number == 927 || x.Number == 952 {
+			msg = x.Message
+			break
+		}
+	}
+	m := ssDatabaseNamed().FindStringSubmatch(msg)
 	if m == nil {
 		return "", false
 	}
