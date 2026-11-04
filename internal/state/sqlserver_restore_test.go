@@ -578,6 +578,31 @@ func TestSQLServerOwnDDL(t *testing.T) {
 	}
 }
 
+// TestSQLServerOwnDDLSequence: after a restore that restarted a
+// sequence, the catalog is reused within two seconds.
+func TestSQLServerOwnDDLSequence(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{}, "CREATE SEQUENCE q AS int START WITH 1", "CREATE TABLE t (n int NULL)")
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the login cannot read the server's performance state")
+	}
+	time.Sleep(2100 * time.Millisecond) // the setup's own changes
+	sqlServerExec(t, db, "SELECT NEXT VALUE FOR q")
+	mustSQLServerFingerprint(t, s)
+	if err := s.Restore(context.Background(), []string{"sequence:dbo.q"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.own.values == "" {
+		t.Fatal("the restore noted no catalog change of its own")
+	}
+	mustSQLServerFingerprint(t, s)
+	inv := s.inv
+	sqlServerExec(t, db, "INSERT INTO t VALUES (1)")
+	mustSQLServerFingerprint(t, s)
+	if inv == nil || s.inv != inv {
+		t.Error("the catalog is read again after the restore's own restart of the sequence")
+	}
+}
+
 // TestSQLServerOwnDDLAhead: a restore whose own catalog changes read
 // later than the server's clock (a modify_date ahead of it) commits after
 // a bounded wait and exempts none of them, instead of holding its locks

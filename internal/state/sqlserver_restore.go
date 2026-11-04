@@ -790,8 +790,8 @@ var sqlServerOwnWait = 50 * time.Millisecond
 
 // ownDDL reads, in the restore's transaction (c), the modify_date of the
 // objects whose definition it changed (ssOwnDDL): the tables it altered or
-// truncated, every object of theirs (constraints, triggers) and the
-// database's DDL triggers. Only dates of
+// truncated, every object of theirs (constraints, triggers), the
+// sequences it restarted and the database's DDL triggers. Only dates of
 // the last seconds up to the server's clock now count: the restore's own
 // changes are among them, an older date is not recent anyway, and a date
 // ahead of the clock (another time zone, a clock set back) is never
@@ -816,6 +816,13 @@ func (s *SQLServer) ownDDL(ctx context.Context, c *sql.Conn, g *ssGuard, plan *s
 	if len(objects) > 0 {
 		in := strings.Join(objects, ", ")
 		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.objects WHERE (object_id IN ("+in+") OR parent_object_id IN ("+in+"))"+recent)
+	}
+	if len(plan.seqs) > 0 {
+		var seqs []string
+		for _, q := range plan.seqs {
+			seqs = append(seqs, fmt.Sprint(q[0].ID))
+		}
+		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.objects WHERE object_id IN ("+strings.Join(seqs, ", ")+")"+recent)
 	}
 	if len(ddl) > 0 {
 		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.triggers WHERE parent_class = 0 AND object_id IN ("+strings.Join(ddl, ", ")+")"+recent)
