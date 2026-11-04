@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,12 +26,31 @@ func TestInitDefaults(t *testing.T) {
 	if got := staleExclusions(excl, []string{"/_debugbar/*", "/old", "/horizon"}); strings.Join(got, ",") != "/old,/horizon" {
 		t.Errorf("stale exclusions: %v", got)
 	}
-	allow, err := allowlist.Parse([]byte("headers:\n" + laravelHeaders + "  - name: x-own\n    format: 'x'\n    reason: mine\n"))
+	// Rules 1–3 are init's; 4 is the user's own; 5 is rule 1 with another
+	// format, 6 with a request of its own: both the user's.
+	allow, err := allowlist.Parse([]byte("headers:\n" + laravelHeaders + `  - name: x-own
+    format: 'x'
+    reason: mine
+  - name: x-ratelimit-remaining
+    format: '.*'
+    reason: Laravel throttle; depends on the requests sent before in the same minute.
+  - name: x-ratelimit-remaining
+    request: 'api-*'
+    format: '\d+'
+    reason: Laravel throttle; depends on the requests sent before in the same minute.
+`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	unused := []allowlist.Unused{{RuleRef: allowlist.RuleRef{Kind: "header", Rule: 1}}, {RuleRef: allowlist.RuleRef{Kind: "header", Rule: 4}}}
-	if got := unusedRules(allow, unused); len(got) != 1 || got[0].Rule != 4 {
-		t.Errorf("unused rules: %+v", got)
+	var unused []allowlist.Unused
+	for i := range allow.Headers {
+		unused = append(unused, allowlist.Unused{RuleRef: allowlist.RuleRef{Kind: "header", Rule: i + 1}})
+	}
+	var got []int
+	for _, u := range unusedRules(allow, unused) {
+		got = append(got, u.Rule)
+	}
+	if fmt.Sprint(got) != "[4 5 6]" {
+		t.Errorf("unused rules reported: %v, want [4 5 6]", got)
 	}
 }

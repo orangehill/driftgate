@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
@@ -8,27 +10,38 @@ import (
 )
 
 // initDefaults are the exclusions and allowlist rules init writes for the
-// frameworks it recognises (detectors), each by its route, header name or
-// body path and its reason. One that applies to nothing is the framework's
-// default for a part the project need not have (Debugbar, Horizon, a
-// throttle), not a stale entry: it is not warned about. An entry the user
-// changed (another reason) is.
+// frameworks it recognises (detectors): an exclusion by its route and
+// reason, a rule by everything that makes it apply (name or path, request,
+// format and its options) and its reason. One that applies to nothing is
+// the framework's default for a part the project need not have (Debugbar,
+// Horizon, a throttle), not a stale entry: it is not warned about. An
+// entry the user changed (another reason, request, format …) is. The
+// service (target) is not compared: init writes the same entries for each.
 type initDefault struct {
-	exclusions, headers, body map[[2]string]bool
+	exclusions    map[[2]string]bool
+	headers, body map[string]bool
+}
+
+func headerKey(r allowlist.HeaderRule) string {
+	return fmt.Sprintf("%q %q %q %t %q", strings.ToLower(r.Name), r.Request, r.Format, r.IgnoreCase, r.Reason)
+}
+
+func bodyKey(r allowlist.BodyRule) string {
+	return fmt.Sprintf("%q %q %q %t %t %q", r.Path, r.Request, r.Format, r.AnyLength, r.Parts, r.Reason)
 }
 
 var initDefaults = sync.OnceValue(func() initDefault {
-	d := initDefault{exclusions: map[[2]string]bool{}, headers: map[[2]string]bool{}, body: map[[2]string]bool{}}
+	d := initDefault{exclusions: map[[2]string]bool{}, headers: map[string]bool{}, body: map[string]bool{}}
 	for _, det := range detectors() {
 		for _, x := range det.exclude {
 			d.exclusions[x] = true
 		}
 		if l, err := allowlist.Parse([]byte("headers:\n" + det.headers + "body:\n" + det.allow)); err == nil {
 			for _, r := range l.Headers {
-				d.headers[[2]string{r.Name, r.Reason}] = true
+				d.headers[headerKey(r)] = true
 			}
 			for _, r := range l.Body {
-				d.body[[2]string{r.Path, r.Reason}] = true
+				d.body[bodyKey(r)] = true
 			}
 		}
 	}
@@ -64,8 +77,8 @@ func unusedRules(allow *allowlist.List, unused []allowlist.Unused) []allowlist.U
 	for _, u := range unused {
 		i := u.Rule - 1
 		switch {
-		case u.Kind == "header" && i >= 0 && i < len(allow.Headers) && defaults.headers[[2]string{allow.Headers[i].Name, allow.Headers[i].Reason}]:
-		case u.Kind == "body" && i >= 0 && i < len(allow.Body) && defaults.body[[2]string{allow.Body[i].Path, allow.Body[i].Reason}]:
+		case u.Kind == "header" && i >= 0 && i < len(allow.Headers) && defaults.headers[headerKey(allow.Headers[i])]:
+		case u.Kind == "body" && i >= 0 && i < len(allow.Body) && defaults.body[bodyKey(allow.Body[i])]:
 		default:
 			out = append(out, u)
 		}
