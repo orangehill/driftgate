@@ -123,17 +123,39 @@ func runFormat(parts []string, before, after string, grow bool) string {
 // own form (status 200 after a version stays 200).
 var grows = lazy.Regexp(`(?i)\bv\d+\.\d+\.\d+|showing \d+\s*[-–]\s*\d+ of \d+`)
 
-// inGrowing reports whether run j of every sample lies inside a part of it
-// that grows. The caller has checked that the samples share their tokens.
-func inGrowing(values []string, toks [][]token, j int) bool {
+// growing is where the parts that grow are in each sample, by byte
+// (spans), and where each token starts (offsets); nil when no sample has
+// one.
+type growing struct {
+	spans   [][][]int
+	offsets [][]int
+}
+
+func growingParts(values []string, toks [][]token) *growing {
+	g := &growing{spans: make([][][]int, len(values)), offsets: make([][]int, len(values))}
 	for i, v := range values {
-		start := 0
-		for _, t := range toks[i][:j] {
-			start += len(t.text)
+		if g.spans[i] = grows().FindAllStringIndex(v, -1); g.spans[i] == nil {
+			return nil // a run must be inside one in every sample
 		}
-		end := start + len(toks[i][j].text)
+		off := make([]int, len(toks[i])+1)
+		for j, t := range toks[i] {
+			off[j+1] = off[j] + len(t.text)
+		}
+		g.offsets[i] = off
+	}
+	return g
+}
+
+// in reports whether run j of every sample lies inside a part of it that
+// grows. The caller has checked that the samples share their tokens.
+func (g *growing) in(j int) bool {
+	if g == nil {
+		return false
+	}
+	for i, spans := range g.spans {
+		start, end := g.offsets[i][j], g.offsets[i][j+1]
 		in := false
-		for _, m := range grows().FindAllStringIndex(v, -1) {
+		for _, m := range spans {
 			if m[0] <= start && end <= m[1] {
 				in = true
 				break
@@ -255,6 +277,8 @@ func Pattern(values []string) string {
 	}
 	var b strings.Builder
 	if shared {
+		grown := growingParts(values, toks)
+		timey := timeLike().MatchString(values[0])
 		for j := 0; j < len(toks[0]); j++ {
 			t := toks[0][j]
 			if !t.run {
@@ -296,13 +320,13 @@ func Pattern(values []string) string {
 				b.WriteString(digitsIn(parts[0]))
 				continue
 			}
-			if equal && !timeLike().MatchString(values[0]) {
+			if equal && !timey {
 				// Digits that agree in every sample stay (page 1 of 3); in a
 				// date or time they agree by chance (the same day).
 				b.WriteString(regexp.QuoteMeta(parts[0]))
 				continue
 			}
-			if sub := byKind(parts, timeLike().MatchString(values[0])); sub != "" {
+			if sub := byKind(parts, timey); sub != "" {
 				b.WriteString(sub)
 				continue
 			}
@@ -322,7 +346,7 @@ func Pattern(values []string) string {
 					break
 				}
 			}
-			b.WriteString(runFormat(parts, before, after, inGrowing(values, toks, j)))
+			b.WriteString(runFormat(parts, before, after, grown.in(j)))
 		}
 	} else {
 		// One class for everything: letters and digits by range, the rest
