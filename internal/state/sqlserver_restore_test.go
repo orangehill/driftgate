@@ -907,28 +907,36 @@ func TestSQLServerRestoreNothing(t *testing.T) {
 }
 
 // benchRestore changes the working database (change), restores items and
-// fingerprints them as the tracker does, b.N times after one to warm up,
-// and reports the time of a restore alone.
+// fingerprints them as the tracker does, once to warm up (connections,
+// catalogs) and then in a b.Loop (the setup runs once, also with
+// -benchtime Nx), and reports the time of a restore alone. It starts two
+// seconds after the setup changed the catalog, which is not reused
+// before (ssGuardSQL).
 func benchRestore(b *testing.B, s *SQLServer, change func(n int), items func(n int) []string) {
 	ctx := context.Background()
+	time.Sleep(2 * time.Second)
 	mustSQLServerFingerprint(b, s)
 	var took time.Duration
-	for n := range b.N + 1 { // the first one warms up (connections, catalogs)
+	one := func(n int) {
 		change(n)
 		start := time.Now()
 		if err := s.Restore(ctx, items(n)); err != nil {
 			b.Fatal(err)
 		}
-		if n == 0 {
-			b.ResetTimer()
-		} else {
+		if n > 0 {
 			took += time.Since(start)
 		}
 		if _, err := s.Fingerprint(ctx, items(n)); err != nil {
 			b.Fatal(err)
 		}
 	}
-	b.ReportMetric(float64(took.Microseconds())/1000/float64(b.N), "ms/restore")
+	one(0)
+	n := 0
+	for b.Loop() {
+		n++
+		one(n)
+	}
+	b.ReportMetric(float64(took.Microseconds())/1000/float64(n), "ms/restore")
 }
 
 // BenchmarkSQLServerRestoreSmall: one row of one table of ten changed and

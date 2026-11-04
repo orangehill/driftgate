@@ -559,11 +559,12 @@ func BenchmarkSQLServerSeed(b *testing.B) {
 	s, _, _ := newSQLServerSeeded(b, Options{Exclude: []string{"sessions"}},
 		"CREATE TABLE t (id int IDENTITY PRIMARY KEY, v int NULL)", "INSERT INTO t (v) SELECT TOP (1000) object_id FROM sys.all_objects",
 		"CREATE TABLE sessions (id int PRIMARY KEY)", "INSERT INTO sessions VALUES (1)")
-	start := time.Now()
-	for range b.N {
+	start, n := time.Now(), 0
+	for b.Loop() { // the setup runs once, also with -benchtime Nx
+		n++
 		if err := s.Seed(context.Background()); err != nil {
 			b.Fatal(err)
 		}
 	}
-	b.ReportMetric(float64(time.Since(start).Microseconds())/1000/float64(b.N), "ms/seed")
+	b.ReportMetric(float64(time.Since(start).Microseconds())/1000/float64(n), "ms/seed")
 }

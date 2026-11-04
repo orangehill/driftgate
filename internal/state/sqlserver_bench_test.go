@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // The budgets of the SQL Server fingerprint (measured on SQL Server 2022
@@ -47,6 +48,9 @@ func BenchmarkSQLServerOneTableOf100(b *testing.B) {
 		sqlServerExec(b, db, fmt.Sprintf("CREATE TABLE t%d (id int IDENTITY PRIMARY KEY, v int, s nvarchar(50))", i),
 			fmt.Sprintf("INSERT INTO t%d (v, s) SELECT TOP (100) object_id, name FROM sys.all_objects", i))
 	}
+	// The catalog read within two seconds of a change is not reused
+	// (ssGuardSQL): the setup's tables are older than that when timed.
+	time.Sleep(2 * time.Second)
 	for range 2 {
 		mustSQLServerFingerprint(b, s)
 	}
