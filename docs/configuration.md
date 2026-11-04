@@ -1223,6 +1223,46 @@ functions and views that reach files, programs, other servers, sessions
 or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
 `OPENDATASOURCE`, `OPENQUERY`, `sys.sql_logins` …).
 
+**Running SQL Server for DriftGate.**
+
+- **The application's login.** Let the application sign in with a login
+  that is only a user of its database (`db_datareader`, `db_datawriter`,
+  what its migrations need), not `sa` and not DriftGate's login: during a
+  restore of the whole database a member of `db_owner`, `dbcreator` or
+  `sysadmin` still gets in, and its writes to excluded tables in that time
+  can be lost (above). Run the grants in a container with its own
+  `sqlcmd`:
+  `docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "…"`
+  (`/opt/mssql-tools` on SQL Server 2017; `-C` trusts the container's own
+  certificate).
+- **The `sa` password** of a container must have at least eight
+  characters of three kinds (upper case, lower case, digits, symbols);
+  otherwise the container stops at its first start, and only its log
+  (`docker compose logs mssql`) says why.
+- **Apple Silicon.** There is no SQL Server image for ARM: run
+  `mcr.microsoft.com/mssql/server` for `linux/amd64` (`platform:
+  linux/amd64` in compose), which Docker Desktop runs under Rosetta; it is
+  slower, and SQL Server 2017 and 2019 may stop under emulation. Azure SQL
+  Edge, once the ARM choice, is retired and refused: use the
+  `mssql/server` image, or a SQL Server on another machine
+  (`allow_remote: true`).
+- **The backup files.** A seed keeps two backups of the pristine copy
+  (`driftgate-<hash>-a.bak` and `-b.bak` in the server's default backup
+  folder, `/var/opt/mssql/data` in the image). To remove them after
+  dropping the pristine copy:
+  `docker compose exec mssql sh -c 'rm /var/opt/mssql/data/driftgate-*.bak'`.
+  A container without a volume loses them with its databases when it is
+  removed; the next `driftgate seed` makes them again.
+- **A certificate error** (`certificate signed by unknown authority`,
+  `certificate is not valid for …`): the server's certificate is verified,
+  as the application's client does. For a container's or a development
+  server's self-signed certificate set `TrustServerCertificate=true` in
+  the DSN (on a loopback address only, as the application's setting does);
+  for a server with a certificate of your own CA, give the CA's file
+  (`certificate=/etc/ssl/certs/my-ca.pem`, or `~/…`); for a certificate
+  that names another host, `hostNameInCertificate=<that name>`. Nothing
+  makes DriftGate's TLS weaker than the application's.
+
 ### seed, prepare, guards
 
 | Key | Meaning |

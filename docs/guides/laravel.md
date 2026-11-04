@@ -66,6 +66,12 @@ discover:
 DriftGate itself runs on the host. A database whose port is published on
 `127.0.0.1` counts as local.
 
+**PHP's opcache.** Herd and `php artisan serve` keep compiled files with
+`opcache.revalidate_freq=2`: a file changed less than 2 seconds before a
+request may still run as it was. Between a change and a capture (and in
+`bisect` hooks) wait 2 seconds, or set `opcache.revalidate_freq=0` in
+development.
+
 ## 3. The database
 
 DriftGate restores the database the application uses (`working`) from a
@@ -133,7 +139,53 @@ state:
   writers waiting while it reads (a few milliseconds on a small file). A
   queue worker on the same file writes `jobs`, which is excluded.
 - Checked on a Laravel 12 application: fingerprints 4–5 ms, restores
-  3–4 ms, about 1.2 s per capture of 11 requests.
+  3–4 ms, about 0.1–0.2 s per capture of 18 requests.
+
+### SQL Server
+
+`DB_CONNECTION=sqlsrv` with `DB_HOST`, `DB_PORT`, `DB_DATABASE`,
+`DB_USERNAME` and `DB_PASSWORD`, here for SQL Server in a container:
+
+```yaml
+# compose.yaml
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64                # also on Apple Silicon (Rosetta)
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}   # 8+ characters of three kinds
+    ports: ["127.0.0.1:1433:1433"]
+```
+
+```ini
+# .env
+DB_CONNECTION=sqlsrv
+DB_HOST=127.0.0.1
+DB_PORT=1433
+DB_DATABASE=shop
+DB_USERNAME=shop
+DB_PASSWORD=…
+DB_TRUST_SERVER_CERTIFICATE=true
+```
+
+- `DB_ENCRYPT` and `DB_TRUST_SERVER_CERTIFICATE` count only when
+  `config/database.php` passes them on. Laravel 11 and later have no
+  `config/database.php` until `php artisan config:publish database`
+  writes it; uncomment the `encrypt` and `trust_server_certificate` lines
+  of the `sqlsrv` connection there. Without them DriftGate takes the
+  client's own default and verifies the container's self-signed
+  certificate, which fails.
+- Make the database and the application's login with the container's
+  `sqlcmd` (`docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "CREATE DATABASE shop"`);
+  `setup` reads the compose service and signs in as `sa` for DriftGate,
+  and the application keeps a login that is only a user of `shop`
+  ([why](../configuration.md#sql-server)).
+- `seed: [["php", "artisan", "migrate:fresh", "--seed", "--force"]]` as
+  above; exclude `sessions`, `cache`, `cache_locks`, `jobs`,
+  `job_batches` and `failed_jobs` when they are tables of the database.
 
 ## 4. Authenticated routes
 

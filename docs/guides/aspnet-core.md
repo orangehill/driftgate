@@ -165,12 +165,39 @@ request on each pooled connection can then fail once, as with any client
 whose server ended its session, and the pool connects again. DriftGate
 sends a `GET` answered with 5xx then again (a 5xx that stays is kept); a
 request that may write is never sent twice, so a write that is the first
-request after such a restore can fail: keep no idle connections in
-development (`Max Pool Size`) or let the pool check them. The log says `restoring the whole database` when it happens. Apply
+request after such a restore can fail: turn pooling off in development
+(`Pooling=False` in the connection string) when that happens. The log says `restoring the whole database` when it happens. Apply
 migrations in `seed:` rather than at start-up, and run `driftgate seed`
 after adding one.
 
-## 7. The first run
+## 7. EF Core on SQLite
+
+With `UseSqlite` and a connection string such as `Data Source=app.db`,
+the database is a file. `setup` reads it from `appsettings.json` and takes
+a relative `Data Source` from the `.csproj`'s folder, where `dotnet run`
+runs:
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite
+    dsn: { appsettings: src/Shop.Api/Shop.Api.csproj, key: "ConnectionStrings:Default" }
+    working: src/Shop.Api/app.db
+seed:
+  - ["dotnet", "ef", "database", "update", "--project", "src/Shop.Api"]
+```
+
+- The pristine copy is a file of DriftGate's store; nothing is granted.
+- Restores write inside the file while the application keeps it open; it
+  sees the restored data on its next query, and its pooled connections
+  stay open (there is no restore that ends them).
+- `Cache=Shared` is fine; `Mode=Memory` (an in-memory database) and an
+  encrypted file (`Password=`) are refused, and so is a file that
+  `|DataDirectory|` names: give the path. See
+  [SQLite](../configuration.md#sqlite).
+
+## 8. The first run
 
 ```sh
 driftgate run

@@ -62,7 +62,7 @@ User documentation: [`docs/`](docs/README.md).
 
 - SQLite, a 50 MB file (Apple M4): a fingerprint 28 µs when nothing
   changed, 150 ms after a change to its large table; seed 124 ms. A
-  Laravel 12 application on SQLite: about 1.2 s per capture of 11
+  Laravel 12 application on SQLite: about 0.1–0.2 s per capture of 18
   requests.
 - SQL Server 2022 in Docker, emulated on an Apple M4: a fingerprint
   0.76 ms when nothing changed, 33 ms after a change to one table of 100,

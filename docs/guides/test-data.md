@@ -10,7 +10,10 @@ It is pseudonymisation (GDPR / Serbian ZZPL), not anonymisation: whoever
 has the key and the original data can link the two. Run it locally or on
 your own runner, never on a shared CI runner with production data.
 
-The module is tested on MySQL, MariaDB and PostgreSQL.
+The module is tested on MySQL, MariaDB and PostgreSQL, and supports only
+those for now: `data.driver` is `mysql` or `postgres`. A project on SQLite
+or SQL Server can use its state with every other command, not the data
+module yet.
 
 ## 1. Source and target
 

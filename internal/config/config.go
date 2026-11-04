@@ -111,7 +111,7 @@ func (d Data) validate() error {
 	switch d.Driver {
 	case MySQL, "mariadb", Postgres:
 	default:
-		return fmt.Errorf("data.driver must be mysql or postgres, got %q", d.Driver)
+		return fmt.Errorf("data.driver must be mysql or postgres (the data module supports only MySQL, MariaDB and PostgreSQL for now), got %q", d.Driver)
 	}
 	if d.Source.DSN.IsZero() {
 		return errors.New("data.source needs dsn (" + dsnSources + ")")
