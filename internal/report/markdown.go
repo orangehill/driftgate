@@ -48,7 +48,7 @@ func (r *Report) Markdown(maxDrifts int) string {
 	b.WriteString(strings.Join(meta, " · ") + "\n\n")
 	b.WriteString("| Compared | Passed | Drifted | Skipped | Observed |\n|---:|---:|---:|---:|---:|\n")
 	fmt.Fprintf(&b, "| %d | %d | %d | %d | %d |\n", r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
 		if note != "" {
 			fmt.Fprintf(&b, "\n> %s\n", mdText(note))
 		}

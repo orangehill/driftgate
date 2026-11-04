@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
+	"github.com/orangehill/driftgate/internal/baseline"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
@@ -60,6 +61,34 @@ func resolve(p *config.Project, name string) (*snapshot.Set, string, error) {
 		return nil, "", configErr("this checkout has no capture of driftgate run yet")
 	}
 	return nil, "", configErr("no baseline or capture named %q", name)
+}
+
+// namedSet is a set of records with the name a comparison gives it
+// (baseline:… or capture:…).
+type namedSet struct {
+	set  *snapshot.Set
+	name string
+}
+
+// privateKeys makes sure the key of the private bodies of the requests ids
+// in every set is at hand, and with check that it is the key they were
+// stored with (checkKey).
+func privateKeys(p *config.Project, ids []string, check bool, sets ...namedSet) error {
+	for _, s := range sets {
+		recs, err := selectRecords(s.set, ids)
+		if err != nil {
+			return err
+		}
+		if err := privateKey(p, s.name, recs); err != nil {
+			return err
+		}
+		if check {
+			if err := checkKey(s.set, recs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func loadProject(path string) (*config.Project, *catalog.Catalog, *allowlist.List, error) {
@@ -244,20 +273,8 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 			ids = append(ids, req.ID)
 		}
 	}
-	for _, s := range []struct {
-		set  *snapshot.Set
-		name string
-	}{{base, baseName}, {cur, curName}} {
-		recs, err := selectRecords(s.set, ids)
-		if err != nil {
-			return 0, err
-		}
-		if err := privateKey(p, s.name, recs); err != nil {
-			return 0, err
-		}
-		if err := checkKey(s.set, recs); err != nil {
-			return 0, err
-		}
+	if err := privateKeys(p, ids, true, namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return 0, err
 	}
 
 	// Values from private bodies are never kept: with --show-private they
@@ -331,6 +348,11 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	r := build(results)
 	if r.BaselineDigest, r.CaptureDigest, err = digests(base, baseName, cur, curName); err != nil {
 		return 0, err
+	}
+	if strings.HasPrefix(baseName, "capture:") {
+		if r.AgainstDigest, err = baseline.SetDigest(base.Dir); err != nil {
+			return 0, envErr(err)
+		}
 	}
 	// The last comparison names drifts of private bodies: it goes into a
 	// store git ignores.

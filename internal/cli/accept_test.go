@@ -647,3 +647,34 @@ func TestBaselinesKeepLineEndings(t *testing.T) {
 		t.Errorf("run on a CRLF checkout: %d\n%s", code, errOut)
 	}
 }
+
+// TestReviewShowPrivateCaptures: review --show-private shows the values of
+// private bodies of a comparison of two captures too, and nothing once a
+// set changed since the comparison.
+func TestReviewShowPrivateCaptures(t *testing.T) {
+	p := newDemoProject(t, "")
+	catalogPath := filepath.Join(filepath.Dir(p.cfg), "driftgate", "catalog.json")
+	write(t, catalogPath, strings.Replace(demoCatalog, `"path":"/api/news","storage":"public"`, `"path":"/api/news","storage":"private"`, 1))
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture a: %d\n%s\n%s", code, out, errOut)
+	}
+	p.api.SetVersion("v2")
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture b: %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, _ := runCLI(t, "compare", "b", "--against", "a", "--config", p.cfg); code != ExitDrift || !strings.Contains(out, "(private)") ||
+		!strings.Contains(out, "values of private bodies are hidden as (private); driftgate review --show-private shows them on this machine") {
+		t.Fatalf("compare b against a: %d\n%s", code, out)
+	}
+	_, hidden, _ := runCLI(t, "review", "--config", p.cfg)
+	_, shown, _ := runCLI(t, "review", "--config", p.cfg, "--show-private")
+	if !strings.Contains(hidden, "(private)") || strings.Contains(shown, "(private)") || strings.Count(hidden, "\n[") != strings.Count(shown, "\n[") {
+		t.Errorf("review --show-private of two captures:\n%s\nplain:\n%s", shown, hidden)
+	}
+	if code, out, errOut := runCLI(t, "capture", "a", "--force", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture a again: %d\n%s\n%s", code, out, errOut)
+	}
+	if _, out, _ := runCLI(t, "review", "--config", p.cfg, "--show-private"); !strings.Contains(out, "--show-private shows nothing: capture:a changed since the comparison") || !strings.Contains(out, "(private)") {
+		t.Errorf("review --show-private after a set changed:\n%s", out)
+	}
+}

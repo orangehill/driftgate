@@ -92,9 +92,12 @@ type Report struct {
 	// What accept checks to know the comparison still describes the compared
 	// sets (manifest of the baseline, records of the capture), and the
 	// requests it has accepted from it since.
-	BaselineDigest string   `json:"baseline_digest,omitempty"`
-	CaptureDigest  string   `json:"capture_digest,omitempty"`
-	Accepted       []string `json:"accepted,omitempty"`
+	BaselineDigest string `json:"baseline_digest,omitempty"`
+	CaptureDigest  string `json:"capture_digest,omitempty"`
+	// AgainstDigest is the records' digest of a capture compared against
+	// (not a baseline), which review --show-private checks.
+	AgainstDigest string   `json:"against_digest,omitempty"`
+	Accepted      []string `json:"accepted,omitempty"`
 	// Requests skipped because their private body is not on this machine;
 	// the result is incomplete unless they were skipped on purpose
 	// (--skip-private).
@@ -215,6 +218,19 @@ func (r *Report) PrivateNote() string {
 		return fmt.Sprintf("%s compared without the body with --skip-private (the private body is not on this machine; status, headers and side effects were compared): %s; this is a partial check", what, ids)
 	}
 	return fmt.Sprintf("the result is incomplete: %s could not be compared here (the private body is not on this machine): %s; compare them where the bodies are, or use an anonymized database so responses hold no personal data (--skip-private accepts a partial check)", what, ids)
+}
+
+// HiddenNote says, when a drift shows a value of a private body as
+// (private), how to see it; empty otherwise.
+func (r *Report) HiddenNote() string {
+	for _, res := range r.Results {
+		for _, d := range res.Drifts {
+			if strings.Contains(d.Baseline, "(private)") || strings.Contains(d.Current, "(private)") || strings.Contains(d.Where, "(private)") {
+				return "values of private bodies are hidden as (private); driftgate review --show-private shows them on this machine"
+			}
+		}
+	}
+	return ""
 }
 
 // Save writes the report, as the last comparison, to path.
@@ -467,7 +483,7 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		}
 	}
 	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %d drifted, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}
