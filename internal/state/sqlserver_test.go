@@ -166,6 +166,34 @@ func TestSQLServerConfig(t *testing.T) {
 	if _, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://sa:x@127.0.0.1:1433", Working: "App", Pristine: "app"}); err == nil {
 		t.Error("a pristine database named as the working one (but for case) is accepted")
 	}
+	for dsn, want := range map[string]uint16{"sqlserver://sa:x@127.0.0.1:1433": 32767, "sqlserver://sa:x@127.0.0.1:1433?packet+size=4096": 4096} {
+		if cfg, err := sqlServerConfig(dsn); err != nil || cfg.PacketSize != want {
+			t.Errorf("%s: packet size %d (%v), want %d", dsn, cfg.PacketSize, err, want)
+		}
+	}
+}
+
+// TestSQLServerPacketSize: connections ask for the largest TDS packets,
+// and the server agrees to them (up to 16383 bytes when the connection is
+// encrypted).
+func TestSQLServerPacketSize(t *testing.T) {
+	s, _ := newSQLServerTest(t, Options{})
+	c, err := s.conn(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	var size int
+	var encrypted bool
+	err = c.QueryRowContext(context.Background(), "SELECT net_packet_size, CASE WHEN encrypt_option = 'TRUE' THEN 1 ELSE 0 END FROM sys.dm_exec_connections WHERE session_id = @@SPID").Scan(&size, &encrypted)
+	if err != nil {
+		t.Skipf("the login cannot read its connection: %v", err)
+	}
+	// The view counts the bytes of a packet with what TLS adds (4266 for
+	// the driver's default of 4096).
+	if size < 16000 {
+		t.Fatalf("packet size %d, want 16383 or more (encrypted: %v)", size, encrypted)
+	}
 }
 
 func TestSQLServerDialerRefusesUDP(t *testing.T) {

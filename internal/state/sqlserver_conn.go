@@ -134,6 +134,12 @@ func sqlServerConfig(dsn string) (msdsn.Config, error) {
 	if p := strings.ToLower(q.Get(msdsn.Protocol)); p != "" && p != "tcp" {
 		return none, errors.New("dsn: only the tcp protocol is supported")
 	}
+	if !q.Has(msdsn.PacketSize) {
+		// Fewer packets for the rows a fingerprint reads than the driver's
+		// 4096 bytes; the server lowers it where it allows less (16383
+		// bytes when the whole connection is encrypted).
+		q.Set(msdsn.PacketSize, "32767")
+	}
 	q.Del(msdsn.Database) // the component names its databases
 	u.RawQuery = q.Encode()
 	cfg, err := msdsn.Parse(u.String())
