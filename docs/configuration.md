@@ -1113,14 +1113,20 @@ sessions of other logins only with `VIEW SERVER STATE`, and without it
 counts only those of the application that signs in as DriftGate's own
 login) and sends, in the read-only part of the same capture that
 follows its first restore (or of the next capture, when it was the last
-restore of a capture: the count is kept in the local store and used
-once), as many requests answered with 5xx once more: a `GET` or
+restore of a capture: the count is kept in the local store, at most 100,
+with the component, its working database, a hash of its server's
+address and the time, and used once, by a capture of the same database
+within an hour; the store is shared by every checkout of the project),
+as many requests answered with 5xx once more: a `GET` or
 `HEAD` to a target on an allowed host, not a `repeat:`, a step of a
 sequence or one the baseline knows writes (a `GET` can write). Each is
 sent at most twice, the second answer is kept (a 5xx that stays is the
 application's), and every report notes it (`sent again …: the first
 answer was 500, after the restore of db ended 3 database sessions of
-the application`). A request that changes data is never sent again; if
+the application`, and a count of such requests in every format). The
+count is of every session of other programs the restore ended in the
+working database, not only the application's pool: a queue worker or an
+open SSMS window adds to it. A request that changes data is never sent again; if
 it is the first after such a restore and fails this way, let the
 application's pool check a connection before it uses it, or keep no idle
 connections. From

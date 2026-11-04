@@ -163,6 +163,10 @@ type tracker struct {
 	// that fails once; resentAfter says which restore.
 	resends     atomic.Int64
 	resentAfter string
+	// databases names every database component (endedDatabase); endedBy
+	// are those whose last restore ended sessions.
+	databases map[string]endedDatabase
+	endedBy   []endedDatabase
 }
 
 // openComponents connects to every state component, in name order.
@@ -268,7 +272,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -304,6 +308,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
 			}
 		}
+		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)
 	}
@@ -371,6 +376,7 @@ func (t *tracker) restore(ctx context.Context) error {
 	defer func(start time.Time) { t.time.Restore += time.Since(start) }(time.Now())
 	t.resends.Store(0)
 	t.resentAfter = ""
+	t.endedBy = nil
 	ended := 0
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
@@ -401,6 +407,7 @@ func (t *tracker) restore(ctx context.Context) error {
 			n := e.EndedSessions()
 			ended += n
 			t.resends.Add(int64(n))
+			t.endedBy = append(t.endedBy, t.databases[c.Name()])
 			t.resentAfter = fmt.Sprintf("the restore of %s ended %d database %s of the application", c.Name(), ended, plural(ended, "session", "sessions"))
 		}
 		if err != nil {

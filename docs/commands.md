@@ -619,6 +619,14 @@ request joins the baseline with `accept`. They do not make the result
 incomplete while other requests were compared, since every new request
 starts without a baseline.
 
+A request the capture or the baseline sent again after a restore ended
+the application's database sessions (SQL Server's restore of the whole
+database, see [configuration](configuration.md#sql-server)) has a note
+with the first answer, and every format counts them in a line of its own,
+so the count shows when the notes are cut after ten: `resent` in JSON (the
+IDs, and `"resent": true` on each result), a line in text and markdown,
+a `resent` property and the line in the suite's `system-out` in JUnit.
+
 Response times are shown as information, never as a gate: the capture
 keeps the time of every request (`timings.json`, also in a baseline made by
 `run`), and when both sides have them the report gives the 50th and 95th

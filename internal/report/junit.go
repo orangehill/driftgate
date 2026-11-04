@@ -32,6 +32,7 @@ type junitSuite struct {
 	Timestamp  string          `xml:"timestamp,attr,omitempty"`
 	Properties []junitProperty `xml:"properties>property,omitempty"`
 	Cases      []junitCase     `xml:"testcase"`
+	SystemOut  string          `xml:"system-out,omitempty"` // the report's notes that count
 }
 
 type junitProperty struct {
@@ -67,6 +68,10 @@ func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 		if p[1] != "" {
 			suite.Properties = append(suite.Properties, junitProperty{Name: p[0], Value: p[1]})
 		}
+	}
+	if n := len(r.Resent); n > 0 {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "resent", Value: fmt.Sprint(n)})
+		suite.SystemOut = r.ResentNote()
 	}
 	for _, res := range r.Results {
 		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0", SystemOut: strings.Join(res.Notes, "\n")}

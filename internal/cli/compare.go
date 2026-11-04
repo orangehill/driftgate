@@ -537,6 +537,7 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	}{{"baseline", bRec}, {"capture", cRec}} {
 		if x.rec != nil && x.rec.Resent != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf("sent again in the %s: the first answer was %d, after %s", x.what, x.rec.Resent.First, x.rec.Resent.After))
+			res.Resent = true
 		}
 	}
 	res.Outcome = report.Pass

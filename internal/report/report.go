@@ -53,6 +53,9 @@ type Result struct {
 	// Notes say how the comparison went where that is not a drift: an
 	// array the allowlist pairs by key whose items were paired by position.
 	Notes []string `json:"notes,omitempty"`
+	// Resent: the baseline or the capture sent the request again after a
+	// restore (a note says which and the first answer).
+	Resent bool `json:"resent,omitempty"`
 }
 
 // Group is a set of drifts with the same signature: one cause. Explanation
@@ -105,6 +108,10 @@ type Report struct {
 	SkipPrivate    bool     `json:"skip_private,omitempty"`
 	// Requests skipped because the baseline has no response for them.
 	NoBaseline []string `json:"no_baseline,omitempty"`
+	// Requests the baseline's or the compared capture sent again after a
+	// restore ended the application's database sessions (each result's
+	// notes say which side and what the first answer was).
+	Resent []string `json:"resent,omitempty"`
 	// Allowlist rules that applied to no change in this comparison: a stale
 	// rule (a renamed value, a request that is gone) stays unnoticed
 	// otherwise. A warning, never a failure.
@@ -151,6 +158,21 @@ func (r *Report) NoBaselineNote() string {
 		return ""
 	}
 	return fmt.Sprintf("%s without a baseline, not compared: %s; new requests join the baseline with driftgate accept", plural(n, "request"), listIDs(r.NoBaseline))
+}
+
+// ResentNote counts the requests sent again after a restore (Resent), so
+// that a resend is seen even when the list of notes is cut; empty when
+// there are none.
+func (r *Report) ResentNote() string {
+	n := len(r.Resent)
+	if n == 0 {
+		return ""
+	}
+	verb := "were"
+	if n == 1 {
+		verb = "was"
+	}
+	return fmt.Sprintf("%s %s sent again after a restore ended the application's database sessions (their notes give the first answer): %s", plural(n, "request"), verb, listIDs(r.Resent))
 }
 
 // UnusedNote warns of the allowlist rules that applied to no change, up to
@@ -282,6 +304,9 @@ func Build(tag, against string, results []Result) *Report {
 		}
 		if res.Outcome == Skipped && res.Note == NoteNoBaseline {
 			r.NoBaseline = append(r.NoBaseline, res.ID)
+		}
+		if res.Resent {
+			r.Resent = append(r.Resent, res.ID)
 		}
 		for _, d := range res.Drifts {
 			sig := d.Signature()
@@ -483,7 +508,7 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		}
 	}
 	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %d drifted, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}

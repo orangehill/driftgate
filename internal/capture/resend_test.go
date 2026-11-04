@@ -2,12 +2,16 @@ package capture
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -108,28 +112,69 @@ func TestResendAfterRestore(t *testing.T) {
 }
 
 // TestEndedCarriedOver: the budget the last restore of a capture leaves
-// goes to the read-only phase of the next capture, once.
+// goes to the read-only phase of the next capture, once, and only to a
+// capture of the same databases soon after: the local store is shared by
+// every checkout of the project.
 func TestEndedCarriedOver(t *testing.T) {
+	db := endedDatabase{Component: "db", Working: "Shop", Server: serverHash("127.0.0.1:1433")}
+	newTracker := func(n int64, ended ...endedDatabase) *tracker {
+		tr := &tracker{databases: map[string]endedDatabase{"db": db}, endedBy: ended}
+		tr.resends.Store(n)
+		if n > 0 {
+			tr.resentAfter = fmt.Sprintf("the restore of db ended %d database sessions of the application", n)
+		}
+		return tr
+	}
 	p := &config.Project{Layout: config.Layout{Pristine: t.TempDir()}}
-	last := &tracker{}
-	last.resends.Store(3)
-	last.resentAfter = "the restore of db ended 3 database sessions of the application"
-	saveEnded(p, last)
-	next := &tracker{}
-	next.resends.Store(1) // its own first restore ended one
-	next.resentAfter = "the restore of db ended 1 database session of the application"
+	saveEnded(p, newTracker(3, db))
+	next := newTracker(1, db) // its own first restore ended one
 	takeEnded(p, next)
 	if next.resends.Load() != 4 || !strings.Contains(next.resentAfter, "at the end of the previous capture") {
 		t.Fatalf("%d %q", next.resends.Load(), next.resentAfter)
 	}
-	again := &tracker{}
+	again := newTracker(0)
 	takeEnded(p, again)
 	if again.resends.Load() != 0 {
 		t.Fatalf("taken twice: %d", again.resends.Load())
 	}
-	saveEnded(p, again) // nothing left: no record
-	takeEnded(p, next)
-	if next.resends.Load() != 4 {
-		t.Fatalf("a record without sessions was taken: %d", next.resends.Load())
+
+	// A record without sessions is never written, and one written by hand
+	// is not taken.
+	saveEnded(p, again)
+	if _, err := os.Stat(endedFile(p)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a record without sessions: %v", err)
+	}
+	write := func(e endedRecord) {
+		if err := snapshot.WriteJSON(endedFile(p), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	for name, e := range map[string]endedRecord{
+		"no sessions":                              {Sessions: 0, Databases: []endedDatabase{db}, Saved: now},
+		"another component":                        {Sessions: 3, Databases: []endedDatabase{{Component: "other", Working: "Shop", Server: db.Server}}, Saved: now},
+		"another working db":                       {Sessions: 3, Databases: []endedDatabase{{Component: "db", Working: "Shop2", Server: db.Server}}, Saved: now},
+		"another server":                           {Sessions: 3, Databases: []endedDatabase{{Component: "db", Working: "Shop", Server: serverHash("10.0.0.5:1433")}}, Saved: now},
+		"older than endedFor":                      {Sessions: 3, Databases: []endedDatabase{db}, Saved: now.Add(-endedFor - time.Minute)},
+		"saved in the future":                      {Sessions: 3, Databases: []endedDatabase{db}, Saved: now.Add(time.Hour)},
+		"of an earlier release, without databases": {Sessions: 3, Saved: now},
+	} {
+		write(e)
+		tr := newTracker(0)
+		takeEnded(p, tr)
+		if tr.resends.Load() != 0 {
+			t.Errorf("%s: taken: %d", name, tr.resends.Load())
+		}
+		if _, err := os.Stat(endedFile(p)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: the record stays: %v", name, err)
+		}
+	}
+
+	// A matching record is capped.
+	write(endedRecord{Sessions: 1 << 40, Databases: []endedDatabase{db}, Saved: now})
+	tr := newTracker(0)
+	takeEnded(p, tr)
+	if tr.resends.Load() != endedMax {
+		t.Fatalf("not capped: %d", tr.resends.Load())
 	}
 }

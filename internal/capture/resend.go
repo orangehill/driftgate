@@ -2,11 +2,14 @@ package capture
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -78,9 +81,44 @@ func endedFile(p *config.Project) string {
 	return filepath.Join(p.Layout.Pristine, "ended-sessions.json")
 }
 
+// The local store of a project is shared by every checkout of it (each
+// worktree, a clone), so a record names the databases whose sessions were
+// ended and when, and the next capture takes it only for the same
+// databases, soon after.
+const (
+	// endedFor is how long a record is taken: a pool keeps an idle
+	// connection for minutes (ADO.NET drops one after 4 to 8 minutes idle;
+	// others keep it until the server's timeout, hours) and the next capture
+	// of a step-by-step upgrade comes within minutes. An hour covers that
+	// loop; a capture later than that is not a continuation, and a budget
+	// taken from an old record could only send more 5xx again.
+	endedFor = time.Hour
+	// endedMax caps a record's sessions at the largest default pool of a
+	// common client (ADO.NET's Max Pool Size, 100).
+	endedMax = 100
+)
+
 type endedRecord struct {
 	Sessions int64  `json:"sessions"`
 	After    string `json:"after"`
+	// Databases are the components whose restore ended the sessions: the
+	// working database and the server it is on, as a hash of its address
+	// (no user or password).
+	Databases []endedDatabase `json:"databases"`
+	Saved     time.Time       `json:"saved"`
+}
+
+type endedDatabase struct {
+	Component string `json:"component"`
+	Working   string `json:"working"`
+	Server    string `json:"server"`
+}
+
+// serverHash names the server of a component in the record without its
+// address.
+func serverHash(server string) string {
+	h := sha256.Sum256([]byte(server))
+	return hex.EncodeToString(h[:8])
 }
 
 // saveEnded keeps the budget of resends the last restore of this capture
@@ -90,15 +128,18 @@ func saveEnded(p *config.Project, t *tracker) {
 	if f == "" {
 		return
 	}
-	if n := t.resends.Load(); n > 0 {
-		snapshot.WriteJSON(f, endedRecord{Sessions: n, After: t.resentAfter + " (at the end of the previous capture)"})
+	if n := t.resends.Load(); n > 0 && len(t.endedBy) > 0 {
+		snapshot.WriteJSON(f, endedRecord{Sessions: min(n, endedMax), After: t.resentAfter + " (at the end of the previous capture)",
+			Databases: t.endedBy, Saved: time.Now().UTC()})
 		return
 	}
 	os.Remove(f)
 }
 
 // takeEnded adds to the budget of this capture's read-only phase what the
-// previous capture's last restore left, once.
+// previous capture's last restore left, once: only a record of this
+// capture's own databases (component, working database and server), made
+// less than endedFor ago.
 func takeEnded(p *config.Project, t *tracker) {
 	f := endedFile(p)
 	if f == "" {
@@ -110,10 +151,18 @@ func takeEnded(p *config.Project, t *tracker) {
 	}
 	os.Remove(f)
 	var e endedRecord
-	if json.Unmarshal(raw, &e) != nil || e.Sessions <= 0 {
+	if json.Unmarshal(raw, &e) != nil || e.Sessions <= 0 || len(e.Databases) == 0 {
 		return
 	}
-	t.resends.Add(e.Sessions)
+	if age := time.Since(e.Saved); age < 0 || age > endedFor {
+		return
+	}
+	for _, d := range e.Databases {
+		if t.databases[d.Component] != d {
+			return
+		}
+	}
+	t.resends.Add(min(e.Sessions, endedMax))
 	if t.resentAfter == "" {
 		t.resentAfter = e.After
 	} else {
