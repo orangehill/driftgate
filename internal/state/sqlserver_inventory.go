@@ -864,7 +864,12 @@ func hasSequence(inv *ssInventory, item string) bool {
 // readSets runs a batch and hands every row of its n-th result set to the
 // n-th function.
 func readSets(ctx context.Context, c *sql.Conn, batch string, sets ...func(*sql.Rows) error) error {
-	rows, err := c.QueryContext(ctx, batch)
+	return readSetsWith(ctx, c, batch, nil, sets...)
+}
+
+// readSetsWith is readSets of a batch with parameters (@p1…).
+func readSetsWith(ctx context.Context, c *sql.Conn, batch string, args []any, sets ...func(*sql.Rows) error) error {
+	rows, err := c.QueryContext(ctx, batch, args...)
 	if err != nil {
 		return err
 	}

@@ -582,6 +582,11 @@ type ssGuard struct {
 	checks   []string     // constraints on again, as they were
 	tolerant []ssTolerant // trusted foreign keys of excluded tables (tolerate)
 	triggers []string     // triggers on again, the database's DDL triggers last
+	// altered are the tables whose definition the guard changes (ALTER
+	// TABLE, DISABLE TRIGGER), ddl the database's DDL triggers it turns
+	// off: their modify_date moves (ssOwnDDL).
+	altered map[int64]bool
+	ddl     []int64
 }
 
 type ssTolerant struct{ table, schema, name string }
@@ -592,18 +597,20 @@ type ssTolerant struct{ table, schema, name string }
 // pristine copy's). With own, the rows written are such rows, so the
 // foreign keys of the tables in set are turned off too and checked after.
 func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bool, own bool) *ssGuard {
-	g := &ssGuard{}
+	g := &ssGuard{altered: map[int64]bool{}}
 	var ddl []string
 	for _, tr := range inv.Triggers {
 		if !tr.Disabled && tr.Table == 0 {
 			g.off = append(g.off, "DISABLE TRIGGER "+qms(tr.Name)+" ON DATABASE")
 			ddl = append(ddl, "ENABLE TRIGGER "+qms(tr.Name)+" ON DATABASE")
+			g.ddl = append(g.ddl, tr.ID)
 		}
 	}
 	for _, tr := range inv.Triggers {
 		if t := inv.byID[tr.Table]; t != nil && !tr.Disabled && set[tr.Table] {
 			g.off = append(g.off, "DISABLE TRIGGER "+qs2(tr.Schema, tr.Name)+" ON "+t.qname())
 			g.triggers = append(g.triggers, "ENABLE TRIGGER "+qs2(tr.Schema, tr.Name)+" ON "+t.qname())
+			g.altered[t.ID] = true
 		}
 	}
 	g.triggers = append(g.triggers, ddl...)
@@ -615,6 +622,7 @@ func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bo
 		alter := "ALTER TABLE " + child.qname()
 		switch {
 		case set[fk.Referenced] || own && set[fk.Table]:
+			g.altered[child.ID] = true
 			g.off = append(g.off, alter+" NOCHECK CONSTRAINT "+qms(fk.Name))
 			switch {
 			case fk.NotTrusted:
@@ -625,12 +633,14 @@ func ssGuardFor(inv *ssInventory, set map[int64]bool, tolerant func(*ssTable) bo
 				g.checks = append(g.checks, alter+" WITH CHECK CHECK CONSTRAINT "+qms(fk.Name))
 			}
 		case set[fk.Table] && fk.NotTrusted:
+			g.altered[child.ID] = true
 			g.off = append(g.off, alter+" NOCHECK CONSTRAINT "+qms(fk.Name))
 			g.checks = append(g.checks, alter+" CHECK CONSTRAINT "+qms(fk.Name))
 		}
 	}
 	for _, ck := range inv.Checks {
 		if t := inv.byID[ck.Table]; t != nil && set[ck.Table] && !ck.Disabled && ck.NotTrusted {
+			g.altered[t.ID] = true
 			g.off = append(g.off, "ALTER TABLE "+t.qname()+" NOCHECK CONSTRAINT "+qms(ck.Name))
 			g.checks = append(g.checks, "ALTER TABLE "+t.qname()+" CHECK CONSTRAINT "+qms(ck.Name))
 		}
@@ -744,10 +754,15 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 		}
 		return fallback("%s", why)
 	}
+	own, wait, err := s.ownDDL(ctx, c, g, plan)
+	if err != nil {
+		return err
+	}
 	chaos.Point("state.sqlserver.restore")
-	if _, err := c.ExecContext(ctx, "COMMIT"); err != nil {
+	if _, err := c.ExecContext(ctx, wait+"COMMIT"); err != nil {
 		return fmt.Errorf("state %s: restore: %w", s.o.Name, err)
 	}
+	s.own = own
 	var tables []*ssTable
 	for _, rt := range plan.tables {
 		if rt.w.rowversion() != "" {
@@ -764,6 +779,64 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 	c.Close()
 	s.restored(items)
 	return nil
+}
+
+// ssModifyDate is a modify_date as CONVERT(varchar(30), …, 121) gives it.
+var ssModifyDate = lazy.Regexp(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}$`)
+
+// ownDDL reads, in the restore's transaction (c), the modify_date of the
+// objects whose definition it changed (ssOwnDDL): the tables it altered or
+// truncated, every object of theirs (constraints, triggers) and the
+// database's DDL triggers. The transaction holds a schema lock on each
+// until it ends, so no other session changes them before, and wait is
+// what makes the COMMIT that follows wait until the server's clock (which
+// sets modify_date) is 10 ms past them, so a change after it has a later
+// modify_date however the clock's time is rounded to datetime's steps of
+// about 3 ms.
+func (s *SQLServer) ownDDL(ctx context.Context, c *sql.Conn, g *ssGuard, plan *ssRestorePlan) (own ssOwnDDL, wait string, err error) {
+	var tables, ddl []string
+	for id := range g.altered {
+		tables = append(tables, fmt.Sprint(id))
+	}
+	for _, rt := range plan.tables {
+		if rt.keys == "" && rt.clear == "TRUNCATE" {
+			tables = append(tables, fmt.Sprint(rt.w.ID))
+		}
+	}
+	for _, id := range g.ddl {
+		ddl = append(ddl, fmt.Sprint(id))
+	}
+	var parts []string
+	if len(tables) > 0 {
+		in := strings.Join(tables, ", ")
+		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.objects WHERE object_id IN ("+in+") OR parent_object_id IN ("+in+")")
+	}
+	if len(ddl) > 0 {
+		parts = append(parts, "SELECT object_id, CONVERT(varchar(30), modify_date, 121) FROM sys.triggers WHERE parent_class = 0 AND object_id IN ("+strings.Join(ddl, ", ")+")")
+	}
+	if len(parts) == 0 {
+		return own, "", nil
+	}
+	var values []string
+	latest := ""
+	err = readSets(ctx, c, strings.Join(parts, "\nUNION ALL ")+";", func(r *sql.Rows) error {
+		var id int64
+		var date string
+		if err := r.Scan(&id, &date); err != nil {
+			return err
+		}
+		if !ssModifyDate().MatchString(date) {
+			return fmt.Errorf("state %s: SQL Server returned the modify_date %q", s.o.Name, date)
+		}
+		values = append(values, fmt.Sprintf("%d %s|", id, date))
+		latest = max(latest, date)
+		return nil
+	})
+	if err != nil || latest == "" {
+		return own, "", err
+	}
+	own = ssOwnDDL{values: "|" + strings.Join(values, ""), latest: latest, at: time.Now()}
+	return own, "WHILE GETDATE() <= DATEADD(millisecond, 10, CONVERT(datetime, '" + latest + "', 121)) WAITFOR DELAY '00:00:00.001';\n", nil
 }
 
 // blockers names, after a lock waited for too long (1222), the other

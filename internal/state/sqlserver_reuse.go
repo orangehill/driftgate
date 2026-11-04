@@ -90,10 +90,10 @@ type ssSignals struct {
 // the catalog that a definition shows: every object's modify_date (ALTER,
 // also of a constraint's or trigger's flags, index changes, renames), the
 // database's DDL triggers, permissions, extended properties, schemas,
-// types, users and assemblies. The second result set says whether an
-// object changed in the last two seconds: modify_date counts in steps of
-// about 3 ms, so a change right after the reading could keep its value,
-// and such a reading is not used.
+// types, users and assemblies. ssRecentSQL then says whether an object
+// changed in the last two seconds: modify_date counts in steps of about 3
+// ms, so a change right after the reading could keep its value, and such
+// a reading is not used.
 const ssGuardSQL = `
 SELECT CONCAT(N'o ', object_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.objects WHERE is_ms_shipped = 0
 UNION ALL SELECT CONCAT(N't ', object_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.triggers WHERE parent_class = 0
@@ -109,9 +109,32 @@ UNION ALL SELECT CONCAT(N'f ', function_id, N' ', CONVERT(varchar(30), modify_da
 UNION ALL SELECT CONCAT(N'd ', partition_scheme_id, N' ', destination_id, N' ', data_space_id) COLLATE DATABASE_DEFAULT FROM sys.destination_data_spaces
 UNION ALL SELECT CONCAT(N'x ', xml_collection_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.xml_schema_collections
 UNION ALL SELECT CONCAT(N'u ', principal_id, N' ', name, N' ', type COLLATE DATABASE_DEFAULT, N' ', default_schema_name, N' ', owning_principal_id, N' ', CONVERT(varchar(200), sid, 1)) COLLATE DATABASE_DEFAULT FROM sys.database_principals
-UNION ALL SELECT CONCAT(N'a ', assembly_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.assemblies;
-SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects WHERE is_ms_shipped = 0 AND modify_date >= DATEADD(second, -2, GETDATE()))
-              OR EXISTS (SELECT 1 FROM sys.triggers WHERE parent_class = 0 AND modify_date >= DATEADD(second, -2, GETDATE())) THEN 1 ELSE 0 END;`
+UNION ALL SELECT CONCAT(N'a ', assembly_id, N' ', CONVERT(varchar(30), modify_date, 121)) COLLATE DATABASE_DEFAULT FROM sys.assemblies;`
+
+// ssRecentSQL says whether an object changed in the last two seconds
+// (ssGuardSQL), but for the modify_date values of DriftGate's own last
+// restore in @p1 (ssOwnDDL.values, "|object_id date|…"; a parameter, so
+// the batch is compiled once).
+const ssRecentSQL = `
+SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.objects o WHERE o.is_ms_shipped = 0 AND o.modify_date >= DATEADD(second, -2, GETDATE())
+                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @p1) = 0)
+              OR EXISTS (SELECT 1 FROM sys.triggers o WHERE o.parent_class = 0 AND o.modify_date >= DATEADD(second, -2, GETDATE())
+                            AND CHARINDEX(CONCAT(N'|', o.object_id, N' ', CONVERT(nvarchar(30), o.modify_date, 121), N'|'), @p1) = 0) THEN 1 ELSE 0 END;`
+
+// ssOwnDDL are the objects DriftGate's last item-level restore changed the
+// definition of (it turned triggers and constraints off and on again),
+// with the modify_date each had when it committed, as
+// "|object_id date|…|"; "" for none. A fingerprint does not take them for a change of the last two
+// seconds: the restore read them in its transaction, while it held the
+// schema lock that any other change of them needs, and committed only once
+// the server's clock had passed them (restoreItems), so any later change
+// has a later modify_date. They are dropped after a few seconds, when
+// they are no longer recent anyway.
+type ssOwnDDL struct {
+	values string
+	latest string // the latest of them
+	at     time.Time
+}
 
 // ssLogSQL flushes the log and reads its end (tier 1).
 const ssLogSQL = `EXEC sys.sp_flush_log;
@@ -216,8 +239,14 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 	var lines []string
 	var recent int
 	locks := map[int64][]ssOpenLock{}
+	var args []any
 	if guard {
-		batch += ssGuardSQL
+		own := ""
+		if time.Since(s.own.at) < 5*time.Second {
+			own = s.own.values
+		}
+		batch += ssGuardSQL + ssRecentSQL
+		args = append(args, own)
 		sets = append(sets, func(r *sql.Rows) error {
 			var line string
 			if err := r.Scan(&line); err != nil {
@@ -270,7 +299,7 @@ func (s *SQLServer) signals(ctx context.Context, c *sql.Conn, log, guard, tables
 			})
 		}
 	}
-	if err := readSets(ctx, c, batch, sets...); err != nil {
+	if err := readSetsWith(ctx, c, batch, args, sets...); err != nil {
 		return nil, err
 	}
 	done()
@@ -504,7 +533,7 @@ func (s *SQLServer) keepTables(fp *ssFingerprint, sig *ssSignals) {
 // last restore go too: after a restore of the whole database they are
 // another copy's, and a value the application gives a row later could
 // reach them (rowversionMoved then compares with the pristine copy).
-func (s *SQLServer) forget() { s.last, s.inv, s.rvMax = nil, nil, nil }
+func (s *SQLServer) forget() { s.last, s.inv, s.rvMax, s.own = nil, nil, nil, ssOwnDDL{} }
 
 // forgetPristine drops what DriftGate knows of the pristine copy too (a
 // seed made a new one).

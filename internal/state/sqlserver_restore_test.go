@@ -505,6 +505,79 @@ func TestSQLServerRestoredKept(t *testing.T) {
 	}
 }
 
+// TestSQLServerOwnDDL: after a restore that turned triggers and foreign
+// keys off and on, the catalog is reused within two seconds (the restore's
+// own changes are not taken for an application's), and an application's
+// ALTER right after the restore is seen, of the very objects too.
+func TestSQLServerOwnDDL(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{},
+		"CREATE TABLE par (id int PRIMARY KEY, v int NULL)", "INSERT INTO par VALUES (1, 1), (2, 2)",
+		"CREATE TABLE kid (id int PRIMARY KEY, p int NULL CONSTRAINT kid_fk REFERENCES par(id))", "INSERT INTO kid VALUES (1, 1)",
+		"CREATE TABLE audit (n int NULL)",
+		"CREATE TRIGGER par_t ON par AFTER UPDATE AS INSERT INTO audit VALUES (1)",
+		"CREATE TRIGGER ddl_t ON DATABASE FOR CREATE_PROCEDURE AS SET NOCOUNT ON")
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the login cannot read the server's performance state")
+	}
+	p := pristineSQLServer(t, s)
+	ctx := context.Background()
+	items := []string{"table:dbo.par"}
+	restore := func() {
+		t.Helper()
+		sqlServerExec(t, db, "DELETE FROM par WHERE id = 2")
+		mustSQLServerFingerprint(t, s)
+		if err := s.Restore(ctx, items); err != nil {
+			t.Fatal(err)
+		}
+		if s.own.values == "" {
+			t.Fatal("the restore noted no catalog change of its own")
+		}
+		// Any change from now on has a later modify_date than the
+		// restore's own, however rounded to datetime's steps.
+		if n := sqlServerInt(t, db, "SELECT CASE WHEN GETDATE() > DATEADD(millisecond, 7, CONVERT(datetime, '"+s.own.latest+"', 121)) THEN 1 ELSE 0 END"); n != 1 {
+			t.Fatalf("the restore committed before the clock passed %s", s.own.latest)
+		}
+	}
+	// Two seconds of the setup's own changes first.
+	time.Sleep(2100 * time.Millisecond)
+	restore()
+	mustSQLServerFingerprint(t, s)
+	inv := s.inv
+	sqlServerExec(t, db, "INSERT INTO audit VALUES (2)")
+	mustSQLServerFingerprint(t, s)
+	if inv == nil || s.inv != inv {
+		t.Error("the catalog is read again after the restore's own changes")
+	}
+	sqlServerExec(t, db, "DELETE FROM audit")
+	for i, alter := range []string{
+		"ALTER TRIGGER par_t ON par AFTER UPDATE AS INSERT INTO audit VALUES (3)",
+		"ALTER TABLE kid NOCHECK CONSTRAINT kid_fk",
+		"ALTER TABLE par ADD w int NULL",
+		"DISABLE TRIGGER ddl_t ON DATABASE",
+		"CREATE INDEX par_v ON par (v)",
+	} {
+		restore()
+		sqlServerExec(t, db, alter) // at once
+		f := mustSQLServerFingerprint(t, s)
+		if d := Diff(f, sqlServerFull(t, s)); len(d) > 0 {
+			t.Fatalf("%d: after %q, %v differ from a full read", i, alter, d)
+		}
+		if d := Diff(f, p); len(d) == 0 {
+			t.Fatalf("%d: %q is not seen", i, alter)
+		}
+		// Back to the pristine copy (the whole database for the
+		// definitions).
+		if err := s.Restore(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxIdleConns(0)
+		db.SetMaxIdleConns(2)
+		if d := Diff(mustSQLServerFingerprint(t, s), p); len(d) > 0 {
+			t.Fatalf("%d: %v differ after the restore", i, d)
+		}
+	}
+}
+
 // TestSQLServerRestoreFallbacks: changes item by item cannot restore
 // restore the whole database, which then fingerprints as the pristine
 // copy; an application's connection fails once and its pool connects

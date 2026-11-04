@@ -48,6 +48,7 @@ type SQLServer struct {
 	last     *ssLast
 	inv      *ssInventory
 	invGuard string
+	own      ssOwnDDL // the catalog changes of DriftGate's own last restore
 	work     *sql.Conn
 	reused   bool
 	mode     string
