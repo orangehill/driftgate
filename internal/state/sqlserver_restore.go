@@ -815,7 +815,7 @@ var sqlServerOwnWait = 50 * time.Millisecond
 // objects whose definition it changed (ssOwnDDL): the tables it altered or
 // truncated, every object of theirs (constraints, triggers), the
 // sequences it restarted and the database's DDL triggers. Only dates of
-// the last seconds up to the server's clock now count: the restore's own
+// the last seconds up to the server's clock count: the restore's own
 // changes are among them, an older date is not recent anyway, and a date
 // ahead of the clock (another time zone, a clock set back) is never
 // exempted. The transaction holds a schema lock on each until it ends, so
