@@ -12,7 +12,7 @@ func TestSQLServerHostsAndServer(t *testing.T) {
 	for _, c := range []struct{ dsn, host, server string }{
 		{"sqlserver://sa:p@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true", "127.0.0.1", "127.0.0.1:14331"},
 		{"sqlserver://sa:p@db.example.com?encrypt=true", "db.example.com", "db.example.com:1433"},
-		{"sqlserver://sa:p@db.example.com?port=1533&encrypt=strict", "db.example.com", "db.example.com:1533"},
+		{"SQLServer://sa:p@db.example.com:1533?encrypt=strict", "db.example.com", "db.example.com:1533"},
 		{"sqlserver://sa:p@db.example.com:1533/SHOP?encrypt=true", "db.example.com", "db.example.com:1533"},
 		{"sqlserver://sa:p@[::1]:1433?encrypt=true", "::1", "[::1]:1433"},
 		{"sqlserver://sa:p@:01433?encrypt=true", "localhost", "localhost:1433"},
@@ -41,15 +41,15 @@ func TestSQLServerRefused(t *testing.T) {
 		{"sqlserver://sa:s3crpw@db:1433?failoverpartner=db2", "failoverpartner"},
 		{"sqlserver://sa:s3crpw@db:1433?protocol=np", "protocol"},
 		{"sqlserver://sa:s3crpw@db:1433?server=db2", "server parameter"},
-		{"sqlserver://sa:s3crpw@db:1433?port=1533", "the port twice"},
+		{"sqlserver://sa:s3crpw@db:1433?port=1533", "not as the port parameter"},
+		{"sqlserver://sa:s3crpw@db?port=1533", "not as the port parameter"},
 		{"sqlserver://sa:s3crpw@db:1433?encrypt=true&Encrypt=false", "a parameter twice"},
 		{"sqlserver://sa:s3crpw@db:1433?encrypt=s3crpw", "encrypt must be"},
 		{"sqlserver://sa:s3crpw@db:1433?TrustServerCertificate=s3crpw", "TrustServerCertificate must be"},
-		{"sqlserver://sa:s3crpw@db?port=s3crpw", "not a number"},
-		{"sqlserver://sa:s3crpw@db?port=0", "not a number"},
-		{"SQLServer://sa:s3crpw@db:1433?encrypt=true", "a SQL Server DSN is a sqlserver:// URL"},
+		{"sqlserver://sa:s3crpw@db:s3crpw", "not a valid URL"},
+		{"sqlserver://sa:s3crpw@db:0", "not a number"},
 		{"sqlserver://sa:s3crpw@db:1433?encrypt=true;server=evil", "holds a ;"},
-		{"sqlserver://sa:s3crpw@db:1433?Port=1533", "the port twice"},
+		{"sqlserver://sa:s3crpw@db:1433?Port=1533", "not as the port parameter"},
 	} {
 		for _, f := range []func() error{
 			func() error { _, err := Hosts(SQLServer, c.dsn); return err },
@@ -74,13 +74,11 @@ func TestSQLServerRefused(t *testing.T) {
 func TestSQLServerDriverParity(t *testing.T) {
 	for _, c := range []struct{ dsn, server string }{
 		{"sqlserver://sa:p@db:1433?encrypt=true", "db:1433"},
-		{"sqlserver://sa:p@db?port=1533", "db:1533"},
 		{"sqlserver://sa:p@:1433", "localhost:1433"},
 		{"sqlserver://sa:p@.:1433", "localhost:1433"},
 		{"sqlserver://sa:p@[::1]:1433", "[::1]:1433"},
 		{"sqlserver://sa:p;w@db:01433", "db:1433"},
 		{"sqlserver://sa:p@db:1433/inst", "db:1433"},                  // the port wins over the instance
-		{"sqlserver://sa:p@db/inst?port=1533", "db:1533"},             // so does the port parameter
 		{"sqlserver://sa:p@db?database=x%3Bserver%3Devil", "db:1433"}, // an encoded ; is the database's
 	} {
 		if s, err := Server(SQLServer, c.dsn); err != nil || s != c.server {

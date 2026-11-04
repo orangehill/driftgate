@@ -15,11 +15,13 @@ import (
 // as go-mssqldb v1.11.2 does (msdsn.splitConnectionStringURL and its tcp
 // protocol parser): the host of the URL, an empty one, . and (local) being
 // localhost; the port of the URL or of the port parameter, 1433 without
-// one; the path a named instance; parameter names in any case, none twice.
-// What would make the driver reach another host or another port than the
-// address read here is refused: a named instance without a port (the SQL
-// Server Browser picks the port), a failover partner, a protocol other
-// than tcp. The other parameters are left to the driver, except the TLS
+// one; the path a named instance; the scheme and parameter names in any
+// case (internal/state hands the driver the scheme in lower case), none
+// twice. What would make the driver reach another host or another port
+// than the address read here is refused: a named instance without a port
+// (the SQL Server Browser picks the port), a failover partner, a protocol
+// other than tcp. The port parameter is refused as internal/state refuses
+// it: the port goes in the host (host:1533). The other parameters are left to the driver, except the TLS
 // ones whose values are checked here, so no error of the driver quotes
 // them.
 
@@ -29,9 +31,10 @@ var errSQLServerForm = errors.New("dsn: a SQL Server DSN is a sqlserver:// URL (
 // sqlServerAddr reads the host and port a sqlserver:// URL connects to.
 // No error carries the DSN or a part of it.
 func sqlServerAddr(dsn string) (host, port string, err error) {
-	// The driver takes the URL form by this prefix only, in lower case;
-	// any other text it reads as an ADO.NET connection string.
-	if !strings.HasPrefix(dsn, "sqlserver://") {
+	// The driver takes the URL form by this prefix only, in lower case
+	// (internal/state lowers it); any other text it reads as an ADO.NET
+	// connection string.
+	if !strings.HasPrefix(strings.ToLower(dsn), "sqlserver://") {
 		return "", "", errSQLServerForm
 	}
 	u, err := url.Parse(dsn)
@@ -50,6 +53,9 @@ func sqlServerAddr(dsn string) (host, port string, err error) {
 			return "", "", errors.New("dsn: the sqlserver:// URL gives a parameter twice (names are not case-sensitive; the DSN is not shown, as it holds the password)")
 		}
 		q[lk] = vs[0]
+	}
+	if _, ok := q["port"]; ok {
+		return "", "", errors.New("dsn: the sqlserver:// URL takes the port in its host (host:1533), not as the port parameter")
 	}
 	if _, ok := q["server"]; ok {
 		return "", "", errors.New("dsn: the sqlserver:// URL takes the server as its host, not as the server parameter")
@@ -80,12 +86,6 @@ func sqlServerAddr(dsn string) (host, port string, err error) {
 		host = "localhost"
 	}
 	port = u.Port()
-	if p, ok := q["port"]; ok {
-		if port != "" {
-			return "", "", errors.New("dsn: the sqlserver:// URL gives the port twice (in the host and as the port parameter)")
-		}
-		port = p
-	}
 	if instance := strings.TrimPrefix(u.Path, "/"); instance != "" && port == "" {
 		return "", "", errors.New("dsn: the sqlserver:// URL names an instance without a port; the SQL Server Browser would pick the port: add the instance's port (host:port)")
 	}
