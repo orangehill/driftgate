@@ -222,37 +222,96 @@ type sqlServerDatabase struct {
 // database reads a database's properties; nil when there is none of that
 // name.
 func (s *SQLServer) database(ctx context.Context, name string) (*sqlServerDatabase, error) {
-	info, err := s.server(ctx)
+	dbs, _, err := s.databases(ctx, []string{name}, "")
 	if err != nil {
 		return nil, err
+	}
+	return dbs[0], nil
+}
+
+// databases reads the properties of the databases named (nil for one
+// there is none of) and, with marked, the mark of that database
+// (readMark: nil when it has none or is not online), in one batch.
+func (s *SQLServer) databases(ctx context.Context, names []string, marked string) ([]*sqlServerDatabase, *sqlServerMark, error) {
+	info, err := s.server(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 	ledger := "0"
 	if info.Major >= 16 {
 		ledger = "ISNULL(CAST(d.is_ledger_on AS int), 0)"
 	}
-	c, err := s.conn(ctx, "")
-	if err != nil {
-		return nil, err
+	var list []string
+	var args []any
+	for i, name := range names {
+		list = append(list, fmt.Sprintf("(%d, @p%d)", i, i+1))
+		args = append(args, name)
 	}
-	defer c.Close()
-	d := &sqlServerDatabase{}
-	var flags int // change data capture, then the four kinds of replication
-	err = c.QueryRowContext(ctx, `SELECT d.name, d.database_id, d.state_desc, d.user_access_desc, d.recovery_model_desc, d.is_read_only,
+	q := `SELECT n.i, d.name, d.database_id, d.state_desc, d.user_access_desc, d.recovery_model_desc, d.is_read_only,
 		CAST(d.is_cdc_enabled AS int) | CAST(d.is_published AS int) * 2 | CAST(d.is_subscribed AS int) * 4 | CAST(d.is_merge_published AS int) * 8 | CAST(d.is_distributor AS int) * 16,
-		CASE WHEN d.replica_id IS NULL THEN 0 ELSE 1 END, `+ledger+`,
+		CASE WHEN d.replica_id IS NULL THEN 0 ELSE 1 END, ` + ledger + `,
 		CASE WHEN EXISTS (SELECT 1 FROM sys.change_tracking_databases t WHERE t.database_id = d.database_id) THEN 1 ELSE 0 END,
 		ISNULL(d.delayed_durability_desc, N'DISABLED'), d.is_broker_enabled, d.is_trustworthy_on, d.is_db_chaining_on, ISNULL(d.collation_name, N'')
-		FROM sys.databases d WHERE d.name = @p1`, name).Scan(
-		&d.Name, &d.ID, &d.State, &d.UserAccess, &d.Recovery, &d.ReadOnly, &flags, &d.AG, &d.Ledger, &d.ChangeTracking,
-		&d.DelayedDurability, &d.Broker, &d.Trustworthy, &d.Chaining, &d.Collation)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		FROM (VALUES ` + strings.Join(list, ", ") + `) n (i, name) JOIN sys.databases d ON d.name = n.name;`
+	if marked != "" {
+		// The mark of an online database, by its quoted name (a
+		// database's name fits QUOTENAME's 128 characters).
+		q += fmt.Sprintf(`
+DECLARE @dg_n int = 0, @dg_m nvarchar(4000);
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p%d AND state = 0)
+	BEGIN
+	DECLARE @dg_q nvarchar(max) = N'SELECT @n = COUNT(*), @m = MAX(CAST(value AS nvarchar(4000))) FROM ' + QUOTENAME(@p%d) + N'.sys.extended_properties WHERE class = 0 AND name = @k';
+	EXEC sys.sp_executesql @dg_q, N'@n int OUTPUT, @m nvarchar(4000) OUTPUT, @k sysname', @n = @dg_n OUTPUT, @m = @dg_m OUTPUT, @k = @p%d;
+	END
+SELECT @dg_n, @dg_m;`, len(names)+1, len(names)+1, len(names)+2)
+		args = append(args, marked, sqlServerMarkName)
 	}
+	c, err := s.conn(ctx, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	d.CDC, d.Replicated = flags&1 != 0, flags&^1 != 0
-	return d, nil
+	defer c.Close()
+	rows, err := c.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	out := make([]*sqlServerDatabase, len(names))
+	for rows.Next() {
+		d := &sqlServerDatabase{}
+		var i int
+		var flags int // change data capture, then the four kinds of replication
+		if err := rows.Scan(&i, &d.Name, &d.ID, &d.State, &d.UserAccess, &d.Recovery, &d.ReadOnly, &flags, &d.AG, &d.Ledger, &d.ChangeTracking,
+			&d.DelayedDurability, &d.Broker, &d.Trustworthy, &d.Chaining, &d.Collation); err != nil {
+			return nil, nil, err
+		}
+		d.CDC, d.Replicated = flags&1 != 0, flags&^1 != 0
+		out[i] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if marked == "" {
+		return out, nil, nil
+	}
+	if !rows.NextResultSet() {
+		if err := rows.Err(); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errors.New("SQL Server returned no mark")
+	}
+	var n int
+	var raw sql.NullString
+	for rows.Next() {
+		if err := rows.Scan(&n, &raw); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := rows.Err(); err != nil || n == 0 {
+		return out, nil, err
+	}
+	m, err := s.parseMark(marked, raw)
+	return out, m, err
 }
 
 // refuse says why DriftGate does not restore a database, or nil: change
@@ -343,6 +402,11 @@ func (s *SQLServer) readMark(ctx context.Context, db string) (*sqlServerMark, er
 	if err != nil {
 		return nil, err
 	}
+	return s.parseMark(db, raw)
+}
+
+// parseMark reads the value of the mark of database db.
+func (s *SQLServer) parseMark(db string, raw sql.NullString) (*sqlServerMark, error) {
 	m := &sqlServerMark{}
 	if err := json.Unmarshal([]byte(raw.String), m); err != nil || m.Working == "" {
 		return nil, fmt.Errorf("state %s: database %s has a DriftGate mark that cannot be read; drop the database yourself if it is not needed", s.o.Name, db)

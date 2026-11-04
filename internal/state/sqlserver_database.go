@@ -344,11 +344,19 @@ func (s *SQLServer) recoveryFork(ctx context.Context, id int) (string, error) {
 // complete and the working database w was restored since, or is being
 // restored). Any other one is dropped.
 func (s *SQLServer) leftSave(ctx context.Context, w *sqlServerDatabase) (bool, error) {
-	dgx := s.excludedDB()
-	d, err := s.database(ctx, dgx)
-	if err != nil || d == nil {
+	d, err := s.database(ctx, s.excludedDB())
+	if err != nil {
 		return false, err
 	}
+	return s.leftSaveOf(ctx, w, d)
+}
+
+// leftSaveOf is leftSave of d, the <pristine>_dgx as read last (nil: none).
+func (s *SQLServer) leftSaveOf(ctx context.Context, w, d *sqlServerDatabase) (bool, error) {
+	if d == nil {
+		return false, nil
+	}
+	dgx := s.excludedDB()
 	if err := s.checkPristine(ctx, dgx); err != nil {
 		return false, err
 	}
@@ -388,7 +396,20 @@ func (s *SQLServer) recoverExcluded(ctx context.Context, w *sqlServerDatabase) e
 	if w == nil || w.State != "ONLINE" {
 		return nil
 	}
-	left, err := s.leftSave(ctx, w)
+	d, err := s.database(ctx, s.excludedDB())
+	if err != nil {
+		return err
+	}
+	return s.recoverExcludedOf(ctx, w, d)
+}
+
+// recoverExcludedOf is recoverExcluded with d, the <pristine>_dgx as read
+// last (nil: none).
+func (s *SQLServer) recoverExcludedOf(ctx context.Context, w, d *sqlServerDatabase) error {
+	if w == nil || w.State != "ONLINE" {
+		return nil
+	}
+	left, err := s.leftSaveOf(ctx, w, d)
 	if err != nil || !left {
 		return err
 	}

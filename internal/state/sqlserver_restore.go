@@ -66,14 +66,17 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) (err error) {
 	if err := s.checkWorking(ctx); err != nil {
 		return err
 	}
-	w, err := s.database(ctx, s.o.Working)
+	// The working database, the pristine copy with its mark and a
+	// <pristine>_dgx, in one round trip.
+	dbs, m, err := s.databases(ctx, []string{s.o.Working, s.o.Pristine, s.excludedDB()}, s.o.Pristine)
 	if err != nil {
 		return err
 	}
+	w, dgx := dbs[0], dbs[2]
 	if w == nil {
 		return fmt.Errorf("state %s: working database %s does not exist", s.o.Name, s.o.Working)
 	}
-	mark, err := s.pristineMark(ctx)
+	mark, err := s.checkMark(ctx, dbs[1], m)
 	if err != nil {
 		return err
 	}
@@ -88,8 +91,11 @@ func (s *SQLServer) Restore(ctx context.Context, items []string) (err error) {
 		if w, err = s.database(ctx, s.o.Working); err != nil {
 			return err
 		}
+		if dgx, err = s.database(ctx, s.excludedDB()); err != nil { // notOnline may have dropped it
+			return err
+		}
 	}
-	if err := s.recoverExcluded(ctx, w); err != nil {
+	if err := s.recoverExcludedOf(ctx, w, dgx); err != nil {
 		return err
 	}
 	if items == nil {
@@ -238,11 +244,17 @@ func (s *SQLServer) pristineFingerprint(ctx context.Context, mark *sqlServerMark
 // read-only and open to every session (a seed that stopped after the
 // rename leaves it writable).
 func (s *SQLServer) pristineMark(ctx context.Context) (*sqlServerMark, error) {
-	info, err := s.server(ctx)
+	dbs, m, err := s.databases(ctx, []string{s.o.Pristine}, s.o.Pristine)
 	if err != nil {
 		return nil, err
 	}
-	d, err := s.database(ctx, s.o.Pristine)
+	return s.checkMark(ctx, dbs[0], m)
+}
+
+// checkMark is pristineMark of the pristine copy d and its mark m, as
+// databases read them.
+func (s *SQLServer) checkMark(ctx context.Context, d *sqlServerDatabase, m *sqlServerMark) (*sqlServerMark, error) {
+	info, err := s.server(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -251,10 +263,6 @@ func (s *SQLServer) pristineMark(ctx context.Context) (*sqlServerMark, error) {
 	}
 	if d.State != "ONLINE" {
 		return nil, fmt.Errorf("state %s: pristine database %s is %s; run driftgate seed", s.o.Name, s.o.Pristine, d.State)
-	}
-	m, err := s.readMark(ctx, s.o.Pristine)
-	if err != nil {
-		return nil, err
 	}
 	switch {
 	case m == nil:
