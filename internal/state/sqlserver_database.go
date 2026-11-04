@@ -302,23 +302,21 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 	return nil
 }
 
+// ssEndSessionsSQL ends every other user session in the database @p1 in
+// one batch on the server, each only while it is still the session listed
+// (its id, database and login time). A session id is reused as soon as its
+// session logs out, and DriftGate's own just closed (closePool) are still
+// listed while they log out: a KILL sent later from the client could end
+// another program's session that got the id meanwhile.
+const ssEndSessionsSQL = `DECLARE @k nvarchar(max) = N'';
+SELECT @k += CONCAT(N'IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE session_id = ', session_id, N' AND database_id = ', database_id,
+       N' AND login_time = CONVERT(datetime, ''', CONVERT(varchar(30), login_time, 121), N''', 121)) BEGIN TRY KILL ', session_id, N' END TRY BEGIN CATCH END CATCH;', NCHAR(10))
+  FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1;
+EXEC (@k);`
+
 // endSessions ends every other session in a database (sysadmin only).
 func (s *SQLServer) endSessions(ctx context.Context, m *sql.Conn, id int) {
-	rows, err := m.QueryContext(ctx, "SELECT session_id FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1", id)
-	if err != nil {
-		return
-	}
-	var ids []int
-	for rows.Next() {
-		var n int
-		if rows.Scan(&n) == nil {
-			ids = append(ids, n)
-		}
-	}
-	rows.Close()
-	for _, n := range ids {
-		m.ExecContext(ctx, "KILL "+strconv.Itoa(n))
-	}
+	m.ExecContext(ctx, ssEndSessionsSQL, id)
 }
 
 // excludedDB is the database excluded tables are saved in during a

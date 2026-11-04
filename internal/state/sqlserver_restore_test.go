@@ -928,7 +928,10 @@ func TestSQLServerSeedStopped(t *testing.T) {
 	// When the cut comes too early nothing is left, too late the
 	// database is online: another try.
 	for _, after := range []time.Duration{150, 300, 80, 450, 600} {
-		done = during(after*time.Millisecond, func(session int) { master.Exec(fmt.Sprintf("KILL %d", session)) })
+		done = during(after*time.Millisecond, func(session int) {
+			// Only while it still runs the RESTORE: a session id is reused.
+			master.Exec(fmt.Sprintf("IF EXISTS (SELECT 1 FROM sys.dm_exec_requests WHERE session_id = %d AND command LIKE N'RESTORE%%') KILL %d", session, session))
+		})
 		tag := strings.TrimPrefix(sqlServerTestName(), "dgt_ss_") // a file a RESTORE cut off early leaves keeps its name
 		master.Exec("RESTORE DATABASE " + qms(newDB) + " FROM DISK = " + sqlServerString(bak) + " WITH RECOVERY, MOVE N'" + s.o.Working +
 			"' TO " + sqlServerString(ssJoin(paths.data, "dg_"+tag+"_1.mdf")) + ", MOVE N'" + s.o.Working + "_log' TO " + sqlServerString(ssJoin(paths.log, "dg_"+tag+"_2.ldf")))
@@ -1330,5 +1333,46 @@ func TestSQLServerRestoreWholeRestricted(t *testing.T) {
 	}
 	if w, err := s.database(context.Background(), s.o.Working); err != nil || w.UserAccess != "RESTRICTED_USER" {
 		t.Fatalf("the working database is %v after the restore (%v), not RESTRICTED_USER as the user set it", w, err)
+	}
+}
+
+// TestSQLServerEndSessions: the sessions in the working database are
+// ended, a session elsewhere is not.
+func TestSQLServerEndSessions(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{}, "")
+	if !mustSQLServerInfo(t, s).Sysadmin {
+		t.Skip("the login is not sysadmin")
+	}
+	ctx := context.Background()
+	in, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := sqlServerTestDB(t, s.o.DSN, "").Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	for _, c := range []*sql.Conn{in, out} {
+		if _, err := c.ExecContext(ctx, "SELECT 1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := s.database(ctx, s.o.Working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.conn(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.endSessions(ctx, m, w.ID)
+	m.Close()
+	if _, err := in.ExecContext(ctx, "SELECT 1"); err == nil {
+		t.Error("a session in the working database was not ended")
+	}
+	if _, err := out.ExecContext(ctx, "SELECT 1"); err != nil {
+		t.Errorf("a session in master was ended: %v", err)
 	}
 }
