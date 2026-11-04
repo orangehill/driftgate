@@ -1418,6 +1418,81 @@ func TestSQLServerRestoreWholeRestricted(t *testing.T) {
 	}
 }
 
+// TestSQLServerRestoreWholeSingle: a working database the user made
+// SINGLE_USER is SINGLE_USER again after a restore of the whole database
+// that saves excluded rows (the RESTORE makes it RESTRICTED_USER), also
+// when the restore was killed after the RESTORE and the next one completes
+// it. The items to restore are given, as the tracker gives them: a full
+// fingerprint takes several sessions, which SINGLE_USER does not allow.
+func TestSQLServerRestoreWholeSingle(t *testing.T) {
+	ctx := context.Background()
+	s, db, _ := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE sessions (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	t.Cleanup(func() { master.Exec("ALTER DATABASE " + qms(s.o.Working) + " SET MULTI_USER") })
+	type killed struct{}
+	for i, kill := range []string{"", "state.sqlserver.restore.restored"} {
+		sqlServerExec(t, db, fmt.Sprintf("INSERT INTO sessions VALUES (%d)", i+1), fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS b FROM users", i))
+		items := Diff(mustSQLServerFingerprint(t, s), p)
+		// The one session the database allows is free for DriftGate:
+		// neither the application's pool nor DriftGate's own holds it.
+		s.closePool(s.o.Working)
+		db.SetMaxIdleConns(0)
+		// The session that sets SINGLE_USER holds the one session the
+		// database allows until it ends.
+		single := sqlServerTestDB(t, s.o.DSN, "")
+		sqlServerExec(t, single, "ALTER DATABASE "+qms(s.o.Working)+" SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
+		single.Close()
+		for start := time.Now(); ; time.Sleep(20 * time.Millisecond) { // until it logged out
+			n := sqlServerInt(t, master, "SELECT COUNT(*) FROM sys.dm_tran_locks l JOIN sys.dm_exec_sessions x ON x.session_id = l.request_session_id WHERE l.resource_type = N'DATABASE' AND l.resource_database_id = DB_ID(N'"+s.o.Working+"') AND x.is_user_process = 1")
+			if n == 0 {
+				break
+			}
+			if time.Since(start) > 10*time.Second {
+				t.Fatalf("%d sessions still in the working database", n)
+			}
+		}
+		if kill != "" {
+			chaos.At = func(point string) {
+				if point == kill {
+					panic(killed{})
+				}
+			}
+			func() {
+				defer func() {
+					chaos.At = nil
+					if r := recover(); r != (killed{}) {
+						t.Fatalf("not stopped at %s: %v", kill, r)
+					}
+				}()
+				s.Restore(ctx, items)
+			}()
+			if w, _ := s.database(ctx, s.o.Working); w == nil || w.UserAccess != "RESTRICTED_USER" {
+				t.Fatalf("the working database after the stop: %+v", w)
+			}
+			s.closePool(s.o.Working)
+			s.forget()
+		}
+		if err := s.Restore(ctx, items); err != nil {
+			t.Fatalf("%q: %v", kill, err)
+		}
+		if w, err := s.database(ctx, s.o.Working); err != nil || w.UserAccess != "SINGLE_USER" {
+			t.Fatalf("%q: the working database is %+v after the restore (%v), not SINGLE_USER as the user set it", kill, w, err)
+		}
+		s.closePool(s.o.Working)
+		sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" SET MULTI_USER WITH ROLLBACK IMMEDIATE")
+		db.SetMaxIdleConns(2)
+		if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != int64(i+1) {
+			t.Fatalf("%q: %d rows of the excluded table, want %d", kill, n, i+1)
+		}
+		if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+			t.Fatalf("%q: %v differ", kill, d)
+		}
+	}
+}
+
 // TestSQLServerEndSessions: the sessions in the working database are
 // ended, a session elsewhere is not.
 func TestSQLServerEndSessions(t *testing.T) {

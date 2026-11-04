@@ -195,50 +195,54 @@ func (s *SQLServer) fallbackFile(ctx context.Context, c *sql.Conn, mark *sqlServ
 }
 
 // restoreDatabase brings the whole working database w back from the
-// backup of the pristine copy (see above).
-func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
+// backup of the pristine copy (see above). With saved, the rows of
+// excluded tables were saved and are copied back, and the caller ends the
+// save (endSave) once it checked the database: until then a working
+// database that was SINGLE_USER stays RESTRICTED_USER, as a check takes
+// several sessions.
+func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (saved bool, err error) {
 	s.forget()
 	defer s.forget()
 	info, err := s.server(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	m, err := s.conn(ctx, "")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer m.Close()
 	path, err := s.fallbackFile(ctx, m, mark)
 	if err != nil {
-		return err
+		return false, err
 	}
 	files, err := backupFiles(ctx, m, path)
 	if err != nil {
-		return fmt.Errorf("state %s: %s: %w", s.o.Name, path, err)
+		return false, fmt.Errorf("state %s: %s: %w", s.o.Name, path, err)
 	}
 	// RESTORE … WITH REPLACE writes over the working database's own files.
 	own := map[string]string{}
 	rows, err := m.QueryContext(ctx, "SELECT name, physical_name FROM sys.master_files WHERE database_id = @p1", w.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for rows.Next() {
 		var name, physical string
 		if err := rows.Scan(&name, &physical); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		own[strings.ToLower(name)] = physical
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
 	restore := "RESTORE DATABASE " + qms(s.o.Working) + " FROM DISK = " + sqlServerString(path) + " WITH REPLACE, RECOVERY, CHECKSUM"
 	for _, f := range files {
 		physical, ok := own[strings.ToLower(f.Logical)]
 		if !ok || len(files) != len(own) {
-			return fmt.Errorf("state %s: the files of database %s changed since the seed (%s is not one of them now); run driftgate seed", s.o.Name, s.o.Working, f.Logical)
+			return false, fmt.Errorf("state %s: the files of database %s changed since the seed (%s is not one of them now); run driftgate seed", s.o.Name, s.o.Working, f.Logical)
 		}
 		restore += ", MOVE " + sqlServerString(f.Logical) + " TO " + sqlServerString(physical)
 	}
@@ -250,9 +254,8 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 	if broker {
 		restore += ", ENABLE_BROKER"
 	}
-	saved, err := s.saveExcluded(ctx, w)
-	if err != nil {
-		return err
+	if saved, err = s.saveExcluded(ctx, w); err != nil {
+		return false, err
 	}
 	if saved {
 		// The application stays out until the rows are copied back
@@ -273,7 +276,7 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 			s.endSessions(ctx, m, w.ID)
 		}
 		if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qms(s.o.Working)+" SET OFFLINE WITH ROLLBACK IMMEDIATE"); err != nil {
-			return fmt.Errorf("state %s: taking %s offline: %w", s.o.Name, s.o.Working, err)
+			return false, fmt.Errorf("state %s: taking %s offline: %w", s.o.Name, s.o.Working, err)
 		}
 	}
 	chaos.Point("state.sqlserver.restore.offline")
@@ -286,20 +289,20 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 			m.ExecContext(cctx, "ALTER DATABASE "+qms(s.o.Working)+" SET ONLINE")
 		}
 		cancel()
-		return fmt.Errorf("state %s: restore of %s from %s: %w (the database is unusable until a restore completes; run the restore again)", s.o.Name, s.o.Working, path, sqlServerFirst(err))
+		return false, fmt.Errorf("state %s: restore of %s from %s: %w (the database is unusable until a restore completes; run the restore again)", s.o.Name, s.o.Working, path, sqlServerFirst(err))
 	}
 	chaos.Point("state.sqlserver.restore.restored")
 	if w.State == "ONLINE" || w.State == "OFFLINE" {
 		if now, err := s.database(ctx, s.o.Working); err == nil && now != nil && now.Recovery != w.Recovery && w.Recovery != "" {
 			if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qms(s.o.Working)+" SET RECOVERY "+w.Recovery); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
 	if saved {
-		return s.copyBack(ctx)
+		return true, s.copyBack(ctx, false)
 	}
-	return nil
+	return saved, nil
 }
 
 // ssEndSessionsSQL ends every other user session in the database @p1 in
@@ -414,7 +417,7 @@ func (s *SQLServer) recoverExcludedOf(ctx context.Context, w, d *sqlServerDataba
 		return err
 	}
 	fmt.Fprintf(s.o.Log, "state %s: copying back the rows of excluded tables a restore of %s saved before it stopped\n", s.o.Name, s.o.Working)
-	return s.copyBack(ctx)
+	return s.copyBack(ctx, true)
 }
 
 // ssExcludedSequences reads the excluded sequences of the database c is
@@ -674,13 +677,15 @@ func (s *SQLServer) keepOut(ctx context.Context, m *sql.Conn, w *sqlServerDataba
 	return nil
 }
 
-// letIn lets every login into the working database again (MULTI_USER)
-// when keepOut or the RESTORE kept them out, on a context of its own (the
-// caller's may be done): only when <pristine>_dgx notes that the database
-// was MULTI_USER before the save (saveExcluded), or does not say (a save
-// of an earlier version). Otherwise DriftGate kept no one out (the save
-// had not begun), or the database was RESTRICTED_USER or SINGLE_USER, the
-// user's choice, and is left as it is.
+// letIn gives the working database back the user access <pristine>_dgx
+// notes it had before the save (saveExcluded) when keepOut or the RESTORE
+// kept the logins out (RESTRICTED_USER), on a context of its own (the
+// caller's may be done): MULTI_USER lets every login in again, as does a
+// save that does not say (one of an earlier version); SINGLE_USER, the
+// user's choice, is set again (the RESTORE made it RESTRICTED_USER; only
+// a member of db_owner, dbcreator or sysadmin can be in it then, and its
+// session ends). A database that was RESTRICTED_USER, or one DriftGate
+// kept no one out of (the save had not begun), is left as it is.
 func (s *SQLServer) letIn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
 	defer cancel()
@@ -698,12 +703,27 @@ func (s *SQLServer) letIn() error {
 		access = "MULTI_USER"
 	case err != nil:
 		return fmt.Errorf("state %s: reading the user access %s had before the restore: %w", s.o.Name, s.o.Working, err)
-	case access != "MULTI_USER":
+	}
+	set := ""
+	switch access {
+	case "MULTI_USER":
+		set = "MULTI_USER"
+	case "SINGLE_USER":
+		// DriftGate's own sessions in it are ended too, so none holds
+		// the one session it allows.
+		s.closePool(s.o.Working)
+		set = "SINGLE_USER WITH ROLLBACK IMMEDIATE"
+	default:
 		return nil
 	}
-	_, err = m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET MULTI_USER", s.o.Working)
+	_, err = m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET "+set, s.o.Working)
+	if access == "SINGLE_USER" {
+		// The session that set it holds the one session the database
+		// allows for as long as it lasts: it ends, not back to the pool.
+		discard(m)
+	}
 	if err != nil {
-		return fmt.Errorf("state %s: letting the application into %s again (ALTER DATABASE … SET MULTI_USER): %w", s.o.Name, s.o.Working, err)
+		return fmt.Errorf("state %s: giving %s back the user access it had (ALTER DATABASE … SET %s): %w", s.o.Name, s.o.Working, access, err)
 	}
 	return nil
 }
@@ -725,7 +745,7 @@ func ssMemoryExcluded(component string, t *ssTable) error {
 // RESTORE (the pristine copy has none) are kept, in a table with a
 // primary key: a saved row with the key of one of them is not copied
 // back, and the identity goes no further back than where it stood.
-func (s *SQLServer) copyBack(ctx context.Context) (err error) {
+func (s *SQLServer) copyBack(ctx context.Context, end bool) (err error) {
 	dgx := s.excludedDB()
 	c, err := s.conn(ctx, s.o.Working)
 	if err != nil {
@@ -867,10 +887,23 @@ func (s *SQLServer) copyBack(ctx context.Context) (err error) {
 		return fmt.Errorf("state %s: copying back the rows of excluded tables: %w", s.o.Name, err)
 	}
 	done = true
+	c.Close() // before letIn, which may end the sessions in the database
+	if !end {
+		return nil
+	}
+	return s.endSave(ctx)
+}
+
+// endSave ends a save of the rows of excluded tables whose rows are copied
+// back: the user access the working database had goes back (letIn) and
+// <pristine>_dgx is dropped. A restore stopped before leaves it with its
+// save no longer complete, which the next restore ends the same way
+// (leftSave).
+func (s *SQLServer) endSave(ctx context.Context) error {
 	if err := s.letIn(); err != nil {
 		return err
 	}
-	return s.dropLeft(ctx, dgx, false)
+	return s.dropLeft(ctx, s.excludedDB(), false)
 }
 
 // mergeable is, for an excluded table whose rows written after the RESTORE

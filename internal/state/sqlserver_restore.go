@@ -154,9 +154,19 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 // restoreWhole restores the whole database and checks every item against
 // the pristine copy's fingerprint: a restore of the whole database
 // changes items the caller did not name.
-func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) error {
-	if err := s.restoreDatabase(ctx, mark, w); err != nil {
+func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
+	saved, err := s.restoreDatabase(ctx, mark, w)
+	if err != nil {
 		return err
+	}
+	if saved {
+		// After the check, which takes several sessions: a working
+		// database that was SINGLE_USER allows one.
+		defer func() {
+			if eerr := s.endSave(ctx); err == nil {
+				err = eerr
+			}
+		}()
 	}
 	p, err := s.pristineFingerprint(ctx, mark)
 	if err != nil {
