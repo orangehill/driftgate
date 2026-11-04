@@ -678,6 +678,53 @@ func TestSQLiteRestoreDropsVirtualTable(t *testing.T) {
 	}
 }
 
+// TestSQLiteRestoreVirtualTablePrefix: a virtual table whose name starts
+// with another's and an underscore (docs, docs_v2) keeps its own shadow
+// tables: restoring the other one, made anew, neither copies the pristine
+// rows into them nor lists them as written. The shadow table belongs to
+// the longest virtual table name it starts with, compared as SQLite
+// compares names.
+func TestSQLiteRestoreVirtualTablePrefix(t *testing.T) {
+	for _, names := range [][2]string{{"docs", "docs_v2"}, {"Docs", "Docs_V2"}} {
+		t.Run(names[0]+" "+names[1], func(t *testing.T) {
+			ctx := context.Background()
+			a, b := names[0], names[1]
+			s, app := sqliteSchemaFixture(t, "wal", nil,
+				"CREATE VIRTUAL TABLE "+a+" USING fts5 (body)",
+				"CREATE VIRTUAL TABLE "+b+" USING fts5 (body)",
+				"INSERT INTO "+a+" VALUES ('alpha beta')",
+				"INSERT INTO "+b+" VALUES ('gamma delta')")
+			// a is made anew in the working file; b is too, with a
+			// prefix index, whose index pages the pristine ones are not.
+			mustExec(t, app,
+				"DROP TABLE "+a, "CREATE VIRTUAL TABLE "+a+" USING fts5 (body, title)", "INSERT INTO "+a+" VALUES ('x', 'y')",
+				"DROP TABLE "+b, "CREATE VIRTUAL TABLE "+b+" USING fts5 (body, prefix = '2')", "INSERT INTO "+b+" VALUES ('epsilon zeta')")
+			item := "table:" + asciiLower(a)
+			if err := s.Restore(ctx, []string{"table:" + a}); err != nil {
+				t.Fatal(err)
+			}
+			if s.restored != nil {
+				for it := range s.restored {
+					if strings.HasPrefix(asciiLower(it), "table:"+asciiLower(b)) {
+						t.Fatalf("the restore of %s lists %s as written", item, it)
+					}
+				}
+			}
+			mustExec(t, app, "INSERT INTO "+b+"("+b+") VALUES ('integrity-check')")
+			if n := count(t, app, "SELECT count(*) FROM "+b+" WHERE "+b+" MATCH 'ep*'"); n != 1 {
+				t.Fatalf("%s finds %d rows of its own after the restore of %s, want 1", b, n, a)
+			}
+			sqliteRestoreChecked(t, s)
+			for _, v := range names {
+				mustExec(t, app, "INSERT INTO "+v+"("+v+") VALUES ('integrity-check')")
+			}
+			if n := count(t, app, "SELECT count(*) FROM "+b+" WHERE "+b+" MATCH 'gamma'"); n != 1 {
+				t.Fatalf("%s finds %d pristine rows after the full restore, want 1", b, n)
+			}
+		})
+	}
+}
+
 // TestSQLiteScanLetsWritersIn: in WAL mode an application writer that does
 // not wait for locks (busy_timeout 0) commits while a fingerprint reads.
 func TestSQLiteScanLetsWritersIn(t *testing.T) {
