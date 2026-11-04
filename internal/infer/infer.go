@@ -102,7 +102,10 @@ func runFormat(parts []string, before, after string, grow bool) string {
 	}
 	switch {
 	case c == `\d`:
-		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) || suffixedID().MatchString(before) || grow {
+		// An id with a word before it (user_42) grows; a code of one width
+		// of three or more (HTTP_401, error_code_403) keeps it.
+		suffixed := suffixedID().MatchString(before) && !(lo == hi && lo >= 3)
+		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) || suffixed || grow {
 			return `\d+`
 		}
 		return c + width()
@@ -114,9 +117,34 @@ func runFormat(parts []string, before, after string, grow bool) string {
 	return c + "+"
 }
 
-// grows reports values whose digits all count up: a version (v1.2.3) or a
-// range of a list (Showing 1-10 of 120).
+// grows matches the part of a value whose digits count up: a version
+// (v1.2.3) or a range of a list (Showing 1-10 of 120). Only digits inside
+// it that differ between the samples grow; the rest of the value keeps its
+// own form (status 200 after a version stays 200).
 var grows = lazy.Regexp(`(?i)\bv\d+\.\d+\.\d+|showing \d+\s*[-–]\s*\d+ of \d+`)
+
+// inGrowing reports whether run j of every sample lies inside a part of it
+// that grows. The caller has checked that the samples share their tokens.
+func inGrowing(values []string, toks [][]token, j int) bool {
+	for i, v := range values {
+		start := 0
+		for _, t := range toks[i][:j] {
+			start += len(t.text)
+		}
+		end := start + len(toks[i][j].text)
+		in := false
+		for _, m := range grows().FindAllStringIndex(v, -1) {
+			if m[0] <= start && end <= m[1] {
+				in = true
+				break
+			}
+		}
+		if !in {
+			return false
+		}
+	}
+	return true
+}
 
 // pathID reports digits that are a segment of a path (/jobs/7/, /jobs/7?):
 // an id, which grows.
@@ -141,7 +169,7 @@ func alternation(parts []string) string {
 var (
 	// counterKey ends the text before a run of digits that counts or
 	// names something and grows: id 7, count=12, "views": 3.
-	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes|total\w*|\w*_?pages|of)["']?\s*[:=]?\s*["']?$`)
+	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes|\w*_?pages|of)["']?\s*[:=]?\s*["']?$`)
 	// suffixedID ends the text before the digits of an id such as user_42.
 	suffixedID = lazy.Regexp(`(?i)(?:^|[^a-z0-9])[a-z]+_$`)
 	// unitAfter starts the text after a run of digits that measures
@@ -155,14 +183,14 @@ var (
 // digitsIn is the format of the digits inside a word that is the same in
 // every sample (29T10 of a time, 5ms): \d+ before a unit (a duration
 // grows), else their width.
-func digitsIn(word string, grow bool) string {
+func digitsIn(word string) string {
 	q := regexp.QuoteMeta(word)
 	var b strings.Builder
 	last := 0
 	for _, m := range digitRun().FindAllStringIndex(q, -1) {
 		b.WriteString(q[last:m[0]])
 		switch n := m[1] - m[0]; {
-		case grow, unitAfter().MatchString(q[m[1]:]):
+		case unitAfter().MatchString(q[m[1]:]):
 			b.WriteString(`\d+`)
 		case n == 1:
 			b.WriteString(`\d`)
@@ -265,11 +293,7 @@ func Pattern(values []string) string {
 			if equal && !allDigits(parts[0]) {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
-				b.WriteString(digitsIn(parts[0], grows().MatchString(values[0])))
-				continue
-			}
-			if equal && grows().MatchString(values[0]) {
-				b.WriteString(`\d+`) // the total of a range, a part of a version
+				b.WriteString(digitsIn(parts[0]))
 				continue
 			}
 			if equal && !timeLike().MatchString(values[0]) {
@@ -298,7 +322,7 @@ func Pattern(values []string) string {
 					break
 				}
 			}
-			b.WriteString(runFormat(parts, before, after, grows().MatchString(values[0])))
+			b.WriteString(runFormat(parts, before, after, inGrowing(values, toks, j)))
 		}
 	} else {
 		// One class for everything: letters and digits by range, the rest

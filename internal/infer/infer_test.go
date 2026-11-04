@@ -104,7 +104,7 @@ func TestPatternNarrow(t *testing.T) {
 	}{
 		{[]string{"pending", "shipped"}, nil, []string{"failed", "cancelled", "error"}},
 		{[]string{"status: pending", "status: shipped"}, nil, []string{"status: failed", "status: cancelled"}},
-		{[]string{"Total: 12.50 EUR", "Total: 13.75 EUR"}, []string{"Total: 99.10 EUR", "Total: 1312.50 EUR", "Total: 3.75 EUR"}, []string{"Total: 12.5 EUR"}},
+		{[]string{"Total: 12.50 EUR", "Total: 13.75 EUR"}, []string{"Total: 99.10 EUR"}, []string{"Total: 1312.50 EUR", "Total: 3.75 EUR", "Total: 12.5 EUR"}},
 		{[]string{"page 1 of 3", "page 2 of 3"}, []string{"page 3 of 3"}, []string{"page 10 of 3", "page 1234567 of 3", "page 1 of 4"}},
 		{[]string{"HTTP 200", "HTTP 201"}, []string{"HTTP 204"}, []string{"HTTP 2010", "HTTP 20"}},
 		{[]string{"code=3", "code=4"}, []string{"code=5"}, []string{"code=500", "code=34"}},
@@ -119,12 +119,28 @@ func TestPatternNarrow(t *testing.T) {
 		{[]string{"count 7", "count 8"}, []string{"count 70000"}, []string{"count x"}},
 		{[]string{"took 7ms", "took 12ms"}, []string{"took 1500ms"}, []string{"took 7s"}},
 		{[]string{"/jobs/9", "/jobs/12"}, []string{"/jobs/100000"}, []string{"/jobs/x"}},
-		// Totals, pages, suffixed ids, versions and ranges grow; a number
+		// Page counts, suffixed ids, versions and ranges grow; a number
 		// none of whose samples is negative stays non-negative.
 		{[]string{"total_pages=3", "total_pages=4"}, []string{"total_pages=120"}, nil},
 		{[]string{"user_42", "user_7"}, []string{"user_100000"}, []string{"user_x"}},
-		{[]string{"v1.2.3", "v1.3.0"}, []string{"v10.20.30"}, []string{"v1.2"}},
-		{[]string{"Showing 1-10 of 120", "Showing 11-20 of 120"}, []string{"Showing 101-110 of 1500"}, nil},
+		{[]string{"v1.2.3", "v1.3.0"}, []string{"v1.20.30"}, []string{"v1.2"}},
+		{[]string{"Showing 1-10 of 120", "Showing 11-20 of 120"}, []string{"Showing 101-110 of 120"}, []string{"Showing 1-10 of 119", "Showing 1-10 of 0"}},
+		// Only digits that differ inside a version or a range grow; what
+		// agrees in every sample, or lies outside them, keeps its form.
+		{[]string{"app v1.2.3 build 7 status 200", "app v1.2.3 build 8 status 200"}, []string{"app v1.2.3 build 9 status 200"}, []string{"app v1.2.3 build 7 status 500", "app v9.9.9 build 7 status 200", "app v1.2.3 build 70 status 200"}},
+		{[]string{"Laravel v10.2.3 errors: 0", "Laravel v10.2.4 errors: 0"}, []string{"Laravel v10.2.40 errors: 0"}, []string{"Laravel v10.2.4 errors: 5", "Laravel v10.3.4 errors: 0"}},
+		{[]string{"Showing 1-10 of 120 (2 hidden)", "Showing 11-20 of 120 (2 hidden)"}, nil, []string{"Showing 1-10 of 120 (3 hidden)", "Showing 1-10 of 120 (200 hidden)"}},
+		// A money total keeps its width; a code after a word keeps a width
+		// of three or more that every sample shares, an id does not.
+		{[]string{"total: 12.50", "total: 13.75"}, nil, []string{"total: 1312.50", "total: 0.01"}},
+		{[]string{"HTTP_401", "HTTP_403"}, []string{"HTTP_500"}, []string{"HTTP_5000", "HTTP_50"}},
+		{[]string{"error_code_401", "error_code_403"}, []string{"error_code_500"}, []string{"error_code_4031"}},
+		{[]string{"order_12 shipped", "order_13 shipped"}, []string{"order_99999 shipped"}, nil},
+		{[]string{"tmp_3", "tmp_9"}, []string{"tmp_123456"}, nil},
+		{[]string{"page 1 of 3", "page 2 of 3"}, nil, []string{"page 1 of 4"}},
+		{[]string{"5", "7"}, []string{"700000"}, []string{"-5"}},
+		{[]string{"0.5", "1.25"}, nil, []string{"-0.5"}},
+		{[]string{"balance: 5", "balance: 7"}, nil, []string{"balance: -5", "balance: 50"}},
 		{[]string{"9", "10"}, []string{"123"}, []string{"-1"}},
 		{[]string{"-1", "10"}, []string{"-123"}, nil},
 	} {
