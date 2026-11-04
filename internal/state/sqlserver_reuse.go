@@ -400,9 +400,17 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 	}
 	c, err := s.pinned(ctx)
 	if err != nil {
+		if m := ssDatabaseNamed().FindStringSubmatch(err.Error()); m != nil && sqlServerNumber(err) == 942 && strings.EqualFold(strings.ReplaceAll(m[1], "''", "'"), s.o.Working) {
+			// 942: "Database '<working>' cannot be opened because it is
+			// offline", without a look at sys.databases, which another
+			// database's restore may stop (927, 952).
+			s.forget()
+			return Fingerprint{ssDatabaseItem: hash([]byte("\x00the working database is OFFLINE"))}, nil
+		}
 		d, derr := s.database(ctx, s.o.Working)
 		switch {
 		case derr != nil:
+			return nil, derr // retryOthers runs it again when another database stopped it
 		case d == nil:
 			return Fingerprint{}, nil
 		case d.State != "ONLINE":
