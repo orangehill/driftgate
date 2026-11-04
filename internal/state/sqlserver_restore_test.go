@@ -86,12 +86,16 @@ func cleanSQLServerSeed(t testing.TB, s *SQLServer) {
 func pristineSQLServer(t testing.TB, s *SQLServer) Fingerprint {
 	t.Helper()
 	ctx := context.Background()
-	c, err := s.conn(ctx, s.o.Pristine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, nil, nil, nil)
+	var fp *ssFingerprint
+	err := s.retryOthers(ctx, func() error { // as Fingerprint
+		c, err := s.conn(ctx, s.o.Pristine)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		fp, err = s.fingerprint(ctx, c, s.o.Pristine, nil, nil, nil, nil)
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,12 +1604,15 @@ func killSQLServerSaved(t *testing.T, s *SQLServer, older bool) {
 	}
 }
 
-// TestSQLServerOtherDatabaseRestoring: a fingerprint and a restore (item
-// by item, and of the whole database) of one database never touch
-// another one of the server: they work while other databases are
-// restoring (WITH NORECOVERY), in STANDBY, and in the middle of a RESTORE
-// that runs again and again. A statement that read every database would
-// fail with 927 ("is in the middle of a restore") or wait.
+// TestSQLServerOtherDatabaseRestoring: a seed, fingerprints (read anew and
+// reused) and restores (item by item, and of the whole database) of one
+// database work while another database of the server is restoring (WITH
+// NORECOVERY) and while others are restored as new databases and dropped
+// again and again, as another checkout's seeds do. SQL Server 2019 and
+// earlier fail a statement of one database with 927 ("is in the middle of
+// a restore") or 952 ("is in transition") about the other one, also a
+// three-part name of its own database or a connection to it; DriftGate
+// tries such an operation again (retryOthers).
 func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
 		"CREATE TABLE users (id int PRIMARY KEY, n int NOT NULL)", "INSERT INTO users VALUES (1, 1)",
@@ -1633,18 +1640,14 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 			", MOVE N'" + src + "' TO " + sqlServerString(ssJoin(paths.data, "dg_"+tag+"_"+name+".mdf")) +
 			", MOVE N'" + src + "_log' TO " + sqlServerString(ssJoin(paths.log, "dg_"+tag+"_"+name+".ldf"))
 	}
-	norecovery, standby, again := s.o.Working+"_onorec", s.o.Working+"_ostandby", s.o.Working+"_oagain"
-	for _, name := range []string{norecovery, standby, again} {
+	norecovery, again := s.o.Working+"_onorec", s.o.Working+"_oagain"
+	for _, name := range []string{norecovery, again} {
 		t.Cleanup(func() {
 			master.Exec("IF DATABASEPROPERTYEX(" + sqlServerString(name) + ", 'Status') = 'RESTORING' RESTORE DATABASE " + qms(name) + " WITH RECOVERY")
 			dropSQLServerDatabase(master, name)
 		})
 	}
-	sqlServerExec(t, master, restore(norecovery, "NORECOVERY"),
-		restore(standby, "STANDBY = "+sqlServerString(ssJoin(paths.backup, "dg_"+tag+"_undo.bak"))))
-	t.Cleanup(func() {
-		master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(ssJoin(paths.backup, "dg_"+tag+"_undo.bak")))
-	})
+	sqlServerExec(t, master, restore(norecovery, "NORECOVERY"))
 	stop := make(chan struct{})
 	done := make(chan int)
 	go func() {
@@ -1656,7 +1659,8 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 				return
 			default:
 			}
-			if _, err := master.Exec(restore(again, "RECOVERY")); err == nil {
+			// A new database each time, as a seed's <pristine>_dgnew.
+			if _, err := master.Exec(restore(again, "RECOVERY") + "; DROP DATABASE " + qms(again)); err == nil {
 				n++
 			}
 		}
@@ -1667,7 +1671,22 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 			<-done
 		}
 	}()
-	for i := range 4 {
+	for i := range 12 {
+		if i%4 == 3 {
+			if err := s.Seed(ctx); err != nil {
+				t.Fatalf("%d: seed: %v", i, err)
+			}
+			p = pristineSQLServer(t, s)
+		}
+		for range 5 { // read anew, then reused
+			s.forget()
+			if _, err := s.Fingerprint(ctx, nil); err != nil {
+				t.Fatalf("%d: fingerprint: %v", i, err)
+			}
+			if _, err := s.Fingerprint(ctx, nil); err != nil {
+				t.Fatalf("%d: fingerprint again: %v", i, err)
+			}
+		}
 		sqlServerExec(t, db, fmt.Sprintf("UPDATE users SET n = %d", i+2), fmt.Sprintf("INSERT INTO sessions VALUES (%d)", i+1))
 		if restoreSQLServer(t, s, db, log, p) {
 			t.Fatalf("%d: restored the whole database for a changed row", i)

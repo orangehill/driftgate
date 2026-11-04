@@ -1231,6 +1231,17 @@ or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
 
 **Running SQL Server for DriftGate.**
 
+- **Other databases being restored.** SQL Server 2019 and earlier stop a
+  statement of one database with error 927 ("Database '…' cannot be
+  opened. It is in the middle of a restore") or 952 ("is in transition")
+  when another database of the server is restored, created or renamed
+  at that moment, even a statement that names only its own database
+  (another checkout's seed, a restore elsewhere). A seed, restore,
+  fingerprint or read of rows that fails so about another database runs
+  again, for up to a minute (the log says so once); each stops in a state
+  the next run completes. The application's own queries can fail the same
+  way on those versions.
+
 - **The application's login.** Let the application sign in with a login
   that is only a user of its database (`db_datareader`, `db_datawriter`,
   what its migrations need), not `sa` and not DriftGate's login: during a

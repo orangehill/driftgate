@@ -97,12 +97,16 @@ func sqlServerFull(t testing.TB, s *SQLServer) Fingerprint {
 	defer fresh.Close()
 	fresh.rvMax, fresh.rvPristine = s.rvMax, s.rvPristine
 	ctx := context.Background()
-	c, err := fresh.conn(ctx, o.Working)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	fp, err := fresh.fingerprint(ctx, c, o.Working, nil, nil, nil, nil)
+	var fp *ssFingerprint
+	err = fresh.retryOthers(ctx, func() error { // as Fingerprint
+		c, err := fresh.conn(ctx, o.Working)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		fp, err = fresh.fingerprint(ctx, c, o.Working, nil, nil, nil, nil)
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

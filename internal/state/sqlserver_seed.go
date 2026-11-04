@@ -34,7 +34,11 @@ import (
 // fingerprint is removed (Replacing) before the old copy goes. The
 // recovery model is the working database's, so a restore of the whole
 // database keeps it.
-func (s *SQLServer) Seed(ctx context.Context) (err error) {
+func (s *SQLServer) Seed(ctx context.Context) error {
+	return s.retryOthers(ctx, func() error { return s.seed(ctx) })
+}
+
+func (s *SQLServer) seed(ctx context.Context) (err error) {
 	defer func() { err = s.denied(err) }()
 	info, err := s.server(ctx)
 	if err != nil {

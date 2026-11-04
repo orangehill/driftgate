@@ -13,11 +13,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	mssql "github.com/microsoft/go-mssqldb"
 	"github.com/microsoft/go-mssqldb/msdsn"
 
 	"github.com/orangehill/driftgate/internal/dbx"
+	"github.com/orangehill/driftgate/internal/lazy"
 )
 
 // QuoteSQLServer quotes an identifier for SQL Server: [name], with ] doubled.
@@ -457,6 +459,66 @@ func sqlServerAt(batch string, err error) string {
 		return fmt.Sprintf(" (raised%s, called at line %d of the batch: %s)", at, e.LineNo, l)
 	}
 	return fmt.Sprintf(" (at line %d of the batch: %s)", e.LineNo, l)
+}
+
+// sqlServerOthersWait bounds how long a seed, restore, fingerprint or read
+// of rows tries again while another database of the server is in
+// transition (retryOthers).
+var sqlServerOthersWait = time.Minute
+
+// ssDatabaseNamed is the database a message of SQL Server names.
+var ssDatabaseNamed = lazy.Regexp(`Database '((?:[^']|'')+)'`)
+
+// othersTransition reports, for an error 927 ("Database '…' cannot be
+// opened. It is in the middle of a restore") or 952 ("is in transition"),
+// the database it names when that is not one of this component's
+// (working, pristine, <pristine>_dgnew, <pristine>_dgx). SQL Server 2019
+// and earlier fail a statement of one database so while another one is
+// restored, created or renamed: even a three-part name of its own
+// database (an item restore's INSERT … SELECT FROM [pristine].…) or a
+// connection to it, when the other's name comes up in the lookup.
+func (s *SQLServer) othersTransition(err error) (string, bool) {
+	if n := sqlServerNumber(err); n != 927 && n != 952 {
+		return "", false
+	}
+	m := ssDatabaseNamed().FindStringSubmatch(err.Error())
+	if m == nil {
+		return "", false
+	}
+	name := strings.ReplaceAll(m[1], "''", "'")
+	for _, own := range []string{s.o.Working, s.o.Pristine, s.o.Pristine + "_dgnew", s.excludedDB()} {
+		if strings.EqualFold(name, own) {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// retryOthers runs f again while it fails because another database of
+// the server is in transition (othersTransition), up to
+// sqlServerOthersWait: each of DriftGate's operations leaves the
+// databases as a stop at any point does, and the next run completes it.
+func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
+	deadline := time.Now().Add(sqlServerOthersWait)
+	wait := 20 * time.Millisecond
+	told := false
+	for {
+		err := f()
+		name, ok := s.othersTransition(err)
+		if !ok || time.Now().After(deadline) || ctx.Err() != nil {
+			return err
+		}
+		if !told {
+			fmt.Fprintf(s.o.Log, "state %s: database %s of the same server is being restored or changed, which stopped a statement on this one; trying again\n", s.o.Name, name)
+			told = true
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, time.Second)
+	}
 }
 
 // sqlServerFirst reports the first message of a server error: SQL Server

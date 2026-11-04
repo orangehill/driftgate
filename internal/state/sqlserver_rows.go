@@ -13,7 +13,15 @@ import (
 // (sqlServerValue; a rowversion too: an UPDATE that changes nothing else
 // still gives a row a new one). A table in row_tracking is schema.name, or
 // a name in dbo.
-func (s *SQLServer) Rows(ctx context.Context, items []string) (Rows, error) {
+func (s *SQLServer) Rows(ctx context.Context, items []string) (r Rows, err error) {
+	err = s.retryOthers(ctx, func() error {
+		r, err = s.rows(ctx, items)
+		return err
+	})
+	return r, err
+}
+
+func (s *SQLServer) rows(ctx context.Context, items []string) (Rows, error) {
 	if _, err := s.server(ctx); err != nil {
 		return nil, err
 	}

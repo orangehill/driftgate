@@ -359,7 +359,15 @@ func (s *SQLServer) settled(ctx context.Context, c *sql.Conn) (*ssSignals, error
 // Fingerprint hashes the working database (see above for what is read
 // again). A working database that does not exist has no items, so a
 // restore brings back every item of the pristine copy.
-func (s *SQLServer) Fingerprint(ctx context.Context, items []string) (Fingerprint, error) {
+func (s *SQLServer) Fingerprint(ctx context.Context, items []string) (f Fingerprint, err error) {
+	err = s.retryOthers(ctx, func() error {
+		f, err = s.fingerprintOnce(ctx, items)
+		return err
+	})
+	return f, err
+}
+
+func (s *SQLServer) fingerprintOnce(ctx context.Context, items []string) (Fingerprint, error) {
 	s.reused = false
 	pinned := s.work != nil
 	f, err := s.fingerprintWorking(ctx, items)

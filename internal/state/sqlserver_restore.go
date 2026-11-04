@@ -62,7 +62,11 @@ var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 
 // Restore brings the given items of the working database back to the
 // pristine copy; nil means every item that differs.
-func (s *SQLServer) Restore(ctx context.Context, items []string) (err error) {
+func (s *SQLServer) Restore(ctx context.Context, items []string) error {
+	return s.retryOthers(ctx, func() error { return s.restore(ctx, items) })
+}
+
+func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {
 	defer func() { err = s.denied(err) }()
 	s.ended = false
 	if _, err := s.server(ctx); err != nil {
@@ -209,7 +213,15 @@ func (s *SQLServer) differing(ctx context.Context, mark *sqlServerMark) ([]strin
 // the items named as the working database's: the record of a seed. The
 // working database fingerprinted after the seed would differ from the
 // copy by every write made since its backup.
-func (s *SQLServer) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+func (s *SQLServer) SeededFingerprint(ctx context.Context) (f Fingerprint, err error) {
+	err = s.retryOthers(ctx, func() error {
+		f, err = s.seededFingerprint(ctx)
+		return err
+	})
+	return f, err
+}
+
+func (s *SQLServer) seededFingerprint(ctx context.Context) (Fingerprint, error) {
 	mark, err := s.pristineMark(ctx)
 	if err != nil {
 		return nil, s.denied(err)
@@ -224,12 +236,15 @@ func (s *SQLServer) SeededFingerprint(ctx context.Context) (Fingerprint, error) 
 // PristineID names the pristine copy: the backup set GUID in its mark,
 // new with every seed. A record of the copy's fingerprint kept with it
 // shows whether the copy is still the one recorded.
-func (s *SQLServer) PristineID(ctx context.Context) (string, error) {
-	mark, err := s.pristineMark(ctx)
-	if err != nil {
-		return "", err
-	}
-	return mark.Fallback, nil
+func (s *SQLServer) PristineID(ctx context.Context) (id string, err error) {
+	err = s.retryOthers(ctx, func() error {
+		mark, err := s.pristineMark(ctx)
+		if err == nil {
+			id = mark.Fallback
+		}
+		return err
+	})
+	return id, err
 }
 
 // pristineFingerprint fingerprints the pristine copy, once per copy (it is

@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // fakeTDSServer is a TCP server that answers every connection's PRELOGIN
@@ -351,5 +353,55 @@ func TestNegativeSerial(t *testing.T) {
 		if got != c.want {
 			t.Errorf("GODEBUG=%q: %q, want %q", c.godebug, got, c.want)
 		}
+	}
+}
+
+// TestSQLServerOthersTransition: an error 927 or 952 about another
+// database of the server makes an operation run again, up to
+// sqlServerOthersWait; one about a database of this component, or any
+// other error, does not.
+func TestSQLServerOthersTransition(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	other := mssql.Error{Number: 927, Message: "Database 'other_pristine_dgnew' cannot be opened. It is in the middle of a restore."}
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{other, true},
+		{fmt.Errorf("state db: restore: %w", other), true},
+		{mssql.Error{Number: 952, Message: "Database 'it''s' is in transition. Try the statement later."}, true},
+		{mssql.Error{Number: 927, Message: "Database 'shop_pristine_dgnew' cannot be opened. It is in the middle of a restore."}, false},
+		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, false},
+		{mssql.Error{Number: 208, Message: "Database 'x'"}, false},
+		{errors.New("Database 'x' is in transition"), false},
+	} {
+		if _, got := s.othersTransition(c.err); got != c.want {
+			t.Errorf("%v: %t", c.err, got)
+		}
+	}
+	calls := 0
+	err = s.retryOthers(context.Background(), func() error {
+		if calls++; calls < 3 {
+			return other
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Errorf("retried %d times: %v", calls, err)
+	}
+	calls = 0
+	own := mssql.Error{Number: 927, Message: "Database 'Shop_pristine' cannot be opened."}
+	if err := s.retryOthers(context.Background(), func() error { calls++; return own }); err == nil || calls != 1 {
+		t.Errorf("own database: %d calls, %v", calls, err)
+	}
+	defer func(w time.Duration) { sqlServerOthersWait = w }(sqlServerOthersWait)
+	sqlServerOthersWait = 50 * time.Millisecond
+	calls = 0
+	if err := s.retryOthers(context.Background(), func() error { calls++; return other }); err == nil || calls < 2 {
+		t.Errorf("past the wait: %d calls, %v", calls, err)
 	}
 }
