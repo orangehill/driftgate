@@ -579,8 +579,14 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (sav
 		_, err := m.ExecContext(ctx, "INSERT INTO "+manifest+" VALUES (@p1, @p2, @p3, @p4, @p5)", n, kind, item, a, b)
 		return err
 	}
-	// Before keepOut and the RESTORE keep the logins out (letIn).
-	if err := add(-1, "access", w.UserAccess, nil, nil); err != nil {
+	// Before keepOut and the RESTORE keep the logins out (letIn), as it
+	// is now: w was read before leftSave let the logins in again after a
+	// restore that stopped, and still says RESTRICTED_USER then.
+	now := *w
+	if err := m.QueryRowContext(ctx, "SELECT user_access_desc FROM sys.databases WHERE name = @p1", s.o.Working).Scan(&now.UserAccess); err != nil {
+		return false, err
+	}
+	if err := add(-1, "access", now.UserAccess, nil, nil); err != nil {
 		return false, err
 	}
 	if len(tables) > 0 || len(seqs) > 0 {
@@ -593,7 +599,7 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (sav
 				s.letIn()
 			}
 		}()
-		if err := s.keepOut(ctx, m, w); err != nil {
+		if err := s.keepOut(ctx, m, &now); err != nil {
 			return false, err
 		}
 		if c, err = s.conn(ctx, s.o.Working); err != nil {
@@ -671,9 +677,10 @@ func (s *SQLServer) keepOut(ctx context.Context, m *sql.Conn, w *sqlServerDataba
 // letIn lets every login into the working database again (MULTI_USER)
 // when keepOut or the RESTORE kept them out, on a context of its own (the
 // caller's may be done): only when <pristine>_dgx notes that the database
-// was MULTI_USER before the save (saveExcluded). Otherwise DriftGate kept
-// no one out (the save had not begun), or the database was RESTRICTED_USER
-// or SINGLE_USER, the user's choice, and is left as it is.
+// was MULTI_USER before the save (saveExcluded), or does not say (a save
+// of an earlier version). Otherwise DriftGate kept no one out (the save
+// had not begun), or the database was RESTRICTED_USER or SINGLE_USER, the
+// user's choice, and is left as it is.
 func (s *SQLServer) letIn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
 	defer cancel()
@@ -685,8 +692,10 @@ func (s *SQLServer) letIn() error {
 	var access string
 	err = m.QueryRowContext(ctx, "SELECT item FROM "+qms(s.excludedDB())+".dbo.driftgate_saved WHERE kind = N'access'").Scan(&access)
 	switch n := sqlServerNumber(err); {
-	case errors.Is(err, sql.ErrNoRows), n == 208, n == 911: // no save, or no table or database of it
+	case n == 208, n == 911: // no save, or one that stopped before keepOut
 		return nil
+	case errors.Is(err, sql.ErrNoRows): // a save of a version that did not note it: as before
+		access = "MULTI_USER"
 	case err != nil:
 		return fmt.Errorf("state %s: reading the user access %s had before the restore: %w", s.o.Name, s.o.Working, err)
 	case access != "MULTI_USER":

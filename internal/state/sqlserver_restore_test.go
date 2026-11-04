@@ -1458,3 +1458,67 @@ func TestSQLServerEndSessions(t *testing.T) {
 		t.Errorf("a session in master was ended: %v", err)
 	}
 }
+
+// TestSQLServerFallbackKilledSaved: a restore of the whole database
+// stopped right after it saved the rows of excluded tables (no deferred
+// function runs, as when DriftGate is killed) leaves the working database
+// RESTRICTED_USER; the next restore drops that save and lets every login
+// in again when it is done, the user access the stopped one found.
+func TestSQLServerFallbackKilledSaved(t *testing.T) {
+	ctx := context.Background()
+	s, db, _ := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users",
+		"CREATE TABLE sessions (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	// The second time the save notes no user access, as one of an
+	// earlier version.
+	for i, older := range []bool{false, true} {
+		sqlServerExec(t, db, fmt.Sprintf("INSERT INTO sessions VALUES (%d)", i+1), fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS b FROM users", i))
+		killSQLServerSaved(t, s, older)
+		db.SetMaxIdleConns(0)
+		db.SetMaxIdleConns(2)
+		if w, err := s.database(ctx, s.o.Working); err != nil || w.UserAccess != "MULTI_USER" {
+			t.Fatalf("%t: the working database is %+v (%v) after the next restore, want MULTI_USER", older, w, err)
+		}
+		if n := sqlServerInt(t, db, "SELECT COUNT(*) FROM sessions"); n != int64(i+1) {
+			t.Fatalf("%t: %d rows of the excluded table, want %d", older, n, i+1)
+		}
+		if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+			t.Fatalf("%t: %v differ", older, d)
+		}
+	}
+}
+
+// killSQLServerSaved stops a restore of the whole database right after it
+// saved the rows of excluded tables, without its deferred functions (as a
+// kill), optionally drops the user access the save noted, and restores
+// again.
+func killSQLServerSaved(t *testing.T, s *SQLServer, older bool) {
+	t.Helper()
+	ctx := context.Background()
+	type killed struct{}
+	chaos.At = func(point string) {
+		if point == "state.sqlserver.restore.saved" {
+			panic(killed{})
+		}
+	}
+	func() {
+		defer func() {
+			chaos.At = nil
+			if r := recover(); r != (killed{}) {
+				t.Fatalf("not stopped at the save: %v", r)
+			}
+		}()
+		s.Restore(ctx, nil)
+	}()
+	if w, _ := s.database(ctx, s.o.Working); w == nil || w.UserAccess != "RESTRICTED_USER" {
+		t.Fatalf("the working database after the stop: %+v", w)
+	}
+	if older {
+		sqlServerExec(t, sqlServerTestDB(t, s.o.DSN, ""), "DELETE FROM "+qms(s.excludedDB())+".dbo.driftgate_saved WHERE kind = N'access'")
+	}
+	s.forget()
+	if err := s.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+}
