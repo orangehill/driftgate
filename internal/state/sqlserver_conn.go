@@ -396,6 +396,41 @@ func sqlServerNumber(err error) int32 {
 	return 0
 }
 
+// sqlServerAt names the statement of a batch of several that a server
+// error (mssql.Error) came from: the line of the batch SQL Server reports
+// it on, and the procedure or trigger it was raised in, if any; "" for
+// any other error. The batches it serves hold names and numbers (where an
+// identity column or sequence stands), never a row's values.
+func sqlServerAt(batch string, err error) string {
+	var e mssql.Error
+	if !errors.As(err, &e) {
+		var p *mssql.Error
+		if !errors.As(err, &p) || p == nil {
+			return ""
+		}
+		e = *p
+	}
+	at := ""
+	if e.ProcName != "" {
+		at = " in " + e.ProcName
+	}
+	lines := strings.Split(batch, "\n")
+	if e.LineNo < 1 || int(e.LineNo) > len(lines) {
+		if at == "" {
+			return ""
+		}
+		return " (raised" + at + ")"
+	}
+	l := strings.TrimSpace(lines[e.LineNo-1])
+	if r := []rune(l); len(r) > 200 {
+		l = string(r[:200]) + "…"
+	}
+	if at != "" {
+		return fmt.Sprintf(" (raised%s, called at line %d of the batch: %s)", at, e.LineNo, l)
+	}
+	return fmt.Sprintf(" (at line %d of the batch: %s)", e.LineNo, l)
+}
+
 // sqlServerFirst reports the first message of a server error: SQL Server
 // ends a failed BACKUP or RESTORE with a generic one ("BACKUP DATABASE is
 // terminating abnormally", 3013) after the one that says why.

@@ -876,8 +876,9 @@ func (s *SQLServer) copyBack(ctx context.Context, end bool) (err error) {
 	}
 	fmt.Fprintf(&body, "DELETE FROM %s.dbo.driftgate_saved WHERE kind = N'complete';\n", qms(dgx))
 	g := ssGuardFor(inv, set, func(t *ssTable) bool { return t.Excluded }, true)
-	if _, err := c.ExecContext(ctx, "BEGIN TRANSACTION;\n"+g.offSQL()+body.String()); err != nil {
-		return fmt.Errorf("state %s: copying back the rows of excluded tables: %w", s.o.Name, err)
+	q := "BEGIN TRANSACTION;\n" + g.offSQL() + body.String()
+	if _, err := c.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("state %s: copying back the rows of excluded tables: %w%s", s.o.Name, err, sqlServerAt(q, err))
 	}
 	on, err := s.tolerate(ctx, c, g)
 	if err != nil {

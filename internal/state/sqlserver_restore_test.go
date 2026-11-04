@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -1595,5 +1596,109 @@ func killSQLServerSaved(t *testing.T, s *SQLServer, older bool) {
 	s.forget()
 	if err := s.Restore(ctx, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSQLServerOtherDatabaseRestoring: a fingerprint and a restore (item
+// by item, and of the whole database) of one database never touch
+// another one of the server: they work while other databases are
+// restoring (WITH NORECOVERY), in STANDBY, and in the middle of a RESTORE
+// that runs again and again. A statement that read every database would
+// fail with 927 ("is in the middle of a restore") or wait.
+func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
+	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
+		"CREATE TABLE users (id int PRIMARY KEY, n int NOT NULL)", "INSERT INTO users VALUES (1, 1)",
+		"CREATE VIEW v AS SELECT id FROM users", "CREATE TABLE sessions (id int PRIMARY KEY)")
+	p := pristineSQLServer(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	ctx := context.Background()
+	c, err := s.conn(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := s.paths(ctx, c)
+	c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, tag := s.o.Working+"_osrc", strings.TrimPrefix(sqlServerTestName(), "dgt_ss_")
+	bak := ssJoin(paths.backup, "dg_"+tag+"_other.bak")
+	sqlServerExec(t, master, "CREATE DATABASE "+qms(src))
+	t.Cleanup(func() { dropSQLServerDatabase(master, src) })
+	sqlServerExec(t, master, "BACKUP DATABASE "+qms(src)+" TO DISK = "+sqlServerString(bak)+" WITH COPY_ONLY, INIT, FORMAT")
+	t.Cleanup(func() { master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(bak)) })
+	restore := func(name, with string) string {
+		return "RESTORE DATABASE " + qms(name) + " FROM DISK = " + sqlServerString(bak) + " WITH REPLACE, " + with +
+			", MOVE N'" + src + "' TO " + sqlServerString(ssJoin(paths.data, "dg_"+tag+"_"+name+".mdf")) +
+			", MOVE N'" + src + "_log' TO " + sqlServerString(ssJoin(paths.log, "dg_"+tag+"_"+name+".ldf"))
+	}
+	norecovery, standby, again := s.o.Working+"_onorec", s.o.Working+"_ostandby", s.o.Working+"_oagain"
+	for _, name := range []string{norecovery, standby, again} {
+		t.Cleanup(func() {
+			master.Exec("IF DATABASEPROPERTYEX(" + sqlServerString(name) + ", 'Status') = 'RESTORING' RESTORE DATABASE " + qms(name) + " WITH RECOVERY")
+			dropSQLServerDatabase(master, name)
+		})
+	}
+	sqlServerExec(t, master, restore(norecovery, "NORECOVERY"),
+		restore(standby, "STANDBY = "+sqlServerString(ssJoin(paths.backup, "dg_"+tag+"_undo.bak"))))
+	t.Cleanup(func() {
+		master.Exec("EXEC master.sys.xp_delete_file 0, " + sqlServerString(ssJoin(paths.backup, "dg_"+tag+"_undo.bak")))
+	})
+	stop := make(chan struct{})
+	done := make(chan int)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-stop:
+				done <- n
+				return
+			default:
+			}
+			if _, err := master.Exec(restore(again, "RECOVERY")); err == nil {
+				n++
+			}
+		}
+	}()
+	defer func() {
+		if stop != nil {
+			close(stop)
+			<-done
+		}
+	}()
+	for i := range 4 {
+		sqlServerExec(t, db, fmt.Sprintf("UPDATE users SET n = %d", i+2), fmt.Sprintf("INSERT INTO sessions VALUES (%d)", i+1))
+		if restoreSQLServer(t, s, db, log, p) {
+			t.Fatalf("%d: restored the whole database for a changed row", i)
+		}
+		sqlServerExec(t, db, fmt.Sprintf("ALTER VIEW v AS SELECT id, %d AS b FROM users", i))
+		if !restoreSQLServer(t, s, db, log, p) {
+			t.Fatalf("%d: restored item by item", i)
+		}
+	}
+	close(stop)
+	n := <-done
+	stop = nil
+	if n == 0 {
+		t.Fatal("no RESTORE of the other database ran meanwhile")
+	}
+	t.Logf("%d RESTOREs of another database ran meanwhile", n)
+}
+
+// TestSQLServerAt: the error of a batch names the statement it came from.
+func TestSQLServerAt(t *testing.T) {
+	s, _ := newSQLServerTest(t, Options{}, "")
+	c, err := s.conn(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	batch := "DECLARE @a int = 1;\nSELECT @a;\nSELECT 1 / (@a - 1);\nSELECT 2;"
+	_, err = c.ExecContext(context.Background(), batch)
+	if got, want := sqlServerAt(batch, err), " (at line 3 of the batch: SELECT 1 / (@a - 1);)"; got != want {
+		t.Fatalf("%q, want %q (%v)", got, want, err)
+	}
+	if got := sqlServerAt(batch, errors.New("x")); got != "" {
+		t.Fatalf("%q for another error", got)
 	}
 }

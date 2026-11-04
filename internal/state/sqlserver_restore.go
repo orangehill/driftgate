@@ -746,7 +746,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 	}
 	if locks != "" {
 		if _, err := c.ExecContext(ctx, batch+locks); err != nil {
-			return fmt.Errorf("state %s: restore: %w%s", s.o.Name, err, s.blockers(err))
+			return fmt.Errorf("state %s: restore: locking the tables whose changed rows it finds: %w%s%s", s.o.Name, err, sqlServerAt(batch+locks, err), s.blockers(err))
 		}
 		batch = ""
 		if err := s.findChanged(ctx, c, plan); err != nil {
@@ -766,7 +766,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 		batch += ssStatements(g.checks) + ssStatements(g.triggers)
 	}
 	if _, err := c.ExecContext(ctx, batch); err != nil {
-		return fmt.Errorf("state %s: restore: %w%s", s.o.Name, err, s.blockers(err))
+		return fmt.Errorf("state %s: restore: writing the rows from %s: %w%s%s", s.o.Name, s.o.Pristine, err, sqlServerAt(batch, err), s.blockers(err))
 	}
 	if len(g.tolerant) > 0 {
 		on, err := s.tolerate(ctx, c, g)
@@ -774,7 +774,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 			return err
 		}
 		if _, err := c.ExecContext(ctx, on); err != nil {
-			return fmt.Errorf("state %s: restore: %w", s.o.Name, err)
+			return fmt.Errorf("state %s: restore: turning the constraints and triggers on again: %w%s", s.o.Name, err, sqlServerAt(on, err))
 		}
 	}
 	after, err := values(ctx, c)
@@ -793,7 +793,7 @@ func (s *SQLServer) restoreItems(ctx context.Context, items []string, mark *sqlS
 	}
 	chaos.Point("state.sqlserver.restore")
 	if own, err = s.commitOwn(ctx, c, own); err != nil {
-		return fmt.Errorf("state %s: restore: %w", s.o.Name, err)
+		return fmt.Errorf("state %s: restore: commit: %w", s.o.Name, err)
 	}
 	s.own = own
 	var tables []*ssTable
