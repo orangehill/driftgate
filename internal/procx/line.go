@@ -2,9 +2,10 @@ package procx
 
 import (
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/orangehill/driftgate/internal/lazy"
 )
 
 // Line is a command (argv) as one line, for messages and logs: an argument
@@ -108,13 +109,13 @@ func render(w *word, v string) string {
 
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "su": true}
 
-var scriptFlag = regexp.MustCompile(`^-[a-z]*c[a-z]*$`)
+var scriptFlag = lazy.Regexp(`^-[a-z]*c[a-z]*$`)
 
 // isScript reports whether the next word of the command (the words before
 // it) is a script a shell runs: sh -c, bash -lc, docker exec x sh -c.
 func isScript(cmd []string) bool {
 	n := len(cmd)
-	if n < 2 || !scriptFlag.MatchString(cmd[n-1]) {
+	if n < 2 || !scriptFlag().MatchString(cmd[n-1]) {
 		return false
 	}
 	for _, a := range cmd[:n-1] {
@@ -247,11 +248,11 @@ func lex(s string) []word {
 }
 
 // ref is a value that is only a reference to a variable: $NAME, ${NAME}.
-var ref = regexp.MustCompile(`^` + refMark + `(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9])$`)
+var ref = lazy.Regexp(`^` + refMark + `(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9])$`)
 
 // hide is *** for a value that is not empty and not a reference.
 func hide(v string) string {
-	if v == "" || ref.MatchString(v) {
+	if v == "" || ref().MatchString(v) {
 		return v
 	}
 	return "***"
@@ -260,20 +261,20 @@ func hide(v string) string {
 var (
 	// secretName is in the name of an option, variable, key or header whose
 	// value is a secret.
-	secretName = regexp.MustCompile(`(?i)pass|pwd|secret|token|key|auth|cookie|session|credential|signature|^-*sig$|[_-]sig$`)
+	secretName = lazy.Regexp(`(?i)pass|pwd|secret|token|key|auth|cookie|session|credential|signature|^-*sig$|[_-]sig$`)
 	// notSecretKey are names with key that name a column or an order.
-	notSecretKey = regexp.MustCompile(`(?i)(?:primary|foreign|sort|partition|unique|cache)[_-]?keys?$`)
+	notSecretKey = lazy.Regexp(`(?i)(?:primary|foreign|sort|partition|unique|cache)[_-]?keys?$`)
 )
 
 func isSecretName(name string) bool {
-	return secretName.MatchString(name) && !notSecretKey.MatchString(name)
+	return secretName().MatchString(name) && !notSecretKey().MatchString(name)
 }
 
 var (
-	optionName = regexp.MustCompile(`^--?[A-Za-z0-9_-]+$`)
+	optionName = lazy.Regexp(`^--?[A-Za-z0-9_-]+$`)
 	// passOption are options of one dash that start like -p with a
 	// password glued to it, whose next argument is the secret.
-	passOption = regexp.MustCompile(`^-pass(?:in|out|word)?$`)
+	passOption = lazy.Regexp(`^-pass(?:in|out|word)?$`)
 )
 
 // programs whose -p takes a port (or a port mapping) or nothing; any other
@@ -284,7 +285,7 @@ var (
 	// passwordP are programs whose -p takes a password, found before the
 	// ones above (docker exec db mysql -p …).
 	passwordP = map[string]bool{"mysql": true, "mysqldump": true, "mysqladmin": true, "mariadb": true, "mariadb-dump": true, "sshpass": true, "sqlcmd": true}
-	port      = regexp.MustCompile(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?(?::[0-9]+(?:-[0-9]+)?)?(?:/(?:tcp|udp|sctp))?$`)
+	port      = lazy.Regexp(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?(?::[0-9]+(?:-[0-9]+)?)?(?:/(?:tcp|udp|sctp))?$`)
 )
 
 // program is the nearest program of the command before the word with
@@ -309,23 +310,23 @@ func has(cmd []string, prog string) bool {
 
 // consoleCommand is a framework console's command (key:generate,
 // secrets:list), after artisan or console.
-var consoleCommand = regexp.MustCompile(`^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$`)
+var consoleCommand = lazy.Regexp(`^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$`)
 
 // redactWord shows a word's value with its secrets as ***; cmd are the
 // words of the command before it, prev the one just before it.
 func redactWord(cmd []string, prev, v string) string {
-	if p := filepath.Base(prev); (p == "artisan" || p == "console") && consoleCommand.MatchString(v) {
+	if p := filepath.Base(prev); (p == "artisan" || p == "console") && consoleCommand().MatchString(v) {
 		return v
 	}
 	prog := program(cmd)
 	switch {
 	case prev == "-p" && flagP[prog]:
-	case prev == "-p" && portP[prog] && port.MatchString(v):
+	case prev == "-p" && portP[prog] && port().MatchString(v):
 	case prev == "-p" || prev == "-P":
 		return hide(v)
 	case prev == "-a" && has(cmd, "redis-cli"):
 		return hide(v)
-	case optionName.MatchString(prev) && isSecretName(prev):
+	case optionName().MatchString(prev) && isSecretName(prev):
 		return hide(v)
 	case prev == "-u" || prev == "--user":
 		if user, pw, ok := strings.Cut(v, ":"); ok {
@@ -335,39 +336,39 @@ func redactWord(cmd []string, prev, v string) string {
 	// -pvalue, -Pvalue (mysql, sqlcmd)
 	if len(v) > 2 && (strings.HasPrefix(v, "-p") || strings.HasPrefix(v, "-P")) && v[2] != '=' {
 		switch {
-		case passOption.MatchString(v): // openssl -passin, -passout
+		case passOption().MatchString(v): // openssl -passin, -passout
 		case v[1] == 'p' && flagP[prog]:
-		case v[1] == 'p' && portP[prog] && port.MatchString(v[2:]):
+		case v[1] == 'p' && portP[prog] && port().MatchString(v[2:]):
 		default:
 			return v[:2] + hide(v[2:])
 		}
 	}
 	// -uuser:password, --user=user:password
-	if m := userOption.FindStringSubmatch(v); m != nil {
+	if m := userOption().FindStringSubmatch(v); m != nil {
 		return m[1] + hide(m[2])
 	}
 	// --name=value with a secret's name: all of the rest
-	if name, val, ok := strings.Cut(v, "="); ok && optionName.MatchString(name) && isSecretName(name) {
+	if name, val, ok := strings.Cut(v, "="); ok && optionName().MatchString(name) && isSecretName(name) {
 		return name + "=" + hide(val)
 	}
 	// Name: value, a header with a secret's name: all of the rest but an
 	// authorization's scheme.
-	if m := header.FindStringSubmatch(v); m != nil && isSecretName(m[1]) {
+	if m := header().FindStringSubmatch(v); m != nil && isSecretName(m[1]) {
 		return m[1] + ":" + m[2] + m[3] + hide(m[4])
 	}
 	return assignments(url(v))
 }
 
 var (
-	userOption = regexp.MustCompile(`^((?:-u|--user=)[^:\s]*:)(.*)$`)
-	header     = regexp.MustCompile(`(?s)^([A-Za-z][A-Za-z0-9_-]*):(\s*)((?i:(?:bearer|basic|token|digest|negotiate)\s+)?)(.*)$`)
-	urlPass    = regexp.MustCompile(`(://[^\s:/@]*:)\S*@`)
+	userOption = lazy.Regexp(`^((?:-u|--user=)[^:\s]*:)(.*)$`)
+	header     = lazy.Regexp(`(?s)^([A-Za-z][A-Za-z0-9_-]*):(\s*)((?i:(?:bearer|basic|token|digest|negotiate)\s+)?)(.*)$`)
+	urlPass    = lazy.Regexp(`(://[^\s:/@]*:)\S*@`)
 )
 
 // url shows a URL's password (scheme://user:password@host) as ***, up to
 // the last @ of the word: a password may hold @ or /.
 func url(v string) string {
-	return urlPass.ReplaceAllStringFunc(v, func(m string) string {
+	return urlPass().ReplaceAllStringFunc(v, func(m string) string {
 		i := strings.Index(m, "://")
 		j := strings.IndexByte(m[i+3:], ':') + i + 3
 		pw := m[j+1 : len(m)-1]
@@ -376,7 +377,7 @@ func url(v string) string {
 }
 
 // assignName is a name followed by = or : (with a JSON key's quote).
-var assignName = regexp.MustCompile(`([A-Za-z0-9_.+-]+)["']?[ \t]*([=:])[ \t]*`)
+var assignName = lazy.Regexp(`([A-Za-z0-9_.+-]+)["']?[ \t]*([=:])[ \t]*`)
 
 // assignments shows the value of every name=value or name: value with a
 // secret's name as ***: environment-like (PGPASSWORD=…), a DSN's
@@ -385,11 +386,11 @@ var assignName = regexp.MustCompile(`([A-Za-z0-9_.+-]+)["']?[ \t]*([=:])[ \t]*`)
 // or brace when it starts with one, else to the next ; in a connection
 // string, else to the next space, ; or &.
 func assignments(v string) string {
-	conn := connString.MatchString(v)
+	conn := connString().MatchString(v)
 	var b strings.Builder
 	last := 0
 	for pos := 0; pos < len(v); {
-		m := assignName.FindStringSubmatchIndex(v[pos:])
+		m := assignName().FindStringSubmatchIndex(v[pos:])
 		if m == nil {
 			break
 		}
@@ -407,7 +408,7 @@ func assignments(v string) string {
 		}
 		// NAME=value as the whole word (env DB_PASSWORD=a b) and name:
 		// value (a header inside a word) run to the end of the word.
-		rest := !conn && (sep == ":" || m[2] == 0 && envName.MatchString(name))
+		rest := !conn && (sep == ":" || m[2] == 0 && envName().MatchString(name))
 		end := valueEnd(v, start, conn, rest)
 		b.WriteString(v[last:start])
 		b.WriteString(hide(unquote(v[start:end])))
@@ -418,10 +419,10 @@ func assignments(v string) string {
 }
 
 var (
-	envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	envName = lazy.Regexp(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	// connString is a connection string: two name=value pairs or more,
 	// separated by ; (Server=h;Password=a b;).
-	connString = regexp.MustCompile(`(?:^|;)\s*[A-Za-z][A-Za-z0-9 _]*=[^;]*;\s*[A-Za-z][A-Za-z0-9 _]*=`)
+	connString = lazy.Regexp(`(?:^|;)\s*[A-Za-z][A-Za-z0-9 _]*=[^;]*;\s*[A-Za-z][A-Za-z0-9 _]*=`)
 )
 
 func valueEnd(v string, start int, conn, rest bool) int {
