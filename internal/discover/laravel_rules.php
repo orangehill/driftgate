@@ -1,7 +1,7 @@
 <?php
 // DriftGate: prints, for every route, the file and line of its action
 // (controller method or closure) and the validation rules of a controller
-// method that takes a form request. Read from standard input by `php`, from
+// method or closure that takes a form request. Read from standard input by `php`, from
 // the application's root; written for PHP 7.0 and later and Laravel 5.5 and
 // later. It only reads: no request is handled and nothing is stored.
 
@@ -54,47 +54,55 @@ foreach ($app['router']->getRoutes() as $route) {
         'error' => null,
     );
     $action = $route->getActionName();
+    $parameters = array();
     if ($action === 'Closure') {
+        // A closure takes a form request as a controller method does
+        // (fn (StorePostRequest $request) => …).
         $definition = $route->getAction();
-        if (isset($definition['uses']) && $definition['uses'] instanceof Closure) {
+        if (!isset($definition['uses']) || !($definition['uses'] instanceof Closure)) {
+            $out[] = $entry;
+            continue;
+        }
+        try {
+            $reflection = new ReflectionFunction($definition['uses']);
+            $entry['file'] = driftgate_source($reflection);
+            $parameters = $reflection->getParameters();
+        } catch (Throwable $e) {
+            $out[] = $entry;
+            continue;
+        }
+    } else {
+        if ($action === '') {
+            continue;
+        }
+        if (strpos($action, '@') === false) {
+            $class = $action;
+            $method = '__invoke';
+        } else {
+            list($class, $method) = explode('@', $action, 2);
+        }
+        if (!class_exists($class)) {
+            continue;
+        }
+        if (!method_exists($class, $method)) {
             try {
-                $entry['file'] = driftgate_source(new ReflectionFunction($definition['uses']));
+                $entry['file'] = driftgate_source(new ReflectionClass($class));
             } catch (Throwable $e) {
             }
+            $out[] = $entry;
+            continue;
         }
-        $out[] = $entry;
-        continue;
-    }
-    if ($action === '') {
-        continue;
-    }
-    if (strpos($action, '@') === false) {
-        $class = $action;
-        $method = '__invoke';
-    } else {
-        list($class, $method) = explode('@', $action, 2);
-    }
-    if (!class_exists($class)) {
-        continue;
-    }
-    if (!method_exists($class, $method)) {
         try {
-            $entry['file'] = driftgate_source(new ReflectionClass($class));
-        } catch (Throwable $e) {
+            $reflection = new ReflectionMethod($class, $method);
+            $entry['file'] = driftgate_source($reflection);
+            $parameters = $reflection->getParameters();
+        } catch (ReflectionException $e) {
+            $out[] = $entry;
+            continue;
         }
-        $out[] = $entry;
-        continue;
     }
     $rules = null;
     $error = null;
-    try {
-        $reflection = new ReflectionMethod($class, $method);
-        $entry['file'] = driftgate_source($reflection);
-        $parameters = $reflection->getParameters();
-    } catch (ReflectionException $e) {
-        $out[] = $entry;
-        continue;
-    }
     foreach ($parameters as $parameter) {
         $type = $parameter->getType();
         if ($type === null) {
