@@ -444,16 +444,20 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 				return k.content, true
 			}
 		}
-		fp, err := s.fingerprint(ctx, c, s.o.Working, items, s.cached(sig), sig.values, reuse)
+		inv := s.cached(sig)
+		fp, err := s.fingerprint(ctx, c, s.o.Working, items, inv, sig.values, reuse)
 		if err != nil {
 			return nil, err
 		}
-		// With no table read, the fingerprint is made of the signals alone,
-		// which read the values before the tables: a commit between the two
-		// moved the counters of the tables it wrote to, which are then
-		// read, and no write was open. Nothing can mix.
+		// With no table read and the catalog kept, the fingerprint is made
+		// of the signals alone, which read the values before the tables: a
+		// commit between the two moved the counters of the tables it wrote
+		// to, which are then read, and no write was open. Nothing can mix.
+		// A catalog read after the signals can: it may show a commit (a
+		// table dropped) whose writes to other tables the reused contents
+		// do not.
 		after := sig
-		if sig.open || fp.read > 0 {
+		if sig.open || fp.read > 0 || inv == nil {
 			if after, err = s.signals(ctx, c, false, false, true); err != nil {
 				return nil, err
 			}

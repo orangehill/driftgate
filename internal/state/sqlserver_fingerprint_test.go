@@ -1382,3 +1382,31 @@ func TestSQLServerWorkingNotOnline(t *testing.T) {
 		db.SetMaxIdleConns(2)
 	}
 }
+
+// TestSQLServerNothingReadNewCatalog: a fingerprint that reads no table
+// but reads the catalog again (it changed in the last seconds) does not
+// mix: a transaction that drops one table and writes another between its
+// signals and its catalog is either wholly in it or not at all.
+func TestSQLServerNothingReadNewCatalog(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{Exclude: []string{"sessions"}})
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the login cannot read the server's performance state")
+	}
+	sqlServerExec(t, db, "CREATE TABLE sessions (id int PRIMARY KEY, n int NULL)", "INSERT INTO sessions VALUES (1, 0)",
+		"CREATE TABLE y (id int PRIMARY KEY, v int NULL)", "INSERT INTO y VALUES (1, 1)", "CREATE TABLE x (id int PRIMARY KEY)")
+	defer func() { sqlServerBeforeScan = nil }()
+	before := mustSQLServerFingerprint(t, s)
+	sqlServerExec(t, db, "UPDATE sessions SET n = 1") // the log moves, no table to read
+	sqlServerBeforeScan = func() {
+		sqlServerBeforeScan = nil
+		sqlServerExec(t, db, "BEGIN TRAN; DROP TABLE x; UPDATE y SET v = 2; COMMIT")
+	}
+	f := mustSQLServerFingerprint(t, s)
+	if sqlServerBeforeScan != nil {
+		t.Fatal("no fingerprint after the signals")
+	}
+	after := sqlServerFull(t, s)
+	if len(Diff(f, before)) > 0 && len(Diff(f, after)) > 0 {
+		t.Fatalf("the fingerprint mixes the states before and after a commit: %v differ from before, %v from after", Diff(f, before), Diff(f, after))
+	}
+}
