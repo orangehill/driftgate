@@ -1095,7 +1095,10 @@ func (m *MySQL) Seed(ctx context.Context) error {
 // have changed the working database while they were and since. The items
 // are named as the working database's; the mark (pristineTable) is none of
 // them, and the counters the working database's fingerprints start from
-// are left as they were.
+// are left as they were. The record then always matches the copy, but a
+// copy the application wrote during can hold one table from before a
+// write and another from after it: a seed still runs while the
+// application does not write.
 func (m *MySQL) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
 	c, err := m.session(ctx)
 	if err != nil {

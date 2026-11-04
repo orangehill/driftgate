@@ -763,7 +763,14 @@ func (p *Postgres) Seed(ctx context.Context) error {
 	if err := p.checkPristine(ctx); err != nil {
 		return err
 	}
+	working, err := p.database(ctx, p.o.Working)
+	if err != nil {
+		return err
+	}
 	return p.copyDatabase(ctx, p.o.Working, p.o.Pristine, func(tmp string) error {
+		if err := p.settings(ctx, tmp, working.Settings); err != nil {
+			return err
+		}
 		if _, err := p.admin.ExecContext(ctx, "COMMENT ON DATABASE "+qp(tmp)+" IS "+pgLiteral(pristineComment+" of "+p.o.Working+", made by driftgate seed and replaced by the next one")); err != nil {
 			return err
 		}
@@ -772,10 +779,40 @@ func (p *Postgres) Seed(ctx context.Context) error {
 	}, p.o.Replacing)
 }
 
+// settings gives db the settings of the working database (ALTER DATABASE …
+// SET, ALTER ROLE … IN DATABASE … SET) in place of those it has, the
+// replaced pristine database's (keep): the time zone, DateStyle and
+// search_path change how the fingerprint prints values and names, so the
+// pristine database is read as the working one is.
+func (p *Postgres) settings(ctx context.Context, db string, settings []pgSetting) error {
+	d, err := p.database(ctx, db)
+	if err != nil {
+		return err
+	}
+	if d == nil {
+		return fmt.Errorf("database %s does not exist", db)
+	}
+	stmts := []string{"ALTER DATABASE " + qp(db) + " RESET ALL"}
+	reset := map[string]bool{}
+	for _, s := range d.Settings {
+		if s.Role != "" && !reset[s.Role] {
+			reset[s.Role] = true
+			stmts = append(stmts, "ALTER ROLE "+qp(s.Role)+" IN DATABASE "+qp(db)+" RESET ALL")
+		}
+	}
+	for _, q := range stmts {
+		if _, err := p.admin.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	return p.keep(ctx, db, &pgDatabase{Owner: d.Owner, Settings: settings})
+}
+
 // SeededFingerprint is the fingerprint of the pristine database, what a
 // seed records: the copy is the working database at one moment, which the
-// application may have changed since. The pristine database accepts
-// connections only while it is read.
+// application may have changed since. The pristine database has the
+// working database's settings (see settings) and accepts connections only
+// while it is read.
 func (p *Postgres) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
 	if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
 		return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
