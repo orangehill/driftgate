@@ -64,7 +64,7 @@ var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 // Restore brings the given items of the working database back to the
 // pristine copy; nil means every item that differs.
 func (s *SQLServer) Restore(ctx context.Context, items []string) error {
-	s.ended = 0 // summed over the runs: each may end sessions
+	s.ended = nil // over the runs: each may end sessions, a run stopped before it ended them counts them again
 	return s.retryOthers(ctx, func() error { return s.restore(ctx, items) })
 }
 
@@ -1219,17 +1219,37 @@ func (s *SQLServer) waitFullText(ctx context.Context, c *sql.Conn, plan *ssResto
 // whole database ends every one, which keepOut and the OFFLINE count
 // before. Without VIEW SERVER STATE the login sees only its own sessions,
 // and the count is 0.
-func (s *SQLServer) EndedSessions() int { return s.ended }
+func (s *SQLServer) EndedSessions() int { return len(s.ended) }
+
+// ssSession is a session of the server: its id, which the server reuses,
+// with its login time.
+type ssSession struct {
+	id    int
+	login time.Time
+}
 
 // countSessions adds to ended the sessions of other programs in database
-// id that are about to be ended. DriftGate's own there (just closed by
-// closePool, they may still be logging out) are told by their program
-// name and process id together: an application in the same process (a
-// test) or another DriftGate is counted.
+// id that are about to be ended, each once: a run of the restore that
+// stopped before it ended them (another database's 927 or 952), and the
+// count before OFFLINE after keepOut's, see them again. DriftGate's own
+// there (just closed by closePool, they may still be logging out) are
+// told by their program name and process id together: an application in
+// the same process (a test) or another DriftGate is counted.
 func (s *SQLServer) countSessions(ctx context.Context, m *sql.Conn, id int) {
-	var n int
-	if m.QueryRowContext(ctx, `SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1
-		AND NOT (program_name = @p2 AND host_process_id = @p3)`, id, s.cfg.AppName, os.Getpid()).Scan(&n) == nil {
-		s.ended += n
+	rows, err := m.QueryContext(ctx, `SELECT session_id, login_time FROM sys.dm_exec_sessions WHERE database_id = @p1 AND session_id <> @@SPID AND is_user_process = 1
+		AND NOT (program_name = @p2 AND host_process_id = @p3)`, id, s.cfg.AppName, os.Getpid())
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x ssSession
+		if rows.Scan(&x.id, &x.login) != nil {
+			return
+		}
+		if s.ended == nil {
+			s.ended = map[ssSession]bool{}
+		}
+		s.ended[x] = true
 	}
 }

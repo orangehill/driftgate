@@ -38,10 +38,10 @@ type SQLServer struct {
 	mu    sync.Mutex
 	pools map[string]*sql.DB // by database; "master" for the server
 
-	// ended is how many of the application's sessions in the working
-	// database the last Restore ended (a restore of the whole database;
-	// EndedSessions).
-	ended int
+	// ended are the application's sessions in the working database the
+	// last Restore ended (a restore of the whole database; EndedSessions),
+	// each once across the runs of a retried Restore.
+	ended map[ssSession]bool
 
 	info    *sqlServerInfo // read once (server)
 	checked bool           // the working database passed checkWorking

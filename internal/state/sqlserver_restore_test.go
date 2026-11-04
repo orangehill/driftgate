@@ -1871,3 +1871,31 @@ func waitSessions(t *testing.T, s *SQLServer, n int) {
 		}
 	}
 }
+
+// TestSQLServerEndedSessionsOnce: a session counted by a run of a restore
+// that stopped before it ended it (another database's 927 or 952) is not
+// counted again by the run that follows.
+func TestSQLServerEndedSessionsOnce(t *testing.T) {
+	ctx := context.Background()
+	s, db, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE users (id int PRIMARY KEY)")
+	db.SetMaxIdleConns(2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() { db.Exec("WAITFOR DELAY '00:00:00.100'") })
+	}
+	wg.Wait()
+	waitSessions(t, s, 2)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	m, err := master.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	id := int(sqlServerInt(t, master, "SELECT DB_ID(N'"+s.o.Working+"')"))
+	s.ended = nil
+	s.countSessions(ctx, m, id) // the run that stopped
+	s.countSessions(ctx, m, id) // the next one
+	if got := s.EndedSessions(); got != 2 {
+		t.Fatalf("%d sessions ended, want 2", got)
+	}
+}
