@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -454,6 +455,53 @@ func TestSQLServerDeltaCompare(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSQLServerRestoredKept: the tables the tracker's fingerprint of the
+// restored items read are reused by the next full fingerprint, and a write
+// to them in between is seen.
+func TestSQLServerRestoredKept(t *testing.T) {
+	s, db, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE t (id int PRIMARY KEY, v int NULL)", "INSERT INTO t VALUES (1, 1), (2, 2)",
+		"CREATE TABLE u (id int PRIMARY KEY)", "INSERT INTO u VALUES (1)")
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the login cannot read the server's performance state")
+	}
+	p := pristineSQLServer(t, s)
+	ctx := context.Background()
+	id := sqlServerInt(t, db, "SELECT OBJECT_ID('dbo.t')")
+	items := []string{"table:dbo.t"}
+	for _, write := range []string{"", "UPDATE t SET v = 5 WHERE id = 2", "INSERT INTO t VALUES (3, 3)", "DELETE FROM t WHERE id = 1"} {
+		sqlServerExec(t, db, "UPDATE t SET v = 9 WHERE id = 1")
+		mustSQLServerFingerprint(t, s)
+		if err := s.Restore(ctx, items); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Fingerprint(ctx, items); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := s.last.content[id]; !ok {
+			t.Fatal("the restored table read after the restore is not kept")
+		}
+		if write != "" {
+			sqlServerExec(t, db, write)
+		}
+		f := mustSQLServerFingerprint(t, s)
+		want := []string(nil)
+		if write != "" {
+			want = items
+		}
+		if d := Diff(f, p); !reflect.DeepEqual(d, want) {
+			t.Fatalf("after %q: %v differ, want %v", write, d, want)
+		}
+		if d := Diff(f, sqlServerFull(t, s)); len(d) > 0 {
+			t.Fatalf("after %q: %v differ from a full read", write, d)
+		}
+		if write != "" {
+			if err := s.Restore(ctx, items); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 

@@ -425,8 +425,11 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 		}
 		if !sig.open && after.values.hash == sig.values.hash && maps.Equal(after.tables, sig.tables) {
 			s.cache(sig, fp.inv)
-			if info.Perf && items == nil {
+			switch {
+			case info.Perf && items == nil:
 				s.keep(fp, sig)
+			case info.Perf:
+				s.keepTables(fp, sig)
 			}
 			return fp.f, nil
 		}
@@ -472,6 +475,28 @@ func (s *SQLServer) keep(fp *ssFingerprint, sig *ssSignals) {
 		last.content[id] = ssKept{item: t.Item, def: fp.inv.Defs[t.Item], sig: sig.tables[id], content: content}
 	}
 	s.last = last
+}
+
+// keepTables adds the tables a fingerprint of some items read (the
+// tracker's after a restore) to what the next fingerprint may reuse, each
+// with the signature read before it: one written to since shows in its
+// signature as after a full fingerprint. Only when the last full
+// fingerprint's signals allow reuse at all, and of the same run of the
+// server.
+func (s *SQLServer) keepTables(fp *ssFingerprint, sig *ssSignals) {
+	last := s.last
+	if last == nil || sig.open || last.sig.tables == nil || last.sig.open || last.sig.start != sig.start {
+		return
+	}
+	for id, content := range fp.content {
+		t := fp.inv.byID[id]
+		now, counted := sig.tables[id]
+		if !counted {
+			delete(last.content, id)
+			continue
+		}
+		last.content[id] = ssKept{item: t.Item, def: fp.inv.Defs[t.Item], sig: now, content: content}
+	}
 }
 
 // forget drops what the next fingerprint could reuse: it reads the
