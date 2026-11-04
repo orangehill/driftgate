@@ -379,9 +379,10 @@ type sqliteTable struct {
 	name, sql string
 	root      int64 // its b-tree's root page (0 for a virtual table)
 	indexes   []string
-	virtual   bool // CREATE VIRTUAL TABLE: its rows live in its shadow tables
-	shadow    bool // a table a virtual table keeps its rows in
-	noRowid   bool // WITHOUT ROWID
+	virtual   bool   // CREATE VIRTUAL TABLE: its rows live in its shadow tables
+	shadow    bool   // a table a virtual table keeps its rows in
+	owner     string // of a shadow table: its virtual table
+	noRowid   bool   // WITHOUT ROWID
 }
 
 // def is the definition a restore compares: the table and its indexes.
@@ -485,11 +486,14 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 		}
 	}
 	// owner finds the virtual table a shadow table belongs to: its name is
-	// the virtual table's, an underscore and a suffix of the module's.
+	// the virtual table's, an underscore and a suffix of the module's
+	// (data, idx, …), none of which has an underscore. Of docs and
+	// docs_v2, docs_v2_data is docs_v2's: the longest name wins, compared
+	// as SQLite compares names.
 	owner := func(name string) string {
 		best := ""
 		for v := range virtual {
-			if strings.HasPrefix(name, v+"_") && len(v) > len(best) {
+			if strings.HasPrefix(asciiLower(name), asciiLower(v)+"_") && len(v) > len(best) {
 				best = v
 			}
 		}
@@ -534,7 +538,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			}
 			continue
 		}
-		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, noRowid: noRowid[e.name]}
+		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, owner: own, noRowid: noRowid[e.name]}
 		o.order = append(o.order, e.name)
 	}
 	for _, e := range all {

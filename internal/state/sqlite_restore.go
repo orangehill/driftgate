@@ -186,7 +186,7 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]st
 				// Creating it makes its shadow tables anew: their rows
 				// come from the pristine file too.
 				for _, name := range pris.order {
-					if sh := pris.tables[name]; sh.shadow && strings.HasPrefix(name, t+"_") {
+					if pris.tables[name].owner == t {
 						fill = append(fill, name)
 					}
 				}
@@ -236,7 +236,7 @@ func (s *SQLite) restore(ctx context.Context, c *sql.Conn, items []string) ([]st
 	for _, t := range drop {
 		if w := work.tables[t]; w != nil && w.virtual {
 			for _, name := range work.order {
-				if sh := work.tables[name]; sh.shadow && strings.HasPrefix(name, t+"_") {
+				if work.tables[name].owner == t {
 					drop = append(drop, name)
 				}
 			}
