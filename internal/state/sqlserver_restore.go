@@ -165,12 +165,26 @@ func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sq
 	if err != nil {
 		return err
 	}
-	if saved {
-		// After the check, which takes several sessions: a working
-		// database that was SINGLE_USER allows one.
+	// After the check, which takes several sessions: a working database
+	// that was SINGLE_USER allows one.
+	switch {
+	case saved:
 		defer func() {
 			if eerr := s.endSave(ctx); err == nil {
 				err = eerr
+			}
+		}()
+	case w.State == "ONLINE" && w.UserAccess == "SINGLE_USER":
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.Background(), sqlServerCleanup)
+			defer cancel()
+			m, cerr := s.conn(cctx, "")
+			if cerr == nil {
+				defer m.Close()
+				cerr = s.giveBack(cctx, m, "SINGLE_USER")
+			}
+			if err == nil {
+				err = cerr
 			}
 		}()
 	}

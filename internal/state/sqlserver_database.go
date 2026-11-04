@@ -267,6 +267,11 @@ func (s *SQLServer) restoreDatabase(ctx context.Context, mark *sqlServerMark, w 
 			}
 		}()
 		chaos.Point("state.sqlserver.restore.saved")
+	} else if online && w.UserAccess != "MULTI_USER" {
+		// Nothing saved, so no note of the user access either: the
+		// RESTORE keeps a user's RESTRICTED_USER, and the caller sets a
+		// SINGLE_USER again once it checked the database (restoreWhole).
+		restore += ", RESTRICTED_USER"
 	}
 	s.closePool(s.o.Working)
 	if online {
@@ -704,22 +709,28 @@ func (s *SQLServer) letIn() error {
 	case err != nil:
 		return fmt.Errorf("state %s: reading the user access %s had before the restore: %w", s.o.Name, s.o.Working, err)
 	}
+	return s.giveBack(ctx, m, access)
+}
+
+// giveBack sets the working database to the user access it had, access,
+// when a restore left it RESTRICTED_USER (keepOut, or RESTORE …
+// RESTRICTED_USER): MULTI_USER or SINGLE_USER; RESTRICTED_USER stays. m
+// is a connection to master; after SINGLE_USER it is ended, as the
+// session that set it holds the one session the database allows for as
+// long as it lasts, and so are DriftGate's own in the database.
+func (s *SQLServer) giveBack(ctx context.Context, m *sql.Conn, access string) error {
 	set := ""
 	switch access {
 	case "MULTI_USER":
 		set = "MULTI_USER"
 	case "SINGLE_USER":
-		// DriftGate's own sessions in it are ended too, so none holds
-		// the one session it allows.
 		s.closePool(s.o.Working)
 		set = "SINGLE_USER WITH ROLLBACK IMMEDIATE"
 	default:
 		return nil
 	}
-	_, err = m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET "+set, s.o.Working)
+	_, err := m.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND state_desc = N'ONLINE' AND user_access_desc = N'RESTRICTED_USER') ALTER DATABASE "+qms(s.o.Working)+" SET "+set, s.o.Working)
 	if access == "SINGLE_USER" {
-		// The session that set it holds the one session the database
-		// allows for as long as it lasts: it ends, not back to the pool.
 		discard(m)
 	}
 	if err != nil {

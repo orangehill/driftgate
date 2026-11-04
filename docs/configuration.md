@@ -1128,7 +1128,10 @@ excluded tables is lost. Limits of that:
   and gives it back once the restore is checked, also when the next
   restore completes one that was stopped (`MULTI_USER` lets every login
   in again; `SINGLE_USER` is set again, ending a `db_owner` session that
-  got in meanwhile). A `SINGLE_USER` database allows one session, and a
+  got in meanwhile). Without excluded tables nothing is saved: the
+  RESTORE keeps `RESTRICTED_USER` and `SINGLE_USER` is set again after
+  the check, but a restore stopped halfway then leaves no note, and the
+  database ends as the pristine copy's backup is (`MULTI_USER`). A `SINGLE_USER` database allows one session, and a
   full fingerprint takes several: a capture then needs the database
   `MULTI_USER`.
 

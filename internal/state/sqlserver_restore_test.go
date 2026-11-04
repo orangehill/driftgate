@@ -1722,3 +1722,57 @@ func TestSQLServerAt(t *testing.T) {
 		t.Fatalf("%q for another error", got)
 	}
 }
+
+// TestSQLServerRestoreWholeAccessNoExclude: without excluded tables a
+// restore of the whole database saves nothing, and still gives the working
+// database back the user access the user set: RESTRICTED_USER and
+// SINGLE_USER stay so.
+func TestSQLServerRestoreWholeAccessNoExclude(t *testing.T) {
+	ctx := context.Background()
+	for _, access := range []string{"RESTRICTED_USER", "SINGLE_USER"} {
+		t.Run(access, func(t *testing.T) {
+			s, db, _ := newSQLServerSeeded(t, Options{},
+				"CREATE TABLE users (id int PRIMARY KEY)", "CREATE VIEW v AS SELECT id FROM users")
+			p := pristineSQLServer(t, s)
+			master := sqlServerTestDB(t, s.o.DSN, "")
+			t.Cleanup(func() { master.Exec("ALTER DATABASE " + qms(s.o.Working) + " SET MULTI_USER WITH ROLLBACK IMMEDIATE") })
+			sqlServerExec(t, db, "ALTER VIEW v AS SELECT id, 1 AS b FROM users")
+			items := Diff(mustSQLServerFingerprint(t, s), p)
+			s.closePool(s.o.Working)
+			db.SetMaxIdleConns(0)
+			one := sqlServerTestDB(t, s.o.DSN, "") // its session holds a SINGLE_USER database: it ends
+			sqlServerExec(t, one, "ALTER DATABASE "+qms(s.o.Working)+" SET "+access+" WITH ROLLBACK IMMEDIATE")
+			one.Close()
+			waitNoSessions(t, master, s.o.Working)
+			if err := s.Restore(ctx, items); err != nil {
+				t.Fatal(err)
+			}
+			if !s.EndedSessions() {
+				t.Fatal("restored item by item")
+			}
+			if w, err := s.database(ctx, s.o.Working); err != nil || w.UserAccess != access {
+				t.Fatalf("the working database is %+v after the restore (%v), want %s", w, err, access)
+			}
+			s.closePool(s.o.Working)
+			sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" SET MULTI_USER WITH ROLLBACK IMMEDIATE")
+			if d := Diff(sqlServerFull(t, s), p); len(d) > 0 {
+				t.Fatalf("%v differ", d)
+			}
+		})
+	}
+}
+
+// waitNoSessions waits until no user session holds the database db (the
+// session that set SINGLE_USER logs out after its connection closes).
+func waitNoSessions(t *testing.T, master *sql.DB, db string) {
+	t.Helper()
+	for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
+		n := sqlServerInt(t, master, "SELECT COUNT(*) FROM sys.dm_tran_locks l JOIN sys.dm_exec_sessions x ON x.session_id = l.request_session_id WHERE l.resource_type = N'DATABASE' AND l.resource_database_id = DB_ID(N'"+strings.ReplaceAll(db, "'", "''")+"') AND x.is_user_process = 1")
+		if n == 0 {
+			return
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("%d sessions still in %s", n, db)
+		}
+	}
+}
