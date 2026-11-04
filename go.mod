@@ -2,6 +2,12 @@ module github.com/orangehill/driftgate
 
 go 1.27.3
 
+// SQL Server 2017 makes itself a certificate with a negative serial
+// number, which crypto/x509 refuses to parse by default since Go 1.23,
+// also with TrustServerCertificate. It is malformed (RFC 5280), not
+// weaker: the chain and host name are verified as before.
+godebug x509negativeserial=1
+
 require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0

@@ -68,8 +68,15 @@ cp "$dir/server.pem" "$dir/server.key" "$dir/tls/"
 
 docker create --name "$name" --platform linux/amd64 --memory 2g -p "127.0.0.1:$port:1433" \
 	-e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD="$pw" "$image" >/dev/null
-docker cp "$dir/tls" "$name:/var/opt/mssql/tls"
-docker cp "$dir/mssql.conf" "$name:/var/opt/mssql/mssql.conf"
+# SQL Server 2017's image makes /var/opt/mssql only when it starts (and
+# runs as root): the folder is copied whole there.
+if docker cp "$dir/tls" "$name:/var/opt/mssql/tls" 2>/dev/null; then
+	docker cp "$dir/mssql.conf" "$name:/var/opt/mssql/mssql.conf"
+else
+	mkdir "$dir/var"
+	cp -R "$dir/tls" "$dir/mssql.conf" "$dir/var/"
+	docker cp "$dir/var" "$name:/var/opt/mssql"
+fi
 docker start "$name" >/dev/null
 
 sqlcmd() {

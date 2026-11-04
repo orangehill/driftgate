@@ -274,16 +274,18 @@ jobs:
       - name: TLS
         run: tools/e2e/sqlserver-tls.sh
 
-  # SQL Server 2019 and 2025, as the databases job does for MySQL and
-  # PostgreSQL: not for pull requests. sqlcmd moved to mssql-tools18 in the
-  # newer images; the health check takes either.
+  # SQL Server 2017, 2019 and 2025, as the databases job does for MySQL and
+  # PostgreSQL: not for pull requests. 2017 is the oldest DriftGate
+  # supports. sqlcmd moved to mssql-tools18 in the newer images (2017 has
+  # only /opt/mssql-tools); the health check and sqlserver-tls.sh take
+  # either.
   sqlserver-versions:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        version: ["2019-latest", "2025-latest"]
+        version: ["2017-latest", "2019-latest", "2025-latest"]
     name: sqlserver (${{ matrix.version }})
     services:
       mssql:

@@ -409,7 +409,7 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   replicating the state databases (`replicate-ignore-db`) or give the user
   no rights to list replicas.
 - Versions tested in CI: MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
-  PostgreSQL 13, 16 and 17, SQL Server 2019, 2022 and 2025. On MariaDB a
+  PostgreSQL 13, 16 and 17, SQL Server 2017, 2019, 2022 and 2025. On MariaDB a
   table with a generated column is fingerprinted from its rows (MariaDB's own table checksum of such a table
   changes without a change of data); on MariaDB 10.3 and 10.4 a table with
   a `VIRTUAL` column is restored whole, not by chunks (the chunked restore
@@ -772,9 +772,11 @@ pure Go driver, so the binary needs no CGO and no client library. It
 supports SQL Server 2017 and later (Developer, Express, Standard and
 Enterprise, on Linux, Windows or in a container), not Azure SQL Database,
 Azure SQL Managed Instance or Synapse, whose databases cannot be backed up
-to a file and restored from it. CI tests SQL Server 2019, 2022 and 2025
-(Developer, on Linux in Docker); 2017 and SQL Server on Windows are not
-tested there.
+to a file and restored from it. CI tests SQL Server 2017, 2019, 2022 and
+2025 (Developer, on Linux in Docker); SQL Server on Windows is not tested
+there. SQL Server 2017 makes itself a certificate with a negative serial
+number, which Go refuses by default; DriftGate accepts it (the chain and
+host name are verified as for any other).
 
 | Key | Type | Meaning |
 |---|---|---|

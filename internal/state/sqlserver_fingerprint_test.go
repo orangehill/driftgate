@@ -858,10 +858,18 @@ func TestSQLServerCheckPristine(t *testing.T) {
 	pdb.Close()
 }
 
-// TestSQLServerCollations: a database of another collation (UTF-8, case
-// sensitive) and names with ] and spaces.
+// TestSQLServerCollations: a database of another collation (UTF-8 from
+// SQL Server 2019 on, case sensitive) and names with ] and spaces.
 func TestSQLServerCollations(t *testing.T) {
-	s, db := newSQLServerTest(t, Options{}, "COLLATE Latin1_General_100_CS_AS_SC_UTF8")
+	var major int
+	if err := sqlServerTestDB(t, sqlServerTestDSN(t), "").QueryRow("SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS int)").Scan(&major); err != nil {
+		t.Fatal(err)
+	}
+	collation := "Latin1_General_100_CS_AS_SC_UTF8"
+	if major < 15 { // SQL Server 2017 has no UTF-8 collations
+		collation = "Latin1_General_100_CS_AS_SC"
+	}
+	s, db := newSQLServerTest(t, Options{}, "COLLATE "+collation)
 	mustExec(t, db, "CREATE SCHEMA [we]]ird s]", "CREATE TABLE [we]]ird s].[t a]]b] ([c]]1] varchar(10) COLLATE Japanese_XJIS_140_CI_AS, [C]]1] nvarchar(10))",
 		"INSERT INTO [we]]ird s].[t a]]b] VALUES ('ć', N'ć')",
 		"EXEC sp_addextendedproperty N'p', 1, N'SCHEMA', N'we]ird s', N'TABLE', N't a]b'")

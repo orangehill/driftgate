@@ -68,7 +68,7 @@ User documentation: [`docs/`](docs/README.md).
   0.76 ms when nothing changed, 33 ms after a change to one table of 100,
   0.51 s for a full read of 57.8 MB; a restore of a small table 16–18 ms.
 - CI tests the database code on MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
-  PostgreSQL 13, 16 and 17, SQL Server 2019, 2022 and 2025, and SQLite
+  PostgreSQL 13, 16 and 17, SQL Server 2017, 2019, 2022 and 2025, and SQLite
   (built in, on Linux, macOS and Windows), and runs the tests on Windows
   too.
 - Releases are signed with cosign
