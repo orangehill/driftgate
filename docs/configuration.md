@@ -1107,7 +1107,9 @@ sessions of other programs the restore ends (not its own; it sees the
 sessions of other logins only with `VIEW SERVER STATE`, and without it
 counts only those of the application that signs in as DriftGate's own
 login) and sends, in the read-only part of the same capture that
-follows its first restore, as many requests answered with 5xx once more: a `GET` or
+follows its first restore (or of the next capture, when it was the last
+restore of a capture: the count is kept in the local store and used
+once), as many requests answered with 5xx once more: a `GET` or
 `HEAD` to a target on an allowed host, not a `repeat:`, a step of a
 sequence or one the baseline knows writes (a `GET` can write). Each is
 sent at most twice, the second answer is kept (a 5xx that stays is the

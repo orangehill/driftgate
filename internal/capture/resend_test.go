@@ -106,3 +106,30 @@ func TestResendAfterRestore(t *testing.T) {
 		t.Fatalf("past the budget: %d %+v, sent %d times", rec.Status, rec.Resent, sent("GET /late"))
 	}
 }
+
+// TestEndedCarriedOver: the budget the last restore of a capture leaves
+// goes to the read-only phase of the next capture, once.
+func TestEndedCarriedOver(t *testing.T) {
+	p := &config.Project{Layout: config.Layout{Pristine: t.TempDir()}}
+	last := &tracker{}
+	last.resends.Store(3)
+	last.resentAfter = "the restore of db ended 3 database sessions of the application"
+	saveEnded(p, last)
+	next := &tracker{}
+	next.resends.Store(1) // its own first restore ended one
+	next.resentAfter = "the restore of db ended 1 database session of the application"
+	takeEnded(p, next)
+	if next.resends.Load() != 4 || !strings.Contains(next.resentAfter, "at the end of the previous capture") {
+		t.Fatalf("%d %q", next.resends.Load(), next.resentAfter)
+	}
+	again := &tracker{}
+	takeEnded(p, again)
+	if again.resends.Load() != 0 {
+		t.Fatalf("taken twice: %d", again.resends.Load())
+	}
+	saveEnded(p, again) // nothing left: no record
+	takeEnded(p, next)
+	if next.resends.Load() != 4 {
+		t.Fatalf("a record without sessions was taken: %d", next.resends.Load())
+	}
+}

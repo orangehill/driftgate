@@ -2,10 +2,14 @@ package capture
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -60,5 +64,59 @@ func takeResend(t *tracker) bool {
 		if t.resends.CompareAndSwap(n, n-1) {
 			return true
 		}
+	}
+}
+
+// endedFile keeps, in the local store, how many of the application's
+// database sessions the last restore of a capture ended: its pooled
+// connections fail at the next capture, whose own first restore may end
+// none (saveEnded, takeEnded).
+func endedFile(p *config.Project) string {
+	if p.Layout.Pristine == "" {
+		return ""
+	}
+	return filepath.Join(p.Layout.Pristine, "ended-sessions.json")
+}
+
+type endedRecord struct {
+	Sessions int64  `json:"sessions"`
+	After    string `json:"after"`
+}
+
+// saveEnded keeps the budget of resends the last restore of this capture
+// left (none: the file goes).
+func saveEnded(p *config.Project, t *tracker) {
+	f := endedFile(p)
+	if f == "" {
+		return
+	}
+	if n := t.resends.Load(); n > 0 {
+		snapshot.WriteJSON(f, endedRecord{Sessions: n, After: t.resentAfter + " (at the end of the previous capture)"})
+		return
+	}
+	os.Remove(f)
+}
+
+// takeEnded adds to the budget of this capture's read-only phase what the
+// previous capture's last restore left, once.
+func takeEnded(p *config.Project, t *tracker) {
+	f := endedFile(p)
+	if f == "" {
+		return
+	}
+	raw, err := os.ReadFile(f)
+	if err != nil {
+		return
+	}
+	os.Remove(f)
+	var e endedRecord
+	if json.Unmarshal(raw, &e) != nil || e.Sessions <= 0 {
+		return
+	}
+	t.resends.Add(e.Sessions)
+	if t.resentAfter == "" {
+		t.resentAfter = e.After
+	} else {
+		t.resentAfter += "; " + e.After
 	}
 }

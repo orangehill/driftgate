@@ -275,6 +275,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
+	// Sessions the last restore of the previous capture ended fail now.
+	takeEnded(p, tr)
 	start, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -357,6 +359,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		if err := tr.restore(ctx); err != nil {
 			return nil, err
 		}
+		saveEnded(p, tr)
 	}
 
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck}
