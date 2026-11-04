@@ -292,6 +292,28 @@ func sqliteSeed(working string) string {
 	return fmt.Sprintf(`#   - ["sqlite3", %q, ".read dump.sql"]`, working)
 }
 
+// seedExample is the example of seed: for the database d found: Laravel's
+// own migrations and seeders, else a dump loaded with the database's
+// client (laravel: the project is a Laravel application).
+func seedExample(d appconf.Database, laravel bool) string {
+	if laravel {
+		return `#   - ["php", "artisan", "migrate:fresh", "--seed", "--force"]`
+	}
+	name := d.Name
+	if name == "" {
+		name = "app"
+	}
+	switch d.Driver {
+	case appconf.SQLite:
+		return sqliteSeed(workingOf(d))
+	case appconf.Postgres:
+		return fmt.Sprintf(`#   - ["pg_restore", "--clean", "--if-exists", "--no-owner", "-d", %q, "dump.pgdump"]   # or ["psql", "-q", "-d", %q, "-f", "dump.sql"]`, name, name)
+	case appconf.SQLServer:
+		return fmt.Sprintf(`#   - ["sh", "-c", "sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -b -Q \"RESTORE DATABASE [%s] FROM DISK = N'/var/opt/mssql/backup/%s.bak' WITH REPLACE\""]`, name, name)
+	}
+	return fmt.Sprintf(`#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql %s"]`, name)
+}
+
 // stateBlock is state: for driftgate.yaml with the database d: a reference
 // to the setting, never its value. A setting that cannot be referenced
 // (only in this shell's environment) takes the DSN from dsnEnv. The block
@@ -416,9 +438,9 @@ func (dr *draft) configText() string {
 			}
 		}
 		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.excludeTables()...) + "\n" + text[end:]
-		if dr.db.Driver == appconf.SQLite {
-			text = strings.Replace(text, mysqlSeed, sqliteSeed(workingOf(*dr.db)), 1)
-		}
+		text = strings.Replace(text, mysqlSeed, seedExample(*dr.db, slices.Contains(d.kinds, "laravel")), 1)
+	} else if slices.Contains(d.kinds, "laravel") {
+		text = strings.Replace(text, mysqlSeed, seedExample(appconf.Database{}, true), 1)
 	}
 	if d.block != "" {
 		text += "\n# Found: " + strings.Join(d.kinds, ", ") + "\n" + d.block

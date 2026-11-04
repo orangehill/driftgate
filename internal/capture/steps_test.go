@@ -83,3 +83,11 @@ func TestStepOutputNotLogged(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandLine: driftgate seed shows the whole command it runs.
+func TestCommandLine(t *testing.T) {
+	got := commandLine([]string{"sh", "-c", `gunzip -c dump.sql.gz | mysql "app"`, ""})
+	if want := `sh -c "gunzip -c dump.sql.gz | mysql \"app\"" ""`; got != want {
+		t.Errorf("%s, want %s", got, want)
+	}
+}

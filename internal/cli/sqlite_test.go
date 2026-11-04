@@ -241,3 +241,23 @@ func TestSQLiteDescribe(t *testing.T) {
 		t.Errorf("state block without a file:\n%s", block)
 	}
 }
+
+// TestSeedExample: the commented seed: of a new configuration fits the
+// database found, and Laravel's migrations and seeders for Laravel.
+func TestSeedExample(t *testing.T) {
+	for _, c := range []struct {
+		d       appconf.Database
+		laravel bool
+		want    string
+	}{
+		{appconf.Database{Driver: appconf.MySQL, Name: "shop"}, false, "mysql shop"},
+		{appconf.Database{Driver: appconf.Postgres, Name: "shop"}, false, `"pg_restore"`},
+		{appconf.Database{Driver: appconf.SQLServer, Name: "shop"}, false, `RESTORE DATABASE [shop]`},
+		{appconf.Database{Driver: appconf.SQLite, File: "db/app.sqlite"}, false, `"sqlite3"`},
+		{appconf.Database{Driver: appconf.SQLServer, Name: "shop"}, true, `["php", "artisan", "migrate:fresh", "--seed", "--force"]`},
+	} {
+		if got := seedExample(c.d, c.laravel); !strings.Contains(got, c.want) || !strings.HasPrefix(got, "#   - [") {
+			t.Errorf("%+v %t: %s, want %s", c.d, c.laravel, got, c.want)
+		}
+	}
+}

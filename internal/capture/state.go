@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -547,7 +548,7 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if opt.SkipCommands {
 			break
 		}
-		fmt.Fprintf(opt.Out, "seed: %s\n", cmd[0])
+		fmt.Fprintf(opt.Out, "seed: %s\n", commandLine(cmd))
 		if err := state.Run(ctx, p.Root, cmd, nil, opt.Log); err != nil {
 			return envErr("seed: %v", err)
 		}
@@ -692,4 +693,18 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// commandLine is a command of driftgate.yaml as one line, an argument with
+// a space, quote or backslash (or an empty one) quoted: as the
+// configuration writes it, so what runs is plain to see.
+func commandLine(cmd []string) string {
+	parts := make([]string, len(cmd))
+	for i, a := range cmd {
+		if a == "" || strings.ContainsAny(a, " \t\n\"'\\") {
+			a = strconv.Quote(a)
+		}
+		parts[i] = a
+	}
+	return strings.Join(parts, " ")
 }
