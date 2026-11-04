@@ -868,7 +868,12 @@ func readSets(ctx context.Context, c *sql.Conn, batch string, sets ...func(*sql.
 }
 
 // readSetsWith is readSets of a batch with parameters (@p1…).
-func readSetsWith(ctx context.Context, c *sql.Conn, batch string, args []any, sets ...func(*sql.Rows) error) error {
+func readSetsWith(ctx context.Context, c *sql.Conn, batch string, args []any, sets ...func(*sql.Rows) error) (err error) {
+	defer func() {
+		if at := sqlServerAt(batch, err); at != "" {
+			err = fmt.Errorf("%w%s", err, at)
+		}
+	}()
 	rows, err := c.QueryContext(ctx, batch, args...)
 	if err != nil {
 		return err
