@@ -1138,13 +1138,13 @@ reads every table:
 
 | Fingerprint | When | Time |
 |---|---|---|
-| reused | nothing moved since the last one: the end of the log (after `sp_flush_log`), every identity column and sequence (a rolled-back `INSERT` and a cached sequence move them without a log record), the database's options; never with memory-optimized tables | 0.76 ms |
-| per table | the tables whose write counters (`sys.dm_db_index_operational_stats`, `sys.dm_db_index_usage_stats`, rows, dates) moved are read again | 33 ms (one table of 100 written to) |
-| full | every table read, on up to four connections; always without `VIEW SERVER PERFORMANCE STATE` | 0.51 s for 57.8 MB |
+| reused | nothing moved since the last one: the end of the log (after `sp_flush_log`), every identity column and sequence (a rolled-back `INSERT` and a cached sequence move them without a log record), the database's options; never with memory-optimized tables | 1.5 ms |
+| per table | the tables whose write counters (`sys.dm_db_index_operational_stats`, `sys.dm_db_index_usage_stats`, rows, dates) moved are read again | 23 ms (one table of 100 written to) |
+| full | every table read, on up to four connections; always without `VIEW SERVER PERFORMANCE STATE` | 0.39–0.56 s for 57.8 MB |
 
-Restore of a small table with one changed row: 16–18 ms; of one row in a
-table of a million rows (by key): about 360 ms. Seed of a small database:
-0.8–2.7 s. Measured with SQL Server 2022 Developer in Docker, emulated
+Restore of a small table with one changed row: 11–12 ms; of one row in a
+table of a million rows (by key): about 190 ms. Seed of a small database:
+0.7–1.3 s. Measured with SQL Server 2022 Developer in Docker, emulated
 (`linux/amd64` under Rosetta on an Apple M4); the server's side is
 several times faster on x86. Memory-optimized tables and tables with a
 `text`, `ntext` or `image` column are read every time (some of their
