@@ -628,7 +628,7 @@ runs in, `init` and `setup` add a note to check it:
 |---|---|
 | Laravel `.env` (`DB_CONNECTION=sqlite`) | `DB_DATABASE`, or the file of `DB_URL` / `DATABASE_URL`; unset, `database/database.sqlite`. A relative `DB_DATABASE` is taken from the project root, with a note: Laravel 11 and later open it from the folder PHP runs in when it is there, else from the root; Laravel 10 and earlier only from the folder PHP runs in (`public/` under `php artisan serve` and PHP-FPM). Leave it unset or make it absolute |
 | Django `settings.py` (`django.db.backends.sqlite3`) | `BASE_DIR / 'db.sqlite3'`, `str(BASE_DIR / …)` or `os.path.join(BASE_DIR, …)`, with `BASE_DIR` as `startproject` writes it (`Path(__file__).resolve().parent.parent`, or `os.path.dirname` of `__file__`); a relative string from `manage.py`'s folder. Other code is not run: set `working:` |
-| Symfony `.env` (`DATABASE_URL="sqlite:///%kernel.project_dir%/var/data.db"`) | `%kernel.project_dir%` is the project root |
+| Symfony `.env` (`DATABASE_URL="sqlite:///%kernel.project_dir%/var/data.db"`) | `%kernel.project_dir%` is the Symfony project's folder: the folder of the `.env` file (of the one above `config/` for a file under it) |
 | Prisma (`provider = "sqlite"` in `prisma/schema.prisma`) | the `file:` URL of the variable its `url = env("…")` names, relative to `prisma/`, as Prisma takes it |
 | Rails `config/database.yml` (`adapter: sqlite3`) | relative to the Rails root; every SQLite database of `development` |
 | ASP.NET `appsettings.json` (`Data Source=app.db`) | relative to the `.csproj`'s folder, where `dotnet run` runs |

@@ -314,8 +314,9 @@ func resolveSQLite(root string, r Ref, p parts) (parts, error) {
 	}
 	if rest, ok := strings.CutPrefix(name, "%kernel.project_dir%/"); ok {
 		// Symfony's DATABASE_URL (sqlite:///%kernel.project_dir%/var/data.db):
-		// the parameter is the project's folder.
-		return sqliteResolved(root, r, p, "", rest)
+		// the parameter is the Symfony project's folder, which need not be
+		// DriftGate's root (symfonyDir). /proj//etc/x.db is /proj/etc/x.db.
+		return sqliteResolved(root, r, p, symfonyDir(r), strings.TrimLeft(rest, "/"))
 	}
 	base, cwd := "", true
 	switch r.Source {
@@ -991,4 +992,25 @@ func phpEnvDefault(src, key string) (string, bool) {
 		return v, true
 	}
 	return "", false
+}
+
+// symfonyDir is the folder of the Symfony project whose setting r is,
+// relative to the root with /: the folder of its .env file, the folder
+// above config/ for a file under it (config/packages/doctrine.yaml), the
+// root for the environment.
+func symfonyDir(r Ref) string {
+	if r.File == "" || r.Source == Env {
+		return ""
+	}
+	dir := path.Dir(r.File)
+	for d := dir; d != "." && d != "/"; d = path.Dir(d) {
+		if path.Base(d) == "config" {
+			dir = path.Dir(d)
+			break
+		}
+	}
+	if dir == "." {
+		return ""
+	}
+	return dir
 }
