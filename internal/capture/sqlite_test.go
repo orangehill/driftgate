@@ -179,7 +179,7 @@ func TestCaptureSQLite(t *testing.T) {
 			if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(out.String(), "pristine copy of db: ") {
+			if !strings.Contains(out.String(), "pristine copy of db: ") || strings.Contains(out.String(), "warning:") {
 				t.Fatalf("seed output:\n%s", out.String())
 			}
 
