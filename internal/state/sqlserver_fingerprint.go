@@ -45,6 +45,7 @@ type ssFingerprint struct {
 	f       Fingerprint
 	inv     *ssInventory
 	content map[int64]string
+	read    int // the tables read (not reused)
 }
 
 // fingerprint hashes items (nil: all) of the database c is connected to.
@@ -106,6 +107,7 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 	if err != nil {
 		return nil, err
 	}
+	out.read = len(scans)
 	for id, sc := range scans {
 		t := inv.byID[id]
 		content := sc.sum.String()

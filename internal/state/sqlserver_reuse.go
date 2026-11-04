@@ -38,11 +38,11 @@ import (
 // wrote and is still open is waited for (up to sqlServerOpenWait): its rows
 // are not read under READ COMMITTED, and its commit moves no counter. One
 // whose every write lock is on excluded tables (and the system tables and
-// extents any insert locks) is not: those tables are not read. The
-// table signatures and values are read again after the tables: when they
-// moved, or a write transaction was still open, the tables are read again
-// (up to sqlServerAttempts times), so no fingerprint mixes rows from before
-// and after a commit.
+// extents any insert locks) is not: those tables are not read. When any
+// table was read, the table signatures and values are read again after
+// the tables: when they moved, or a write transaction was still open, the
+// tables are read again (up to sqlServerAttempts times), so no fingerprint
+// mixes rows from before and after a commit.
 //
 // Without the permission every fingerprint reads every table, and checks
 // the signatures db_owner can read (rows and index write counters); a
@@ -448,9 +448,15 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 		if err != nil {
 			return nil, err
 		}
-		after, err := s.signals(ctx, c, false, false, true)
-		if err != nil {
-			return nil, err
+		// With no table read, the fingerprint is made of the signals alone,
+		// which read the values before the tables: a commit between the two
+		// moved the counters of the tables it wrote to, which are then
+		// read, and no write was open. Nothing can mix.
+		after := sig
+		if sig.open || fp.read > 0 {
+			if after, err = s.signals(ctx, c, false, false, true); err != nil {
+				return nil, err
+			}
 		}
 		if !sig.open && after.values.hash == sig.values.hash && maps.Equal(after.tables, sig.tables) {
 			s.cache(sig, fp.inv)

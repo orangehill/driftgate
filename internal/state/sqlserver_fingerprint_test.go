@@ -192,6 +192,47 @@ func TestSQLServerBoundedRow(t *testing.T) {
 	}
 }
 
+// TestSQLServerNothingRead: a fingerprint that reads no table (only an
+// excluded one was written) skips the signals after the tables; a write
+// made right after its signals is not kept stale, the next fingerprint
+// sees it.
+func TestSQLServerNothingRead(t *testing.T) {
+	s, db := newSQLServerTest(t, Options{Exclude: []string{"sessions"}})
+	if !mustSQLServerInfo(t, s).Perf {
+		t.Skip("the login cannot read the server's performance state")
+	}
+	sqlServerExec(t, db, "CREATE TABLE sessions (id int PRIMARY KEY, n int NULL)", "INSERT INTO sessions VALUES (1, 0)",
+		"CREATE TABLE t (id int IDENTITY PRIMARY KEY, v int NULL)", "INSERT INTO t (v) VALUES (1), (2)",
+		"CREATE SEQUENCE seq AS int START WITH 1 CACHE 10")
+	defer func() { sqlServerBeforeScan = nil }()
+	for i, write := range []string{
+		"UPDATE t SET v = 7 WHERE id = 1",
+		"INSERT INTO t (v) VALUES (3)",
+		"BEGIN TRAN; INSERT INTO t (v) VALUES (4); ROLLBACK",
+		"DECLARE @x int = NEXT VALUE FOR seq",
+		"ALTER TABLE t ADD w int NULL",
+	} {
+		mustSQLServerFingerprint(t, s)
+		before := mustSQLServerFingerprint(t, s)
+		sqlServerExec(t, db, fmt.Sprintf("UPDATE sessions SET n = %d", i+1))
+		sqlServerBeforeScan = func() {
+			sqlServerBeforeScan = nil
+			sqlServerExec(t, db, write)
+		}
+		mustSQLServerFingerprint(t, s)
+		if sqlServerBeforeScan != nil {
+			t.Fatal("no fingerprint after the signals")
+		}
+		f := mustSQLServerFingerprint(t, s)
+		if d := Diff(f, sqlServerFull(t, s)); len(d) > 0 {
+			t.Fatalf("after %q, %v differ from a full read", write, d)
+		}
+		if d := Diff(f, before); len(d) == 0 {
+			t.Fatalf("%q is not seen", write)
+		}
+	}
+}
+
 // TestSQLServerItems: the items, what their hash covers, exclusion and
 // schemas other than dbo.
 func TestSQLServerItems(t *testing.T) {
