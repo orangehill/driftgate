@@ -926,9 +926,13 @@ DriftGate cannot map is an error, never left out. When the setting leaves
   `trustServerCertificateCA`) or the server's own certificate
   (`ServerCertificate`, compared byte for byte; not together with
   `HostNameInCertificate` or a CA). A `.pem` or `.der` file (convert a
-  `.cer` or `.crt` with `openssl x509`); a setting of the project names one
-  inside the project (also past symbolic links), a DSN of the environment
-  by its absolute path. A Java trust store (`trustStore`) is refused: give
+  `.cer` or `.crt` with `openssl x509`), a regular file. A setting of the
+  project names one by a path relative to the project, which stays inside
+  it (also past symbolic links), or by an absolute path or one in the home
+  folder (`~/certs/ca.pem`) anywhere, such as a system folder
+  (`/etc/ssl/certs`); a DSN of the environment or 1Password by an absolute
+  path or one in the home folder. The driver only reads it as a
+  certificate; no message shows what it holds. A Java trust store (`trustStore`) is refused: give
   the CA as a PEM file. JDBC's `sslProtocol=TLSv1.3` is `tlsmin=1.3`.
 
 `tools/e2e/sqlserver-tls.sh` (run in CI for every version) starts SQL

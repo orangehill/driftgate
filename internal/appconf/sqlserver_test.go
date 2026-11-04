@@ -244,20 +244,54 @@ func TestSQLServerProjectRefusals(t *testing.T) {
 }
 
 // TestSQLServerCertificateFiles: a certificate file a setting of the
-// project names is the project's, read past links; .pem and .der only; a
-// DSN of the environment gives it by its absolute path.
+// project names by a relative path is the project's, read past links; one
+// named by an absolute path or in the home folder (~/) may be anywhere (a
+// CA's certificate is often in a system folder), read past links too;
+// .pem and .der only, a regular file. A DSN of the environment gives it by
+// its absolute path or in the home folder.
 func TestSQLServerCertificateFiles(t *testing.T) {
-	outside := filepath.Join(t.TempDir(), "ca.pem")
-	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	elsewhere := t.TempDir()
+	outside := filepath.Join(elsewhere, "ca.pem")
+	for _, f := range []string{outside, filepath.Join(elsewhere, "ca.crt")} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(elsewhere, "link.pem")
+	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(home, "certs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "certs", "ca.der"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(elsewhere, "dir.pem"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := func(f string) string {
+		r, err := filepath.EvalSymlinks(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
 	const jdbc = "jdbc:sqlserver://db:1433;user=app;password=p;trustServerCertificateCA="
-	for _, tt := range []struct{ file, err string }{
-		{"certs/ca.pem", ""},
-		{"certs/missing.pem", "a certificate file: certs/missing.pem: not found"},
-		{"../ca.pem", "must be inside the project"},
-		{outside, "outside the project"},
-		{"certs/ca.crt", "a .pem or .der file"},
+	for _, tt := range []struct{ file, want, err string }{
+		{"certs/ca.pem", "", ""},
+		{"certs/missing.pem", "", "a certificate file: certs/missing.pem: not found"},
+		{"../ca.pem", "", "must be inside the project"},
+		{outside, real(outside), ""},
+		{link, real(outside), ""},
+		{"~/certs/ca.der", real(filepath.Join(home, "certs", "ca.der")), ""},
+		{"~/certs/missing.pem", "", "a certificate file"},
+		{filepath.Join(elsewhere, "dir.pem"), "", "not a regular file"},
+		{"certs/ca.crt", "", "a .pem or .der file"},
+		{filepath.Join(elsewhere, "ca.crt"), "", "a .pem or .der file"},
 	} {
 		root := writeTree(t, map[string]string{".env": "X=\"" + jdbc + tt.file + "\"\n", "certs/ca.pem": "x", "certs/ca.crt": "x"})
 		dsn, err := Ref{Source: Dotenv, File: ".env", Key: "X"}.DSN(root, SQLServer, nil)
@@ -267,13 +301,19 @@ func TestSQLServerCertificateFiles(t *testing.T) {
 			}
 			continue
 		}
-		real, _ := filepath.EvalSymlinks(filepath.Join(root, "certs", "ca.pem"))
-		if want := "sqlserver://app:p@db:1433?certificate=" + url.QueryEscape(real) + "&encrypt=true"; err != nil || dsn != want {
+		if tt.want == "" {
+			tt.want = real(filepath.Join(root, "certs", "ca.pem"))
+		}
+		if want := "sqlserver://app:p@db:1433?certificate=" + url.QueryEscape(tt.want) + "&encrypt=true"; err != nil || dsn != want {
 			t.Errorf("%s: %s, %v; want %s", tt.file, dsn, err, want)
 		}
 	}
 	if _, err := Convert(jdbc+"certs/ca.pem", SQLServer); err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Errorf("a relative path in a DSN of the environment: %v", err)
+	}
+	want := "sqlserver://app:p@db:1433?certificate=" + url.QueryEscape(filepath.Join(home, "certs", "ca.der")) + "&encrypt=true"
+	if dsn, err := Convert(jdbc+"~/certs/ca.der", SQLServer); err != nil || dsn != want {
+		t.Errorf("a path in the home folder in a DSN of the environment: %s, %v; want %s", dsn, err, want)
 	}
 }
 

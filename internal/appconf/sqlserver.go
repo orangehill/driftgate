@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -97,8 +98,8 @@ const (
 	errSQLServerInstance     = constError("names an instance without its port; add the port the instance listens on (host\\instance,port)")
 	errSQLServerODBCPort     = constError("gives Port=, which Microsoft's ODBC drivers do not read: write the port with the server (Server=host,1433)")
 	errSQLServerCertType     = constError("names a certificate file DriftGate's driver cannot read: it takes a .pem or .der file (convert a .cer or .crt with openssl x509)")
-	errSQLServerCertRelative = constError("names a certificate file by a relative path; a DSN of the environment or 1Password gives it by its absolute path")
-	errSQLServerCertOutside  = constError("names a certificate file outside the project; DriftGate reads only the project's files for a setting of the project")
+	errSQLServerCertRelative = constError("names a certificate file by a relative path; a DSN of the environment or 1Password gives it by its absolute path or in the home folder (~/)")
+	errSQLServerCertFile     = constError("names a certificate file that is not a regular file")
 	errSQLServerCertPair     = constError("names the server's own certificate (ServerCertificate) with HostNameInCertificate or a CA certificate; the two ways of verifying do not go together: keep one")
 )
 
@@ -1053,14 +1054,18 @@ func (s sqlServerTLS) params(host string) (url.Values, error) {
 	if s.serverCert != "" && (s.ca != "" || s.hostInCert != "") {
 		return nil, errSQLServerCertPair
 	}
-	for _, f := range []string{s.ca, s.serverCert} {
-		if f == "" {
+	for _, f := range []*string{&s.ca, &s.serverCert} {
+		if *f == "" {
 			continue
 		}
-		if ext := strings.ToLower(filepath.Ext(f)); ext != ".pem" && ext != ".der" {
+		if ext := strings.ToLower(filepath.Ext(*f)); ext != ".pem" && ext != ".der" {
 			return nil, errSQLServerCertType
 		}
-		if !filepath.IsAbs(f) && !strings.HasPrefix(f, "/") {
+		home, err := homePath(*f)
+		if err != nil {
+			return nil, err
+		}
+		if *f = home; !filepath.IsAbs(*f) && !strings.HasPrefix(*f, "/") {
 			return nil, errSQLServerCertRelative
 		}
 	}
@@ -1215,10 +1220,31 @@ func packageMajor(lc, pkg string) (int, bool) {
 	return major, err == nil
 }
 
+// homePath is a path in the home folder (~/…) as an absolute one; any
+// other path comes back as it is.
+func homePath(f string) (string, error) {
+	rest, ok := strings.CutPrefix(f, "~/")
+	if !ok && filepath.Separator == '\\' {
+		rest, ok = strings.CutPrefix(f, `~\`)
+	}
+	if !ok {
+		return f, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("a certificate file in the home folder (~/): %w", err)
+	}
+	return filepath.Join(home, filepath.FromSlash(rest)), nil
+}
+
 // sqlServerFiles resolves the certificate files a SQL Server setting of
 // the project names (Ref.Read; driver is the component's): a relative path
-// against the project root, past symbolic links, which must stay inside
-// it, as must an absolute one.
+// against the project root, past symbolic links, which must stay inside it;
+// an absolute one, or one in the home folder (~/), anywhere, as a CA's
+// certificate is often in a system folder (/etc/ssl/certs). The driver
+// only reads it as a certificate and no message shows what it holds; the
+// file must be a regular one (not a device or a pipe a read would hang
+// on).
 func sqlServerFiles(root, driver string, p parts) (parts, error) {
 	if p.driver != SQLServer && (p.driver != "" || driver != SQLServer) {
 		return p, nil
@@ -1227,32 +1253,28 @@ func sqlServerFiles(root, driver string, p parts) (parts, error) {
 	if err != nil {
 		return parts{}, err
 	}
-	realRoot, err := filepath.Abs(root)
-	if err == nil {
-		realRoot, err = filepath.EvalSymlinks(realRoot)
-	}
-	if err != nil {
-		return parts{}, fmt.Errorf("the project folder: %w", unwrapPath(err))
-	}
 	for _, f := range []*string{&s.ca, &s.serverCert} {
-		switch {
-		case *f == "":
-		case filepath.IsAbs(*f):
-			real, err := filepath.EvalSymlinks(*f)
-			if err != nil {
+		if *f == "" {
+			continue
+		}
+		home, err := homePath(*f)
+		if err != nil {
+			return parts{}, err
+		}
+		var real string
+		if filepath.IsAbs(home) {
+			if real, err = filepath.EvalSymlinks(home); err != nil {
 				return parts{}, fmt.Errorf("a certificate file: %w", unwrapPath(err))
 			}
-			if rel, err := filepath.Rel(realRoot, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return parts{}, errSQLServerCertOutside
-			}
-			*f = real
-		default:
-			real, err := localPath(root, *f)
-			if err != nil {
-				return parts{}, fmt.Errorf("a certificate file: %w", err)
-			}
-			*f = real
+		} else if real, err = localPath(root, *f); err != nil {
+			return parts{}, fmt.Errorf("a certificate file: %w", err)
 		}
+		if fi, err := os.Stat(real); err != nil {
+			return parts{}, fmt.Errorf("a certificate file: %w", unwrapPath(err))
+		} else if !fi.Mode().IsRegular() {
+			return parts{}, errSQLServerCertFile
+		}
+		*f = real
 	}
 	p.mssql = s
 	return p, nil

@@ -178,7 +178,9 @@ to do it.
   the sign-in is encrypted even with `Encrypt` off (a server that answers
   it cannot encrypt is refused before the password is sent), and `Strict`
   is never weakened; a certificate file
-  a setting names must be inside the project
+  a setting names by a relative path must be inside the project (an
+  absolute path or `~/` may name a system CA; the file is only read as a
+  certificate, and no message shows what it holds)
   ([SQL Server](configuration.md#sql-server)). A
   connection string is never read as a URL or the MySQL driver's form, so
   no part of its password is taken for the user and shown. No project code runs to read
