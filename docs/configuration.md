@@ -1154,9 +1154,10 @@ excluded tables is lost. Limits of that:
   later restore that completes a stopped one sets it again too, while
   without excluded tables there is no note, and a restore stopped halfway
   leaves the database as the pristine copy's backup is (`MULTI_USER`).
-  This concerns a restore of given items (the tracker's); a capture of a
-  `SINGLE_USER` database is refused at its first fingerprint, which reads
-  on several sessions, with what to do (`SET MULTI_USER`).
+  A capture never gets that far with a `SINGLE_USER` database: it
+  fingerprints the database before its first restore and refuses it
+  there, since a fingerprint reads on several sessions, and says what to
+  do (`SET MULTI_USER`).
 
 Measured on small databases, such a restore takes about 0.8 s. A
 restore of the whole database that stops halfway leaves the working
