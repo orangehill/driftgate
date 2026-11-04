@@ -1005,7 +1005,11 @@ DriftGate ran.
    Express, with checksums);
 2. restores that backup as `<pristine>_dgnew`, every file moved to a new
    name in the server's data folder (`dg_<hash>_<file>.mdf`, `.ndf`,
-   `.ldf`), never over an existing database;
+   `.ldf`), never over an existing database. A seed stopped while that
+   `RESTORE` runs drops the copy, and the next seed drops one that is
+   left; when the process is killed before SQL Server registered the copy,
+   its `dg_*` files can stay in the data folder, which only a login with
+   access to that folder can delete;
 3. deletes the rows of the excluded tables there, without firing a
    trigger or running a cascade (a table that is not excluded and whose
    rows refer to rows of an excluded table by a trusted foreign key stops
@@ -1084,9 +1088,24 @@ where the pristine copy's stands. Such a restore:
 
 The application's pooled connections to the working database are ended:
 the first use of each one can fail once (go-mssqldb reports `Read: EOF`,
-other clients a closed connection), and the pool connects again. Writes
-the application makes to excluded tables between step 2 and step 3 are
-lost. Measured on small databases, such a restore takes about 0.8 s. A
+other clients a closed connection), and the pool connects again. From
+step 2 until the rows are copied back the working database is
+`RESTRICTED_USER`: the application cannot connect, so none of its writes to
+excluded tables is lost. Limits of that:
+
+- a login that is a member of `db_owner`, `dbcreator` or `sysadmin` still
+  gets in. Of what it writes to excluded tables, rows committed after
+  step 2 reads them and before step 3 ends its session are lost; rows it
+  writes after the restore are kept, in a table with a primary key, and a
+  saved row with the same key is not copied back. In a table without a
+  primary key (or with a computed column) its rows are replaced by the
+  saved ones. Let the application sign in with a login that is only a
+  user of the database;
+- a restore stopped while the database is `RESTRICTED_USER` (DriftGate
+  killed) leaves it so until the next restore or capture lets every login
+  in again (`ALTER DATABASE … SET MULTI_USER` does it by hand).
+
+Measured on small databases, such a restore takes about 0.8 s. A
 restore of the whole database that stops halfway leaves the working
 database restoring or offline, unusable until the next restore (a
 capture) completes it; that one copies the saved rows back too, and a
@@ -1138,7 +1157,7 @@ reads every table:
 
 | Fingerprint | When | Time |
 |---|---|---|
-| reused | nothing moved since the last one: the end of the log (after `sp_flush_log`), every identity column and sequence (a rolled-back `INSERT` and a cached sequence move them without a log record), the database's options; never with memory-optimized tables | 1.5 ms |
+| reused | nothing moved since the last one: the end of the log (after `sp_flush_log`), every identity column and sequence (a rolled-back `INSERT` and a cached sequence move them without a log record), the database's options; never with memory-optimized tables, nor while the application writes an excluded table (sessions, cache, jobs) on every request: the log moves, and the per-table cost applies | 1.5 ms |
 | per table | the tables whose write counters (`sys.dm_db_index_operational_stats`, `sys.dm_db_index_usage_stats`, rows, dates) moved are read again | 23 ms (one table of 100 written to) |
 | full | every table read, on up to four connections; always without `VIEW SERVER PERFORMANCE STATE` | 0.39–0.56 s for 57.8 MB |
 
