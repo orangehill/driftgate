@@ -2,6 +2,7 @@ package infer
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -21,8 +22,15 @@ func TestPattern(t *testing.T) {
 		{[]string{"eyJ.a-b_c.x1", "eyJ.ab.c-d_e2"}, `[0-9A-Za-z\-._]+`},
 		{[]string{"11bca30b-0308-4725-9d4e-6f1a2b3c4d5e", "7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d"}, `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`},
 		{[]string{"11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E", "7E2F0C41-5521-4A0B-8C3D-0E9F8A7B6C5D"}, `[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}`},
-		{[]string{"/orders/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E?x=1", "/orders/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d?x=2"}, `/orders/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\?x=\d`},
-		{[]string{"/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/1", "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/2"}, `/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/\d`},
+		{[]string{"/orders/11BCA30B-0308-4725-9D4E-6F1A2B3C4D5E?x=1", "/orders/7e2f0c41-5521-4a0b-8c3d-0e9f8a7b6c5d?x=2"}, `/orders/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\?x=\d+`},
+		{[]string{"/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/1", "/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/2"}, `/t/11bca30b-0308-4725-9d4e-6f1a2b3c4d5e/jobs/\d+`},
+		// A duration and a session cookie: neither keeps the width of
+		// the samples (6ms then 12ms; a longer payload).
+		{[]string{"Response rendered in 6ms at 1", "Response rendered in 6ms at 2"}, `Response rendered in \d+ms at \d+`},
+		{[]string{"x-time: 7ms", "x-time: 12ms"}, `x-time: \d+ms`},
+		{[]string{"s=" + strings.Repeat("aB3", 113) + "; path=/", "s=" + strings.Repeat("Zx9", 113) + "; path=/"}, `s=[0-9A-Za-z]+; path=/`},
+		{[]string{"1700000000", "1700000123"}, `-?\d+`},
+		{[]string{"id ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34", "id 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"}, `id [0-9a-f]{40}`},
 		{[]string{"same", "same"}, ``},
 		{[]string{"abc", ""}, `[a-z]*`},
 		{[]string{"", "2024-01-01"}, `[0-9\-]*`},

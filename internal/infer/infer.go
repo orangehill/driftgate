@@ -67,7 +67,14 @@ func class(parts []string) string {
 	return "[" + c + "]"
 }
 
-func quantifier(parts []string) string {
+// quantifier is how many characters of class c (class) a run of the parts
+// takes. A fixed width is kept only where it is the value's form, not
+// chance: a field of a date or time (two to four digits, zero-padded), a
+// short code, a hex token (a hash or id has its width). A lone digit is a
+// count that reaches 10, and a longer run of digits or letters (a token, a
+// session cookie, a duration) gets as long as it needs: one more digit or
+// a longer payload is not a change of the contract.
+func quantifier(c string, parts []string) string {
 	lo, hi := -1, 0
 	for _, p := range parts {
 		n := len(p)
@@ -81,10 +88,24 @@ func quantifier(parts []string) string {
 	switch {
 	case lo != hi:
 		return "+"
+	case c == `\d` && lo == 1:
+		return "+"
 	case lo == 1:
 		return ""
+	case lo <= 4 || c == `[0-9a-f]`:
+		return fmt.Sprintf("{%d}", lo)
 	}
-	return fmt.Sprintf("{%d}", lo)
+	return "+"
+}
+
+// digitsIn is the format of a run of n digits inside a word that is the
+// same in every sample (5ms, 29T10): only the digits vary, and their
+// width as quantifier takes it.
+func digitsIn(n int) string {
+	if n >= 2 && n <= 4 {
+		return fmt.Sprintf(`\d{%d}`, n)
+	}
+	return `\d+`
 }
 
 // Pattern returns a format for the values, or "" when they are all equal.
@@ -172,10 +193,7 @@ func Pattern(values []string) string {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
 				b.WriteString(digitRun().ReplaceAllStringFunc(regexp.QuoteMeta(parts[0]), func(d string) string {
-					if len(d) == 1 {
-						return `\d`
-					}
-					return fmt.Sprintf(`\d{%d}`, len(d))
+					return digitsIn(len(d))
 				}))
 				continue
 			}
@@ -183,7 +201,8 @@ func Pattern(values []string) string {
 				b.WriteString(sub)
 				continue
 			}
-			b.WriteString(class(parts) + quantifier(parts))
+			c := class(parts)
+			b.WriteString(c + quantifier(c, parts))
 		}
 	} else {
 		// One class for everything: letters and digits by range, the rest
@@ -334,7 +353,9 @@ func byKind(parts []string) string {
 			return ""
 		}
 	}
-	if len(split[0]) < 2 {
+	// Two to four parts (896Z, 29T10, v2beta1): more of them that agree
+	// are chance in a token, not its build.
+	if len(split[0]) < 2 || len(split[0]) > 4 {
 		return ""
 	}
 	var b strings.Builder
@@ -352,11 +373,12 @@ func byKind(parts []string) string {
 		}
 		switch {
 		case digits:
-			b.WriteString(`\d` + quantifier(col))
+			b.WriteString(`\d` + quantifier(`\d`, col))
 		case equal:
 			b.WriteString(regexp.QuoteMeta(col[0]))
 		default:
-			b.WriteString(class(col) + quantifier(col))
+			c := class(col)
+			b.WriteString(c + quantifier(c, col))
 		}
 	}
 	return b.String()
