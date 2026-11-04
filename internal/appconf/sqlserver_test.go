@@ -308,6 +308,16 @@ func TestSQLServerCertificateFiles(t *testing.T) {
 			t.Errorf("%s: %s, %v; want %s", tt.file, dsn, err, want)
 		}
 	}
+	for _, f := range []string{filepath.Join(elsewhere, "dir.pem"), "/dev/null.pem"} {
+		if f == "/dev/null.pem" {
+			if _, err := os.Stat(f); err != nil {
+				continue // not on this system
+			}
+		}
+		if _, err := Convert(jdbc+f, SQLServer); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("%s in a DSN of the environment: %v", f, err)
+		}
+	}
 	if _, err := Convert(jdbc+"certs/ca.pem", SQLServer); err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Errorf("a relative path in a DSN of the environment: %v", err)
 	}

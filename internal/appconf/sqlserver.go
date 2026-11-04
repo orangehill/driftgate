@@ -1068,6 +1068,12 @@ func (s sqlServerTLS) params(host string) (url.Values, error) {
 		if *f = home; !filepath.IsAbs(*f) && !strings.HasPrefix(*f, "/") {
 			return nil, errSQLServerCertRelative
 		}
+		// A DSN of the environment or 1Password too: a regular file, not a
+		// device or a pipe a read would hang on (past links; one that is
+		// missing the driver reports when it connects).
+		if fi, err := os.Stat(*f); err == nil && !fi.Mode().IsRegular() {
+			return nil, errSQLServerCertFile
+		}
 	}
 	if trust {
 		q.Set("TrustServerCertificate", "true")
