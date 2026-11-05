@@ -322,3 +322,44 @@ func TestSeedSQLiteWhileWriting(t *testing.T) {
 		t.Errorf("%d users after the capture, want the 2 of the pristine copy", n)
 	}
 }
+
+// The comparison of the working database with the copy just made only
+// warns: a working database that cannot be read then fails no seed, and
+// the record of the sound copy is written.
+func TestSeedWarnsWhenWorkingUnreadable(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	file := filepath.Join(root, "app.sqlite")
+	db, err := sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT); INSERT INTO users (email) VALUES ('a@x')"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		State: map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite"}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chaos.At = func(point string) {
+		if point == "state.sqlite.seed" {
+			if err := os.WriteFile(file, bytes.Repeat([]byte("not a database "), 512), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { chaos.At = nil })
+	var out bytes.Buffer
+	if err := Seed(context.Background(), p, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed: %v\n%s", err, out.String())
+	}
+	chaos.At = nil
+	if !strings.Contains(out.String(), "warning: db: the working database could not be compared with the pristine copy just made") {
+		t.Errorf("no warning:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "pristine copy of db: ") {
+		t.Errorf("no record of the copy:\n%s", out.String())
+	}
+}

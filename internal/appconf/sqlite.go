@@ -44,17 +44,33 @@ func isSQLiteValue(v string) bool {
 // other DSN.
 func sqliteValue(v string) (p parts, ok bool, err error) {
 	scheme, _, found := strings.Cut(v, ":")
-	if !found || !isScheme(scheme) {
+	if !found || !isScheme(scheme) || mysqlNetwork(v) {
 		return parts{}, false, nil
 	}
 	if !sqliteScheme(scheme) {
-		if _, other := driverName(scheme); other != "" && !strings.Contains(v, "://") && !isDriverForm(v) {
+		if _, other := driverName(scheme); other != "" && !strings.Contains(v, "://") {
 			return parts{other: other}, true, nil
 		}
 		return parts{}, false, nil
 	}
 	p, err = fromSQLiteValue(v)
 	return p, true, err
+}
+
+// mysqlNetwork reports the MySQL driver's own form: a user (which may read
+// like a scheme, sqlite:… or oauth2:…) before an @ and a network address.
+// file:data@/app.db stays an SQLite file.
+func mysqlNetwork(v string) bool {
+	at := strings.LastIndexByte(v, '@')
+	if at < 0 {
+		return false
+	}
+	for _, n := range []string{"tcp(", "tcp4(", "tcp6(", "unix("} {
+		if strings.HasPrefix(v[at+1:], n) {
+			return true
+		}
+	}
+	return false
 }
 
 // isScheme reports a URL scheme: a letter, then letters, digits, + - and
