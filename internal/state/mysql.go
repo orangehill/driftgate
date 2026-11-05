@@ -1078,7 +1078,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, def); err != nil {
+		if _, err := c.ExecContext(ctx, recreate(def)); err != nil {
 			return fmt.Errorf("%s: %w", t, err)
 		}
 	}

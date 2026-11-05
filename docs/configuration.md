@@ -443,6 +443,12 @@ anything else through commands.
   otherwise the capture stops with exit 3 and says so: run `driftgate
   seed`, and when the message names the baseline, `driftgate verify
   --baseline <name> --migrate-state` (see [verify](commands.md#verify)).
+- MySQL 8: a column that takes its table's collation without naming it
+  (`utf8mb3_unicode_ci` in a Laravel 5.5 table) keeps it that way through a
+  seed and a restore. Up to v1.0.2 the copy named it, so the copy printed
+  `CHARACTER SET … COLLATE …` and a restore stopped with "left 1 items
+  different from the pristine copy"; a pristine copy seeded by those
+  releases needs one `driftgate seed`.
 
 #### Database DSNs
 

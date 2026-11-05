@@ -471,3 +471,114 @@ func TestPurgeCrash(t *testing.T) {
 		}
 	}
 }
+
+// TestMySQLImplicitCollation: a column that takes its table's collation
+// without naming it (a Laravel 5.5 table, utf8 and utf8_unicode_ci, and a
+// column a migration added) keeps its definition through a seed and a
+// restore. MySQL 8 prints it as COLLATE utf8mb3_unicode_ci, and that text
+// run as it is made the copy's column print as CHARACTER SET utf8mb3
+// COLLATE utf8mb3_unicode_ci: the restore left the table different from
+// the pristine record. A real change of a column's collation still shows.
+func TestMySQLImplicitCollation(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) { testMySQLImplicitCollation(t, dsn) })
+	}
+}
+
+func testMySQLImplicitCollation(t *testing.T, dsn string) {
+	ctx := context.Background()
+	work, pristine := "dgt_icoll", "dgt_icoll_pristine"
+	root := mysqlAdmin(t, dsn, "")
+	mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work+" CHARACTER SET utf8 COLLATE utf8_unicode_ci")
+	t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+	db := mysqlAdmin(t, dsn, work)
+	mustExec(t, db,
+		"CREATE TABLE user_has_roles (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, user_id INT UNSIGNED NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE 'utf8_unicode_ci'",
+		"ALTER TABLE user_has_roles ADD role VARCHAR(255) NULL",
+		// Named, so explicit: it stays so.
+		"ALTER TABLE user_has_roles ADD scope VARCHAR(255) CHARACTER SET utf8 COLLATE utf8_unicode_ci NULL",
+		"ALTER TABLE user_has_roles ADD kind ENUM('a COLLATE utf8mb3_unicode_ci', 'b''c') NULL",
+		"INSERT INTO user_has_roles (user_id, role, scope, kind) VALUES (1, 'admin', 'all', 'b''c'), (2, 'editor', 'news', NULL)",
+	)
+	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	defs := func(db string) string {
+		t.Helper()
+		c, err := root.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		def, err := showCreate(ctx, c, "TABLE", db, "user_has_roles")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return def
+	}
+	before := defs(work)
+	if err := m.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := defs(pristine); got != before {
+		t.Fatalf("pristine copy:\n%s\nworking:\n%s", got, before)
+	}
+	fp0 := samePristine(t, m) // as the seed records it
+	for _, change := range []string{
+		"UPDATE user_has_roles SET role = 'owner' WHERE id = 1",
+		"ALTER TABLE user_has_roles MODIFY role VARCHAR(255) COLLATE utf8_general_ci NULL",
+		"ALTER TABLE user_has_roles MODIFY role VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL",
+		"ALTER TABLE user_has_roles MODIFY scope VARCHAR(255) COLLATE utf8_bin NULL",
+	} {
+		mustExec(t, db, change)
+		changed := Diff(fp0, mustFingerprint(t, m))
+		if !reflect.DeepEqual(changed, []string{"table:user_has_roles"}) {
+			t.Fatalf("%s: changed %v", change, changed)
+		}
+		if err := m.Restore(ctx, changed); err != nil {
+			t.Fatalf("%s: %v", change, err)
+		}
+		if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+			t.Fatalf("%s: after the restore %v:\n%s\nwas:\n%s", change, d, defs(work), before)
+		}
+	}
+}
+
+// TestRecreate: only a column's COLLATE that is the table's collation,
+// without CHARACTER SET, is left out; nothing in quotes or parentheses.
+func TestRecreate(t *testing.T) {
+	const tail = "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci"
+	for _, c := range []struct{ def, want string }{
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci DEFAULT NULL" + tail,
+			"CREATE TABLE `t` (\n  `a` varchar(255) DEFAULT NULL" + tail},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci,\n  `b` text COLLATE utf8mb3_unicode_ci" + tail,
+			"CREATE TABLE `t` (\n  `a` varchar(255),\n  `b` text" + tail},
+		// Named: kept.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL" + tail, ""},
+		// Another collation, or a longer name: kept.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_bin DEFAULT NULL" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci_x DEFAULT NULL" + tail, ""},
+		// In an enum value, a default, a comment, an expression, a name.
+		{"CREATE TABLE `t` (\n  `a` enum('x'' COLLATE utf8mb3_unicode_ci','y\\\\') CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` enum('x\\\\',' COLLATE utf8mb3_unicode_ci') COLLATE utf8mb3_unicode_ci" + tail,
+			"CREATE TABLE `t` (\n  `a` enum('x\\\\',' COLLATE utf8mb3_unicode_ci')" + tail},
+		{"CREATE TABLE `t` (\n  `a` int DEFAULT NULL COMMENT 'x COLLATE utf8mb3_unicode_ci'" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(5) GENERATED ALWAYS AS ((_utf8mb3'a' COLLATE utf8mb3_unicode_ci)) VIRTUAL" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a COLLATE utf8mb3_unicode_ci` int" + tail, ""},
+		// No collation among the table's options (MySQL 5.7 prints none for
+		// a character set's default), or one only in its comment.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3", ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COMMENT='COLLATE=utf8mb3_unicode_ci'", ""},
+	} {
+		want := c.want
+		if want == "" {
+			want = c.def
+		}
+		if got := recreate(c.def); got != want {
+			t.Errorf("recreate(%q)\n= %q\nwant %q", c.def, got, want)
+		}
+	}
+}

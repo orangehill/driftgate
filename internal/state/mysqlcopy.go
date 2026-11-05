@@ -254,7 +254,7 @@ func (m *MySQL) copyOne(ctx context.Context, c *sql.Conn, src, dst string, j tab
 		if err := dropObject(ctx, c, dst, t, "table"); err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, j.sdef); err != nil {
+		if _, err := c.ExecContext(ctx, recreate(j.sdef)); err != nil {
 			return fmt.Errorf("%s: %w", t, err)
 		}
 	}
@@ -265,6 +265,95 @@ func (m *MySQL) copyOne(ctx context.Context, c *sql.Conn, src, dst string, j tab
 		return err
 	}
 	return analyze(ctx, c, dst, t)
+}
+
+// recreate returns the statement that makes a table again from its SHOW
+// CREATE TABLE, so the new table prints the same. MySQL 8 marks a column
+// whose collation a statement names, and prints it as CHARACTER SET cs
+// COLLATE x; a column that takes the table's collation without naming it
+// prints as COLLATE x when x is not its character set's default. Run as
+// printed, that COLLATE names the collation: the copy's column then prints
+// with CHARACTER SET, and its fingerprint differs from the source's
+// (measured on MySQL 8.0 and 8.4; a restore left the table different from
+// the pristine copy's record). So a column's COLLATE that is the table's
+// own collation, without a CHARACTER SET before it, is left out: the column
+// takes the same collation from the table. Nothing in quotes, backquotes or
+// parentheses (enum values, defaults, comments, expressions) is changed;
+// MariaDB, which marks no column, never prints such a COLLATE.
+func recreate(def string) string {
+	type word struct {
+		s          string
+		start, end int
+		depth      int
+	}
+	var words []word
+	depth := 0
+	for i := 0; i < len(def); {
+		switch ch := def[i]; {
+		case ch == '\'' || ch == '"' || ch == '`':
+			// SHOW CREATE TABLE doubles a quote in a string and escapes a
+			// backslash with one (the session has no NO_BACKSLASH_ESCAPES).
+			for i++; i < len(def); i++ {
+				if def[i] == '\\' && ch != '`' {
+					i++
+				} else if def[i] == ch {
+					if i+1 < len(def) && def[i+1] == ch {
+						i++
+						continue
+					}
+					break
+				}
+			}
+			i++
+		case ch == '(':
+			depth++
+			i++
+		case ch == ')':
+			depth--
+			i++
+		case ch == '_' || ch == '$' || ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z':
+			j := i
+			for j < len(def) && (def[j] == '_' || def[j] == '$' || def[j] >= '0' && def[j] <= '9' || def[j] >= 'a' && def[j] <= 'z' || def[j] >= 'A' && def[j] <= 'Z') {
+				j++
+			}
+			words = append(words, word{def[i:j], i, j, depth})
+			i = j
+		default:
+			i++
+		}
+	}
+	// The table's collation: COLLATE=x among its options, after the columns.
+	table := ""
+	for k, w := range words {
+		if w.depth == 0 && w.s == "COLLATE" && k+1 < len(words) && words[k+1].start == w.end+1 && def[w.end] == '=' {
+			table = words[k+1].s
+		}
+	}
+	if table == "" {
+		return def
+	}
+	var b strings.Builder
+	last := 0
+	for k, w := range words {
+		if w.depth != 1 || w.s != "COLLATE" || k+1 >= len(words) || k < 3 {
+			continue
+		}
+		x := words[k+1]
+		if x.s != table || x.depth != 1 || x.start != w.end+1 || def[w.end] != ' ' || def[w.start-1] != ' ' ||
+			x.end < len(def) && !strings.ContainsRune(" ,\n", rune(def[x.end])) {
+			continue
+		}
+		if words[k-2].s == "SET" && words[k-3].s == "CHARACTER" {
+			continue
+		}
+		b.WriteString(def[last : w.start-1])
+		last = x.end
+	}
+	if last == 0 {
+		return def
+	}
+	b.WriteString(def[last:])
+	return b.String()
 }
 
 // analyze makes InnoDB compute the table's statistics now. TRUNCATE and
