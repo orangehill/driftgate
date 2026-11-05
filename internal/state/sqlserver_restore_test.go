@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -1844,11 +1845,13 @@ func TestSQLServerEndedSessions(t *testing.T) {
 					}
 					waitSessions(t, s, app)
 					items := Diff(mustSQLServerFingerprint(t, s), p) // DriftGate's pool and pinned connection in it
-					if err := s.Restore(ctx, items); err != nil {
+					var err error
+					seen := sessionsDuring(t, s, func() { err = s.Restore(ctx, items) })
+					if err != nil {
 						t.Fatal(err)
 					}
 					if got := s.EndedSessions(); got != app {
-						t.Fatalf("%d: %d sessions ended, want the application's %d", i, got, app)
+						t.Fatalf("%d: %d sessions ended, want the application's %d; sessions of other programs in the database during the restore: %s", i, got, app, strings.Join(seen, "; "))
 					}
 				}
 			})
@@ -1856,13 +1859,24 @@ func TestSQLServerEndedSessions(t *testing.T) {
 	}
 }
 
+// ssOthersSQL selects the user sessions in database @p1 that countSessions
+// counts: all but this process's DriftGate's (@p2, @p3).
+const ssOthersSQL = `FROM sys.dm_exec_sessions x LEFT JOIN sys.dm_exec_requests r ON r.session_id = x.session_id
+	WHERE x.database_id = DB_ID(@p1) AND x.session_id <> @@SPID AND x.is_user_process = 1
+	AND NOT (x.program_name = @p2 AND x.host_process_id = @p3)`
+
 // waitSessions waits until the working database has n user sessions that
-// are not DriftGate's (the ones the test closed have logged out).
+// countSessions counts (the ones the test closed have logged out).
 func waitSessions(t *testing.T, s *SQLServer, n int) {
 	t.Helper()
 	master := sqlServerTestDB(t, s.o.DSN, "")
 	for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
-		got := sqlServerInt(t, master, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = DB_ID(N'"+s.o.Working+"') AND is_user_process = 1 AND program_name <> N'"+sqlServerAppName+"'")
+		var got int64
+		if err := RetryInTransition(func() error {
+			return master.QueryRow("SELECT COUNT(*) "+ssOthersSQL, s.o.Working, sqlServerAppName, os.Getpid()).Scan(&got)
+		}); err != nil {
+			t.Fatal(err)
+		}
 		if got == int64(n) {
 			return
 		}
@@ -1870,6 +1884,46 @@ func waitSessions(t *testing.T, s *SQLServer, n int) {
 			t.Fatalf("%d sessions in the working database, want %d", got, n)
 		}
 	}
+}
+
+// sessionsDuring runs f and returns the sessions countSessions would count
+// that were in the working database meanwhile, each once with what it was
+// doing: what a count that is not the application's was made of.
+func sessionsDuring(t *testing.T, s *SQLServer, f func()) []string {
+	t.Helper()
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	master.SetMaxOpenConns(1)
+	if err := master.Ping(); err != nil { // logged in before f
+		t.Fatal(err)
+	}
+	stop, done := make(chan struct{}), make(chan []string)
+	go func() {
+		seen := map[string]bool{}
+		var out []string
+		for {
+			if rows, err := master.Query(`SELECT CONCAT(x.session_id, N' ', CONVERT(varchar(30), x.login_time, 121), N' program ', ISNULL(x.program_name, N'NULL'),
+				N' pid ', ISNULL(CAST(x.host_process_id AS nvarchar(12)), N'NULL'), N' ', x.status, N' ', ISNULL(r.command, N'idle')) `+ssOthersSQL,
+				s.o.Working, sqlServerAppName, os.Getpid()); err == nil {
+				for rows.Next() {
+					var v string
+					if rows.Scan(&v) == nil && !seen[v] {
+						seen[v] = true
+						out = append(out, v)
+					}
+				}
+				rows.Close()
+			}
+			select {
+			case <-stop:
+				done <- out
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+	f()
+	close(stop)
+	return <-done
 }
 
 // TestSQLServerEndedSessionsOnce: a session counted by a run of a restore
