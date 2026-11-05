@@ -87,15 +87,7 @@ func runFormat(parts []string, before, after string, grow bool) string {
 	for _, p := range parts {
 		lo, hi = min(lo, len(p)), max(hi, len(p))
 	}
-	width := func() string {
-		switch {
-		case lo == hi && lo == 1:
-			return ""
-		case lo == hi:
-			return fmt.Sprintf("{%d}", lo)
-		}
-		return fmt.Sprintf("{%d,%d}", lo, hi)
-	}
+	width := func() string { return widths(lo, hi) }
 	letters := true
 	for _, p := range parts {
 		letters = letters && !strings.ContainsAny(p, "0123456789")
@@ -217,7 +209,7 @@ func digitsIn(word string) string {
 		case n == 1:
 			b.WriteString(`\d`)
 		default:
-			fmt.Fprintf(&b, `\d{%d}`, n)
+			b.WriteString(`\d` + widths(n, n))
 		}
 		last = m[1]
 	}
@@ -382,18 +374,44 @@ func Pattern(values []string) string {
 		}
 	}
 	p := b.String()
-	re := regexp.MustCompile("^(?:" + p + ")$")
+	exact := func() string {
+		quoted := make([]string, len(values))
+		for i, v := range values {
+			quoted[i] = regexp.QuoteMeta(v)
+		}
+		return strings.Join(quoted, "|")
+	}
+	// The format is built from the values, which come from responses: one
+	// the regexp package cannot compile is never proposed (and never
+	// panics); the values themselves are.
+	re, err := regexp.Compile("^(?:" + p + ")$")
+	if err != nil {
+		return exact()
+	}
 	for _, v := range values {
 		if !re.MatchString(v) {
 			// Should not happen; never propose a format that rejects a seen value.
-			quoted := make([]string, len(values))
-			for i, v := range values {
-				quoted[i] = regexp.QuoteMeta(v)
-			}
-			return strings.Join(quoted, "|")
+			return exact()
 		}
 	}
 	return p
+}
+
+// maxRepeat is the largest count the regexp package takes in {n,m}.
+const maxRepeat = 1000
+
+// widths is the count of a class for runs of lo to hi characters: none for
+// one, {n} or {lo,hi}, and + past what a regular expression can count.
+func widths(lo, hi int) string {
+	switch {
+	case hi > maxRepeat:
+		return "+"
+	case lo == hi && lo == 1:
+		return ""
+	case lo == hi:
+		return fmt.Sprintf("{%d}", lo)
+	}
+	return fmt.Sprintf("{%d,%d}", lo, hi)
 }
 
 var (
@@ -520,7 +538,7 @@ func byKind(parts []string, timey bool) string {
 			if len(col[0]) == 1 {
 				b.WriteString(`\d`)
 			} else {
-				fmt.Fprintf(&b, `\d{%d}`, len(col[0]))
+				b.WriteString(`\d` + widths(len(col[0]), len(col[0])))
 			}
 		case equal:
 			b.WriteString(regexp.QuoteMeta(col[0]))

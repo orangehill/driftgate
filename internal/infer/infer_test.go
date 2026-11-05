@@ -158,3 +158,27 @@ func TestPatternNarrow(t *testing.T) {
 		}
 	}
 }
+
+// TestPatternLong: a run longer than a regular expression can count (1000)
+// takes as many as it needs; Pattern never panics on what responses hold.
+func TestPatternLong(t *testing.T) {
+	for name, vals := range map[string][]string{
+		"hex":           {"sig " + strings.Repeat("a1", 600), "sig " + strings.Repeat("b2", 600)},
+		"digits":        {"n " + strings.Repeat("1", 1200), "n " + strings.Repeat("2", 1200)},
+		"letters":       {strings.Repeat("aZ", 600) + "-x", strings.Repeat("bY", 600) + "-x"},
+		"digits 5-1200": {"x 1 " + strings.Repeat("1", 1200), "x 2 " + strings.Repeat("2", 5)},
+		"equal digits":  {"a" + strings.Repeat("7", 1200) + "Z x", "a" + strings.Repeat("7", 1200) + "Z y"},
+	} {
+		p := Pattern(vals)
+		re, err := regexp.Compile("^(?:" + p + ")$")
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		for _, v := range vals {
+			if !re.MatchString(v) {
+				t.Errorf("%s: %s rejects a sample", name, p)
+			}
+		}
+	}
+}
