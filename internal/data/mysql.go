@@ -169,7 +169,7 @@ func (d mysqlDialect) schema(ctx context.Context, c *sql.Conn, db string) (*Sche
 		if err != nil {
 			return nil, err
 		}
-		t.create = []string{"DROP TABLE IF EXISTS " + t.quoted, def}
+		t.create = []string{"DROP TABLE IF EXISTS " + t.quoted, dbx.MySQLCreateTable(def)}
 	}
 	for _, name := range sequences {
 		def, err := dbx.ShowCreateSQL(ctx, c, "SEQUENCE", db, name, false)

@@ -448,6 +448,27 @@ anything else through commands.
   otherwise the capture stops with exit 3 and says so: run `driftgate
   seed`, and when the message names the baseline, `driftgate verify
   --baseline <name> --migrate-state` (see [verify](commands.md#verify)).
+- MySQL 8: a column that takes its table's collation without naming it
+  (any such column of a table whose collation is not its character set's
+  default, as `utf8mb3_unicode_ci` in a Laravel 5.5 table) keeps it that
+  way through a seed and a restore. Up to v1.0.2 the copy named it, so the
+  copy printed `CHARACTER SET … COLLATE …` and a restore stopped with "left
+  1 items different from the pristine copy"; the message then adds that the
+  pristine copy no longer matches its record. That restore has already
+  rewritten the working tables from the copy, so re-create the working
+  database (migrations or your dump), then run `driftgate seed`.
+- MySQL/MariaDB in a container: start the server with
+  `--skip-name-resolve` (compose: `command: --skip-name-resolve`). Without it
+  the server looks up the name of every client that connects, and a slow
+  lookup makes each connection slow (measured: fingerprints of 622 requests
+  took 29 minutes, 45 seconds with it). The official images set it in a
+  file a project's own mounted configuration can replace: `mysql` in
+  `/etc/my.cnf`, `mariadb` in `/etc/mysql/mariadb.conf.d/05-skipcache.cnf`. Accounts are then matched by address
+  (`'app'@'%'`), not by host name.
+- MySQL/MariaDB: DriftGate keeps up to 12 connections per database
+  component open for the whole command, so fingerprints and restores do not
+  connect again (3 components: 36, against the default `max_connections`
+  of 151, MariaDB 10.3: 100).
 
 #### Database DSNs
 

@@ -103,6 +103,12 @@ func NewMySQL(o Options) (*MySQL, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The connections a fingerprint or a restore uses at the same time
+	// (checksums, copyTables' connections, each with rowDiff's two of its
+	// own) stay open for the next one, until the component is closed at the
+	// end of the command: a new connection costs a server that resolves the
+	// client's name a reverse DNS lookup (database/sql keeps 2 by default).
+	db.SetMaxIdleConns(copyConns * 3)
 	return &MySQL{o: o, db: db}, nil
 }
 
@@ -472,6 +478,16 @@ func (m *MySQL) FingerprintAs(ctx context.Context, format int, items []string) (
 	}
 	defer c.Close()
 	return m.fingerprintAs(ctx, c, m.o.Working, items, format)
+}
+
+// PristineFingerprint hashes items of the pristine database.
+func (m *MySQL) PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error) {
+	c, err := m.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return m.fingerprint(ctx, c, m.o.Pristine, items)
 }
 
 func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string) (Fingerprint, error) {
@@ -1078,7 +1094,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, def); err != nil {
+		if _, err := c.ExecContext(ctx, dbx.MySQLCreateTable(def)); err != nil {
 			return fmt.Errorf("%s: %w", t, err)
 		}
 	}
