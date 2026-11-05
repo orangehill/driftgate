@@ -47,11 +47,12 @@ type word struct {
 const refMark = "\x00"
 
 // redactWords returns every word as it is shown: as written when it holds
-// no secret, its value with the secrets as *** otherwise.
+// no secret, its value with the secrets as *** otherwise. What a word means
+// depends on the words of its command before it, which a command keeps as
+// it goes (linear in the words).
 func redactWords(ws []word) []string {
 	out := make([]string, len(ws))
-	start := 0 // the first word of the simple command
-	var prev *word
+	var c command
 	for i := range ws {
 		w := &ws[i]
 		out[i] = w.raw
@@ -60,40 +61,54 @@ func redactWords(ws []word) []string {
 		}
 		if w.op {
 			if w.value != "<" && w.value != ">" && w.value != ">>" {
-				start = i + 1
+				c = command{}
+			} else {
+				c.prev = ""
 			}
-			prev = nil
 			continue
 		}
-		cmd := words(ws[start:i])
 		v := w.value
 		var shown string
-		if isScript(cmd) {
+		if c.script() {
 			shown = redactScript(strings.ReplaceAll(v, refMark, "$"))
 		} else {
-			p := ""
-			if prev != nil {
-				p = prev.value
-			}
-			shown = redactWord(cmd, p, v)
+			shown = redactWord(&c, v)
 		}
 		if shown != v {
 			out[i] = render(w, shown)
 		}
-		prev = w
+		c.add(v)
 	}
 	return out
 }
 
-// words are the values of the words, without spaces and operators.
-func words(ws []word) []string {
-	var out []string
-	for _, w := range ws {
-		if !w.space && !w.op {
-			out = append(out, w.value)
-		}
+// command is what the words of a simple command so far say about the next
+// one.
+type command struct {
+	prev string // the word just before, "" after a redirection
+	// prog is the nearest program with a -p of its own meaning (program).
+	prog  string
+	redis bool // redis-cli is one of the words
+	// shell: a shell is one of the words before prev (sh … -c, script);
+	// shellNow: one of them all.
+	shell, shellNow bool
+}
+
+func (c *command) add(v string) {
+	b := filepath.Base(v)
+	if portP[b] || flagP[b] || passwordP[b] {
+		c.prog = b
 	}
-	return out
+	c.redis = c.redis || b == "redis-cli"
+	c.shell = c.shellNow
+	c.shellNow = c.shellNow || shells[b]
+	c.prev = v
+}
+
+// script reports whether the next word is a script a shell runs: sh -c,
+// bash -lc, docker exec x sh -c.
+func (c *command) script() bool {
+	return c.shell && scriptFlag().MatchString(c.prev)
 }
 
 // render shows a word whose value changed: plain in an argument of its own
@@ -110,21 +125,6 @@ func render(w *word, v string) string {
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "su": true}
 
 var scriptFlag = lazy.Regexp(`^-[a-z]*c[a-z]*$`)
-
-// isScript reports whether the next word of the command (the words before
-// it) is a script a shell runs: sh -c, bash -lc, docker exec x sh -c.
-func isScript(cmd []string) bool {
-	n := len(cmd)
-	if n < 2 || !scriptFlag().MatchString(cmd[n-1]) {
-		return false
-	}
-	for _, a := range cmd[:n-1] {
-		if shells[filepath.Base(a)] {
-			return true
-		}
-	}
-	return false
-}
 
 // redactScript shows a shell script with its secrets as ***.
 func redactScript(s string) string {
@@ -288,43 +288,23 @@ var (
 	port      = lazy.Regexp(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?(?::[0-9]+(?:-[0-9]+)?)?(?:/(?:tcp|udp|sctp))?$`)
 )
 
-// program is the nearest program of the command before the word with
-// a -p of its own meaning, or "".
-func program(cmd []string) string {
-	for i := len(cmd) - 1; i >= 0; i-- {
-		if b := filepath.Base(cmd[i]); portP[b] || flagP[b] || passwordP[b] {
-			return b
-		}
-	}
-	return ""
-}
-
-func has(cmd []string, prog string) bool {
-	for _, a := range cmd {
-		if filepath.Base(a) == prog {
-			return true
-		}
-	}
-	return false
-}
-
 // consoleCommand is a framework console's command (key:generate,
 // secrets:list), after artisan or console.
 var consoleCommand = lazy.Regexp(`^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$`)
 
-// redactWord shows a word's value with its secrets as ***; cmd are the
-// words of the command before it, prev the one just before it.
-func redactWord(cmd []string, prev, v string) string {
+// redactWord shows a word's value with its secrets as ***, after the words
+// of its command so far (c).
+func redactWord(c *command, v string) string {
+	prev, prog := c.prev, c.prog
 	if p := filepath.Base(prev); (p == "artisan" || p == "console") && consoleCommand().MatchString(v) {
 		return v
 	}
-	prog := program(cmd)
 	switch {
 	case prev == "-p" && flagP[prog]:
 	case prev == "-p" && portP[prog] && port().MatchString(v):
 	case prev == "-p" || prev == "-P":
 		return hide(v)
-	case prev == "-a" && has(cmd, "redis-cli"):
+	case prev == "-a" && c.redis:
 		return hide(v)
 	case optionName().MatchString(prev) && isSecretName(prev):
 		return hide(v)
