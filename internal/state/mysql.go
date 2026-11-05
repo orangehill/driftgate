@@ -1094,7 +1094,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, recreate(def)); err != nil {
+		if _, err := c.ExecContext(ctx, dbx.MySQLCreateTable(def)); err != nil {
 			return fmt.Errorf("%s: %w", t, err)
 		}
 	}
