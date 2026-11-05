@@ -597,12 +597,34 @@ func TestProjectRootsInHome(t *testing.T) {
 		// An absolute path would name the user: not recorded.
 		"/Users/Jane Doe/Sites/shop": "",
 		"/home/Jane Doe/work/shop":   "",
-		"/data/home/jane/src/shop":   "",
 		"/data/home/janet/src/shop":  "/data/home/janet/src/shop",
 	} {
 		got := projectRoots(root)
 		if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
 			t.Errorf("%s: %v, want %q", root, got, want)
 		}
+	}
+	// This machine's home of another form ($HOME): ~/…; with white
+	// space: not recorded.
+	for home, want := range map[string]string{"/data/home/jane": "~/src/shop", "/var/lib/jenkins": "~/src/shop", "/data/home/Jane Doe": ""} {
+		t.Setenv("HOME", home)
+		got := projectRoots(home + "/src/shop")
+		if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
+			t.Errorf("HOME %s: %v, want %q", home, got, want)
+		}
+	}
+	// A home that is a link (to /nfs/home/<name>): the real path of the
+	// project is in its real path, also ~/….
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "jane")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(real, "src", "shop"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", link)
+	if got := projectRoots(filepath.Join(link, "src", "shop")); len(got) != 1 || got[0] != "~/src/shop" {
+		t.Errorf("home that is a link: %v", got)
 	}
 }

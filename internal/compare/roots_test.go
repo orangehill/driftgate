@@ -2,6 +2,7 @@ package compare
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -119,6 +120,19 @@ func TestRootsInHome(t *testing.T) {
 		b.Roots, cs.Roots = []string{"~/Sites/shop"}, []string{"/srv/other"}
 		if ds := both(t, nil, b, cs); len(ds) == 0 {
 			t.Errorf("%s taken for the project's folder", body)
+		}
+	}
+	// A service account's home of another form (Jenkins) is this
+	// machine's: a capture there recorded its folder as ~/….
+	if runtime.GOOS != "windows" {
+		t.Setenv("HOME", "/var/lib/jenkins")
+		b, cs := side(200, jsonType, trace("/Users/alice/Sites/shop")), side(200, jsonType, trace("/var/lib/jenkins/jobs/shop"))
+		b.Roots, cs.Roots = []string{"~/Sites/shop"}, []string{"~/jobs/shop"}
+		if ds := both(t, nil, b, cs); len(ds) != 0 {
+			t.Errorf("Jenkins' home: %+v", ds)
+		}
+		if rest, in := HomeRelative("/var/lib/jenkins/jobs/shop"); !in || rest != "/jobs/shop" {
+			t.Errorf("HomeRelative in Jenkins' home: %q %v", rest, in)
 		}
 	}
 	forms := rootForms([]string{`~\src\shop`})

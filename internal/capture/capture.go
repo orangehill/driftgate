@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -453,25 +452,14 @@ func projectRoots(root string) []string {
 var homeSpaced = regexp.MustCompile(`(?i)^(?:/(?:Users|home)/|/mnt/[a-z]/Users/|[a-z]:\\Users\\)[^/\\]*\s`)
 
 // namesUser reports a folder not recorded as ~/… whose absolute path
-// would name the user: in a home folder whose name has a space, or in the
-// home folder of this user ($HOME) in a form the comparison does not know
-// (/data/home/jane). It is not recorded: meta.json goes into the
-// repository with baselines: git. Its traces are then compared as they
-// are, which can only make a difference, never hide one.
+// would name the user: in a home folder whose name has a space, or in
+// this machine's own home when HomeRelative cannot write it as ~/… (a
+// home with white space). It is not recorded:
+// meta.json goes into the repository with baselines: git. Its traces are
+// then compared as they are, which can only make a difference, never hide
+// one.
 func namesUser(folder string) bool {
-	if homeSpaced.MatchString(folder) {
-		return true
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" || home == "/" {
-		return false
-	}
-	home = strings.TrimRight(home, `/\`)
-	f, h := folder, home
-	if runtime.GOOS != "linux" {
-		f, h = strings.ToLower(f), strings.ToLower(h)
-	}
-	return f == h || strings.HasPrefix(f, h+"/") || strings.HasPrefix(f, h+`\`)
+	return homeSpaced.MatchString(folder) || compare.InLocalHome(folder)
 }
 
 // asidePrefix starts the name of a previous capture of tag moved aside; it
