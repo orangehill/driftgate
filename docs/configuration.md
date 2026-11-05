@@ -322,14 +322,16 @@ folder itself and one name in it are not recorded (their path names the
 user, and a record of them would take any path of any home folder, or a
 URL's, for the project's): their traces are compared as they are. The
 home folder of the machine that captures (`$HOME`) is a person's when it
-is outside the system's folders (`/nfs/home/<name>`, `/data/home/<name>`),
+is outside the system's folders, or in their `home` folder, and of two
+names or more (`/nfs/home/<name>`, `/data/home/<name>`, `/var/home/<name>`),
 and so is the real path of a home of those forms linked elsewhere
 (`/home/<name>` to `/nfs/home/<name>`): a folder there is recorded as
 `~/…` too, and `compare` on that machine takes that home for one (on
 another machine its traces may then differ, never hide a difference). A
 home whose name has a space is left out: its folders are not recorded. A
-folder elsewhere (a container's `/srv/…`, a service account's home under
-`/var`, `/srv`, `/opt` or `/usr`, such as `/var/lib/jenkins/…`) is
+folder elsewhere (a container's `/srv/…` or a home of one name such as
+`/app`, a service account's home under `/var`, `/srv`, `/opt` or `/usr`,
+such as `/var/lib/jenkins/…`) is
 recorded as it is, absolute, and compares on any machine. A debug
 error page or JSON writes the application's folder into its stack trace
 (Laravel with `APP_DEBUG`): two checkouts of the project (the main

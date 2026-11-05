@@ -612,6 +612,8 @@ func TestProjectRootsInHome(t *testing.T) {
 		"/nfs/home/jane":      {"/nfs/home/jane/src/shop", "~/src/shop"},
 		"/var/lib/jenkins":    {"/var/lib/jenkins/jobs/shop", "/var/lib/jenkins/jobs/shop"},
 		"/srv/app":            {"/srv/app", "/srv/app"},
+		"/var/home/jane":      {"/var/home/jane/src/shop", "~/src/shop"},
+		"/app":                {"/app/shop", "/app/shop"},
 		"/data/home/Jane Doe": {"/data/home/Jane Doe/src/shop", ""},
 	} {
 		t.Setenv("HOME", home)

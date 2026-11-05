@@ -100,7 +100,9 @@ func localHomesOf(h, real string) []string {
 	}
 	var out []string
 	for _, x := range []string{h, real} {
-		if len(restNames(x)) == 0 || strings.ContainsAny(x, " \t") || homeStart().MatchString(x) || slices.Contains(out, x) {
+		// A home of one name (a container's /app, /code) names no
+		// person, and is also a URL's path: recorded as it is.
+		if len(restNames(x)) < 2 || strings.ContainsAny(x, " \t") || homeStart().MatchString(x) || slices.Contains(out, x) {
 			continue
 		}
 		out = append(out, x)
@@ -113,7 +115,13 @@ func localHomesOf(h, real string) []string {
 func systemHome(h string) bool {
 	h = strings.ReplaceAll(h, `\`, "/")
 	for _, p := range []string{"/var/", "/srv/", "/opt/", "/usr/"} {
-		if strings.HasPrefix(h, p) || h+"/" == p {
+		if rest, ok := strings.CutPrefix(h, p); ok {
+			// /var/home/<name> (Fedora Silverblue), /usr/home/<name>
+			// (FreeBSD): a person's.
+			first, _, _ := strings.Cut(rest, "/")
+			return !strings.EqualFold(first, "home") && !strings.EqualFold(first, "Users")
+		}
+		if h+"/" == p {
 			return true
 		}
 	}

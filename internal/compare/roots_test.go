@@ -332,6 +332,9 @@ func TestLocalHomes(t *testing.T) {
 		{"/var/lib/jenkins", "/var/lib/jenkins", nil},
 		{"/srv/app", "/srv/app", nil},
 		{"/data/home/Jane Doe", "/data/home/Jane Doe", nil},
+		{"/var/home/jane", "/var/home/jane", []string{"/var/home/jane"}},
+		{"/usr/home/jane", "/usr/home/jane", []string{"/usr/home/jane"}},
+		{"/app", "/app", nil},
 	} {
 		if got := localHomesOf(c.home, c.real); !slices.Equal(got, c.want) {
 			t.Errorf("%s (%s): %q, want %q", c.home, c.real, got, c.want)
