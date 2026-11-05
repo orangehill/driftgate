@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,4 +148,88 @@ func TestWorkingFollowsTheSetting(t *testing.T) {
 	if _, err := Seeded(context.Background(), p); !errors.Is(err, ErrConfig) || !strings.Contains(err.Error(), "names the database shop_wt42, but working is shop") {
 		t.Errorf("Seeded: %v", err)
 	}
+}
+
+// TestStalePristineHint: a restore that leaves items different says so
+// with a hint when the pristine copy itself no longer matches its record
+// (a pristine copy seeded by an earlier release on MySQL 8), and without
+// one otherwise.
+func TestStalePristineHint(t *testing.T) {
+	servers := os.Getenv("DRIFTGATE_TEST_MYSQL")
+	if servers == "" {
+		t.Skip("DRIFTGATE_TEST_MYSQL not set")
+	}
+	for _, dsn := range strings.Split(servers, ",") {
+		t.Run(dsn[strings.Index(dsn, "@")+1:], func(t *testing.T) {
+			ctx := context.Background()
+			t.Setenv(config.EnvStore, t.TempDir())
+			t.Setenv("DG_STALE_DSN", dsn)
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+				State: map[string]config.Component{"db": {Driver: config.MySQL, DSN: config.Secret{Env: "DG_STALE_DSN"}, Working: "dgt_stale", Pristine: "dgt_stale_pristine"}}}, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, err := dbx.OpenMySQL(dsn, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			exec := func(stmts ...string) {
+				t.Helper()
+				for _, s := range stmts {
+					if _, err := root.Exec(s); err != nil {
+						t.Fatalf("%s: %v", s, err)
+					}
+				}
+			}
+			exec("DROP DATABASE IF EXISTS dgt_stale", "DROP DATABASE IF EXISTS dgt_stale_pristine", "CREATE DATABASE dgt_stale",
+				"CREATE TABLE dgt_stale.news (id INT PRIMARY KEY, title VARCHAR(20))", "INSERT INTO dgt_stale.news VALUES (1, 'a')")
+			t.Cleanup(func() {
+				root.Exec("DROP DATABASE IF EXISTS dgt_stale")
+				root.Exec("DROP DATABASE IF EXISTS dgt_stale_pristine")
+			})
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			restore := func() error {
+				t.Helper()
+				tr, err := newTracker(ctx, p, nil, io.Discard, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tr.close()
+				return tr.restore(ctx)
+			}
+			exec("UPDATE dgt_stale.news SET title = 'b'")
+			if err := restore(); err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			// The pristine copy changed after its record was made.
+			exec("UPDATE dgt_stale_pristine.news SET title = 'c'", "UPDATE dgt_stale.news SET title = 'b'")
+			err = restore()
+			if err == nil || !strings.Contains(err.Error(), "left 1 items different") || !strings.Contains(err.Error(), "re-create the working database") {
+				t.Fatalf("restore from a stale pristine copy: %v", err)
+			}
+		})
+	}
+}
+
+// TestStaleHintMatches: no hint when the pristine copy matches its record.
+func TestStaleHintMatches(t *testing.T) {
+	c := pristineComp{f: state.Fingerprint{"table:a": "1", "table:b": "2"}}
+	if h := staleHint(context.Background(), c, state.Fingerprint{"table:a": "1", "table:b": "3"}, []string{"table:a"}); h != "" {
+		t.Errorf("hint for a matching item: %q", h)
+	}
+	if h := staleHint(context.Background(), c, state.Fingerprint{"table:a": "9"}, []string{"table:a"}); h == "" {
+		t.Error("no hint for a pristine copy that differs from its record")
+	}
+}
+
+type pristineComp struct {
+	state.Component
+	f state.Fingerprint
+}
+
+func (c pristineComp) PristineFingerprint(_ context.Context, items []string) (state.Fingerprint, error) {
+	return c.f.Subset(items), nil
 }

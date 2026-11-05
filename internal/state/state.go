@@ -42,6 +42,13 @@ type Formatter interface {
 	FingerprintAs(ctx context.Context, format int, items []string) (Fingerprint, error)
 }
 
+// PristineFingerprinter is a component that can fingerprint items of its
+// pristine copy, to tell a restore that went wrong from a pristine copy
+// that no longer matches its record.
+type PristineFingerprinter interface {
+	PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error)
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string

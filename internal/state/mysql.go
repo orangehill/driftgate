@@ -483,6 +483,16 @@ func (m *MySQL) FingerprintAs(ctx context.Context, format int, items []string) (
 	return m.fingerprintAs(ctx, c, m.o.Working, items, format)
 }
 
+// PristineFingerprint hashes items of the pristine database.
+func (m *MySQL) PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error) {
+	c, err := m.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return m.fingerprint(ctx, c, m.o.Pristine, items)
+}
+
 func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string) (Fingerprint, error) {
 	return m.fingerprintAs(ctx, c, db, items, FingerprintFormat)
 }

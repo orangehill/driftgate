@@ -364,12 +364,29 @@ func (t *tracker) restore(ctx context.Context) error {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the pristine copy: %v", c.Name(), len(d), limit(d, 20))
+			return envErr("restore of %s left %d items different from the pristine copy: %v%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
 	t.dirty = map[string][]string{}
 	return nil
+}
+
+// staleHint explains a restore that left items different when the
+// pristine copy itself no longer matches its record: a pristine copy seeded
+// by v1.0.2 or earlier on MySQL 8 names column collations the working
+// database left implicit, and its first restore has already rewritten the
+// working tables from it. It is read only on that error path.
+func staleHint(ctx context.Context, c state.Component, record state.Fingerprint, items []string) string {
+	pc, ok := c.(state.PristineFingerprinter)
+	if !ok {
+		return ""
+	}
+	p, err := pc.PristineFingerprint(ctx, items)
+	if err != nil || len(state.Diff(p, record.Subset(items))) == 0 {
+		return ""
+	}
+	return "; the pristine copy no longer matches its record (seeded by an earlier release on MySQL 8?): re-create the working database (migrations or your dump), then run driftgate seed"
 }
 
 // MigrateState proves that the state now is the one a baseline whose
