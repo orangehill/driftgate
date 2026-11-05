@@ -171,6 +171,9 @@ type command struct {
 	ssh                                                              int  // sshNone, sshHost (looking for it), sshRemote
 	sshArg                                                           bool // the next word is an ssh option's argument
 	stdin                                                            bool // a word reads a password from standard input
+	// hideNext: the next word is the value of a secret's name and its =
+	// (password = x, $env:PGPASSWORD = 'x').
+	hideNext bool
 }
 
 const (
@@ -233,9 +236,10 @@ func (c *command) add(v string) {
 var stdinOption = lazy.Regexp(`(?i)^--?[a-z0-9-]*(?:pass|secret|token|key)[a-z0-9-]*-stdin$`)
 
 // script reports whether the next word is a script a shell runs: sh -c,
-// bash -lc, docker exec x sh -c, pwsh -Command, cmd /c.
+// bash -lc, docker exec x sh -c, pwsh -Command, cmd /c, script -qc,
+// nix-shell --run, eval.
 func (c *command) script() bool {
-	return c.shell && scriptFlag().MatchString(c.prev)
+	return c.shell && scriptFlag().MatchString(c.prev) || c.prev == "eval"
 }
 
 // render shows a word whose value changed: plain in an argument of its own
@@ -253,9 +257,9 @@ func render(w *word, v string) string {
 // PowerShell and cmd are read as a POSIX shell would: enough to find an
 // option and its value, an assignment or a connection string in them.
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "su": true,
-	"fish": true, "pwsh": true, "powershell": true, "cmd": true}
+	"fish": true, "pwsh": true, "powershell": true, "cmd": true, "script": true, "nix-shell": true}
 
-var scriptFlag = lazy.Regexp(`(?i)^(?:-[a-z]*c[a-z]*|-command|/[ck])$`)
+var scriptFlag = lazy.Regexp(`(?i)^(?:-[a-z]*c[a-z]*|-command|/[ck]|--run)$`)
 
 // redactScript shows a shell script with its secrets as ***.
 func redactScript(s string, depth int) string {
@@ -441,20 +445,45 @@ func hide(v string) string {
 }
 
 // sqlPassword is a password SQL sets: IDENTIFIED BY '…' (MySQL), PASSWORD
-// '…' (PostgreSQL), PASSWORD = '…' or N'…' (SQL Server), SET PASSWORD =
-// PASSWORD('…').
-var sqlPassword = lazy.Regexp(`(?i)(\bidentified(?:\s+with\s+\S+)?\s+by|\bpassword)((?:\s*=\s*|\s+)(?:password\s*\(\s*)?N?)('(?:[^']|'')*'|"(?:[^"\\]|\\.)*")`)
+// '…', E'…' or $$…$$ (PostgreSQL), PASSWORD = '…' or N'…' (SQL Server),
+// SET PASSWORD [FOR user] = '…' or PASSWORD('…').
+var sqlPassword = lazy.Regexp(`(\bidentified(?:\s+with\s+\S+)?\s+by|\bpassword(?:\s+for\s+\S+)?)((?:\s*=\s*|\s+)(?:password\s*\(\s*)?[ne]?)('(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|\$\$(?:[^$]|\$[^$])*\$\$)`)
 
 // sqlPasswords hides the passwords SQL in a text sets (mysql -e, psql -c,
-// a here-document, tinker's --execute).
+// a here-document, tinker's --execute). sqlPassword is matched in the text
+// in lower case (ASCII only, so every byte stays in its place): a pattern
+// without (?i) is several times faster.
 func sqlPasswords(s string) string {
-	if !strings.ContainsAny(s, "'\"") {
+	if !strings.ContainsAny(s, "'\"$") {
 		return s
 	}
-	if l := strings.ToLower(s); !strings.Contains(l, "password") && !strings.Contains(l, "identified") {
+	l := asciiLower(s)
+	if !strings.Contains(l, "password") && !strings.Contains(l, "identified") {
 		return s
 	}
-	return sqlPassword().ReplaceAllString(s, "${1}${2}***")
+	ms := sqlPassword().FindAllStringSubmatchIndex(l, -1)
+	if ms == nil {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range ms {
+		b.WriteString(s[last:m[6]])
+		b.WriteString("***")
+		last = m[7]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 var (
@@ -474,14 +503,14 @@ var (
 	optionName = lazy.Regexp(`^--?[A-Za-z0-9_-]+$`)
 	// passOption are options of one dash that start like -p with a
 	// password glued to it, whose next argument is the secret.
-	passOption = lazy.Regexp(`^-pass(?:in|out|word)?$`)
+	passOption = lazy.Regexp(`(?i)^-pass(?:in|out|word)?$`)
 )
 
 // programs whose -p takes a port (or a port mapping) or nothing; any other
 // program's -p takes a password.
 var (
 	portP = map[string]bool{"psql": true, "pg_dump": true, "pg_dumpall": true, "pg_restore": true, "pg_isready": true, "createdb": true, "dropdb": true, "redis-cli": true, "docker": true, "podman": true, "ssh": true, "nc": true}
-	flagP = map[string]bool{"mkdir": true}
+	flagP = map[string]bool{"mkdir": true, "cp": true, "rsync": true, "install": true, "tar": true}
 	// passwordP are programs whose -p takes a password, found before the
 	// ones above (docker exec db mysql -p …).
 	passwordP = map[string]bool{"mysql": true, "mysqldump": true, "mysqladmin": true, "mariadb": true, "mariadb-dump": true, "sshpass": true, "sqlcmd": true}
@@ -502,7 +531,19 @@ func redactWord(c *command, v string) string {
 	if strings.HasSuffix(prev, "=") && optionName().MatchString(prev[:len(prev)-1]) {
 		prev = prev[:len(prev)-1] // --password= x
 	}
+	if c.hideNext {
+		c.hideNext = false
+		return hide(v)
+	}
 	switch {
+	case (v == "=" || v == "=>") && assignsSecret(prev):
+		// password = x in a configuration a here-document writes,
+		// $env:PGPASSWORD = 'x' in PowerShell: the value is the next word.
+		c.hideNext = true
+		return v
+	case strings.HasSuffix(prev, ":") && len(prev) > 1 && assignsSecret(prev[:len(prev)-1]):
+		// password: x (YAML), "password": "x" (JSON) over several words
+		return hide(v)
 	case c.redisAuth: // redis-cli AUTH [user] password
 		return hide(v)
 	case c.htBatch && c.htArgs >= 1 && !strings.HasPrefix(v, "-"): // htpasswd -b file user password
@@ -514,10 +555,11 @@ func redactWord(c *command, v string) string {
 	case prev == "-a" && c.redis, prev == "-b" && c.curl, prev == "-k" && c.openssl,
 		(prev == "--body" || prev == "-b") && c.ghSecret:
 		return hide(v)
-	case optionName().MatchString(prev) && isSecretName(prev):
+	case optionName().MatchString(prev) && isSecretName(prev) && !flagOption().MatchString(prev):
 		return hide(v)
-	case bareName().MatchString(prev) && isSecretName(prev):
-		// aws configure set aws_secret_access_key x
+	case bareName().MatchString(prev) && isSecretName(prev), // aws configure set aws_secret_access_key x
+		len(prev) >= 10 && strings.EqualFold(prev[len(prev)-10:], "_authtoken"),              // npm config set //registry/:_authToken x
+		strings.HasPrefix(prev, "github-oauth.") || strings.HasPrefix(prev, "gitlab-token."): // composer config
 		return hide(v)
 	case (prev == "-u" || prev == "--user" || prev == "-U") && !strings.Contains(v, "://"):
 		if user, pw, ok := strings.Cut(v, ":"); ok {
@@ -554,6 +596,19 @@ func redactWord(c *command, v string) string {
 	return sqlPasswords(assignments(url(v)))
 }
 
+// assignsSecret reports a word that is the name of a secret being set:
+// password, PGPASSWORD, $env:PGPASSWORD, $Password, a JSON key.
+func assignsSecret(w string) bool {
+	if i := strings.LastIndexAny(w, ":"+refEnd); i >= 0 {
+		w = w[i+1:]
+	}
+	w = strings.Trim(w, refMark+"${}\"'[ ")
+	return w != "" && envName().MatchString(w) && isSecretName(w)
+}
+
+// flagOption is an option with a secret's name that takes no value.
+var flagOption = lazy.Regexp(`^--?(?:no|skip)-|^--askpass$|-stdin$`)
+
 // bareName is a word that only names a setting (aws_secret_access_key,
 // password), not a program (sshpass), an option, a command of a console
 // (key:generate) or a path.
@@ -563,6 +618,9 @@ var (
 	userOption = lazy.Regexp(`^((?:-u|--user=)[^:\s]*:)(.*)$`)
 	header     = lazy.Regexp(`(?s)^([A-Za-z][A-Za-z0-9_-]*):(\s*)((?i:(?:bearer|basic|token|digest|negotiate)\s+)?)(.*)$`)
 	urlPass    = lazy.Regexp(`(://[^\s:/@]*:)\S*@`)
+	// urlToken is a URL's user without a password, often a token
+	// (https://ghp_x@github.com); a user name is hidden too.
+	urlToken = lazy.Regexp(`(://)[^\s:/@]+@`)
 )
 
 // url shows a URL's password (scheme://user:password@host) as ***, up to
@@ -571,6 +629,7 @@ func url(v string) string {
 	if !strings.Contains(v, "://") {
 		return v
 	}
+	v = urlToken().ReplaceAllString(v, "${1}***@") // https://token@host
 	return urlPass().ReplaceAllStringFunc(v, func(m string) string {
 		i := strings.Index(m, "://")
 		j := strings.IndexByte(m[i+3:], ':') + i + 3
@@ -589,7 +648,7 @@ var assignName = lazy.Regexp(`([A-Za-z0-9_.+-]+)["']?[ \t]*([=:])[ \t]*`)
 // or brace when it starts with one, else to the next ; in a connection
 // string, else to the next space, ; or &.
 func assignments(v string) string {
-	if strings.IndexAny(v, "=:") < 0 {
+	if !strings.ContainsAny(v, "=:") {
 		return v
 	}
 	conn := strings.IndexByte(v, ';') >= 0 && connString().MatchString(v)
@@ -616,6 +675,11 @@ func assignments(v string) string {
 		// NAME=value as the whole word (env DB_PASSWORD=a b) and name:
 		// value (a header inside a word) run to the end of the word.
 		rest := !conn && (sep == ":" || m[2] == 0 && envName().MatchString(name))
+		if sep == "=" && start < len(v) && v[start] == '>' {
+			// 'password' => 'x' (PHP, Ruby)
+			for start++; start < len(v) && (v[start] == ' ' || v[start] == '\t'); start++ {
+			}
+		}
 		end := valueEnd(v, start, conn, rest)
 		b.WriteString(v[last:start])
 		b.WriteString(hide(unquote(v[start:end])))

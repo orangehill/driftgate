@@ -98,6 +98,29 @@ func TestLine(t *testing.T) {
 		{[]string{"docker", "run", "-p", "8080:80", "img"}, `docker run -p 8080:80 img`},
 		{[]string{"docker", "exec", "db", "mysql", "-p", "1234"}, `docker exec db mysql -p ***`},
 		{[]string{"x", "--primary-key", "id"}, `x --primary-key id`},
+		// A secret's name, then = or :, then its value as words of their own
+		// (a configuration a here-document writes, PowerShell); => of PHP.
+		{[]string{"pwsh", "-c", "$env:PGPASSWORD = 'S3cret'; psql"}, `pwsh -c "$env:PGPASSWORD = ***; psql"`},
+		{[]string{"pwsh", "-Command", "$Password = 'S3cret'; ./seed.ps1"}, `pwsh -Command "$Password = ***; ./seed.ps1"`},
+		{[]string{"bash", "-c", "cat > ~/.my.cnf <<EOF\n[client]\npassword = S3cret\nEOF"}, `bash -c "cat > ~/.my.cnf <<EOF\n[client]\npassword = ***\nEOF"`},
+		{[]string{"bash", "-c", "cat > c.yml <<EOF\npassword: S3cret\nEOF"}, `bash -c "cat > c.yml <<EOF\npassword: ***\nEOF"`},
+		{[]string{"bash", "-c", "cat > c.json <<'EOF'\n{\n  \"password\": \"S3cret\"\n}\nEOF"}, ""},
+		{[]string{"php", "artisan", "tinker", "--execute=User::first()->update(['password' => Hash::make('S3cret')])"}, ""},
+		{[]string{"bash", "-c", "php artisan tinker --execute=\"User::factory()->create(['password' => bcrypt('S3cret')])\""}, ""},
+		{[]string{"mysql", "-e", "SET PASSWORD FOR 'u'@'%' = PASSWORD('S3cret')"}, `mysql -e "SET PASSWORD FOR 'u'@'%' = PASSWORD(***)"`},
+		{[]string{"bash", "-c", "mysql <<EOF\nSET PASSWORD FOR root = 'S3cret';\nEOF"}, ""},
+		{[]string{"psql", "-c", "ALTER ROLE app PASSWORD $$S3cret$$"}, `psql -c "ALTER ROLE app PASSWORD ***"`},
+		{[]string{"psql", "-c", "ALTER USER app PASSWORD E'S3cret'"}, `psql -c "ALTER USER app PASSWORD E***"`},
+		{[]string{"git", "clone", "https://S3cret@github.com/a/b"}, `git clone https://***@github.com/a/b`},
+		{[]string{"bash", "-c", `eval "mysql -pS3cret"`}, `bash -c "eval \"mysql -p***\""`},
+		{[]string{"script", "-qc", "mysql -pS3cret", "/dev/null"}, `script -qc "mysql -p***" /dev/null`},
+		{[]string{"npm", "config", "set", "//registry.npmjs.org/:_authToken", "S3cret"}, `npm config set //registry.npmjs.org/:_authToken ***`},
+		// Flags that only look like they take a secret.
+		{[]string{"cp", "-p", "a", "b"}, `cp -p a b`},
+		{[]string{"cp", "-pr", "a", "b"}, `cp -pr a b`},
+		{[]string{"mysql", "--skip-password", "app"}, `mysql --skip-password app`},
+		{[]string{"psql", "--no-password", "app"}, `psql --no-password app`},
+		{[]string{"pwsh", "-c", "Invoke-Sqlcmd -Password 'S3cret' -Query x"}, `pwsh -c "Invoke-Sqlcmd -Password *** -Query x"`},
 		// A command ssh runs, a command substitution, a literal glued to a
 		// reference, SQL that sets a password, shells of other kinds.
 		{[]string{"ssh", "-p", "22", "host", "mysql -pS3cret db"}, `ssh -p 22 host "mysql -p*** db"`},
