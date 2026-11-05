@@ -172,6 +172,15 @@ type Component interface {
 	Close() error
 }
 
+// SessionEnder is a Component whose Restore may end the application's own
+// sessions with the database (SQL Server's restore of the whole database
+// takes it offline): the application's pooled connections then fail once
+// each, on their next use.
+type SessionEnder interface {
+	// EndedSessions is how many of them the last Restore ended.
+	EndedSessions() int
+}
+
 // Command is a component handled entirely by commands of the project.
 type Command struct {
 	name        string
@@ -245,7 +254,7 @@ func Run(ctx context.Context, root string, argv, env []string, log io.Writer) er
 		if log != nil && out.Len() > 0 {
 			fmt.Fprintln(log, strings.Join(lines, "\n"))
 		}
-		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return fmt.Errorf("%s: %w", procx.Line(argv), err)
 	}
 	return nil
 }

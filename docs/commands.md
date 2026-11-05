@@ -123,7 +123,9 @@ folder, from the frameworks it finds.
   a `run` would otherwise create the pristine database unasked.
   `driftgate setup` turns it on after asking, or uncomment it. With
   several settings it takes the one `setup --yes` would and lists the
-  others above `state:`.
+  others above `state:`. For an SQLite file it also writes the tables
+  the framework keeps its sessions, cache and jobs in as `exclude:`
+  ([SQLite](configuration.md#sqlite)).
 
 ```sh
 driftgate init --project shop
@@ -133,7 +135,7 @@ driftgate init --project shop
 
 ```
 driftgate setup [--yes] [--project <name>] [--baselines local|git]
-    [--driver mysql|postgres] [--database <name>] [--url <address>]
+    [--driver mysql|postgres|sqlite|sqlserver] [--database <name>] [--url <address>]
 ```
 
 Sets up a new project from zero to its first baseline, in this order:
@@ -158,8 +160,8 @@ Sets up a new project from zero to its first baseline, in this order:
 | `--yes` | ask nothing: take the best database setting and make the pristine copy. Where a value would have to be guessed, it stops and says what to pass |
 | `--project <name>` | project name (default: the folder name) |
 | `--baselines local\|git` | as for `init`; default `local` |
-| `--driver mysql\|postgres` | the database server, when the settings do not say |
-| `--database <name>` | the database the application uses, when the settings do not say |
+| `--driver mysql\|postgres\|sqlite\|sqlserver` | the database server, when the settings do not say |
+| `--database <name>` | the database the application uses (SQLite: its file, relative to the project root), when the settings do not say |
 | `--url <address>` | where the application answers, when the settings do not say it or say it wrongly |
 
 - **Several database settings** (`.env` and `.env.local`, a compose
@@ -168,8 +170,10 @@ Sets up a new project from zero to its first baseline, in this order:
   (`.env.development.local`, `.env.local`, `.env.development`, `.env`, …),
   and says which it took. A compose service comes first only when the
   application's setting names that server and database: its root user
-  (MySQL, MariaDB, when the root password is known) or its user
-  (PostgreSQL, a superuser of the image) can create the pristine copy.
+  (MySQL, MariaDB, when the root password is known), its user
+  (PostgreSQL, a superuser of the image) or `sa` (SQL Server) can create
+  the pristine copy. A SQL Server image names no database: the service
+  takes the database of the application's setting for the same server.
   That is meant for a local, disposable database in a container; on a
   shared server use a limited user ([security](security.md)). A compose
   service of another database comes last. The others are listed in the
@@ -181,12 +185,34 @@ Sets up a new project from zero to its first baseline, in this order:
 - **No database name**, or PostgreSQL's own database `postgres` (a compose
   service without `POSTGRES_DB`): the block is written commented out, with
   what to set; `--database` names it.
+- **An SQLite file** (Laravel 11 and later by default, Django, Rails,
+  Prisma, ASP.NET; see [SQLite](configuration.md#sqlite)): `working:` is
+  the file, the pristine copy a file of DriftGate's store, and nothing is
+  granted. Setup proposes to exclude the framework's own tables in the
+  same file (sessions, cache, jobs; default yes, `--yes` says yes), and
+  says to run the application's migrations first when the file does not
+  exist yet (exit 2). `--driver sqlite` for a setting that names a
+  database server, or another driver for one that names an SQLite file,
+  stops it (exit 2). In a worktree, the worktree's settings must name a
+  file of its own, which must exist there (git does not carry it).
 - **A user that may not create a database.** Before the pristine copy it
   says what to grant, as an administrator: `GRANT ALL PRIVILEGES ON
-  \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB) or `ALTER ROLE
-  "shop" CREATEDB;` (PostgreSQL). A seed that fails for want of the
-  right (MySQL/MariaDB errors 1044, 1142, 1227; PostgreSQL 42501) repeats
-  it; another failure (the server not running) does not.
+  \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB), `ALTER ROLE
+  "shop" CREATEDB;` (PostgreSQL), or for SQL Server the server role
+  `dbcreator` and `db_owner` in the working database (the statements are
+  under [SQL Server](configuration.md#sql-server); nothing for `sa`).
+  `dbcreator` lets the login take any database of the server offline,
+  restore over it or drop it, so setup also prints the narrower grant,
+  `CREATE ANY DATABASE` and ownership of the working database, which
+  changes that database's owner (the login must have no user in it). For
+  SQL Server it also proposes `VIEW SERVER PERFORMANCE STATE` (`VIEW
+  SERVER STATE` before 2022), which makes fingerprints of unchanged data
+  almost free, and says where the copy goes: a database on the same
+  server, restored from a `COPY_ONLY` backup, with two backup files in
+  the server's backup folder. A seed that fails for want of the right
+  (MySQL/MariaDB errors 1044, 1142, 1227; PostgreSQL 42501; SQL Server
+  229, 230, 262, 297, 916, 3110, 4060, 4063, 5011, 15247) repeats it;
+  another failure (the server not running) does not.
 - **A setting only this shell's environment holds** (Spring's
   `SPRING_DATASOURCE_*`): `dsn: { env: DG_DB_DSN }`, with the note of what
   was found; setup stops until `DG_DB_DSN` holds the DSN.
@@ -260,15 +286,22 @@ Runs the `seed:` commands and keeps a pristine copy of every state database.
 after changing the seed data. Run it while the application does not write
 (no queue workers, schedulers or requests): MySQL/MariaDB copy the tables
 one by one, so a write during the copy can leave a pristine copy that
-mixes data from before and after it (a PostgreSQL copy is of one moment). `seed` records the fingerprint of the pristine
+mixes data from before and after it (a PostgreSQL, SQLite or SQL Server
+copy is of one moment). `seed` records the fingerprint of the pristine
 copy itself and warns when the working database differs from it right
 after the copy (the application wrote during the seed or just after it).
 Every capture restores the databases to the pristine copy and checks them
-against its fingerprint. The fingerprint is
-kept in the local store per database server (from the DSN, without its
+against its fingerprint. The fingerprint is kept in the local store per database server (from the DSN, without its
 credentials) and databases, so checkouts of the project (git worktrees)
 that share the store but use their own database server never take each
-other's; `run` seeds when this server has none yet.
+other's; `run` seeds when this server has none yet. A SQL Server pristine
+copy is a read-only database on the same server, made from a `COPY_ONLY`
+backup of the working database, with a backup of its own in the server's
+backup folder ([SQL Server](configuration.md#sql-server)). An SQLite database is
+named by the real path of its working file, and its pristine copy is a
+file next to that record unless `pristine:` names one
+([SQLite](configuration.md#sqlite)); the seed only reads the working
+file.
 
 ```sh
 driftgate seed
@@ -388,7 +421,10 @@ count as one). A method is covered only by a request that should succeed;
 error variants (`not-found`, `invalid-param` …) do not cover it. Exclude a
 route on purpose in `.driftgate/exclusions.yaml`, with a reason. It also
 reports requests that reach no route, stale exclusions and routes without a
-sample body.
+sample body. An exclusion `init` wrote for the framework (Debugbar,
+Telescope, Horizon …) is not reported stale while it keeps `init`'s
+route and reason: the project need not have that part. The JSON output
+(`stale_exclusions`) leaves it out too.
 
 ```
 $ driftgate coverage
@@ -556,6 +592,8 @@ driftgate compare <tag> [--against <baseline|tag>]
 ```
 
 Compares a capture with a baseline or another capture (exit 1 on drift).
+`<tag>` `run` is this checkout's capture of `driftgate run` (when no
+baseline or capture is named `run`).
 
 | Flag | Meaning |
 |---|---|
@@ -581,6 +619,14 @@ request joins the baseline with `accept`. They do not make the result
 incomplete while other requests were compared, since every new request
 starts without a baseline.
 
+A request the capture or the baseline sent again after a restore ended
+the application's database sessions (SQL Server's restore of the whole
+database, see [configuration](configuration.md#sql-server)) has a note
+with the first answer, and every format counts them in a line of its own,
+so the count shows when the notes are cut after ten: `resent` in JSON (the
+IDs, and `"resent": true` on each result), a line in text and markdown,
+a `resent` property and the line in the suite's `system-out` in JUnit.
+
 Response times are shown as information, never as a gate: the capture
 keeps the time of every request (`timings.json`, also in a baseline made by
 `run`), and when both sides have them the report gives the 50th and 95th
@@ -599,7 +645,15 @@ failure): a rule whose requests are all gone or renamed (`no request`),
 or one whose values did not change this time (`no change`). A rule listed
 comparison after comparison is probably stale: the value it names was
 renamed or removed. With `--only` or `--target`, rules of the requests
-not compared are not listed.
+not compared are not listed. A rule `init` wrote for the framework (a
+throttle's `x-ratelimit-*`) is not listed, in the text nor in the JSON
+(`unused_rules`), while it is as `init` wrote it: the same header or
+path, request, format and its options, and reason; one you changed is.
+
+Groups are numbered by size, the ones the default view leaves out (only
+in requests whose status changed) after the ones it lists, so the listed
+groups start at [1]; `review --group N` and `accept group:N` use the same
+numbers.
 
 ```
 $ driftgate compare before --only 'get-*'
@@ -757,7 +811,7 @@ all, before anything is captured.
 ## review
 
 ```
-driftgate review [--group N]
+driftgate review [--group N] [--show-private]
 ```
 
 Drift groups of the last comparison, with the accept command for each.
@@ -765,6 +819,7 @@ Drift groups of the last comparison, with the accept command for each.
 | Flag | Meaning |
 |---|---|
 | `--group N` | show this group with every request it touches |
+| `--show-private` | show values from private bodies, compared again from the two sets, on your own machine only (never kept) |
 
 It asks nothing (it works in CI). A request is accepted whole, so when its
 drifts fall into several groups, `review` names them together in one

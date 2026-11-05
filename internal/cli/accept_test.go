@@ -381,9 +381,22 @@ func TestAcceptAfterReview(t *testing.T) {
 	if !strings.Contains(plain, "(private)") {
 		t.Fatal("the demo comparison has no drift in a private body to hide")
 	}
-	runCLI(t, "compare", runTagFor(t, p.cfg), "--config", p.cfg, "--show-private")
+	// run names this checkout's capture of driftgate run, as README writes it.
+	code, shownOut, errOut := runCLI(t, "compare", "run", "--config", p.cfg, "--show-private")
+	if code != ExitDrift || saved() != plain {
+		t.Errorf("compare run --show-private: %d %s, or it saved values the plain comparison does not", code, errOut)
+	}
+	if strings.Contains(shownOut, "(private)") {
+		t.Errorf("compare --show-private still hides values:\n%s", shownOut)
+	}
+	// review --show-private shows them too, in the same groups.
+	_, hidden, _ := runCLI(t, "review", "--config", p.cfg)
+	_, shown, _ := runCLI(t, "review", "--config", p.cfg, "--show-private")
+	if !strings.Contains(hidden, "(private)") || strings.Contains(shown, "(private)") || strings.Count(hidden, "\n[") != strings.Count(shown, "\n[") {
+		t.Errorf("review --show-private:\n%s\nplain:\n%s", shown, hidden)
+	}
 	if saved() != plain {
-		t.Error("compare --show-private saved values the plain comparison does not")
+		t.Error("review --show-private saved values")
 	}
 
 	// Part of the catalog captured: a glob must not drop the rest.
@@ -632,5 +645,36 @@ func TestBaselinesKeepLineEndings(t *testing.T) {
 	}
 	if code, _, errOut := runCLI(t, "run", "--config", p.cfg); code != ExitEnv || !strings.Contains(errOut, "core.autocrlf") {
 		t.Errorf("run on a CRLF checkout: %d\n%s", code, errOut)
+	}
+}
+
+// TestReviewShowPrivateCaptures: review --show-private shows the values of
+// private bodies of a comparison of two captures too, and nothing once a
+// set changed since the comparison.
+func TestReviewShowPrivateCaptures(t *testing.T) {
+	p := newDemoProject(t, "")
+	catalogPath := filepath.Join(filepath.Dir(p.cfg), "driftgate", "catalog.json")
+	write(t, catalogPath, strings.Replace(demoCatalog, `"path":"/api/news","storage":"public"`, `"path":"/api/news","storage":"private"`, 1))
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture a: %d\n%s\n%s", code, out, errOut)
+	}
+	p.api.SetVersion("v2")
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture b: %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, _ := runCLI(t, "compare", "b", "--against", "a", "--config", p.cfg); code != ExitDrift || !strings.Contains(out, "(private)") ||
+		!strings.Contains(out, "values of private bodies are hidden as (private); driftgate review --show-private shows them on this machine") {
+		t.Fatalf("compare b against a: %d\n%s", code, out)
+	}
+	_, hidden, _ := runCLI(t, "review", "--config", p.cfg)
+	_, shown, _ := runCLI(t, "review", "--config", p.cfg, "--show-private")
+	if !strings.Contains(hidden, "(private)") || strings.Contains(shown, "(private)") || strings.Count(hidden, "\n[") != strings.Count(shown, "\n[") {
+		t.Errorf("review --show-private of two captures:\n%s\nplain:\n%s", shown, hidden)
+	}
+	if code, out, errOut := runCLI(t, "capture", "a", "--force", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture a again: %d\n%s\n%s", code, out, errOut)
+	}
+	if _, out, _ := runCLI(t, "review", "--config", p.cfg, "--show-private"); !strings.Contains(out, "--show-private shows nothing: capture:a changed since the comparison") || !strings.Contains(out, "(private)") {
+		t.Errorf("review --show-private after a set changed:\n%s", out)
 	}
 }

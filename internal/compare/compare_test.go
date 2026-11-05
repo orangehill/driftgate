@@ -64,6 +64,26 @@ func TestBodyDrifts(t *testing.T) {
 	}
 }
 
+// TestKeyDriftValues: a key that is missing or new shows its value (the
+// key is in the place), an object or array cut short.
+func TestKeyDriftValues(t *testing.T) {
+	long := `"` + strings.Repeat("x", 300) + `"`
+	ds := run(t, nil, LevelValues, side(200, nil, `{"a":1,"gone":"old"}`), side(200, nil, `{"a":1,"b":{"x":[1,2]},"c":[`+long+`]}`))
+	got := map[string][2]string{}
+	for _, d := range ds {
+		got[d.Kind+" "+d.Where] = [2]string{d.Baseline, d.Current}
+	}
+	if v := got["key-missing $.gone"]; v != [2]string{`"old"`, ""} {
+		t.Errorf("missing: %q", v)
+	}
+	if v := got["key-extra $.b"]; v != [2]string{"", `{"x":[1,2]}`} {
+		t.Errorf("extra: %q", v)
+	}
+	if v := got["key-extra $.c"][1]; len([]rune(v)) != memberTextMax+1 || !strings.HasSuffix(v, "…") {
+		t.Errorf("long: %q", v)
+	}
+}
+
 func TestRecursesPastKeyChanges(t *testing.T) {
 	// An object whose keys changed is compared further, by the keys both
 	// sides share.

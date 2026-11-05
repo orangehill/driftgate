@@ -72,6 +72,21 @@ func bisectCmd(args []string, out, errOut io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// The application runs from the worktree, with the SQLite file of
+	// the worktree; a restore would reset this checkout's file, which the
+	// application does not use, and every commit would run on what the
+	// one before it wrote.
+	var sqlite []string
+	for n, sc := range p.State {
+		if sc.Driver == config.SQLite {
+			sqlite = append(sqlite, n)
+		}
+	}
+	if len(sqlite) > 0 {
+		sort.Strings(sqlite)
+		n := sqlite[0]
+		return 0, configErr("bisect does not support SQLite state yet (state %s): the application runs from the worktree in $%s with that worktree's own file, and DriftGate restores %s of this checkout, so the requests of each commit would run on what earlier ones wrote; bisect by hand with git bisect and driftgate run, or use a MySQL, PostgreSQL or SQL Server database", n, bisect.EnvDir, p.State[n].Working)
+	}
 	if len(p.Bisect.Checkout) == 0 {
 		return 0, configErr("bisect needs bisect.checkout in %s: the command that puts the application on the commit checked out in $%s (built, restarted), e.g.\n  bisect:\n    checkout: [\"sh\", \"-c\", \"cd \\\"$%s\\\" && make restart\"]\n    ready: [\"curl\", \"-sf\", \"http://localhost:8000/up\"]", *cfg, bisect.EnvDir, bisect.EnvDir)
 	}

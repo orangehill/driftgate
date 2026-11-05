@@ -375,6 +375,13 @@ func TestSourceFiles(t *testing.T) {
 		if r := find(t, rs, "GET /api/faq"); len(r.Body) != 0 || r.BodySource != "" {
 			t.Errorf("a route without a form request got a body: %+v", r)
 		}
+		// A closure that takes a form request gets a body from its rules,
+		// as a controller method does.
+		list := `[{"domain":null,"method":"POST","uri":"api\/news","name":null,"action":"Closure","middleware":["api"],"path":"routes\/api.php:8"}]`
+		rs = run(t, Adapter{Adapter: "laravel", Dir: "testdata/laravel-app", Command: []string{"echo", list}, PHP: []string{"php"}})
+		if r := find(t, rs, "POST /api/news"); r.BodySource != "validation rules" || !strings.Contains(string(r.Body), `"title"`) {
+			t.Errorf("a closure with a form request: %+v (body %s)", r, r.Body)
+		}
 	} else {
 		t.Log("php not found: Laravel script skipped")
 	}

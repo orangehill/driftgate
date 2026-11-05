@@ -79,33 +79,6 @@
  "groups": [
   {
    "n": 1,
-   "signature": "encoding $",
-   "requests": 1,
-   "drifts": 1,
-   "example": {
-    "request": "api-news",
-    "kind": "encoding",
-    "where": "$",
-    "baseline": "layout",
-    "current": "layout"
-   },
-   "explanation": "1 drift in 1 request: the same values with a different layout of whitespace"
-  },
-  {
-   "n": 2,
-   "signature": "header-missing header:x-total",
-   "requests": 1,
-   "drifts": 1,
-   "example": {
-    "request": "api-news",
-    "kind": "header-missing",
-    "where": "header:x-total",
-    "baseline": "[\"3\"]"
-   },
-   "explanation": "1 drift in 1 request: header x-total is missing"
-  },
-  {
-   "n": 3,
    "signature": "header-value header:content-type",
    "requests": 1,
    "drifts": 1,
@@ -119,7 +92,48 @@
    "explanation": "1 drift in 1 request: header content-type changed value ([\"application/json\"] → [\"application/problem+json\"])"
   },
   {
+   "n": 2,
+   "signature": "status ",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "api-news",
+    "kind": "status",
+    "where": "",
+    "baseline": "200",
+    "current": "500"
+   },
+   "explanation": "1 drift in 1 request: status changed (200 → 500)"
+  },
+  {
+   "n": 3,
+   "signature": "encoding $",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "api-news",
+    "kind": "encoding",
+    "where": "$",
+    "baseline": "layout",
+    "current": "layout"
+   },
+   "explanation": "1 drift in 1 request: the same values with a different layout of whitespace"
+  },
+  {
    "n": 4,
+   "signature": "header-missing header:x-total",
+   "requests": 1,
+   "drifts": 1,
+   "example": {
+    "request": "api-news",
+    "kind": "header-missing",
+    "where": "header:x-total",
+    "baseline": "[\"3\"]"
+   },
+   "explanation": "1 drift in 1 request: header x-total is missing"
+  },
+  {
+   "n": 5,
    "signature": "key-extra $.exception",
    "requests": 1,
    "drifts": 1,
@@ -132,7 +146,7 @@
    "explanation": "1 drift in 1 request: $.exception is new"
   },
   {
-   "n": 5,
+   "n": 6,
    "signature": "key-extra $.message",
    "requests": 1,
    "drifts": 1,
@@ -145,7 +159,7 @@
    "explanation": "1 drift in 1 request: $.message is new"
   },
   {
-   "n": 6,
+   "n": 7,
    "signature": "key-missing $.data",
    "requests": 1,
    "drifts": 1,
@@ -156,20 +170,6 @@
     "baseline": "data"
    },
    "explanation": "1 drift in 1 request: $.data is missing"
-  },
-  {
-   "n": 7,
-   "signature": "status ",
-   "requests": 1,
-   "drifts": 1,
-   "example": {
-    "request": "api-news",
-    "kind": "status",
-    "where": "",
-    "baseline": "200",
-    "current": "500"
-   },
-   "explanation": "1 drift in 1 request: status changed (200 → 500)"
   },
   {
    "n": 8,

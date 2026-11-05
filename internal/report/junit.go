@@ -32,6 +32,7 @@ type junitSuite struct {
 	Timestamp  string          `xml:"timestamp,attr,omitempty"`
 	Properties []junitProperty `xml:"properties>property,omitempty"`
 	Cases      []junitCase     `xml:"testcase"`
+	SystemOut  string          `xml:"system-out,omitempty"` // the report's notes that count
 }
 
 type junitProperty struct {
@@ -45,6 +46,7 @@ type junitCase struct {
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
 	Skipped   *junitSkipped `xml:"skipped,omitempty"`
+	SystemOut string        `xml:"system-out,omitempty"` // the result's notes
 }
 
 type junitFailure struct {
@@ -67,8 +69,12 @@ func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 			suite.Properties = append(suite.Properties, junitProperty{Name: p[0], Value: p[1]})
 		}
 	}
+	if n := len(r.Resent); n > 0 {
+		suite.Properties = append(suite.Properties, junitProperty{Name: "resent", Value: fmt.Sprint(n)})
+		suite.SystemOut = r.ResentNote()
+	}
 	for _, res := range r.Results {
-		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0"}
+		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0", SystemOut: strings.Join(res.Notes, "\n")}
 		switch res.Outcome {
 		case Drift:
 			lines := driftLines(res, maxDrifts, 0)

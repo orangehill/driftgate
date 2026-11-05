@@ -7,9 +7,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/orangehill/driftgate/internal/baseline"
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
 // reviewCmd shows the drift groups of the last comparison, each with an
@@ -19,6 +22,7 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	cfg := fs.String("config", "", "")
 	group := fs.Int("group", 0, "")
+	showPrivate := fs.Bool("show-private", false, "")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return 0, err
@@ -41,6 +45,15 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	why, err := staleComparison(p, r)
 	if err != nil {
 		return 0, err
+	}
+	if *showPrivate {
+		note, err := showPrivateValues(p, *cfg, r)
+		if err != nil {
+			return 0, err
+		}
+		if note != "" {
+			fmt.Fprintf(out, "--show-private shows nothing: %s\n", note)
+		}
 	}
 	canAccept := why == "" && p.Mode == config.Evolve
 	switch {
@@ -151,6 +164,9 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 		return ExitClean, nil
 	}
 	fmt.Fprintln(out, "\ndriftgate review --group N shows every drift of a group")
+	if note := r.HiddenNote(); note != "" {
+		fmt.Fprintln(out, note)
+	}
 	if canAccept {
 		fmt.Fprintln(out, `requests can also be accepted by ID or glob: driftgate accept <request|glob> --reason "…"`)
 	}
@@ -208,4 +224,89 @@ func linkedGroups(r *report.Report, done map[string]bool) map[int][]int {
 		out[g.N] = ms
 	}
 	return out
+}
+
+// showPrivateValues puts into the drifts of the last comparison r the
+// values its saved report hides, compared again from the two sets
+// (compare --show-private), each request at the level it was compared
+// at: only the values, so every drift stays in its group, and only into a
+// drift of the same kind and place; a request whose drifts are not the
+// same ones again keeps them hidden. Both sets must be as they were
+// compared (their digests); otherwise it says why and shows nothing.
+// Nothing is saved.
+func showPrivateValues(p *config.Project, cfg string, r *report.Report) (why string, err error) {
+	_, cat, allow, err := loadProject(cfg)
+	if err != nil {
+		return "", err
+	}
+	base, baseName, err := resolve(p, r.Against)
+	if err != nil {
+		return "", err
+	}
+	cur, curName, err := resolve(p, r.Tag)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range []struct {
+		set        *snapshot.Set
+		name, want string
+	}{{base, baseName, r.BaselineDigest}, {base, baseName, r.AgainstDigest}, {cur, curName, r.CaptureDigest}} {
+		var got string
+		switch {
+		case s.want == "":
+			continue
+		case strings.HasPrefix(s.name, "baseline:"):
+			got, err = baseline.Digest(s.set.Dir)
+		default:
+			got, err = baseline.SetDigest(s.set.Dir)
+		}
+		if err != nil {
+			return "", envErr(err)
+		}
+		if got != s.want {
+			return s.name + " changed since the comparison; run driftgate compare again", nil
+		}
+	}
+	reqs := map[string]catalog.Request{}
+	for _, req := range cat.Requests {
+		reqs[req.ID] = req
+	}
+	var ids []string
+	for _, res := range r.Results {
+		if res.Outcome == report.Drift {
+			ids = append(ids, res.ID)
+		}
+	}
+	if err := privateKeys(p, ids, false, namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return "", err
+	}
+	origins, _, err := setOrigins(p, base, cur)
+	if err != nil {
+		return "", envErr(err)
+	}
+	for i, res := range r.Results {
+		req, ok := reqs[res.ID]
+		if res.Outcome != report.Drift || !ok {
+			continue
+		}
+		level, err := compare.ParseLevel(res.Level)
+		if res.Level == "" || err != nil {
+			if level, err = compare.ParseLevel(r.Level); err != nil {
+				return "", configErr("the last comparison: %v", err)
+			}
+		}
+		shown, err := compareOne(req, base, cur, origins, allow, level, true)
+		if err != nil {
+			return "", err
+		}
+		if len(shown.Drifts) != len(res.Drifts) {
+			continue
+		}
+		for j, d := range shown.Drifts {
+			if old := res.Drifts[j]; d.Kind == old.Kind && hidePath(d.Where) == hidePath(old.Where) {
+				r.Results[i].Drifts[j].Baseline, r.Results[i].Drifts[j].Current = d.Baseline, d.Current
+			}
+		}
+	}
+	return "", nil
 }

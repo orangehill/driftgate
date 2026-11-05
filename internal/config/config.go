@@ -111,7 +111,7 @@ func (d Data) validate() error {
 	switch d.Driver {
 	case MySQL, "mariadb", Postgres:
 	default:
-		return fmt.Errorf("data.driver must be mysql or postgres, got %q", d.Driver)
+		return fmt.Errorf("data.driver must be mysql or postgres (the data module supports only MySQL, MariaDB and PostgreSQL for now), got %q", d.Driver)
 	}
 	if d.Source.DSN.IsZero() {
 		return errors.New("data.source needs dsn (" + dsnSources + ")")
@@ -379,10 +379,10 @@ type Tokens struct {
 // with a built-in driver, or anything else through restore and fingerprint
 // commands.
 type Component struct {
-	Driver      string   `yaml:"driver,omitempty"` // mysql (also MariaDB) or postgres; empty: commands
-	DSN         Secret   `yaml:"dsn,omitempty"`
-	Working     string   `yaml:"working,omitempty"`  // database the application uses
-	Pristine    string   `yaml:"pristine,omitempty"` // its pristine copy; default <working>_pristine
+	Driver      string   `yaml:"driver,omitempty"`   // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
+	DSN         Secret   `yaml:"dsn,omitempty"`      // SQLite: optional, cross-checked with working
+	Working     string   `yaml:"working,omitempty"`  // database the application uses; SQLite: its file, relative to the project root
+	Pristine    string   `yaml:"pristine,omitempty"` // its pristine copy; default <working>_pristine (SQLite: a file of the local store)
 	Exclude     []string `yaml:"exclude,omitempty"`  // tables never fingerprinted or restored (globs)
 	RowTracking []string `yaml:"row_tracking,omitempty"`
 	// AllowRemote lets the database be on a host outside target.allow_hosts.
@@ -395,24 +395,88 @@ type Component struct {
 
 // Drivers.
 const (
-	MySQL    = "mysql"
-	Postgres = "postgres"
+	MySQL     = "mysql"
+	Postgres  = "postgres"
+	SQLite    = "sqlite"
+	SQLServer = "sqlserver"
 )
+
+// drivers names the drivers in messages.
+const drivers = "mysql, postgres, sqlite, sqlserver"
 
 func (c Component) validate() error {
 	switch c.Driver {
 	case "":
 		switch {
 		case len(c.Restore) == 0:
-			return errors.New("needs a driver (mysql, postgres) or a restore command")
+			return errors.New("needs a driver (" + drivers + ") or a restore command")
 		case !c.DSN.IsZero() || c.Working != "" || c.Pristine != "" || len(c.Exclude) > 0 || len(c.RowTracking) > 0:
 			return errors.New("dsn, working, pristine, exclude and row_tracking need a driver")
 		}
 		return nil
-	case MySQL, "mariadb", Postgres:
+	case MySQL, "mariadb", Postgres, SQLServer, "mssql":
+		if err := c.validateServer(); err != nil {
+			return err
+		}
+	case SQLite:
+		if err := c.validateSQLite(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("unknown driver %q (mysql, postgres)", c.Driver)
+		return fmt.Errorf("unknown driver %q (%s)", c.Driver, drivers)
 	}
+	if len(c.Restore) > 0 || len(c.Fingerprint) > 0 {
+		return errors.New("restore and fingerprint commands are for components without a driver")
+	}
+	for _, t := range c.RowTracking {
+		if c.trackedExcluded(t) {
+			return fmt.Errorf("row_tracking table %s is excluded", t)
+		}
+	}
+	return nil
+}
+
+// trackedExcluded reports whether a glob of exclude matches row_tracking
+// table t as the driver's component matches it: SQLite in ASCII without
+// case, SQL Server without case and with or without the schema (dbo for
+// a table named without one), the others as written.
+func (c Component) trackedExcluded(t string) bool {
+	names, fold := []string{t}, func(s string) string { return s }
+	switch c.Driver {
+	case SQLite:
+		fold = asciiLower
+	case SQLServer, "mssql":
+		fold = strings.ToLower
+		schema, name, ok := strings.Cut(t, ".")
+		if !ok {
+			schema, name = "dbo", t
+		}
+		names = []string{schema + "." + name, name}
+	}
+	for _, g := range c.Exclude {
+		for _, n := range names {
+			if glob.Match(fold(g), fold(n)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// asciiLower lowers the ASCII letters of s only, as SQLite compares names.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// validateServer checks a component of a database server: MySQL, MariaDB,
+// PostgreSQL or SQL Server, whose pristine copy is a second database on it.
+func (c Component) validateServer() error {
 	if c.DSN.IsZero() {
 		return errors.New("needs dsn (" + dsnSources + ")")
 	}
@@ -424,17 +488,9 @@ func (c Component) validate() error {
 		return errors.New("needs working (the database the application uses)")
 	case c.Pristine == c.Working, c.Driver != Postgres && strings.EqualFold(c.Pristine, c.Working):
 		// MySQL and MariaDB on macOS and Windows (lower_case_table_names 1
-		// or 2) take App and app for the same database.
-		return errors.New("pristine must differ from working (MySQL and MariaDB: also in letter case)")
-	case len(c.Restore) > 0 || len(c.Fingerprint) > 0:
-		return errors.New("restore and fingerprint commands are for components without a driver")
-	}
-	for _, t := range c.RowTracking {
-		for _, g := range c.Exclude {
-			if glob.Match(g, t) {
-				return fmt.Errorf("row_tracking table %s is excluded", t)
-			}
-		}
+		// or 2) take App and app for the same database, as SQL Server does
+		// under its default, case-insensitive collation.
+		return errors.New("pristine must differ from working (MySQL, MariaDB and SQL Server: also in letter case)")
 	}
 	return nil
 }
@@ -602,10 +658,15 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		if err := comp.validate(); err != nil {
 			return nil, fmt.Errorf("%s: state %s: %w", FileName, name, err)
 		}
-		if comp.Driver == "mariadb" {
+		switch comp.Driver {
+		case "mariadb":
 			comp.Driver = MySQL
+		case "mssql":
+			comp.Driver = SQLServer
 		}
-		if comp.Driver != "" && comp.Pristine == "" {
+		// SQLite's pristine copy defaults to a file of the local store,
+		// which the capture names (it is not a setting).
+		if comp.Driver != "" && comp.Driver != SQLite && comp.Pristine == "" {
 			comp.Pristine = comp.Working + "_pristine"
 		}
 		c.State[name] = comp

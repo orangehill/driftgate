@@ -29,6 +29,12 @@ bisect:
 - `ready` is repeated until it succeeds; when it does not within
   `ready_timeout`, the commit is skipped.
 - `finish` runs once at the end.
+- The state is restored on the database the configuration names, so the
+  application in the worktree must use that database (MySQL, PostgreSQL,
+  SQL Server). An SQLite state is refused: the application in the worktree
+  opens the worktree's own file, which DriftGate does not restore, so each
+  commit would run on what the earlier ones wrote. Bisect such a project by
+  hand (`git bisect` with `driftgate run` at each step).
 
 ## Run it
 

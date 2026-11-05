@@ -29,6 +29,8 @@ func TestStateValidation(t *testing.T) {
 		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Restore: []string{"x"}}, "without a driver"},
 		{Component{Restore: []string{"x"}, Working: "app"}, "need a driver"},
 		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"sess*"}, RowTracking: []string{"sessions"}}, "is excluded"},
+		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"Sessions"}, RowTracking: []string{"sessions"}}, ""}, // as written
+		{Component{Driver: "postgres", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"Sessions"}, RowTracking: []string{"sessions"}}, ""},
 	}
 	for i, c := range cases {
 		cfg := base

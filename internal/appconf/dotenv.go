@@ -270,11 +270,17 @@ func readDotenv(root, file, key string, lookup Lookup) (parts, error) {
 		}
 		return fromValue(v)
 	}
+	if d, _ := driverName(env[dbConnection]); d == SQLite {
+		return laravelSQLite(file, env)
+	}
 	if !laravel(env) {
 		return parts{}, fmt.Errorf("%s: no DB_HOST, DB_DATABASE or DB_USERNAME (name the key of a URL with key:)", file)
 	}
 	p := parts{host: env[dbHost], port: env[dbPort], name: env[dbDatabase], user: env[dbUsername], password: env[dbPassword], socket: env[dbSocket]}
 	p.setDriver(env[dbConnection])
+	if p.driver == SQLServer {
+		return laravelSQLServer(root, file, env, p)
+	}
 	if p.driver == Postgres { // Laravel's pgsql connection has no socket
 		p.socket = ""
 	}

@@ -12,11 +12,11 @@
    - 3 requests: 200 → 302 to /login: `home`, `about`, `contact`
    - 2 requests: 200 → 500: `api-news`, `api-faq`
    - 1 request: 200 → 302 to http://localhost:8080/: `admin`
-- [5] 4 drifts in 4 requests: header location is new
-- [9] 3 drifts in 3 requests: header x-total is missing
-- [10] 3 drifts in 3 requests: header content-type changed value (for example \["application/json"\] → \["application/problem+json"\])
-- [16] 1 drift in 1 request: $.data\[\*\].id changed type int → string
-- [17] 1 drift in 1 request: $.title changed value ("Notes" → "Notes news-0")
+- [2] 4 drifts in 4 requests: header location is new
+- [3] 3 drifts in 3 requests: header x-total is missing
+- [4] 3 drifts in 3 requests: header content-type changed value (for example \["application/json"\] → \["application/problem+json"\])
+- [5] 1 drift in 1 request: $.data\[\*\].id changed type int → string
+- [6] 1 drift in 1 request: $.title changed value ("Notes" → "Notes news-0")
 
 _11 more groups only in requests whose status changed, summarized there; `driftgate review` lists them._
 

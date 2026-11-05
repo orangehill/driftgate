@@ -1,5 +1,7 @@
-// Package dbdsn reads the DSNs of MySQL/MariaDB and PostgreSQL databases the
-// way their drivers do, for the state components and the data module alike.
+// Package dbdsn reads the DSNs of MySQL/MariaDB, PostgreSQL and SQL Server
+// databases the way their drivers do, for the state components and the
+// data module alike. An SQLite database is a file: it has no DSN to read
+// and no server.
 // A DSN holds a password, so no error of this package carries the DSN or
 // any part of it: a parse error of net/url or of a driver quotes the text it
 // could not read, which may be the password itself.
@@ -22,9 +24,15 @@ import (
 
 // Drivers.
 const (
-	MySQL    = "mysql" // MySQL and MariaDB
-	Postgres = "postgres"
+	MySQL     = "mysql" // MySQL and MariaDB
+	Postgres  = "postgres"
+	SQLite    = "sqlite"
+	SQLServer = "sqlserver"
 )
+
+// errNoServer refuses to name the server or hosts of an SQLite database,
+// which is a file of the project.
+var errNoServer = errors.New("dsn: an SQLite database is a file, not a server")
 
 // errURL replaces a parse error of a URL, which would quote the DSN.
 var errURL = errors.New("dsn: not a valid URL (the DSN is not shown, as it holds the password); percent-encode special characters such as @ : / % in the user name and password")
@@ -168,6 +176,12 @@ func PostgresURL(dsn string) (*url.URL, error) {
 // driver itself reads it (PostgreSQL: several hosts, fallbacks, host=
 // parameters, PG* variables); "" stands for a local socket.
 func Hosts(driver, dsn string) ([]string, error) {
+	switch driver {
+	case SQLServer:
+		return sqlServerHosts(dsn)
+	case SQLite:
+		return nil, errNoServer
+	}
 	if driver == Postgres {
 		u, err := PostgresURL(dsn)
 		if err != nil {
@@ -216,9 +230,16 @@ func Hosts(driver, dsn string) ([]string, error) {
 
 // Server names the server a DSN connects to, without the user or password:
 // the network and address for MySQL (tcp(127.0.0.1:3306), unix(/tmp/s)),
-// every host:port in order for PostgreSQL. Two DSNs with the same server
-// reach the same databases.
+// every host:port in order for PostgreSQL, as sqlServerServer says for SQL
+// Server. Two DSNs with the same server reach the same databases. An SQLite
+// database has none (the capture names it by its file).
 func Server(driver, dsn string) (string, error) {
+	switch driver {
+	case SQLServer:
+		return sqlServerServer(dsn)
+	case SQLite:
+		return "", errNoServer
+	}
 	if driver == Postgres {
 		u, err := PostgresURL(dsn)
 		if err != nil {

@@ -57,8 +57,8 @@ var commands = []commandHelp{
 		{name: "yes", text: "ask nothing: take the best database setting and make the pristine copy; stop with an instruction where a value would have to be guessed"},
 		{name: "project", arg: "<name>", text: "project name (default: the folder name)"},
 		{name: "baselines", arg: "local|git", text: "local (default): everything in .driftgate/, which git ignores; git: driftgate.yaml and driftgate/ in the repository"},
-		{name: "driver", arg: "mysql|postgres", text: "the database server, when the settings do not say"},
-		{name: "database", arg: "<name>", text: "the database the application uses, when the settings do not say"},
+		{name: "driver", arg: "mysql|postgres|sqlite|sqlserver", text: "the database server, when the settings do not say"},
+		{name: "database", arg: "<name>", text: "the database the application uses (SQLite: its file, relative to the project root), when the settings do not say"},
 		{name: "url", arg: "<address>", text: "where the application answers (default: from its settings)"},
 	}},
 	{name: "seed", summary: "runs the seed: commands and keeps a pristine copy of every state database", flags: []flagHelp{
@@ -132,6 +132,7 @@ var commands = []commandHelp{
 	}},
 	{name: "review", summary: "drift groups of the last comparison, with the accept command for each", flags: []flagHelp{
 		{name: "group", arg: "N", text: "show this group with every request it touches"},
+		{name: "show-private", text: "show values from private bodies, on your own machine only (never kept)"},
 	}},
 	{name: "accept", args: "<request|glob|group:N>...", summary: "takes drifts of the last comparison into its baseline (mode evolve), with a reason in the acceptance log", flags: []flagHelp{
 		{name: "reason", arg: `"…"`, text: "why the change is right", required: true},

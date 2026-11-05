@@ -9,13 +9,13 @@ DRIFT  api-news
          encoding        $  layout → layout
 
 Groups:
-  [1] 1 drift in 1 request: the same values with a different layout of whitespace
-  [2] 1 drift in 1 request: header x-total is missing
-  [3] 1 drift in 1 request: header content-type changed value (["application/json"] → ["application/problem+json"])
-  [4] 1 drift in 1 request: $.exception is new
-  [5] 1 drift in 1 request: $.message is new
-  [6] 1 drift in 1 request: $.data is missing
-  [7] 1 drift in 1 request: status changed (200 → 500)
+  [1] 1 drift in 1 request: header content-type changed value (["application/json"] → ["application/problem+json"])
+  [2] 1 drift in 1 request: status changed (200 → 500)
+  [3] 1 drift in 1 request: the same values with a different layout of whitespace
+  [4] 1 drift in 1 request: header x-total is missing
+  [5] 1 drift in 1 request: $.exception is new
+  [6] 1 drift in 1 request: $.message is new
+  [7] 1 drift in 1 request: $.data is missing
   [8] 1 drift in 1 request: $.status changed value ("ok" → "error")
 
 run against baseline:local: 2 compared, 1 passed, 1 drifted, 0 skipped, 0 observed

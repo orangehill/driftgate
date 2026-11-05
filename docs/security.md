@@ -29,6 +29,15 @@ to do it.
     `DRIFTGATE_KEY` is set in a `pull_request` job;
   - treat the `run.log` artifact as unmasked: it holds the output of the
     project's commands, which GitHub masks only for secrets it knows.
+  - DriftGate shows a command it runs or that failed (`seed:`, `prepare:`,
+    a command step in `run.log`) with its passwords, secrets, tokens, keys,
+    cookies and signatures as `***`, also the password SQL sets
+    (`IDENTIFIED BY '…'`, `PASSWORD '…'`). Arguments are never expanded, so
+    a `$` is part of a value except in a script a shell runs (`sh -c "…"`,
+    `pwsh -c`, `cmd /c`, the command `ssh` runs, `$(…)`), where only a bare
+    `$NAME` or `${NAME}` is shown. It is a courtesy for the log, made to
+    hide too much rather than too little; what a command prints is not
+    redacted.
 - The `sql` of `params` is checked to be a single `SELECT` (or `WITH …
   SELECT`) without statements and functions that write or reach the
   server's files, programs or other connections, and runs in a read-only
@@ -39,7 +48,26 @@ to do it.
   compose service is acceptable only for a local, disposable database in a
   container on this machine (what `driftgate setup` prefers when the
   application's setting names that service); a database on a shared server
-  gets a limited user.
+  gets a limited user. An SQLite file has no users: there the query runs
+  on the pristine file opened read-only, on a connection that lets only
+  reads compile, without `ATTACH`, `PRAGMA` or the functions and tables
+  that reach other files or the file's pages
+  ([SQLite](configuration.md#sqlite)). On SQL Server a read-only database
+  still runs `EXEC xp_cmdshell` and `OPENROWSET`, so the query is also
+  refused with any other statement's keyword (T-SQL needs no `;` between
+  statements), `NEXT VALUE FOR`, names of three or four parts (another
+  database or server), and the system procedures, functions and views
+  that reach files, programs, other servers, sessions or logins
+  ([SQL Server](configuration.md#sql-server)). Its login needs
+  `dbcreator` and `db_owner` in the working database, not `sysadmin`
+  (`sa` only for a local container). `dbcreator` lets the login take any
+  database of the server offline, restore over it or drop it; the
+  narrower grant (`CREATE ANY DATABASE` and ownership of the working
+  database) reaches only the databases the login owns, but changes the
+  working database's owner. Either lets it restore any backup file the
+  server can read. `VIEW SERVER STATE` (2017, 2019) and `VIEW SERVER
+  PERFORMANCE STATE` (2022), optional, let the login read the SQL text of
+  every session.
 - Commands run without a shell (a shell is written explicitly and shows in
   the diff), data from responses never goes into their arguments, and they
   do not receive `DRIFTGATE_KEY`, the variable `key.env` names, or any
@@ -70,13 +98,21 @@ to do it.
   they must be copies: on this machine (a local address or a socket) or on a
   host some target's `allow_hosts` names. A private address alone is not
   enough, as it may be production. Every host the driver may connect to is
-  checked (PostgreSQL `host=`, several hosts, `PG*` variables), and every
+  checked (PostgreSQL `host=`, several hosts, `PG*` variables; SQL Server
+  takes one host over TCP, and a named instance without its port, a
+  failover partner, named pipes and shared memory are refused), and every
   connection is checked again on the address it actually goes to, so a
   name that resolves elsewhere after the check (DNS rebinding) is not
   reached. A database
   elsewhere needs `allow_remote: true` on that component, so a wrong DSN
   cannot reach a production server. The data module's target follows the
-  same rule (`data.allow_remote`).
+  same rule (`data.allow_remote`). An SQLite database is a file inside the
+  project (also past symbolic links): a file outside it, on a network
+  share (`\\server\share`) or in memory is refused, `allow_remote` does not
+  apply, and a restore writes inside the file, in one transaction, without
+  firing its triggers or cascading its foreign keys. The pristine copy of
+  an SQLite file keeps no rows of excluded tables (sessions, tokens), not
+  even in its free pages.
 - Against production, DriftGate sends no request that changes data without
   two separate flags. It is meant for a copy of the data: CI, staging, a
   developer machine.
@@ -140,9 +176,21 @@ to do it.
   project's `UserSecretsId` are read from outside it, and never written.
   The setting's TLS is kept: one DriftGate cannot pass on stops the
   command instead of connecting without it. A setting that names another
-  database than `working` stops the command, so a restore never resets a
-  database the application does not run on; one whose host may be the
-  local socket or TCP needs `host:` (DriftGate does not guess). A
+  database than `working` (for SQLite, another file) stops the command,
+  so a restore never resets a database the application does not run on; one whose host may be the
+  local socket or TCP needs `host:` (DriftGate does not guess). SQL
+  Server's TLS is never weaker than the application's client: `Encrypt`
+  and `TrustServerCertificate` are passed on, a setting that leaves
+  `Encrypt` unset gets the client's own default (encrypted and verified
+  when DriftGate cannot tell the client; a go-mssqldb URL of the
+  environment or 1Password without `encrypt` is encrypted and verified),
+  the sign-in is encrypted even with `Encrypt` off (a server that answers
+  it cannot encrypt is refused before the password is sent), and `Strict`
+  is never weakened; a certificate file
+  a setting names by a relative path must be inside the project (an
+  absolute path or `~/` may name a system CA; the file is only read as a
+  certificate, and no message shows what it holds)
+  ([SQL Server](configuration.md#sql-server)). A
   connection string is never read as a URL or the MySQL driver's form, so
   no part of its password is taken for the user and shown. No project code runs to read
   a setting: PHP, Python and Ruby (ERB) are read as text. A password read
@@ -261,7 +309,9 @@ to do it.
 A release is built only from a tag `vX.Y.Z` on a commit of `main`, by
 `.github/workflows/release.yml`, after the CI checks of `ci.yml` itself
 (format, vet, staticcheck, tests against MariaDB, MySQL and PostgreSQL,
-fuzzing, `govulncheck` without findings, and the size and package limits of
+of SQLite on Linux, macOS and Windows, of SQL Server 2017, 2019, 2022 and 2025
+with a check of its TLS against a server with a certificate of a test CA,
+fuzzing, `govulncheck` without findings, and the size report and the package limits of
 the binaries on the six platforms, which pull requests pass too). It is
 published from the `release` environment. Each release has:
 

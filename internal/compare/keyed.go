@@ -118,11 +118,11 @@ func (c *comparer) keyed(path string, r *allowlist.ArrayRule, b, v *jsonx.Value)
 			c.lengths++
 		} else {
 			for _, i := range missing {
-				c.add(KindKeyMissing, path+"["+bSteps[i]+"]", bSteps[i], "")
+				c.add(KindKeyMissing, path+"["+bSteps[i]+"]", memberText(b.Items[i]), "") // the item, as a missing key's value
 			}
 			for j, step := range cSteps {
 				if _, extra := at[cIDs[j]]; extra {
-					c.add(KindKeyExtra, path+"["+step+"]", "", step)
+					c.add(KindKeyExtra, path+"["+step+"]", "", memberText(v.Items[j]))
 				}
 			}
 		}

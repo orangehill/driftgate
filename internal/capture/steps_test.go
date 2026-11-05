@@ -68,18 +68,44 @@ func TestUploadsReadWhenSent(t *testing.T) {
 
 // TestStepOutputNotLogged: when a command step fails, the log shows what
 // it wrote to standard error, not its output, which is its body: private,
-// or public but not scanned for personal data yet.
+// or public but not scanned for personal data yet; its command shows no
+// secret.
 func TestStepOutputNotLogged(t *testing.T) {
 	for _, storage := range []string{snapshot.Private, snapshot.Public} {
 		var log bytes.Buffer
 		r := &runner{p: &config.Project{Root: t.TempDir()}, log: &log}
 		res := r.command(context.Background(), catalog.Request{ID: "export", Storage: storage, Output: true,
-			Command: []string{"sh", "-c", "printf 'marko%sexample.rs\\n' @; echo export failed >&2; exit 3"}})
+			Command: []string{"sh", "-c", "MYSQL_PWD=S3cret true; printf 'marko%sexample.rs\\n' @; echo export failed >&2; exit 3"}})
 		if res.Record.Exit == nil || *res.Record.Exit != 3 {
 			t.Fatalf("%s: %+v", storage, res.Record)
 		}
-		if !strings.Contains(log.String(), "export failed") || strings.Contains(log.String(), "marko@") {
+		if !strings.Contains(log.String(), "export failed") || strings.Contains(log.String(), "marko@") || !strings.Contains(log.String(), "MYSQL_PWD=***") || strings.Contains(log.String(), "S3cret") {
 			t.Fatalf("%s: log %q", storage, log.String())
+		}
+	}
+}
+
+// TestCommandLine: driftgate seed shows the whole command it runs, its
+// passwords and secrets as ***; a reference to a variable stays.
+func TestCommandLine(t *testing.T) {
+	for _, c := range []struct {
+		cmd  []string
+		want string
+	}{
+		{[]string{"sh", "-c", `gunzip -c dump.sql.gz | mysql "app"`, ""}, `sh -c "gunzip -c dump.sql.gz | mysql \"app\"" ""`},
+		{[]string{"mysql", "-u", "root", "-p", "s3cr"}, `mysql -u root -p ***`},
+		{[]string{"mysql", "-ps3cr", "app"}, `mysql -p*** app`},
+		{[]string{"mysql", "--password=s3cr", "app"}, `mysql --password=*** app`},
+		{[]string{"sh", "-c", "sqlcmd -S db -U sa -P s3cr -Q x"}, `sh -c "sqlcmd -S db -U sa -P *** -Q x"`},
+		{[]string{"sh", "-c", `sqlcmd -U sa -P "$MSSQL_SA_PASSWORD"`}, `sh -c "sqlcmd -U sa -P \"$MSSQL_SA_PASSWORD\""`},
+		{[]string{"psql", "postgres://app:s3cr@db/app"}, `psql postgres://app:***@db/app`},
+		{[]string{"tool", "Server=db;User Id=sa;Password=s3cr;Encrypt=true"}, `tool "Server=db;User Id=sa;Password=***;Encrypt=true"`},
+		{[]string{"env", "API_TOKEN=s3cr", "MYSQL_PWD=s3cr", "DB_PASSWORD=s3cr", "APP_ENV=local"}, `env API_TOKEN=*** MYSQL_PWD=*** DB_PASSWORD=*** APP_ENV=local`},
+		{[]string{"php", "artisan", "migrate:fresh", "--seed", "--force"}, `php artisan migrate:fresh --seed --force`},
+	} {
+		got := commandLine(c.cmd)
+		if got != c.want || strings.Contains(got, "s3cr") {
+			t.Errorf("%q: %s, want %s", c.cmd, got, c.want)
 		}
 	}
 }

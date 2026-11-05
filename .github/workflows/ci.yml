@@ -32,9 +32,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# How long one test package may run before go test stops it (go's default
+# is 10m). The slowest packages (internal/data, internal/state with SQL
+# Server) take 5-9 minutes on a normal runner; a slower runner must not fail
+# a sound build. Each job's timeout-minutes is the outer bound: a job that
+# hangs is stopped there, whatever this value is.
+env:
+  GO_TEST_TIMEOUT: 20m
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       mariadb:
         image: mariadb:11.4
@@ -93,10 +102,24 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      # The SQLite and SQL Server drivers are imported by internal/state
+      # alone (its tests included): every other package reaches a database
+      # through a state component.
+      - name: Driver imports
+        shell: bash
+        run: |
+          go list -test -f '{{.ImportPath}} {{join .Imports " "}}' ./... \
+            | awk '$1 !~ /^github\.com\/orangehill\/driftgate\/internal\/state(_test)?$/ {
+                     for (i = 2; i <= NF; i++) if ($i ~ /^(modernc\.org\/sqlite|github\.com\/microsoft\/go-mssqldb)(\/|$)/) { print $1 ": " $i; bad = 1 } }
+                   END { exit bad }'
       # Coverage of the whole module (-coverpkg), with the databases of this
       # job; the report goes to Coveralls on pushes, never failing the job.
+      # The SQLite end-to-end and crash tests run in the sqlite job, without
+      # the race detector: under it, SQLite (C translated to Go) in every
+      # driftgate process they start takes them from 5 s to 100 s. The
+      # SQLite tests of the packages run here with it.
       - name: Test
-        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+        run: go test -race -timeout "$GO_TEST_TIMEOUT" -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -skip '^Test(EndToEnd|Crash\w*)SQLite$' ./...
       - name: Coverage report
         if: github.event_name == 'push' && github.workflow == 'ci'
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
@@ -184,6 +207,125 @@ jobs:
       - name: Test
         run: go test -count=1 ${{ matrix.packages }}
 
+  # SQLite: the driver's tests on the three systems the binary runs on, as
+  # SQLite's file locking differs between them; the database is a file, so
+  # no service is needed. Also for pull requests. Python's own SQLite is the
+  # application in another process (DRIFTGATE_TEST_PYTHON: its tests fail
+  # rather than skip without it). The end-to-end and crash tests (kill -9
+  # inside a restore and a seed) need a unix; the fuzzer runs on Linux.
+  sqlite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: sqlite (${{ matrix.os }})
+    env:
+      DRIFTGATE_TEST_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.x"
+      - name: Test
+        shell: bash
+        run: go test -count=1 -run SQLite ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/config/ ./internal/dbdsn/
+      - name: End to end and crashes
+        if: runner.os != 'Windows'
+        run: go test -count=1 -run SQLite ./tools/e2e/
+      - name: Fuzz the SQLite restore
+        if: runner.os == 'Linux'
+        run: go test -run='^$' -fuzz=FuzzSQLiteRestore -fuzztime=60s ./internal/state/
+
+  # SQL Server: the driver's tests against SQL Server 2022 (Developer), also
+  # for pull requests, with the race detector; the end-to-end and crash
+  # tests (the whole matrix outside pull requests), the restore fuzzer, and
+  # the TLS check against a server with a certificate of its own (a second
+  # container the script starts). The image starts slowly; the health check
+  # waits for it.
+  sqlserver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Dg-Passw0rd-2026
+        ports: ["14331:1433"]
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b"
+          --health-interval=5s --health-retries=30
+    env:
+      DRIFTGATE_TEST_SQLSERVER: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -race -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
+      # Every driftgate process the tests start would run under the race
+      # detector too; they run without it, as in the sqlite job.
+      - name: End to end and crashes
+        env:
+          DRIFTGATE_CHAOS: ${{ github.event_name != 'pull_request' && 'full' || '' }}
+        run: go test -count=1 -run SQLServer ./tools/e2e/
+      - name: Fuzz the SQL Server restore
+        run: go test -run='^$' -fuzz=FuzzSQLServerRestore -fuzztime=60s ./internal/state/
+      - name: TLS
+        run: tools/e2e/sqlserver-tls.sh
+
+  # SQL Server 2017, 2019 and 2025, as the databases job does for MySQL and
+  # PostgreSQL: not for pull requests. 2017 is the oldest DriftGate
+  # supports. sqlcmd moved to mssql-tools18 in the newer images (2017 has
+  # only /opt/mssql-tools); the health check and sqlserver-tls.sh take
+  # either.
+  sqlserver-versions:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["2017-latest", "2019-latest", "2025-latest"]
+    name: sqlserver (${{ matrix.version }})
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.version }}
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Dg-Passw0rd-2026
+        ports: ["14331:1433"]
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b"
+          --health-interval=5s --health-retries=30
+    env:
+      DRIFTGATE_TEST_SQLSERVER: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:14331?encrypt=true&TrustServerCertificate=true
+      DRIFTGATE_CHAOS: full
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
+      - name: TLS
+        env:
+          IMAGE: mcr.microsoft.com/mssql/server:${{ matrix.version }}
+        run: tools/e2e/sqlserver-tls.sh
+
   # Windows: the packages that need no database, and the parts written for
   # it (the store lock, process groups). A cross-compiled build (build)
   # does not run a test.
@@ -205,8 +347,9 @@ jobs:
             ./internal/allowlist/ ./internal/catalog/ ./internal/glob/ ./internal/jsonx/ ./internal/pii/ ./internal/scan/ \
             ./internal/secret/ ./internal/report/ ./internal/baseline/ ./internal/httpx/ ./internal/har/ ./internal/sheet/ ./internal/upload/
           go test -count=1 -run 'TestHelp|TestClassify|TestUsageErrors|TestCompareNamesAreConfiguration|TestImportAndCompare|TestReport|TestHidePrivateValues|TestLockStoreSweep' ./internal/cli/
+          go test -count=1 -run 'SQLite|SQLServer' ./internal/appconf/ ./internal/dbdsn/
 
-  # The six platforms, also for pull requests: the size and package gate
+  # The six platforms, also for pull requests: the package gate
   # below must fail before a merge, not on main or in a release.
   build:
     needs: test
@@ -228,18 +371,34 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags "-s -w" -o driftgate-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/driftgate
-      # The binary stays light: a dependency that adds megabytes, or a package
-      # that keeps every method linked (text/template, html/template) or adds
-      # debug endpoints (net/http/pprof, expvar), fails here, not in a release.
+      # The binary stays as small as it can: its size is reported against the
+      # latest release (in the job summary), so every increase is seen and
+      # explained in review rather than capped. A package that keeps every
+      # method linked (text/template, html/template) or adds debug endpoints
+      # (net/http/pprof, expvar) still fails here, not in a release.
       - name: Size
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          GH_TOKEN: ${{ github.token }}
         run: |
-          size=$(wc -c < driftgate-$GOOS-$GOARCH)
-          echo "driftgate-$GOOS-$GOARCH: $size bytes"
-          test "$size" -le $((18 << 20))
+          file=driftgate-$GOOS-$GOARCH
+          size=$(wc -c < "$file")
+          base=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets 2>/dev/null \
+            | jq -r --arg f "$file" '.tagName + " " + ([.assets[] | select(.name == $f or .name == $f + ".exe") | .size] | first | tostring)' 2>/dev/null || true)
+          line="$file: $size bytes"
+          if [ -n "$base" ] && [ "${base#* }" != "null" ]; then
+            tag=${base% *}; was=${base#* }
+            line="$line ($((size - was)) bytes against $tag, $(awk -v a="$size" -v b="$was" 'BEGIN { printf "%+.1f%%", (a / b - 1) * 100 }'))"
+          fi
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
           if go list -deps ./cmd/driftgate | grep -Ex 'text/template|html/template|net/http/pprof|expvar|plugin'; then
+            exit 1
+          fi
+          # SQL Server takes SQL logins only: the driver's Kerberos, Azure AD
+          # and named-pipe parts, and what they pull in, stay out.
+          if go list -deps ./cmd/driftgate | grep -E 'jcmturner|github\.com/Azure/|AzureAD|go-mssqldb/(azuread|integratedauth/krb5|namedpipe)'; then
             exit 1
           fi

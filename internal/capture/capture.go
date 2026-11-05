@@ -275,6 +275,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
+	// Sessions the last restore of the previous capture ended fail now.
+	takeEnded(p, tr)
 	start, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -357,6 +359,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		if err := tr.restore(ctx); err != nil {
 			return nil, err
 		}
+		saveEnded(p, tr)
 	}
 
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck}
@@ -617,7 +620,7 @@ type runner struct {
 // or a prepare may have changed.
 func (r *runner) prepare(ctx context.Context) error {
 	for _, cmd := range r.p.Prepare {
-		fmt.Fprintf(r.out, "prepare: %s\n", cmd[0])
+		fmt.Fprintf(r.out, "prepare: %s\n", commandLine(cmd))
 		if err := state.Run(ctx, r.p.Root, cmd, r.env, r.log); err != nil {
 			return envErr("prepare: %v", err)
 		}
@@ -705,6 +708,9 @@ func (r *runner) parallel(ctx context.Context, reqs []catalog.Request, workers i
 					}
 				}
 				res := r.send(ctx, req)
+				if q != nil {
+					res = r.resendAfterRestore(ctx, req, res)
+				}
 				if q == nil {
 					res.Release()
 					continue

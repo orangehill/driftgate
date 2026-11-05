@@ -341,14 +341,16 @@ Every capture starts from the same data. Each entry under `state:` is a
 component, named by a simple name: a database with a built-in driver, or
 anything else through commands.
 
-**A database** (MySQL, MariaDB or PostgreSQL):
+**A database** (MySQL, MariaDB, PostgreSQL or SQL Server; an SQLite file
+takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
+[SQL Server](#sql-server)):
 
 | Key | Type | Meaning |
 |---|---|---|
-| `driver` | `mysql` (also MariaDB; `mariadb` is accepted) \| `postgres` | |
-| `dsn` | `{env}` \| `{op}` \| a file of the project | the server, never written in the file: `mysql://user:pass@host:3306/` (or the driver's `user:pass@tcp(host:3306)/`), `postgres://user:pass@host:5432/`, or where the project keeps it (`{ dotenv: .env }`); see [database DSNs](#database-dsns) |
+| `driver` | `mysql` (also MariaDB; `mariadb` is accepted) \| `postgres` \| `sqlite` \| `sqlserver` (`mssql` is accepted) | |
+| `dsn` | `{env}` \| `{op}` \| a file of the project | the server, never written in the file: `mysql://user:pass@host:3306/` (or the driver's `user:pass@tcp(host:3306)/`), `postgres://user:pass@host:5432/`, `sqlserver://user:pass@host:1433?encrypt=true`, or where the project keeps it (`{ dotenv: .env }`); see [database DSNs](#database-dsns) |
 | `working` | string, required | the database the application uses |
-| `pristine` | string | its pristine copy; default `<working>_pristine`; must differ from `working` (MySQL/MariaDB: also in letter case) |
+| `pristine` | string | its pristine copy; default `<working>_pristine`; must differ from `working` (MySQL/MariaDB and SQL Server: also in letter case) |
 | `exclude` | list of globs | tables never fingerprinted or restored (sessions, caches, logs) |
 | `row_tracking` | list of tables | also record which rows and columns each request changes (without values); not an excluded table |
 | `allow_remote` | bool | allow a database host that is neither local nor named in some target's `allow_hosts` |
@@ -360,11 +362,14 @@ anything else through commands.
   after it was made. A capture restores `working` from `pristine`
   (MySQL/MariaDB: only the tables that changed, with their counters,
   triggers and views; PostgreSQL: the whole database from the pristine one
-  as a template), checks it against the fingerprint, and stops with exit 3
-  when the data differ from the data the baseline was captured from.
+  as a template; SQL Server: the tables and sequences that changed, else
+  the whole database from the pristine copy's backup), checks it against
+  the fingerprint, and stops with exit 3 when the data differ from the
+  data the baseline was captured from.
 - `seed` replaces only a pristine database it made itself: it marks the one
   it makes (MySQL/MariaDB: a table `driftgate_pristine`, never fingerprinted
-  or restored; PostgreSQL: the database's comment). A database under the
+  or restored; PostgreSQL: the database's comment; SQL Server: an
+  extended property of the database). A database under the
   `pristine` name that has objects and no mark is not dropped; seed stops
   and names it. (A pristine database made by an earlier release has no
   mark; it is replaced when DriftGate's record of it names it.) The record
@@ -409,8 +414,8 @@ anything else through commands.
   replicating the state databases (`replicate-ignore-db`) or give the user
   no rights to list replicas.
 - Versions tested in CI: MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
-  PostgreSQL 13, 16 and 17. On MariaDB a table with a generated column is
-  fingerprinted from its rows (MariaDB's own table checksum of such a table
+  PostgreSQL 13, 16 and 17, SQL Server 2017, 2019, 2022 and 2025. On MariaDB a
+  table with a generated column is fingerprinted from its rows (MariaDB's own table checksum of such a table
   changes without a change of data); on MariaDB 10.3 and 10.4 a table with
   a `VIRTUAL` column is restored whole, not by chunks (the chunked restore
   made those versions crash now and then). PostgreSQL before 15 has no file copy of a
@@ -427,7 +432,9 @@ anything else through commands.
   `POSTGRES_USER` may be used, as `driftgate setup` does when the
   application's setting names that service; on a shared server, always a
   limited user. PostgreSQL restore ends the application's sessions on the
-  working database.
+  working database. SQL Server: a login with `dbcreator` and `db_owner` in
+  the working database ([SQL Server](#sql-server)), not `sysadmin`, except
+  for `sa` of a local container.
 - MySQL/MariaDB: the global `PROCESS` privilege is optional. With it, a
   fingerprint after a request re-reads only the tables written to (per-table
   counters: MariaDB `userstat`, MySQL `performance_schema`), as it can see
@@ -440,8 +447,9 @@ anything else through commands.
   restore keeps (MySQL/MariaDB). PostgreSQL also: functions and procedures,
   enum types with their values in order, domains, schemas, materialized
   views with their rows, row security and policies (objects of extensions
-  are left out). A request that changes one of them is a side effect, and
-  the next restore brings it back.
+  are left out); SQL Server: see [SQL Server](#sql-server). A request that
+  changes one of them is a side effect, and the next restore brings it
+  back.
 - Triggers and views (MySQL/MariaDB) and the PostgreSQL objects above are
   fingerprinted in the current format. A pristine copy or a baseline whose
   fingerprint has an older format keeps working while none of them differs;
@@ -490,12 +498,14 @@ parameters; any other stops with an error instead of being ignored:
 `mysql://app:secret@db.internal:3306/?tls=true` connects only over
 verified TLS. The driver's own form (`user:pass@tcp(host:3306)/?tls=true`)
 takes the driver's parameters. A `postgres://` URL takes PostgreSQL's
-(`sslmode`, `sslrootcert`, …).
+(`sslmode`, `sslrootcert`, …), a `sqlserver://` URL go-mssqldb's TLS
+parameters ([SQL Server](#sql-server)).
 
 An `env` or `op` DSN may also be a JDBC URL (`jdbc:mysql://…`,
 `jdbc:postgresql://…?user=…&password=…`), an ADO.NET connection string
 (`Server=…;Port=…;Database=…;Uid=…;Pwd=…`, Npgsql's
-`Host=…;Username=…;Password=…`), as .NET reads `ConnectionStrings__Default`
+`Host=…;Username=…;Password=…`, SqlClient's `Server=tcp:host,1433;…`, an
+ODBC string of SQL Server), as .NET reads `ConnectionStrings__Default`
 from the environment, or libpq's keyword form (`host=… dbname=… user=…
 password=…`); it is converted as below. A connection string that names no
 server (`Server=`, `Host=`) is refused rather than taken for a local one:
@@ -524,7 +534,7 @@ restore a database the application no longer runs on.
 | `yaml: config/database.yml` | Rails' `database.yml` (with `<<: *default`; `DATABASE_URL` of the environment over it, as Rails merges it; in ERB only `ENV['X']`, `ENV.fetch('X')`, `ENV.fetch('X', default)`, `ENV.fetch('X') { default }` and `ENV['X'] \|\| default`), or a Go service's `config.yaml`: a URL, or `adapter`/`driver`, `host`, `port`, `database`/`name`/`dbname`, `username`/`user`, `password`, `socket` | default `development` for `database.yml`, else the first of `database`, `db`, `datasource`, `mysql`, `postgres`, `postgresql`; dots separate levels (`development.primary`) |
 | `php: app/etc/env.php` | Magento: the array the file returns (`host`, also `host:port`, `dbname`, `username`, `password`) | default `db.connection.default` |
 | `python: shop/settings.py` | Django: the literal `DATABASES = {…}` (`ENGINE`, `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT`) | default `default` |
-| `compose: compose.yaml` | a MySQL, MariaDB or PostgreSQL service (by its image) of a compose file with its override: the port it publishes on this machine and its user from `MYSQL_*`/`MARIADB_*`/`POSTGRES_*` (also through `env_file` and `${VAR}` from the environment and the `.env` next to the file). MySQL and MariaDB: `root` when the root password is set, as DriftGate creates the pristine database | required: the service name |
+| `compose: compose.yaml` | a MySQL, MariaDB, PostgreSQL or SQL Server ([below](#sql-server)) service (by its image) of a compose file with its override: the port it publishes on this machine and its user from `MYSQL_*`/`MARIADB_*`/`POSTGRES_*` (also through `env_file` and `${VAR}` from the environment and the `.env` next to the file). MySQL and MariaDB: `root` when the root password is set, as DriftGate creates the pristine database | required: the service name |
 
 - `host: 127.0.0.1:3307` replaces the setting's host and port: the address
   of the database from this machine. `host: /path/to/mysqld.sock` (or a
@@ -552,8 +562,8 @@ restore a database the application no longer runs on.
   `schema`) are left out, except PostgreSQL's `application_name`,
   `connect_timeout` and `target_session_attrs`; so is the database
   (`working` and `database` name it).
-- A file that names another database (SQL Server, SQLite) or a driver
-  other than the component's is an error, as is a value only code
+- A file that names a driver other than the component's is an error
+  (an SQLite file for a `mysql` component), as is a value only code
   computes (`os.environ[...]` in `settings.py`, other Ruby in ERB): put the
   DSN in a variable and use `{ env: NAME }`.
 - `.env` files are read as phpdotenv, Node's dotenv and godotenv agree:
@@ -597,6 +607,733 @@ state:
 A catalog with requests that change data needs at least one component with
 a restore; otherwise `capture` and `run` refuse it (exit 2) unless
 `--allow-mutating-without-restore`.
+
+#### SQLite
+
+An SQLite database is a file of the project. DriftGate has SQLite built
+in: [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) with
+SQLite 3.54.1, SQLite's own C code translated to Go, so the binary needs
+no CGO and locks the file as the application's SQLite does. Any SQLite 3
+file works, in WAL or rollback-journal mode. CI tests it on Linux, macOS
+and Windows with Python's `sqlite3` as the application in another
+process.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `sqlite` | |
+| `working` | path, required | the database file the application opens, relative to the project root; it must exist when a command runs (the application's migrations make it) |
+| `pristine` | path | its pristine copy; default a file of the local store (`pristine/<name>-<hash>.sqlite`, next to the record of its fingerprint), so every checkout and working file has its own. When set, another file inside the project (seed creates it, and its folder when that does not exist yet): not `working` and not one of its `-wal`, `-shm` and `-journal` files, also in letter case |
+| `dsn` | a file of the project \| `{env}` \| `{op}` | optional: the setting the application reads (`{ dotenv: .env }`, see [database DSNs](#database-dsns)); the file it names must be `working`, so a changed `DB_DATABASE` stops a command (exit 2) instead of restoring a file the application no longer uses. An `env` or `op` value is a path, a `file:` URI or an `sqlite:` URL |
+| `exclude`, `row_tracking` | | as above; a row without a primary key is named by its rowid (`rowid=7`) |
+
+`allow_remote` is refused: there is no server.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite
+    dsn: { dotenv: .env }       # DB_CONNECTION=sqlite; it must name working
+    working: database/database.sqlite
+    exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]
+```
+
+**The file.** `working` and `pristine` are relative to the project root
+and inside it, also past symbolic links. They, and a path from the
+application's settings, are resolved as the system opens them: a `..`
+after a symbolic link goes up from where the link leads, and a link out
+of the project is refused. Refused too: an in-memory database (`:memory:`, `mode=memory`,
+SQLAlchemy's `sqlite://`), a file outside the project, a network share
+(`\\server\share\…`), a URL with a host (other than `file://localhost/`),
+an encrypted file (SQLCipher, a `Password=` of Microsoft.Data.Sqlite) and
+a file that `|DataDirectory|` names. A value in the MySQL driver's form
+(`user:password@tcp(host)/db`, `user@/db`) is MySQL's even when the user
+reads like a scheme (`file:`, `sqlite:`), so in a DSN or URL a folder
+ending in `@` needs `file:///…` (a plain path does in `DB_DATABASE`,
+`working:` and `--database`). A relative path is taken as the
+framework takes it; where the application opens it from the folder it
+runs in, `init` and `setup` add a note to check it:
+
+| Setting | The file |
+|---|---|
+| Laravel `.env` (`DB_CONNECTION=sqlite`) | `DB_DATABASE`, or the file of `DB_URL` / `DATABASE_URL`; unset, `database/database.sqlite`. A relative `DB_DATABASE` is taken from the project root, with a note: Laravel 11 and later open it from the folder PHP runs in when it is there, else from the root; Laravel 10 and earlier only from the folder PHP runs in (`public/` under `php artisan serve` and PHP-FPM). Leave it unset or make it absolute |
+| Django `settings.py` (`django.db.backends.sqlite3`) | `BASE_DIR / 'db.sqlite3'`, `str(BASE_DIR / …)` or `os.path.join(BASE_DIR, …)`, with `BASE_DIR` as `startproject` writes it (`Path(__file__).resolve().parent.parent`, or `os.path.dirname` of `__file__`); a relative string from `manage.py`'s folder. Other code is not run: set `working:` |
+| Symfony `.env` (`DATABASE_URL="sqlite:///%kernel.project_dir%/var/data.db"`) | `%kernel.project_dir%` is the Symfony project's folder: the folder of the `.env` file (of the one above `config/` for a file under it) |
+| Prisma (`provider = "sqlite"` in `prisma/schema.prisma`) | the `file:` URL of the variable its `url = env("…")` names, relative to `prisma/`, as Prisma takes it |
+| Rails `config/database.yml` (`adapter: sqlite3`) | relative to the Rails root; every SQLite database of `development` |
+| ASP.NET `appsettings.json` (`Data Source=app.db`) | relative to the `.csproj`'s folder, where `dotnet run` runs |
+| any other | relative to the project root |
+
+- **Rails 8** has a file per database (`primary`, `cache`, `queue`,
+  `cable`; a new application splits them in production only). Each file
+  of `development` is a component of its own; `init` and `setup` write
+  the primary and list the others. The cache, queue and cable databases (Solid Cache, Solid Queue, Solid Cable) change without a
+  request changing data: leave them out of `state:`, or exclude their
+  tables.
+- **The same machine.** SQLite's locks keep a restore and the
+  application's writes apart, so the file must be on a local disk of the
+  machine DriftGate runs on, opened by an application on that machine.
+  They do not hold across network file systems (NFS, SMB), and Docker
+  Desktop's file sharing (macOS, Windows) is not documented to keep them:
+  `init` and `setup` note a compose service that mounts the file's folder
+  into its container. Run the application on this machine
+  (or on Linux, where a bind mount is the same file system).
+
+**Restore, in place.** A restore writes inside the working file, in one
+transaction, as the application's own SQLite does; the file is never
+copied, renamed or deleted, nor are its `-wal`, `-shm` and `-journal`
+files. The application's open connections keep the file they opened: a
+copy or a rename over it would leave them reading and writing the old
+file (a pass on data that is not the restored data, and lost writes), with
+`-wal` and `-shm` files that no longer match the file.
+
+- Only the items that differ are restored, in one `BEGIN IMMEDIATE`
+  transaction with the pristine file attached read-only, so the
+  application sees all of a restore or none of it. A table with the
+  pristine definition is emptied and filled again with `INSERT … SELECT`,
+  which SQLite copies as raw records (a table without an `INTEGER PRIMARY
+  KEY` with its hidden rowids, so they are kept), and gets its
+  `sqlite_sequence` value back; a changed table is copied whole. A table
+  whose definition (its or its indexes' `CREATE` statement) differs is
+  dropped and created from the pristine file; views and triggers are made
+  again from it, and `user_version` and `application_id` set to its own.
+- Nothing a restore does runs the application's logic: foreign keys are off
+  on DriftGate's connections, so deletes do not cascade, and the triggers
+  of the tables it writes are dropped before and created again after,
+  inside the transaction. Excluded tables, SQLite's statistics and the
+  mark of the pristine copy are not touched.
+- A working file replaced on disk (deleted and made again, a copy written
+  over it) is noticed at the next fingerprint, restore or seed: DriftGate
+  opens the new file and reads it in full.
+
+**Seed.** `driftgate seed` copies one moment of the working file
+(`VACUUM INTO`) into `<pristine>.driftgate-new`, marks it (a table
+`driftgate_pristine`), empties its excluded tables (with
+`secure_delete`, so the rows of sessions and tokens do not stay in its
+free pages), sets it to rollback mode (`DELETE`), writes it to disk and
+renames it over the pristine file; a seed that stops before leaves the
+old copy. The working file is only read. A file at the `pristine` path is
+replaced only when it has the mark, is empty, or is the one DriftGate's
+record names; any other is someone's data, and seed stops and names it.
+
+**Fingerprint.** It covers `table:<name>` (its `CREATE` statement, those
+of its indexes, its `sqlite_sequence` value and its rows), `view:`,
+`trigger:`, `pragma:user_version` and `pragma:application_id`. Every
+value is hashed with its storage class, so `1`, `1.0`, `'1'` and `x'31'`
+differ, as do NULL and `''`; a generated column counts by its definition.
+A virtual table (FTS5, R*Tree) counts by its `CREATE` statement, its rows
+by its shadow tables; a module DriftGate's SQLite does not have stops a
+restore with the advice to exclude the table. Not covered: SQLite's
+statistics (`sqlite_stat1` …, which `ANALYZE` and `PRAGMA optimize`
+write), temporary objects, excluded tables and the mark. A trigger of an
+excluded table is covered: its body may write any table.
+
+A fingerprint is taken at one of three costs; the first one of a command
+reads every table:
+
+| Fingerprint | When | 1 MB | 50 MB | 500 MB |
+|---|---|---|---|---|
+| reused | nothing committed since the last one (`PRAGMA data_version`, the schema version, the file's identity, size and time, and no restore of DriftGate's own) | 22 µs | 28 µs | 54 µs |
+| page digests | something was written, but every table's pages hash as at its last reading (only an excluded table was written) | 0.87 ms | 30 ms | 302 ms |
+| rows | the tables whose pages changed are read again (one row of the large table) | 3.0 ms | 150 ms | 1.13 s |
+| full | every table read | 3.5 ms | 167 ms | 1.67 s |
+
+Seed (1, 50, 500 MB): 12.8 ms, 124 ms, 1.33 s. Restore of a small table with one changed
+row: about 0.35 ms; of a table of about 490 MB: 4.5 s. Measured on an
+Apple M4 in WAL mode, on a file with one large table with an index,
+twenty small tables and an excluded session table. A database session or
+cache table written on every request moves `data_version` every time: the
+page digests then keep the fingerprint from reading the other tables.
+
+**Locks.** DriftGate's connections wait up to 10 s for a lock the
+application holds (`busy_timeout`), and never change the file's journal
+mode or locking mode or checkpoint its WAL.
+
+- A fingerprint first waits for a write the application has under way
+  (`BEGIN IMMEDIATE`); when one committed meanwhile, it looks again after
+  5 ms, up to 20 times, so a request that ends with several transactions
+  is seen whole. Holding the write lock only for that moment, it starts
+  read transactions on up to five connections, which then read one moment
+  of the file while the application goes on.
+- In WAL mode the application's writers are not held up by a fingerprint
+  or a seed. In rollback mode (`DELETE`, SQLite's default, which Laravel
+  and Django keep; Rails sets WAL) a reading transaction keeps writers
+  from committing: for the duration of a scan or of a seed's copy, an
+  application write waits (or, without a busy timeout, fails with
+  `database is locked`). Exclude what background workers write, or switch
+  the file to WAL.
+- A restore is one write transaction: the application's writers wait for
+  it, and its readers see the data before or after it.
+
+**Exclude** what the framework writes on every request or outside
+requests, in the same file: sessions, cache, jobs. Restoring them would
+log users out and drop queued jobs, and their writes would make every
+fingerprint read them. `init` and `setup` propose them from the settings
+(`setup` asks, default yes):
+
+- Laravel: `sessions`, `cache` and `cache_locks`, `jobs` when
+  `SESSION_DRIVER`, `CACHE_STORE` (`CACHE_DRIVER` before Laravel 11) and
+  `QUEUE_CONNECTION` are `database` on the default connection, or unset
+  with `database` as the default (the framework's since Laravel 11), or
+  the tables `SESSION_TABLE`, `DB_CACHE_TABLE`, `DB_CACHE_LOCK_TABLE` and
+  `DB_QUEUE_TABLE` name; `job_batches`, and `failed_jobs` unless
+  `QUEUE_FAILED_DRIVER` is `null`, `file` or `dynamodb`; Telescope's
+  (`telescope_entries`, `telescope_entries_tags`, `telescope_monitoring`)
+  and Pulse's (`pulse_values`, `pulse_entries`, `pulse_aggregates`) when
+  `composer.json` requires them;
+- Django: `django_session`, with database sessions.
+
+An excluded table keeps its definition in the pristine copy, without
+rows. `exclude` may name tables the file does not have.
+
+**Queries** (`params` `sql:`) run on the pristine file, opened read-only
+(`mode=ro`, `query_only`, defensive mode), on a connection that lets only
+reads compile. Besides what the other drivers refuse, `ATTACH`, `DETACH`,
+`PRAGMA`, `VACUUM`, `REINDEX`, the tables that read the file's pages
+(`sqlite_dbpage`, `dbstat`, `sqlite_dbdata`, `sqlite_dbptr`) and the
+functions `load_extension`, `fts3_tokenizer`, `readfile`, `writefile` and
+`edit` are refused. A `DATETIME` value comes back as the text SQLite
+holds.
+
+#### SQL Server
+
+DriftGate has SQL Server built in: the core of
+[go-mssqldb](https://pkg.go.dev/github.com/microsoft/go-mssqldb), a
+pure Go driver, so the binary needs no CGO and no client library. It
+supports SQL Server 2017 and later (Developer, Express, Standard and
+Enterprise, on Linux, Windows or in a container), not Azure SQL Database,
+Azure SQL Managed Instance or Synapse, whose databases cannot be backed up
+to a file and restored from it. CI tests SQL Server 2017, 2019, 2022 and
+2025 (Developer, on Linux in Docker); SQL Server on Windows is not tested
+there. SQL Server 2017 makes itself a certificate with a negative serial
+number, which Go refuses to read by default (also with
+`TrustServerCertificate`), so no connection to it would work. When a
+command makes its first SQL Server component, DriftGate turns on
+`GODEBUG=x509negativeserial=1` for its own process: from then on, for
+the whole process (the target's HTTPS included, and the commands it
+starts, which inherit it), such a certificate is read; its chain and host
+name are verified as any other's. A project without SQL Server never has
+it, and an `x509negativeserial` you set in `GODEBUG` yourself is kept.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `driver` | `sqlserver` (`mssql` is accepted) | |
+| `dsn` | `{env}` \| `{op}` \| a file of the project | the server and an SQL login: `sqlserver://user:pass@host:1433?encrypt=true`, an ADO.NET, ODBC or JDBC connection string, or the application's setting (`{ appsettings: … }`, `{ dotenv: .env }`; see the application's settings below) |
+| `working` | string, required | the database the application uses; names are compared without letter case, as SQL Server does |
+| `pristine` | string | its pristine copy, a database on the same server; default `<working>_pristine`; not `working` in any letter case, at most 122 characters (DriftGate makes `<pristine>_dgnew` and `<pristine>_dgx` next to it) |
+| `exclude` | list of globs | as above; a glob matches `schema.name` or `name`, without letter case. It also leaves out views and sequences of those names |
+| `row_tracking` | list of tables | as above; `schema.name`, or `name` in `dbo`; the table needs a primary key |
+| `allow_remote` | bool | as above |
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlserver
+    dsn: { appsettings: src/Shop.Api/Shop.Api.csproj, key: "ConnectionStrings:Default" }
+    working: Shop
+    exclude: [dbo.SessionCache, "HangFire.*"]
+```
+
+**The login.** DriftGate signs in with an SQL Server login (a user name
+and password; the server must allow SQL Server authentication, as the
+container images do). Windows accounts (`Integrated Security`,
+`Trusted_Connection`, `DOMAIN\user`), Kerberos and NTLM, and Microsoft
+Entra ID (`Authentication=ActiveDirectory…`) are refused by name, as the
+driver is built without them. The login needs:
+
+- the server role `dbcreator`: it creates the pristine copy, renames and
+  drops the copies it made (it owns them), and restores the working
+  database from a backup. `dbcreator` reaches every database of the
+  server, not only these: its login may alter any of them (take it
+  offline, set it to single user), restore over any of them (`RESTORE …
+  WITH REPLACE`) and drop any of them, though it cannot read their data;
+- `db_owner` in the working database (or to own it): it backs it up and
+  restores it, table by table and, when it must, as a whole.
+
+`sa` or another `sysadmin` needs nothing more; use it only for a local,
+disposable server, such as a container on this machine. `driftgate
+setup` prints what an administrator runs for any other login (every
+statement may run again):
+
+```sql
+USE [master]; ALTER SERVER ROLE [dbcreator] ADD MEMBER [shop];
+USE [Shop];
+IF SUSER_SID(N'shop') NOT IN (SELECT sid FROM sys.database_principals WHERE sid IS NOT NULL) CREATE USER [shop] FOR LOGIN [shop];
+IF SUSER_SID(N'shop') <> (SELECT sid FROM sys.database_principals WHERE name = N'dbo') ALTER ROLE [db_owner] ADD MEMBER [shop];
+```
+
+A narrower grant, which `setup` prints too: instead of both, the right to
+create databases and the ownership of the working database.
+
+```sql
+USE [master]; GRANT CREATE ANY DATABASE TO [shop]; ALTER AUTHORIZATION ON DATABASE::[Shop] TO [shop];
+```
+
+The login then reaches only the databases it owns, the working database
+and the copies it makes: seeds, restores item by item and as a whole
+work, and altering, restoring over or dropping any other database is
+refused. It is not the default because it changes the working
+database's owner, which an application may rely on (the login becomes
+`dbo` there; whatever ran as the old owner, such as `EXECUTE AS OWNER`
+or cross-database ownership chaining, changes with it). It fails (error
+15110) while the login has a user in that database: drop it first
+(`USE [Shop]; DROP USER [shop];`; as `dbo` the login needs none). Either
+grant lets the login restore any backup file the server can read into a
+new database of its own, and so read it: keep the backups of other
+databases out of the server's reach, its backup folder included.
+
+Optional, and proposed by `setup` with it: `GRANT VIEW SERVER
+PERFORMANCE STATE TO [shop];` (SQL Server 2022 and later; `VIEW SERVER
+STATE` on 2017 and 2019). With it a fingerprint of data that did not
+change is reused, and one after a change reads only the tables written to
+(see the fingerprint below); a fingerprint
+also waits for the application's open transactions. Without it the result
+is the same, but every fingerprint reads every table, which takes longer
+on a large database; the log says so once. The login's own permissions
+are the real limit of what DriftGate's queries can do
+([security](security.md)). Either permission also lets the login itself
+read every session of the server and the SQL text it runs or ran
+(`sys.dm_exec_requests`, the plan cache), literals included; DriftGate's
+queries refuse those views, but grant it only to a login the server's
+other users may trust with that.
+
+**DSN and TLS.** DriftGate's DSN is go-mssqldb's URL,
+`sqlserver://user:pass@host:1433?encrypt=true`; a DSN of the environment
+or 1Password may also be an ADO.NET connection string
+(`Server=tcp:db,1433;Database=Shop;User Id=shop;Password=…`), an ODBC one
+(`Driver={ODBC Driver 18 for SQL Server};Server=…`) or a JDBC URL
+(`jdbc:sqlserver://db:1433;databaseName=Shop;user=…;password=…`). Each is
+read and the URL written anew from what DriftGate reads: go-mssqldb
+ignores a parameter it does not know, so a mistyped `encrypt` would
+otherwise go unnoticed. A URL parameter DriftGate does not know, one
+given twice, and a `;` in the query (percent-encode it as `%3B`) are
+refused. The URL's database is ignored; `working` names it. A go-mssqldb
+URL of the environment or 1Password is written for DriftGate, not taken
+from an application: without `encrypt` it is encrypted and the
+certificate verified (`encrypt=true`); for a self-signed certificate add
+`TrustServerCertificate=true`.
+
+The TLS DriftGate connects with is never weaker than the application's
+own client. `Encrypt` (`true`, `yes`, `Mandatory`; `false`, `no`,
+`Optional`; `Strict`), `TrustServerCertificate`, `HostNameInCertificate`,
+a minimum TLS version and certificate files are passed on; a value
+DriftGate cannot map is an error, never left out. When the setting leaves
+`Encrypt` unset, the client's default is taken:
+
+| Client | Told by | `Encrypt` unset: DriftGate connects with |
+|---|---|---|
+| Microsoft.Data.SqlClient 4 and later | its `PackageReference` in the `.csproj` | `encrypt=true` (encrypted, certificate verified) |
+| Microsoft.Data.SqlClient before 4 | the `.csproj` | `encrypt=false` |
+| EF Core (`Microsoft.EntityFrameworkCore.SqlServer`) 7 and later, before 7 | the `.csproj` | `encrypt=true`; before 7 `encrypt=false` |
+| System.Data.SqlClient | the `.csproj` | `encrypt=false&TrustServerCertificate=true` |
+| ODBC Driver 18 and later | `Driver=` (also Django's `OPTIONS` `driver`) | `encrypt=true` |
+| ODBC Driver 17 and earlier, SQL Server Native Client, the old `SQL Server` driver | `Driver=` | `encrypt=false&TrustServerCertificate=true` |
+| mssql-jdbc (10.2 and later) | `jdbc:sqlserver://` | `encrypt=true` |
+| Prisma | `sqlserver://host:1433;database=…` | `encrypt=true` |
+| tedious, node-mssql | `mssql://` | `encrypt=true` |
+| go-mssqldb | `sqlserver://user:pass@host:1433` in a Go application's own setting file | `encrypt=false&TrustServerCertificate=true` |
+| FreeTDS (its ODBC driver, `dblib://`, Rails' TinyTDS), pdo_sqlsrv (Laravel), pyodbc without a known driver | | `encrypt=true`: `freetds.conf` or the ODBC driver decides, which DriftGate does not read |
+| a go-mssqldb URL or an ADO.NET connection string of the environment or 1Password, any other | | `encrypt=true` |
+
+- **`Encrypt` off.** DriftGate still encrypts the sign-in, as every
+  client does, and never signs in without TLS (`encrypt=disable`,
+  Prisma's `DANGER_PLAINTEXT` are taken as off): a server that answers it
+  cannot encrypt (`ENCRYPT_NOT_SUP`, which go-mssqldb alone would answer
+  by sending the password in clear) is refused before the password is
+  sent. After the sign-in the data is not encrypted. go-mssqldb verifies
+  the certificate the sign-in is encrypted with. For the clients that
+  never verify it with `Encrypt` off (System.Data.SqlClient, ODBC Driver
+  17 and earlier, a Go application's go-mssqldb setting without
+  `encrypt`, FreeTDS with `encryption = off` or `request`) DriftGate does
+  not either
+  (`TrustServerCertificate=true`); for the others, a server with a
+  self-signed certificate needs `TrustServerCertificate=true` in the
+  application's own setting, and `init` and `setup` say so.
+- **A setting that does not say** (`Encrypt` unset, a client DriftGate
+  cannot tell) is encrypted and verified; for a self-signed certificate,
+  set `Encrypt` and `TrustServerCertificate` in the setting. FreeTDS's
+  `encryption = require` encrypts without verifying unless a CA is given.
+- **A compose service** on a loopback address of this machine is trusted
+  with its own self-signed certificate (`encrypt=true&TrustServerCertificate=true`)
+  unless the setting says otherwise; on any other address it is verified.
+- **`Strict`** (TDS 8) always verifies and drops `TrustServerCertificate`.
+  CI checks it on SQL Server 2025; SQL Server 2022 and 2019 on Linux close
+  a TDS 8 connection, and DriftGate does not fall back to another
+  encryption.
+- **Certificate files**: a CA (go-mssqldb's `certificate`, Prisma's
+  `trustServerCertificateCA`) or the server's own certificate
+  (`ServerCertificate`, compared byte for byte; not together with
+  `HostNameInCertificate` or a CA). A `.pem` or `.der` file (convert a
+  `.cer` or `.crt` with `openssl x509`), a regular file. A setting of the
+  project names one by a path relative to the project, which stays inside
+  it (also past symbolic links), or by an absolute path or one in the home
+  folder (`~/certs/ca.pem`) anywhere, such as a system folder
+  (`/etc/ssl/certs`); a DSN of the environment or 1Password by an absolute
+  path or one in the home folder. The driver only reads it as a
+  certificate; no message shows what it holds. A Java trust store (`trustStore`) is refused: give
+  the CA as a PEM file. JDBC's `sslProtocol=TLSv1.3` is `tlsmin=1.3`.
+
+`tools/e2e/sqlserver-tls.sh` (run in CI for every version) starts SQL
+Server with a certificate of a test CA and forced encryption, and checks
+that a verified connection works and that a wrong CA, host or
+`hostNameInCertificate` is refused without the password in any message.
+
+**The application's settings.**
+`init` and `setup` find SQL Server in the settings below and write the
+`dsn:` that reads them ([from the project's own settings](#database-dsns));
+the server is `host`, `host,port`, `tcp:host,port` or `host\instance,port`.
+The local server (`.`, `(local)`, none) is taken as TCP to `127.0.0.1`,
+with a note: a Windows client may reach it through shared memory.
+
+| Framework | `dsn:` | Reads |
+|---|---|---|
+| ASP.NET, EF Core | `appsettings: <project>.csproj`, `key: "ConnectionStrings:<name>"` | the connection string, as above; the client from the `.csproj` (see the [ASP.NET Core guide](guides/aspnet-core.md)) |
+| Laravel | `dotenv: .env` | `DB_CONNECTION=sqlsrv`, `DB_HOST` (also `host\instance` or `host,port`), `DB_PORT` (default 1433), `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_URL` (`sqlsrv://`) over them. `DB_ENCRYPT` and `DB_TRUST_SERVER_CERTIFICATE` count only when `config/database.php` passes them on (Laravel ships those lines commented out); without a `config/database.php` a value that weakens TLS is left out, with a note |
+| Spring, Quarkus, Micronaut | `properties: …` | `jdbc:sqlserver://host:1433;databaseName=…;encrypt=…` (also `serverName`, `portNumber`, `instanceName`) with the user and password keys |
+| Django | `python: settings.py` | `ENGINE` `mssql` (mssql-django) or `sql_server.pyodbc`; `HOST` (also `host\instance`) and `PORT`; `OPTIONS` `driver` (whose default `Encrypt` counts) and `extra_params` (ODBC keys); an ODBC `dsn` is refused |
+| Prisma | `dotenv: .env`, `key: DATABASE_URL` | `sqlserver://host:1433;database=…;user=…;password=…;encrypt=…` (a value with `;` in `{…}`) |
+| Rails | `yaml: config/database.yml` | `adapter: sqlserver` (activerecord-sqlserver-adapter), `host`, `port`, `database`, `username`, `password` |
+| Go | `yaml: config.yaml` | a go-mssqldb URL with `?database=…`; a path with a port is taken for the database, as Rails reads it, with a note (go-mssqldb takes it for an instance); a path without a port is refused |
+| Node | `dotenv: .env`, `key: …` | `mssql://user:pass@host:1433/db` (tedious, node-mssql) |
+| compose | `compose: compose.yaml`, `key: <service>` | an `mcr.microsoft.com/mssql/server` (or `mssql/rhel/server`) service: `sa` with `MSSQL_SA_PASSWORD` (or `SA_PASSWORD`), at the port it publishes for `MSSQL_TCP_PORT` (default 1433). The image names no database: `setup` takes the application's when its setting names the same server. A password from a file (`MSSQL_SA_PASSWORD_FILE`) and Azure SQL Edge are refused |
+
+A key that names the server, database, user, password or port twice with
+different values (`Server` and `Data Source`, `Database` and `Initial
+Catalog`) is refused: the clients differ in which one wins. Microsoft's
+ODBC drivers do not read `Port=` (write `Server=host,1433`); FreeTDS's
+does.
+
+**Refused**, each with a message that names it and no value:
+
+- other sign-ins than an SQL login (above), and Always Encrypted (`Column
+  Encryption Setting`), whose columns DriftGate cannot read;
+- other ways to the server than TCP to one host and port: named pipes
+  (`np:`, `Network Library`), shared memory (`lpc:`), LocalDB, the
+  dedicated admin connection (`admin:`), an ODBC data source (`DSN=`), a
+  `Failover Partner`, `ApplicationIntent=ReadOnly` (a read-only replica
+  cannot be restored), `AttachDbFilename` and `User Instance`, and a named
+  instance without its port (the SQL Server Browser would choose the port
+  over UDP: add `,port`);
+- servers older than SQL Server 2017, Azure SQL Database, Managed
+  Instance and Synapse;
+- as `working`: a system database (`master`, `model`, `msdb`, `tempdb`),
+  and a database in an availability group, with change data capture, in
+  replication (published, subscribed, a distributor) or a ledger
+  database. Change tracking is noted, not refused: a restore resets the
+  rows, not the change tracking versions an application syncs from;
+- a server trigger on `CREATE`, `ALTER` or `DROP DATABASE`, which may
+  refuse what a seed and a restore do: disable it while DriftGate runs;
+- a table with row-level security (an enabled security policy with a
+  filter or block predicate), which hides rows from DriftGate's reads or
+  blocks its writes: turn the policy off in this database, or exclude the
+  table;
+- memory-optimized tables with `DURABILITY = SCHEMA_ONLY` that are not
+  excluded (their rows are in no backup), and excluded memory-optimized
+  tables whose rows are kept (`SCHEMA_AND_DATA`): SQL Server does not let
+  their rows be saved through a restore of the whole database.
+
+**The pristine copy** is a second database on the same server,
+`<working>_pristine` by default, read-only (`READ_ONLY`) and marked as
+DriftGate's by an extended property, `driftgate_pristine`, that names the
+working database, the server (`@@SERVERNAME`) and the backup made of it.
+A restore uses only a pristine copy with that mark for this working
+database and this server, and stops when another seed replaced it while
+DriftGate ran.
+
+`driftgate seed`:
+
+1. backs up the working database with `BACKUP … WITH COPY_ONLY` (the
+   application's own backup chain stays as it was; compressed except on
+   Express, with checksums);
+2. restores that backup as `<pristine>_dgnew`, every file moved to a new
+   name in the server's data folder (`dg_<hash>_<file>.mdf`, `.ndf`,
+   `.ldf`), never over an existing database. A seed stopped while that
+   `RESTORE` runs drops the copy, and the next seed drops one that is
+   left; when the process is killed before SQL Server registered the copy,
+   its `dg_*` files can stay in the data folder, which only a login with
+   access to that folder can delete;
+3. deletes the rows of the excluded tables there, without firing a
+   trigger or running a cascade (a table that is not excluded and whose
+   rows refer to rows of an excluded table by a trusted foreign key stops
+   the seed: exclude it too, or drop the key);
+4. backs `<pristine>_dgnew` up into one of two backup files in the
+   server's default backup folder (`driftgate-<hash>-a.bak` and `-b.bak`;
+   the data folder on SQL Server 2017), the one the current copy does not
+   use, so that copy keeps a valid backup until the new one replaces it;
+   a restore of the whole database restores from it;
+5. shrinks the copy's log (the backup keeps the working database's log
+   size; the read-only copy needs none of it), marks the copy, drops the
+   old pristine copy, renames the new one and makes it read-only.
+
+A seed that stops anywhere leaves the old copy, or none, and a
+`<pristine>_dgnew` the next seed drops; a database under the `pristine`
+name that DriftGate did not make (one with objects, schemas or users and
+no mark) is never dropped. The working database is only read. The server
+needs room for the pristine copy (about the working database without its
+excluded rows) and the two backup files, during a seed also for the new
+copy next to the old one, and during a restore of the whole database for
+a copy of the excluded tables' rows: count about twice the working
+database plus twice its excluded data. DriftGate cannot delete the backup
+files (that needs `sysadmin`): when a project no longer uses DriftGate,
+drop the pristine database and delete its two files yourself.
+
+**Restore, item by item.** A restore brings back only the items that
+differ, in one transaction on the working database (`XACT_ABORT`, a lock
+wait of at most 30 s), so the application sees all of a restore or none of
+it, and keeps its connections:
+
+- the database's DDL triggers and the DML triggers of the tables it
+  writes are disabled, and the foreign keys that refer to those tables
+  (and the constraints the pristine rows need not meet, as they are not
+  trusted) set to `NOCHECK`, so no trigger fires and no cascade runs;
+- a table is emptied (`TRUNCATE` where SQL Server allows it, else
+  `DELETE`) and its rows copied from the pristine copy with
+  `IDENTITY_INSERT`; a table with a primary key and 5,000 rows or more
+  gets only the rows that differ (deleted and copied by key, unless more
+  than a quarter changed);
+- identity columns are set back where the pristine copy's stand (`DBCC
+  CHECKIDENT … RESEED`), sequences with `ALTER SEQUENCE … RESTART WITH`;
+- constraints are turned on again as they were (`WITH CHECK` where the
+  pristine copy's are trusted, disabled ones stay disabled), then the
+  triggers; identity and sequence values are compared with the pristine
+  copy's before the commit. Full-text indexes are waited for, up to a
+  minute, while SQL Server fills them again.
+
+A large restore in one transaction is logged in full: with the `FULL`
+recovery model the working database's log keeps it until a log backup
+and grows. A development database is best in `SIMPLE` recovery.
+
+**Restore of the whole database.** Anything a restore cannot bring back
+item by item restores the whole working database from the pristine
+copy's backup instead (the log says why): a view, procedure, function,
+trigger, type, synonym, schema, partition function or scheme, XML schema
+collection, rule or default that changed; a table created, dropped or
+with another definition; the `database:` item (users, roles,
+permissions, database options); a memory-optimized, temporal, graph,
+ledger, external or FileTable table, one with a column of Always Encrypted
+or of a CLR type of its own; an identity column that cannot be set back
+where the pristine copy's stands. Such a restore:
+
+1. checks that the backup file is the one the mark names and that the
+   working database still has the files it had at the seed;
+2. saves the rows of the excluded tables, and the excluded sequences,
+   into `<pristine>_dgx`, a database of DriftGate's own (marked);
+3. ends every other session of the working database (`SET OFFLINE WITH
+   ROLLBACK IMMEDIATE`; a `sysadmin` login ends them first, which saves
+   about 3 s per session);
+4. restores the backup `WITH REPLACE` onto the working database's own
+   files. Its owner, `TRUSTWORTHY` and `DB_CHAINING` are kept (they live
+   in `master`), Service Broker is turned on again when it was on, and the
+   recovery model is set back;
+5. copies the saved rows back, drops `<pristine>_dgx`, and checks every
+   item against the pristine copy's fingerprint.
+
+The application's pooled connections to the working database are ended:
+the first use of each one can fail once (go-mssqldb reports `Read: EOF`,
+other clients a closed connection), and the pool connects again. Such a
+failure is usually a 500 from the application. DriftGate counts the
+sessions of other programs the restore ends (not its own; it sees the
+sessions of other logins only with `VIEW SERVER STATE`, and without it
+counts only those of the application that signs in as DriftGate's own
+login) and sends, in the read-only part of the same capture that
+follows its first restore (or of the next capture, when it was the last
+restore of a capture: the count is kept in the local store, at most 100,
+with the component, its working database, a hash of its server's
+address and the time, and used once, by a capture of the same database
+within an hour; the store is shared by every checkout of the project),
+as many requests answered with 5xx once more: a `GET` or
+`HEAD` to a target on an allowed host, not a `repeat:`, a step of a
+sequence or one the baseline knows writes (a `GET` can write). Each is
+sent at most twice, the second answer is kept (a 5xx that stays is the
+application's), and every report notes it (`sent again …: the first
+answer was 500, after the restore of db ended 3 database sessions of
+the application`, and a count of such requests in every format). The
+count is of every session of other programs the restore ended in the
+working database, not only the application's pool: a queue worker or an
+open SSMS window adds to it. Close tools such as SSMS, Azure Data Studio
+or a database client of the IDE on the working database while you
+capture: each of their sessions allows one more request to be sent again.
+A request that changes data is never sent again; if
+it is the first after such a restore and fails this way, let the
+application's pool check a connection before it uses it, or keep no idle
+connections. From
+step 2 until the rows are copied back the working database is
+`RESTRICTED_USER`: the application cannot connect, so none of its writes to
+excluded tables is lost. Limits of that:
+
+- a login that is a member of `db_owner`, `dbcreator` or `sysadmin` still
+  gets in. Of what it writes to excluded tables, rows committed after
+  step 2 reads them and before step 3 ends its session are lost; rows it
+  writes after the restore are kept, in a table with a primary key, and a
+  saved row with the same key is not copied back. In a table without a
+  primary key (or with a computed column) its rows are replaced by the
+  saved ones. Let the application sign in with a login that is only a
+  user of the database;
+- a restore stopped while the database is `RESTRICTED_USER` (DriftGate
+  killed) leaves it so until the next restore or capture lets every login
+  in again (`ALTER DATABASE … SET MULTI_USER` does it by hand);
+- a working database you made `RESTRICTED_USER` or `SINGLE_USER` yourself
+  stays so. `RESTRICTED_USER` is kept by the RESTORE itself. `SINGLE_USER`
+  is set again at the end of the restore of the whole database, after its
+  check, and only while the database is still the `RESTRICTED_USER` the
+  RESTORE left (ending a `db_owner` session that got in meanwhile); with
+  excluded tables the user access is noted in `<pristine>_dgx`, so a
+  later restore that completes a stopped one sets it again too, while
+  without excluded tables there is no note, and a restore stopped halfway
+  leaves the database as the pristine copy's backup is (`MULTI_USER`).
+  A capture never gets that far with a `SINGLE_USER` database: it
+  fingerprints the database before its first restore and refuses it
+  there, since a fingerprint reads on several sessions, and says what to
+  do (`SET MULTI_USER`).
+
+Measured on small databases, such a restore takes about 0.8 s. A
+restore of the whole database that stops halfway leaves the working
+database restoring or offline, unusable until the next restore (a
+capture) completes it; that one copies the saved rows back too, and a
+seed refuses to run before it. A working database taken
+offline by someone else is brought online first; in any other state,
+with excluded tables whose rows DriftGate did not save, the restore stops
+rather than lose them.
+
+**Fingerprint.** It covers
+`table:<schema>.<name>` (its columns with every attribute, identity and
+where it stands, indexes, constraints with their trusted and disabled
+flags, temporal, graph and memory-optimized settings, row-level security
+policies, permissions, extended properties, and its rows), `view:`,
+`procedure:`, `function:`, `trigger:` (a database's DDL trigger as
+`trigger:database.<name>`), `sequence:` (with where it stands), `type:`,
+`synonym:`, `schema:`, `rule:`, `default:`, `partition_function:`,
+`partition_scheme:`, `xml_schema:`, and `database:`: the database's users
+and roles with their members, the permissions and extended properties
+that belong to no other item (on the database itself, on `dbo` and the
+other built-in schemas), the options that change what a query does
+(compatibility level, collation, `READ_COMMITTED_SNAPSHOT`,
+`ALLOW_SNAPSHOT_ISOLATION`, the ANSI defaults, `QUOTED_IDENTIFIER`,
+recursive and nested triggers, forced parameterization …) and the
+database scoped configurations. A difference in `database:` restores the
+whole database.
+
+- A row is encoded on the server as its values' own bytes and hashed by
+  DriftGate (SHA-256): case and trailing spaces count whatever the
+  collation compares equal, as do a float's `-0` and last bit and a
+  `datetime2`'s precision, and NULL and `''` differ. A computed column
+  counts by its definition. `CHECKSUM` is not used. A column of a type
+  DriftGate cannot read stops the fingerprint, naming it.
+- Not covered: statistics (they change how a query runs, not what it
+  returns), excluded tables, views and sequences, the mark, and a
+  sequence's `start_value`: a restore item by item sets it with `RESTART
+  WITH`, and it decides only where a later `RESTART` without a value
+  starts.
+- **`rowversion`** values are not part of a table's rows. A restore writes
+  rows anew and SQL Server gives them new values (above the database's
+  `@@DBTS`, which only moves on), so a restored table has other values
+  after every restore: a response that shows them (an `ETag`, EF Core's
+  concurrency token, a `timestamp` column in JSON) differs between
+  captures and needs an [allowlist](#allowlistyaml) rule. An `UPDATE` that
+  only gives a row a new `rowversion` is still a change: a table whose
+  values moved since DriftGate's own last restore counts as changed.
+
+A fingerprint is taken at one of three costs; the first one of a command
+reads every table:
+
+| Fingerprint | When | Time |
+|---|---|---|
+| reused | nothing moved since the last one: the end of the log (after `sp_flush_log`), every identity column and sequence (a rolled-back `INSERT` and a cached sequence move them without a log record), the database's options; never with memory-optimized tables, nor while the application writes an excluded table (sessions, cache, jobs) on every request: the log moves, and the per-table cost applies | 1.5 ms |
+| per table | the tables whose write counters (`sys.dm_db_index_operational_stats`, `sys.dm_db_index_usage_stats`, rows, dates) moved are read again | 23 ms (one table of 100 written to) |
+| full | every table read, on up to four connections; always without `VIEW SERVER PERFORMANCE STATE` | 0.39–0.56 s for 57.8 MB |
+
+Restore of a small table with one changed row: 11–12 ms; of one row in a
+table of a million rows (by key): about 190 ms. Seed of a small database:
+0.7–1.3 s. Measured with SQL Server 2022 Developer in Docker, emulated
+(`linux/amd64` under Rosetta on an Apple M4); the server's side is
+several times faster on x86. Memory-optimized tables and tables with a
+`text`, `ntext` or `image` column are read every time (some of their
+writes move no counter DriftGate reads), and after a restart of the
+server every table is read once.
+
+**Transactions.** A fingerprint reads committed data only (`READ
+COMMITTED`) and waits up to 10 s for a transaction of the application
+that wrote to the database and is still open; it reads the tables again
+when something committed while it read them, so it never mixes rows from
+before and after a commit. Without `VIEW SERVER PERFORMANCE STATE` it
+cannot see the open transactions: on a database with
+`READ_COMMITTED_SNAPSHOT` a transaction that wrote before the reading and
+commits during it is not noticed. A restore holds its locks until it
+commits; the application's queries on the tables it writes wait for it.
+
+**Exclude** what the application writes on every request or outside
+requests: session and cache tables (ASP.NET's SQL Server distributed
+cache, `dotnet sql-cache create`), job tables (Hangfire's `HangFire.*`),
+logs. An excluded table keeps its definition in the pristine copy,
+without rows; a restore item by item does not touch it, and a restore of
+the whole database saves its rows and copies them back. A table that is
+not excluded and whose rows refer to an excluded table's rows stops the
+seed (above); a foreign key of an excluded table to restored rows that are
+gone stays, no longer trusted, and the log says so.
+
+**Queries** (`params` `sql:`) run on the pristine copy (read-only), in a
+transaction that is rolled back. A query must be one `SELECT` (or `WITH …
+SELECT`) statement in ASCII outside its quoted texts and names, without
+comments, `INTO`, any other statement's keyword (T-SQL needs no `;`
+between statements: `SELECT 1 DROP TABLE x` is refused), `NEXT VALUE
+FOR` (it moves a sequence outside the transaction), names of three or
+four parts (another database or server; for `schema.table.column` use an
+alias), and the system procedures,
+functions and views that reach files, programs, other servers, sessions
+or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
+`OPENDATASOURCE`, `OPENQUERY`, `sys.sql_logins` …).
+
+**Running SQL Server for DriftGate.**
+
+- **Other databases being restored.** SQL Server 2019 and earlier stop a
+  statement of one database with error 927 ("Database '…' cannot be
+  opened. It is in the middle of a restore") or 952 ("is in transition")
+  when another database of the server is restored, created or renamed
+  at that moment, even a statement that names only its own database
+  (another checkout's seed, a restore elsewhere). A seed, restore,
+  fingerprint or read of rows that fails so about another database runs
+  again, for up to a minute (the log says so once); each stops in a state
+  the next run completes. The application's own queries can fail the same
+  way on those versions.
+
+- **The application's login.** Let the application sign in with a login
+  that is only a user of its database (`db_datareader`, `db_datawriter`,
+  what its migrations need), not `sa` and not DriftGate's login: during a
+  restore of the whole database a member of `db_owner`, `dbcreator` or
+  `sysadmin` still gets in, and its writes to excluded tables in that time
+  can be lost (above). Run the grants in a container with its own
+  `sqlcmd`:
+  `docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "…"`
+  (`/opt/mssql-tools` on SQL Server 2017; `-C` trusts the container's own
+  certificate).
+- **The `sa` password** of a container must have at least eight
+  characters of three kinds (upper case, lower case, digits, symbols);
+  otherwise the container stops at its first start, and only its log
+  (`docker compose logs mssql`) says why.
+- **Apple Silicon.** There is no SQL Server image for ARM: run
+  `mcr.microsoft.com/mssql/server` for `linux/amd64` (`platform:
+  linux/amd64` in compose), which Docker Desktop runs under Rosetta; it is
+  slower, and SQL Server 2017 and 2019 may stop under emulation. Azure SQL
+  Edge, once the ARM choice, is retired and refused: use the
+  `mssql/server` image, or a SQL Server on another machine
+  (`allow_remote: true`).
+- **The backup files.** A seed keeps two backups of the pristine copy
+  (`driftgate-<hash>-a.bak` and `-b.bak` in the server's default backup
+  folder, `/var/opt/mssql/data` in the image). To remove them after
+  dropping the pristine copy:
+  `docker compose exec mssql sh -c 'rm /var/opt/mssql/data/driftgate-*.bak'`.
+  A container without a volume loses them with its databases when it is
+  removed; the next `driftgate seed` makes them again.
+- **A certificate error** (`certificate signed by unknown authority`,
+  `certificate is not valid for …`): the server's certificate is verified,
+  as the application's client does. For a container's or a development
+  server's self-signed certificate set `TrustServerCertificate=true` in
+  the DSN (on a loopback address only, as the application's setting does);
+  for a server with a certificate of your own CA, give the CA's file
+  (`certificate=/etc/ssl/certs/my-ca.pem`, or `~/…`); for a certificate
+  that names another host, `hostNameInCertificate=<that name>`. Nothing
+  makes DriftGate's TLS weaker than the application's.
 
 ### seed, prepare, guards
 

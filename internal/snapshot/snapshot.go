@@ -66,6 +66,17 @@ type Record struct {
 	// Exit is the exit code of a command step; its body is the output, when
 	// the step compares it.
 	Exit *int `json:"exit,omitempty"`
+	// Resent says the request was sent again and the record is the second
+	// answer (capture's resend after a restore that ended the
+	// application's database sessions).
+	Resent *Resent `json:"resent,omitempty"`
+}
+
+// Resent is why a request was sent again, and the status of its first
+// answer.
+type Resent struct {
+	After string `json:"after"` // "the restore of db ended 3 database sessions of the application"
+	First int    `json:"first"` // the first answer's status
 }
 
 // SideEffects are the changes one request made to the state.

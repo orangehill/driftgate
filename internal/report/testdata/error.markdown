@@ -8,8 +8,8 @@
 
 #### What changed
 
-- [3] 1 drift in 1 request: header content-type changed value (\["application/json"\] → \["application/problem+json"\])
-- [7] 1 drift in 1 request: status changed (200 → 500)
+- [1] 1 drift in 1 request: header content-type changed value (\["application/json"\] → \["application/problem+json"\])
+- [2] 1 drift in 1 request: status changed (200 → 500)
    - 1 request: 200 → 500: `api-news`
 
 _6 more groups only in requests whose status changed, summarized there; `driftgate review` lists them._

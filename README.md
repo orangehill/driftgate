@@ -60,8 +60,17 @@ User documentation: [`docs/`](docs/README.md).
   | seed, PostgreSQL 16 | 2.6 s | |
   | command start | 1.74 ms | |
 
-- CI tests the database code on MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4
-  and PostgreSQL 13, 16 and 17, and runs the tests on Windows too.
+- SQLite, a 50 MB file (Apple M4): a fingerprint 28 µs when nothing
+  changed, 150 ms after a change to its large table; seed 124 ms. A
+  Laravel 12 application on SQLite: about 0.1–0.2 s per capture of 18
+  requests.
+- SQL Server 2022 in Docker, emulated on an Apple M4: a fingerprint
+  0.76 ms when nothing changed, 33 ms after a change to one table of 100,
+  0.51 s for a full read of 57.8 MB; a restore of a small table 16–18 ms.
+- CI tests the database code on MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
+  PostgreSQL 13, 16 and 17, SQL Server 2017, 2019, 2022 and 2025, and SQLite
+  (built in, on Linux, macOS and Windows), and runs the tests on Windows
+  too.
 - Releases are signed with cosign
   ([release verification](docs/security.md#release-verification)).
 
@@ -113,7 +122,10 @@ DriftGate runs; for those, copy the binary into the application's image:
 application running, it recognises the framework, reads the database and
 the address from the project's own settings (`.env`, `appsettings.json`,
 compose…), writes `.driftgate/`, makes the key and, after asking, the
-pristine copy of the database, then the first baseline, and says what to
+pristine copy of the database (MySQL, MariaDB, PostgreSQL,
+[SQL Server](docs/configuration.md#sql-server) 2017 and later, or an SQLite file such as a new Laravel application's
+[`database/database.sqlite`](docs/guides/laravel.md#sqlite)), then the
+first baseline, and says what to
 check by hand ([setup](docs/commands.md#setup)). After every upgrade
 step, `driftgate run` compares with that baseline.
 

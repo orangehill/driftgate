@@ -258,14 +258,14 @@ func TestSetupAsksWhatItCannotTell(t *testing.T) {
 	url := "http://127.0.0.1:" + closedPort(t)
 	root := setupDir(t, files)
 	code, out, errOut := runCLI(t, "setup", "--yes", "--url", url)
-	if code != ExitConfig || !strings.Contains(errOut, "pass --driver mysql or --driver postgres") {
+	if code != ExitConfig || !strings.Contains(errOut, "pass --driver with mysql, postgres, sqlite or sqlserver") {
 		t.Fatalf("setup --yes: %d\n%s\n%s", code, out, errOut)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".driftgate")); err == nil {
 		t.Error("setup wrote files before it knew the driver")
 	}
 	input(t, "oracle\npostgres\nn\n")
-	if code, out, errOut = runCLI(t, "setup", "--url", url); code != ExitConfig || !strings.Contains(errOut, "mysql or postgres") {
+	if code, out, errOut = runCLI(t, "setup", "--url", url); code != ExitConfig || !strings.Contains(errOut, "mysql, postgres, sqlite or sqlserver") {
 		t.Fatalf("setup at a terminal: %d\n%s\n%s", code, out, errOut)
 	}
 	if _, c := loadState(t, root); c.Driver != "postgres" || c.DSN.AppSettings != "src/Shop.Api/Shop.Api.csproj" {

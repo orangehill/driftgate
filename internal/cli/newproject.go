@@ -27,9 +27,13 @@ type draft struct {
 
 	db      *appconf.Database // state: db; nil for none
 	dbIndex int               // the setting of dbs it was made from
-	enable  bool              // state: is written on, not commented out (setup)
-	url     string            // target.base_url; empty: the framework's default
-	urlFrom string            // where url comes from, for the messages
+	// exclude are the tables state: excludes (SQLite: the framework's own,
+	// setup's question); excludeAsked says the question was asked.
+	exclude      []string
+	excludeAsked bool
+	enable       bool   // state: is written on, not commented out (setup)
+	url          string // target.base_url; empty: the framework's default
+	urlFrom      string // where url comes from, for the messages
 }
 
 // newDraft locates a new project (config.Locate) and reads its folder. A
@@ -111,26 +115,44 @@ func join(a, b string) string {
 }
 
 // canCreate reports a database user that can make the pristine copy for
-// certain: the root user of a compose MySQL or MariaDB service, or the user
-// of a compose PostgreSQL service, which the image makes a superuser.
+// certain: the root user of a compose MySQL or MariaDB service, the user
+// of a compose PostgreSQL service, which the image makes a superuser, or
+// sa of a compose SQL Server service.
 func canCreate(d appconf.Database) bool {
-	return d.Ref.Source == appconf.Compose && (d.Driver == appconf.Postgres || d.User == "root")
+	if d.Ref.Source != appconf.Compose {
+		return false
+	}
+	switch d.Driver {
+	case appconf.Postgres:
+		return true
+	case appconf.SQLServer:
+		return strings.EqualFold(d.User, "sa")
+	case appconf.SQLite:
+		return false
+	}
+	return d.User == "root"
 }
 
 // server is the server and database a setting names, as this machine
 // reaches them: the loopback addresses are one host, and a missing port is
 // the driver's default. MySQL's localhost and no host are the local socket
-// for most of its clients, not TCP; PostgreSQL's no host too.
+// for most of its clients, not TCP; PostgreSQL's no host too. An SQLite
+// database is its file.
 func server(d appconf.Database) string {
+	if d.Driver == appconf.SQLite {
+		return "sqlite:" + d.Path
+	}
 	host, port := d.Host, d.Port
 	switch {
+	case d.Driver == appconf.SQLServer && (host == "" || host == "localhost"):
+		host = "local" // SQL Server takes TCP only
 	case host == "" || host == "localhost" && d.Driver != appconf.Postgres:
 		host = "socket"
 	case host == "localhost", host == "127.0.0.1", host == "::1":
 		host = "local"
 	}
 	if port == "" {
-		port = map[string]string{appconf.MySQL: "3306", appconf.Postgres: "5432"}[d.Driver]
+		port = map[string]string{appconf.MySQL: "3306", appconf.Postgres: "5432", appconf.SQLServer: "1433"}[d.Driver]
 	}
 	return d.Driver + "://" + host + ":" + port + "/" + d.Name
 }
@@ -156,6 +178,13 @@ func rankDatabases(dbs []appconf.Database) []appconf.Database {
 	}
 	var first, last []appconf.Database
 	for _, c := range compose {
+		if a := app[0]; c.Driver == appconf.SQLServer && a.Driver == appconf.SQLServer && c.Name == "" &&
+			server(c) == server(appconf.Database{Driver: a.Driver, Host: a.Host, Port: a.Port}) {
+			// A SQL Server service names no database (the image has no
+			// setting for one): on the server the application's setting
+			// reaches, it is the application's database.
+			c.Name = a.Name
+		}
 		if canCreate(c) && server(c) == server(app[0]) {
 			first = append(first, c)
 		} else {
@@ -172,12 +201,20 @@ func rankDatabases(dbs []appconf.Database) []appconf.Database {
 func disagree(dbs []appconf.Database) (a, b appconf.Database, ok bool) {
 	for i, x := range dbs {
 		for _, y := range dbs[i+1:] {
-			if x.Ref.Source != appconf.Compose && y.Ref.Source != appconf.Compose && server(x) != server(y) {
+			if x.Ref.Source != appconf.Compose && y.Ref.Source != appconf.Compose && server(x) != server(y) && !sqliteSiblings(x, y) {
 				return x, y, true
 			}
 		}
 	}
 	return a, b, false
+}
+
+// sqliteSiblings reports two SQLite files of one Rails database.yml (its
+// primary and queue databases): two databases of the application, not
+// settings that disagree.
+func sqliteSiblings(x, y appconf.Database) bool {
+	return x.Driver == appconf.SQLite && y.Driver == appconf.SQLite && x.Ref.Source == appconf.YAML && y.Ref.Source == appconf.YAML &&
+		x.Ref.File == y.Ref.File && x.Ref.Key != y.Ref.Key
 }
 
 // rankURLs orders the addresses found, best first, each once: a port a
@@ -211,11 +248,14 @@ func where(d appconf.Database) string {
 
 // describe is a database setting in one line, without its password.
 func describe(d appconf.Database) string {
-	driver, name := d.Driver, d.Name
+	driver, name := d.Driver, workingOf(d)
 	if driver == "" {
 		driver = "driver unknown"
 	}
-	if name == "" {
+	switch {
+	case name == "" && d.Driver == appconf.SQLite:
+		name = "(no database file named)"
+	case name == "":
 		name = "(no database named)"
 	}
 	s := driver + " " + name
@@ -238,34 +278,92 @@ func describe(d appconf.Database) string {
 // dsnEnv is the variable state: names when a setting cannot be referenced.
 const dsnEnv = "DG_DB_DSN"
 
+// mysqlSeed is the example of seed: in the commented configuration.
+const mysqlSeed = `#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql app"]`
+
+// sqliteSeed is the example of seed: for an SQLite database whose working
+// file is working: a dump read into the file in place, which the
+// application keeps open (a copy over it would leave the application on
+// the old file).
+func sqliteSeed(working string) string {
+	if working == "" {
+		working = "database.sqlite"
+	}
+	return fmt.Sprintf(`#   - ["sqlite3", %q, ".read dump.sql"]`, working)
+}
+
+// seedExample is the example of seed: for the database d found: Laravel's
+// own migrations and seeders, else a dump loaded with the database's
+// client (laravel: the project is a Laravel application).
+func seedExample(d appconf.Database, laravel bool) string {
+	if laravel {
+		return `#   - ["php", "artisan", "migrate:fresh", "--seed", "--force"]`
+	}
+	name := d.Name
+	if name == "" {
+		name = "app"
+	}
+	switch d.Driver {
+	case appconf.SQLite:
+		return sqliteSeed(workingOf(d))
+	case appconf.Postgres:
+		return fmt.Sprintf(`#   - ["pg_restore", "--clean", "--if-exists", "--no-owner", "-d", %q, "dump.pgdump"]   # or ["psql", "-q", "-d", %q, "-f", "dump.sql"]`, name, name)
+	case appconf.SQLServer:
+		return fmt.Sprintf(`#   - ["sh", "-c", "sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -b -Q \"RESTORE DATABASE [%s] FROM DISK = N'/var/opt/mssql/data/%s.bak' WITH REPLACE\""]`, name, name)
+	}
+	return fmt.Sprintf(`#   - ["sh", "-c", "gunzip -c dump.sql.gz | mysql %s"]`, name)
+}
+
 // stateBlock is state: for driftgate.yaml with the database d: a reference
 // to the setting, never its value. A setting that cannot be referenced
 // (only in this shell's environment) takes the DSN from dsnEnv. The block
 // is commented out unless on, and when the setting gives no driver or
 // database name, with what to do.
-func stateBlock(d appconf.Database, on bool) string {
+func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 	dsn := flow(config.SecretFor(d.Ref))
 	comment := "from " + where(d) + ", read when a command runs; the password stays there"
+	if d.Driver == appconf.SQLite {
+		comment = "from " + where(d) + ", read when a command runs; it must name the working file"
+	}
 	if d.Ref.IsZero() {
 		dsn = flow(config.Secret{Env: dsnEnv})
 		comment = "set " + dsnEnv + " to the DSN (mysql://user:pass@host:3306/ or postgres://…)"
+		if d.Driver == appconf.SQLServer {
+			comment = "set " + dsnEnv + " to the DSN (sqlserver://user:pass@host:1433?database=" + d.Name + "&encrypt=true)"
+		}
 	}
+	working := workingOf(d)
 	lines := []string{
 		"state:                                    # restored at the start and before requests that change data",
 		"  db:",
 		"    driver: " + d.Driver,
 		"    dsn: " + dsn + "   # " + comment,
-		"    working: " + scalar(d.Name),
+		"    working: " + scalar(working),
 	}
-	if d.Name != "" {
+	switch {
+	case d.Driver == appconf.SQLite:
+		// The pristine copy is a file of the store; the DSN only
+		// cross-checks working, so none is needed without a setting.
+		if d.Ref.IsZero() {
+			lines = slices.Delete(lines, 3, 4)
+		}
+		lines = append(lines, "    # pristine: a file of DriftGate's store by default, made by driftgate seed")
+	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
-	lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
+	if len(exclude) > 0 {
+		lines = append(lines, "    exclude: "+flow(exclude)+"   # the framework's own tables in the same file: never compared or restored")
+	} else {
+		lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
+	}
 	var missing []string
 	if d.Driver == "" {
-		missing = append(missing, "driver (mysql or postgres)")
+		missing = append(missing, "driver (mysql, postgres, sqlite or sqlserver)")
 	}
-	if d.Name == "" {
+	switch {
+	case working == "" && d.Driver == appconf.SQLite:
+		missing = append(missing, "working (the database file the application uses, relative to the project root)")
+	case working == "":
 		missing = append(missing, "working (the database the application uses)")
 	}
 	var b strings.Builder
@@ -280,7 +378,9 @@ func stateBlock(d appconf.Database, on bool) string {
 		b.WriteString("# found in the project's settings: driftgate setup turns it on (it asks before it creates the pristine copy), or uncomment it\n")
 	}
 	for _, l := range lines {
-		if off && !strings.HasPrefix(strings.TrimSpace(l), "#") {
+		// SQLite's comments inside the block are commented with it, so they
+		// stay in line.
+		if off && (!strings.HasPrefix(strings.TrimSpace(l), "#") || d.Driver == appconf.SQLite) {
 			l = "# " + l
 		}
 		b.WriteString(l + "\n")
@@ -337,7 +437,10 @@ func (dr *draft) configText() string {
 				others.WriteString("# also found: " + describe(o) + "\n")
 			}
 		}
-		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable) + "\n" + text[end:]
+		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.excludeTables()...) + "\n" + text[end:]
+		text = strings.Replace(text, mysqlSeed, seedExample(*dr.db, slices.Contains(d.kinds, "laravel")), 1)
+	} else if slices.Contains(d.kinds, "laravel") {
+		text = strings.Replace(text, mysqlSeed, seedExample(appconf.Database{}, true), 1)
 	}
 	if d.block != "" {
 		text += "\n# Found: " + strings.Join(d.kinds, ", ") + "\n" + d.block

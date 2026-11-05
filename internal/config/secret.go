@@ -109,7 +109,8 @@ func (s Secret) validate() error {
 	return appconf.CheckRef(s.ref())
 }
 
-// Read returns the DSN for a database with driver (mysql or postgres) of a
+// Read returns the DSN for a database with driver (mysql, postgres, sqlite
+// or sqlserver) of a
 // project rooted at root. A DSN of the environment or 1Password may also be
 // a JDBC URL, an ADO.NET connection string or libpq's keyword form; one of
 // a file is converted from the file's form (appconf.Ref.DSN). No error
@@ -142,6 +143,9 @@ func (s Secret) read(ctx context.Context, root, driver string) (dsn, database st
 		}
 		return "", "", errors.New("no source")
 	}
+	if driver == SQLite { // a file, read by checkSQLiteDSN
+		return v, "", nil
+	}
 	dsn, err = appconf.Convert(v, driver)
 	return dsn, "", err
 }
@@ -150,19 +154,45 @@ func (s Secret) read(ctx context.Context, root, driver string) (dsn, database st
 // project's setting it reads names a database, that must be working: the
 // file is followed when a command runs, working is not, and a restore of
 // another database than the one the application runs on would reset the
-// wrong one. That error is ErrInvalid and names only the databases.
+// wrong one. That error is ErrInvalid and names only the databases. SQL
+// Server compares the names in any letter case, as its default collation
+// does. SQLite needs no DSN (it returns ""); a setting it names, and a DSN
+// of the environment or 1Password, must name the file working is.
 func (c Component) ReadDSN(ctx context.Context, root string) (string, error) {
+	if c.Driver == SQLite && c.DSN.IsZero() {
+		return "", nil
+	}
 	dsn, named, err := c.DSN.read(ctx, root, c.Driver)
 	if err != nil {
 		return "", err
 	}
-	if named != "" && named != c.Working {
-		r := c.DSN.ref()
-		where := r.File
-		if r.Key != "" {
-			where += " " + r.Key
+	if err := c.checkNamed(root, named); err != nil {
+		return "", err
+	}
+	if c.Driver == SQLite && (c.DSN.Env != "" || c.DSN.Op != "") {
+		if err := checkSQLiteDSN(root, c.DSN.Env, dsn, c.Working); err != nil {
+			return "", err
 		}
-		return "", invalid{fmt.Errorf("dsn: %s names the database %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s (and pristine:), or change the setting", where, named, c.Working, named, c.Working, named)}
 	}
 	return dsn, nil
+}
+
+// checkNamed checks the database a setting names ("" for none) against
+// working (ReadDSN).
+func (c Component) checkNamed(root, named string) error {
+	switch {
+	case named == "", named == c.Working, c.Driver == SQLServer && strings.EqualFold(named, c.Working):
+		return nil
+	case c.Driver == SQLite && sameSQLiteFile(root, named, c.Working):
+		return nil
+	}
+	r := c.DSN.ref()
+	where := r.File
+	if r.Key != "" {
+		where += " " + r.Key
+	}
+	if c.Driver == SQLite {
+		return invalid{fmt.Errorf("%s names the database file %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s, or change the setting", where, named, c.Working, named, c.Working, named)}
+	}
+	return invalid{fmt.Errorf("%s names the database %s, but working is %s: the application runs on %s, and DriftGate would restore %s; set working: %s (and pristine:), or change the setting", where, named, c.Working, named, c.Working, named)}
 }

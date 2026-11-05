@@ -148,7 +148,7 @@ func TestWorkingFollowsTheSetting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Seeded(context.Background(), p); !errors.Is(err, ErrConfig) || !strings.Contains(err.Error(), "names the database shop_wt42, but working is shop") {
+	if _, err := Seeded(context.Background(), p); !errors.Is(err, ErrConfig) || !strings.Contains(err.Error(), "state db: dsn: .env names the database shop_wt42, but working is shop") || strings.Contains(err.Error(), "dsn: dsn:") {
 		t.Errorf("Seeded: %v", err)
 	}
 }

@@ -42,9 +42,9 @@ func TestKeyedArrays(t *testing.T) {
 		name, extra, base, cur, want, note string
 	}{
 		{name: "insert at the front", base: users("1", "2", "3"), cur: users("0", "1", "2", "3"),
-			want: "key-extra $.data[id=0]  → id=0"},
+			want: "key-extra $.data[id=0]  → {\"id\":0,\"name\":\"u0\"}"},
 		{name: "removed", base: users("1", "2", "3"), cur: users("1", "3"),
-			want: "key-missing $.data[id=2] id=2 → "},
+			want: "key-missing $.data[id=2] {\"id\":2,\"name\":\"u2\"} → "},
 		{name: "value of a paired item", base: users("1", "2"), cur: `{"data":[{"id":1,"name":"u1"},{"id":2,"name":"x"}]}`,
 			want: `value $.data[id=2].name "u2" → "x"`},
 		{name: "reordered", base: users("1", "2", "3"), cur: users("3", "1", "2"),
@@ -53,11 +53,11 @@ func TestKeyedArrays(t *testing.T) {
 		{name: "any order still reports a change", extra: "    any_order: true\n", base: users("1", "2"), cur: `{"data":[{"id":2,"name":"x"},{"id":1,"name":"u1"}]}`,
 			want: `value $.data[id=2].name "u2" → "x"`},
 		{name: "string keys", base: users(`"a"`, `"b"`), cur: users(`"b"`, `"c"`),
-			want: "key-extra $.data[id=\"c\"]  → id=\"c\"\nkey-missing $.data[id=\"a\"] id=\"a\" → "},
+			want: "key-extra $.data[id=\"c\"]  → {\"id\":\"c\",\"name\":\"uc\"}\nkey-missing $.data[id=\"a\"] {\"id\":\"a\",\"name\":\"ua\"} → "},
 		{name: "key type change is a type drift in the item", base: users("1"), cur: users(`"1"`),
 			want: "type $.data[id=1].id int → string"},
 		{name: "item without the key", base: users("1", "2"), cur: `{"data":[{"name":"u0"},{"id":1,"name":"u1"},{"id":2,"name":"u2"}]}`,
-			want: "array-length $.data 2 → 3\nkey-missing $.data[0].id \"id\" → \nvalue $.data[0].name \"u1\" → \"u0\"\nvalue $.data[1].id 2 → 1\nvalue $.data[1].name \"u2\" → \"u1\"",
+			want: "array-length $.data 2 → 3\nkey-missing $.data[0].id 1 → \nvalue $.data[0].name \"u1\" → \"u0\"\nvalue $.data[1].id 2 → 1\nvalue $.data[1].name \"u2\" → \"u1\"",
 			note: "$.data: items paired by position, not by id: in the current response item 0 has no id"},
 		{name: "duplicate key", base: users("1", "1"), cur: users("1", "2"),
 			want: "value $.data[1].id 1 → 2\nvalue $.data[1].name \"u1\" → \"u2\"",
@@ -113,7 +113,7 @@ body:
 	base := `{"rows":[{"user":{"id":7},"at":"1"},{"user":{"id":8},"at":"2"}]}`
 	cur := `{"rows":[{"user":{"id":9},"at":"5"},{"user":{"id":7},"at":"3"},{"user":{"id":8},"at":"x"}]}`
 	ds = run(t, l, LevelValues, side(200, jsonT, base), side(200, jsonT, cur))
-	want := "format $.rows[user.id=8].at \"2\" → \"x\"\nkey-extra $.rows[user.id=9]  → user.id=9"
+	want := "format $.rows[user.id=8].at \"2\" → \"x\"\nkey-extra $.rows[user.id=9]  → {\"user\":{\"id\":9},\"at\":\"5\"}"
 	if got := driftList(ds); got != want {
 		t.Errorf("nested key:\n%s\nwant\n%s", got, want)
 	}

@@ -139,6 +139,68 @@ on the hash of the files the seed reads and on `pristine-cache-key`:
   stops with exit 3. What a stale dump can hide is a change to the seed in
   the pull request itself, hence the key.
 
+### SQLite
+
+An SQLite database needs no service: the file is in the checkout (or made
+by the seed). The pristine cache is a copy of the file:
+
+```yaml
+      - uses: orangehill/driftgate@v1.0.2
+        with:
+          pristine-cache-files: |
+            database/migrations/**
+            database/seeders/**
+            database/factories/**
+            driftgate.yaml
+          pristine-cache-key: sqlite
+          pristine-dump: cp database/database.sqlite "$DRIFTGATE_PRISTINE_DIR/app.sqlite"
+          pristine-load: cp "$DRIFTGATE_PRISTINE_DIR/app.sqlite" database/database.sqlite
+```
+
+Load it before the application starts: an application that has the file
+open keeps the old one when it is replaced.
+
+### SQL Server
+
+The service as DriftGate's own CI starts it; `sqlcmd` is in
+`/opt/mssql-tools18` (`/opt/mssql-tools` on 2017), and `-C` trusts the
+image's own certificate:
+
+```yaml
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Dg-Passw0rd-2026     # a test server's password
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -Q 'SELECT 1' -b"
+          --health-interval=5s --health-retries=30
+    env:
+      DG_DB_DSN: sqlserver://sa:Dg-Passw0rd-2026@127.0.0.1:1433?encrypt=true&TrustServerCertificate=true
+```
+
+The pristine cache is a backup of the working database, made in the
+container and copied out, and restored over it on a hit:
+
+```yaml
+          pristine-cache-key: mssql-2022
+          pristine-dump: >-
+            docker exec ${{ job.services.mssql.id }} /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -b
+            -Q "BACKUP DATABASE [app] TO DISK = N'/var/opt/mssql/data/app.bak' WITH COPY_ONLY, INIT, FORMAT"
+            && docker cp ${{ job.services.mssql.id }}:/var/opt/mssql/data/app.bak "$DRIFTGATE_PRISTINE_DIR/app.bak"
+          pristine-load: >-
+            docker cp "$DRIFTGATE_PRISTINE_DIR/app.bak" ${{ job.services.mssql.id }}:/var/opt/mssql/data/app.bak
+            && docker exec ${{ job.services.mssql.id }} /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dg-Passw0rd-2026 -b
+            -Q "RESTORE DATABASE [app] FROM DISK = N'/var/opt/mssql/data/app.bak' WITH REPLACE"
+```
+
+A file copied into the container belongs to root; SQL Server 2019 and
+later run as the `mssql` user, which reads it as long as it is readable by
+all (`docker cp` keeps the runner's mode, 644 by default).
+
 ## Other CI systems
 
 The action is a wrapper around `driftgate run` and `driftgate report`:

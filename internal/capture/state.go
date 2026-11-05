@@ -12,11 +12,14 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/appconf"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
+	"github.com/orangehill/driftgate/internal/procx"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -77,10 +80,11 @@ type pristineFile struct {
 	Format      int               `json:"format,omitempty"` // state.FingerprintFormat; 0 in a file of format 1
 	Component   string            `json:"component"`
 	Driver      string            `json:"driver"`
-	Server      string            `json:"server,omitempty"` // dbdsn.Server; none in a file of an earlier release
+	Server      string            `json:"server,omitempty"` // serverOf; none in a file of an earlier release
 	Working     string            `json:"working"`
 	Pristine    string            `json:"pristine"`
 	Created     string            `json:"created"`
+	PristineID  string            `json:"pristine_id,omitempty"` // pristineIdentifier; none for other components and in a file of an earlier release
 	Fingerprint state.Fingerprint `json:"fingerprint"`
 }
 
@@ -153,6 +157,16 @@ type tracker struct {
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
 	out      io.Writer
+	// resends is how many requests may still be sent again after the last
+	// restore (resendAfterRestore): the application's sessions with a
+	// database it ended (state.SessionEnder), each a pooled connection
+	// that fails once; resentAfter says which restore.
+	resends     atomic.Int64
+	resentAfter string
+	// databases names every database component (endedDatabase); endedBy
+	// are those whose last restore ended sessions.
+	databases map[string]endedDatabase
+	endedBy   []endedDatabase
 }
 
 // openComponents connects to every state component, in name order.
@@ -162,7 +176,7 @@ func openComponents(ctx context.Context, p *config.Project, env []string, log io
 }
 
 // openServers is openComponents that also returns the server of every
-// database component (dbdsn.Server), by name. For a seed, a component
+// database component (serverOf), by name. For a seed, a component
 // removes the record of its pristine copy right before it replaces that
 // copy (state.Options.Replacing).
 func openServers(ctx context.Context, p *config.Project, env []string, log io.Writer, seed bool) ([]state.Component, map[string]string, error) {
@@ -189,18 +203,28 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			closeAll()
 			return nil, nil, dsnErr(sc.DSN, n, err)
 		}
-		if servers[n], err = dbdsn.Server(sc.Driver, dsn); err != nil {
+		if servers[n], err = serverOf(p, sc, dsn); err != nil {
 			closeAll()
 			return nil, nil, configErr("state %s: %v", n, err)
 		}
 		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RowTracking: sc.RowTracking, Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
-		if seed {
-			path, err := pristinePath(p, n, servers[n])
-			if err != nil {
+		// The record's path names the pristine file of SQLite and is
+		// removed by a seed; MySQL and PostgreSQL need it for neither.
+		var path string
+		if seed || sc.Driver == config.SQLite {
+			if path, err = pristinePath(p, n, servers[n]); err != nil {
 				closeAll()
 				return nil, nil, err
 			}
+		}
+		if sc.Driver == config.SQLite {
+			if o.Working, o.Pristine, err = sqliteFiles(p, sc, servers[n], path); err != nil {
+				closeAll()
+				return nil, nil, configErr("state %s: %v", n, err)
+			}
+		}
+		if seed {
 			o.Replacing = func() error {
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
@@ -210,8 +234,9 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 		}
 		// A restore rewrites the tables: the database must be on an allowed
 		// host, and every host the driver may connect to is checked, first
-		// by name and then at every connection, on the address dialled.
-		if !sc.AllowRemote {
+		// by name and then at every connection, on the address dialled. An
+		// SQLite database is a file of the project, on no host.
+		if !sc.AllowRemote && sc.Driver != config.SQLite {
 			const hint = "allow_remote: true for this component"
 			if err := dbx.AllowHosts(ctx, sc.Driver, dsn, p.AllowHostLists(), hint); err != nil {
 				closeAll()
@@ -223,9 +248,14 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			}
 		}
 		var c state.Component
-		if sc.Driver == config.Postgres {
+		switch sc.Driver {
+		case config.Postgres:
 			c, err = state.NewPostgres(o)
-		} else {
+		case config.SQLite:
+			c, err = state.NewSQLite(o)
+		case config.SQLServer:
+			c, err = state.NewSQLServer(o)
+		default:
 			c, err = state.NewMySQL(o)
 		}
 		if err != nil {
@@ -242,7 +272,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -264,6 +294,21 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 			t.close()
 			return nil, envErr("state %s: the pristine copy was made for another configuration; run driftgate seed", c.Name())
 		}
+		// The record is of one pristine copy; a seed that keeps its record
+		// in another store (another project or machine on the same server,
+		// a checkout with its own DRIFTGATE_STORE) may have replaced it.
+		if pi, ok := c.(pristineIdentifier); ok && pf.PristineID != "" {
+			id, err := pi.PristineID(ctx)
+			if err != nil {
+				t.close()
+				return nil, envErr("state %s: %v", c.Name(), err)
+			}
+			if id != pf.PristineID {
+				t.close()
+				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
+			}
+		}
+		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)
 	}
@@ -329,6 +374,10 @@ func (t *tracker) markDirty(d map[string][]string) {
 // pristine fingerprint; a command component always runs its restore command.
 func (t *tracker) restore(ctx context.Context) error {
 	defer func(start time.Time) { t.time.Restore += time.Since(start) }(time.Now())
+	t.resends.Store(0)
+	t.resentAfter = ""
+	t.endedBy = nil
+	ended := 0
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -353,7 +402,15 @@ func (t *tracker) restore(ctx context.Context) error {
 		}
 		fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
 		start := time.Now()
-		if err := c.Restore(ctx, items); err != nil {
+		err := c.Restore(ctx, items)
+		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
+			n := e.EndedSessions()
+			ended += n
+			t.resends.Add(int64(n))
+			t.endedBy = append(t.endedBy, t.databases[c.Name()])
+			t.resentAfter = fmt.Sprintf("the restore of %s ended %d database %s of the application", c.Name(), ended, plural(ended, "session", "sessions"))
+		}
+		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
 		got, err := c.Fingerprint(ctx, items)
@@ -504,9 +561,15 @@ type SeedOptions struct {
 }
 
 // seededFingerprinter is a component that fingerprints its pristine copy
-// (state.MySQL, state.Postgres).
+// (state.MySQL, state.Postgres, state.SQLite, state.SQLServer).
 type seededFingerprinter interface {
 	SeededFingerprint(ctx context.Context) (state.Fingerprint, error)
+}
+
+// pristineIdentifier is a component that names its pristine copy, new with
+// every seed (state.SQLServer: the backup in its mark).
+type pristineIdentifier interface {
+	PristineID(ctx context.Context) (string, error)
 }
 
 // Seed runs the seed commands, which load the data into the working state,
@@ -526,7 +589,7 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if opt.SkipCommands {
 			break
 		}
-		fmt.Fprintf(opt.Out, "seed: %s\n", cmd[0])
+		fmt.Fprintf(opt.Out, "seed: %s\n", commandLine(cmd))
 		if err := state.Run(ctx, p.Root, cmd, nil, opt.Log); err != nil {
 			return envErr("seed: %v", err)
 		}
@@ -559,7 +622,7 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 			return envErr("seed of %s failed: %v", c.Name(), err)
 		}
 		// The record is of the pristine copy itself where the component
-		// can read it (MySQL/MariaDB, PostgreSQL): the working data may
+		// can read it (all database drivers): the working data may
 		// have moved on since the copy was made, while the application
 		// kept writing.
 		var f state.Fingerprint
@@ -578,14 +641,15 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 			// it. On MySQL/MariaDB a write during the copy may leave a
 			// copy that mixes data from before and after it (each table
 			// is copied on its own), which no check can tell from a
-			// consistent one; a PostgreSQL copy is of one moment.
-			w, err := c.Fingerprint(ctx, nil)
-			if err != nil {
-				return envErr("state %s: fingerprint: %v", c.Name(), err)
-			}
-			if d := state.Diff(w, f); len(d) > 0 {
+			// consistent one; a PostgreSQL template copy, an SQLite
+			// VACUUM INTO and a SQL Server backup are of one moment.
+			// The check only warns: an error here leaves the copy and its
+			// record as they are.
+			if w, err := c.Fingerprint(ctx, nil); err != nil {
+				fmt.Fprintf(opt.Out, "warning: %s: the working database could not be compared with the pristine copy just made: %v\n", c.Name(), err)
+			} else if d := state.Diff(w, f); len(d) > 0 {
 				advice := "the copy is of one moment and stays the pristine copy"
-				if sc.Driver != config.Postgres {
+				if sc.Driver == config.MySQL {
 					advice = "a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write"
 				}
 				fmt.Fprintf(opt.Out, "warning: %s: the working database differs from the pristine copy just made in %d %s (%v): the application wrote during the seed or right after it; %s\n", c.Name(), len(d), plural(len(d), "item", "items"), limit(d, 20), advice)
@@ -593,10 +657,19 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,
 			Created: time.Now().UTC().Format(time.RFC3339), Fingerprint: f}
+		if pi, ok := c.(pristineIdentifier); ok {
+			if pf.PristineID, err = pi.PristineID(ctx); err != nil {
+				return envErr("state %s: %v", c.Name(), err)
+			}
+		}
 		if err := snapshot.WriteJSON(path, pf); err != nil {
 			return err
 		}
-		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), sc.Pristine, len(f), time.Since(start).Round(time.Millisecond))
+		pristine := sc.Pristine
+		if sc.Driver == config.SQLite && pristine == "" {
+			pristine = sqliteStorePristine(path)
+		}
+		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), pristine, len(f), time.Since(start).Round(time.Millisecond))
 	}
 	return nil
 }
@@ -638,6 +711,28 @@ func dsnErr(dsn config.Secret, name string, err error) error {
 	return configErr("state %s: dsn: %v", name, err)
 }
 
+// serverOf names the server of the database component sc whose DSN is dsn
+// (dbdsn.Server). An SQLite database has none: it is named by its file,
+// file: and the real path of working (appconf.SQLitePath: the file the
+// system opens), which must exist inside the project.
+func serverOf(p *config.Project, sc config.Component, dsn string) (string, error) {
+	if sc.Driver == config.SQLite {
+		working, err := appconf.SQLitePath(p.Root, sc.Working)
+		if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		// Stat only: closing a handle of a file SQLite has open in this
+		// process would drop its locks.
+		if _, err := os.Stat(working); errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("working: %s: not found", sc.Working)
+		} else if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		return sqliteServerPrefix + working, nil
+	}
+	return dbdsn.Server(sc.Driver, dsn)
+}
+
 // Seeded reports whether every database component has a pristine copy on
 // the server its DSN names now.
 func Seeded(ctx context.Context, p *config.Project) (bool, error) {
@@ -649,7 +744,7 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 		if err != nil {
 			return false, dsnErr(sc.DSN, name, err)
 		}
-		server, err := dbdsn.Server(sc.Driver, dsn)
+		server, err := serverOf(p, sc, dsn)
 		if err != nil {
 			return false, configErr("state %s: %v", name, err)
 		}
@@ -663,3 +758,7 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 	}
 	return true, nil
 }
+
+// commandLine is a command of driftgate.yaml as one line, its secrets
+// shown as *** (procx.Line).
+func commandLine(cmd []string) string { return procx.Line(cmd) }

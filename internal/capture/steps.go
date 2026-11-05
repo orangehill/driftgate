@@ -353,7 +353,7 @@ func (r *runner) command(ctx context.Context, req catalog.Request) httpx.Result 
 		if len(lines) > 20 {
 			lines = lines[len(lines)-20:]
 		}
-		fmt.Fprintf(r.log, "%s: %s (standard output not shown)\n%s\n", req.ID, strings.Join(req.Command, " "), strings.Join(lines, "\n"))
+		fmt.Fprintf(r.log, "%s: %s (standard output not shown)\n%s\n", req.ID, procx.Line(req.Command), strings.Join(lines, "\n"))
 	}
 	if rec.Error != "" {
 		return httpx.Result{Record: rec, Duration: dur}

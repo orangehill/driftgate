@@ -87,16 +87,38 @@ func (s *Server) viewCount(id int) int {
 		return s.views[id]
 	}
 	var v int
-	s.db.QueryRow("SELECT views FROM news WHERE id = ?", id).Scan(&v)
+	if err := retried(func() error { return s.db.QueryRow("SELECT views FROM news WHERE id = ?", id).Scan(&v) }); err != nil {
+		panic(dbError{err})
+	}
 	return v
 }
+
+// retried runs a query of the demo's database again while SQL Server
+// 2019 or earlier stops it because another database of the server is
+// being restored (927, 952), as tests restore theirs meanwhile; up to 30 s.
+func retried(f func() error) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := f()
+		if err == nil || !(strings.Contains(err.Error(), "(927)") || strings.Contains(err.Error(), "(952)")) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// dbError is a failed query of the demo's database: ServeHTTP answers it
+// with 500, as a framework does.
+type dbError struct{ err error }
 
 func (s *Server) addView(id int) {
 	if s.db == nil {
 		s.views[id]++
 		return
 	}
-	s.db.Exec("UPDATE news SET views = views + 1 WHERE id = ?", id)
+	if err := retried(func() error { _, err := s.db.Exec("UPDATE news SET views = views + 1 WHERE id = ?", id); return err }); err != nil {
+		panic(dbError{err})
+	}
 }
 
 func (s *Server) addFAQ(created string) (int, error) {
@@ -104,13 +126,17 @@ func (s *Server) addFAQ(created string) (int, error) {
 		s.faq = append(s.faq, map[string]any{})
 		return len(s.faq), nil
 	}
-	res, err := s.db.Exec("INSERT INTO faq (created_at) VALUES (?)", created)
+	var res sql.Result
+	err := retried(func() (err error) {
+		res, err = s.db.Exec("INSERT INTO faq (created_at) VALUES (?)", created)
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
 	if s.v2() {
-		if _, err := s.db.Exec("INSERT INTO faq_log (faq_id) VALUES (?)", id); err != nil {
+		if err := retried(func() error { _, err := s.db.Exec("INSERT INTO faq_log (faq_id) VALUES (?)", id); return err }); err != nil {
 			return 0, err
 		}
 	}
@@ -149,6 +175,14 @@ func (s *Server) write(w http.ResponseWriter, status int, v any) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if e := recover(); e != nil {
+			if _, ok := e.(dbError); !ok {
+				panic(e)
+			}
+			s.write(w, 500, map[string]any{"message": "Server Error"})
+		}
+	}()
 	if s.serveFiles(w, r) {
 		return
 	}

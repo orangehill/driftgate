@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
+	"github.com/orangehill/driftgate/internal/baseline"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
@@ -52,8 +53,42 @@ func resolve(p *config.Project, name string) (*snapshot.Set, string, error) {
 		return b, "baseline:" + name, nil
 	case c.Exists():
 		return c, "capture:" + name, nil
+	case name == "run":
+		// This checkout's capture of driftgate run (capture:run-<id>).
+		if r, err := p.Capture(runTag(p)); err == nil && r.Exists() {
+			return r, "capture:" + runTag(p), nil
+		}
+		return nil, "", configErr("this checkout has no capture of driftgate run yet")
 	}
 	return nil, "", configErr("no baseline or capture named %q", name)
+}
+
+// namedSet is a set of records with the name a comparison gives it
+// (baseline:… or capture:…).
+type namedSet struct {
+	set  *snapshot.Set
+	name string
+}
+
+// privateKeys makes sure the key of the private bodies of the requests ids
+// in every set is at hand, and with check that it is the key they were
+// stored with (checkKey).
+func privateKeys(p *config.Project, ids []string, check bool, sets ...namedSet) error {
+	for _, s := range sets {
+		recs, err := selectRecords(s.set, ids)
+		if err != nil {
+			return err
+		}
+		if err := privateKey(p, s.name, recs); err != nil {
+			return err
+		}
+		if check {
+			if err := checkKey(s.set, recs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func loadProject(path string) (*config.Project, *catalog.Catalog, *allowlist.List, error) {
@@ -238,20 +273,8 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 			ids = append(ids, req.ID)
 		}
 	}
-	for _, s := range []struct {
-		set  *snapshot.Set
-		name string
-	}{{base, baseName}, {cur, curName}} {
-		recs, err := selectRecords(s.set, ids)
-		if err != nil {
-			return 0, err
-		}
-		if err := privateKey(p, s.name, recs); err != nil {
-			return 0, err
-		}
-		if err := checkKey(s.set, recs); err != nil {
-			return 0, err
-		}
+	if err := privateKeys(p, ids, true, namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return 0, err
 	}
 
 	// Values from private bodies are never kept: with --show-private they
@@ -314,7 +337,7 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		r.Level, r.Mode, r.Created = p.Level.String(), p.Mode, time.Now().UTC().Format(time.RFC3339)
 		r.SkipPrivate = o.skipPrivate
 		r.Origins = notes
-		r.UnusedRules = allow.Unused(o.only != "" || o.someTargets)
+		r.UnusedRules = unusedRules(allow, allow.Unused(o.only != "" || o.someTargets))
 		r.Timings = report.CompareTimings(results, timings(base), timings(cur))
 		if o.override != nil {
 			r.Level = o.override.String()
@@ -325,6 +348,11 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	r := build(results)
 	if r.BaselineDigest, r.CaptureDigest, err = digests(base, baseName, cur, curName); err != nil {
 		return 0, err
+	}
+	if strings.HasPrefix(baseName, "capture:") {
+		if r.AgainstDigest, err = baseline.SetDigest(base.Dir); err != nil {
+			return 0, envErr(err)
+		}
 	}
 	// The last comparison names drifts of private bodies: it goes into a
 	// store git ignores.
@@ -457,16 +485,18 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	if err != nil {
 		return res, envErr(err)
 	}
-	if bRec == nil {
-		res.Outcome, res.Note = report.Skipped, report.NoteNoBaseline
-		return res, nil
-	}
 	cRec, err := cur.Record(id)
 	if err != nil {
 		return res, envErr(err)
 	}
+	if bRec == nil {
+		res.Outcome, res.Note = report.Skipped, report.NoteNoBaseline
+		resentNotes(&res, bRec, cRec)
+		return res, nil
+	}
 	if req.Observe {
 		res.Outcome, res.Note = report.Observed, observation(bRec, cRec)
+		resentNotes(&res, bRec, cRec)
 		return res, nil
 	}
 	// Never by the ref alone: without the body there is nothing to compare
@@ -501,6 +531,7 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	} else if !showPrivate && len(req.ParamsFrom) > 0 {
 		hideErrors(res.Drifts) // its path may hold values of a private body
 	}
+	resentNotes(&res, bRec, cRec)
 	res.Outcome = report.Pass
 	if len(res.Drifts) > 0 {
 		res.Outcome = report.Drift
@@ -512,6 +543,21 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 		}
 	}
 	return res, nil
+}
+
+// resentNotes notes a request a side sent again after a restore ended the
+// application's database sessions: never silent, also when the request is
+// observed or has no baseline.
+func resentNotes(res *report.Result, bRec, cRec *snapshot.Record) {
+	for _, x := range []struct {
+		what string
+		rec  *snapshot.Record
+	}{{"baseline", bRec}, {"capture", cRec}} {
+		if x.rec != nil && x.rec.Resent != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("sent again in the %s: the first answer was %d, after %s", x.what, x.rec.Resent.First, x.rec.Resent.After))
+			res.Resent = true
+		}
+	}
 }
 
 // sameBody reports two records whose bodies have the same name: the same
