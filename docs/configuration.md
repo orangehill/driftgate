@@ -354,7 +354,10 @@ anything else through commands.
 | `allow_remote` | bool | allow a database host that is neither local nor named in some target's `allow_hosts` |
 
 - `driftgate seed` (or the first `run`) copies `working` to `pristine` and
-  records its fingerprint. A capture restores `working` from `pristine`
+  records the fingerprint of the pristine copy (not of `working`, which the
+  application may have changed since the copy). Seed while the application
+  does not write; seed warns when `working` differs from the copy right
+  after it was made. A capture restores `working` from `pristine`
   (MySQL/MariaDB: only the tables that changed, with their counters,
   triggers and views; PostgreSQL: the whole database from the pristine one
   as a template), checks it against the fingerprint, and stops with exit 3
@@ -382,7 +385,9 @@ anything else through commands.
   working database's owner, its settings (`ALTER DATABASE … SET`, `ALTER
   ROLE … IN DATABASE … SET`), privileges (`GRANT … ON DATABASE`), comment
   and connection limit, read from the working database before every
-  restore. The application's role thus keeps its rights (from PostgreSQL 15
+  restore and at seed (the pristine copy gets the working database's
+  settings, not those of the pristine database it replaces). The
+  application's role thus keeps its rights (from PostgreSQL 15
   the schema `public` belongs to the database's owner) and its sessions
   their `timezone` or `search_path`. The DSN's user needs the rights to
   give them (a superuser, or a member of the owner's role).

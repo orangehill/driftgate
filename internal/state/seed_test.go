@@ -466,6 +466,87 @@ func TestPostgresKeepsDatabase(t *testing.T) {
 	}
 }
 
+// TestPostgresSeedSettings: the pristine database gets the working
+// database's settings, not those of the copy it replaces, so its
+// fingerprint, which a seed records, prints times, dates, intervals and
+// names as the working database's does; every restore then matches it.
+func TestPostgresSeedSettings(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_settings", "dgt_settings_pristine"
+	p, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine, newName(work), oldName(work), newName(pristine), oldName(pristine)} {
+			p.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+	}
+	drop()
+	t.Cleanup(func() {
+		p.Close()
+		drop()
+	})
+	settings := func(db string) string {
+		t.Helper()
+		var s sql.NullString
+		if err := p.admin.QueryRow(`SELECT string_agg(CASE WHEN s.setrole = 0 THEN '' ELSE 'role ' END || array_to_string(s.setconfig, ';'), ' ' ORDER BY s.setrole)
+			FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = $1`, db).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s.String
+	}
+	mustExec(t, p.admin, "CREATE DATABASE "+work)
+	db, err := p.open(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, "CREATE SCHEMA app", "CREATE SEQUENCE app.s",
+		"CREATE TABLE app.t (id int DEFAULT nextval('app.s'), at timestamptz, day date, took interval)",
+		"CREATE VIEW app.v AS SELECT id, at FROM app.t",
+		"INSERT INTO app.t (at, day, took) VALUES ('2026-01-01 00:00:00+00', '2026-02-03', '1 day 2 hours')")
+	db.Close()
+	// A pristine copy of earlier settings, which the next one must not keep.
+	if err := p.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, p.admin,
+		"ALTER DATABASE "+pristine+" SET timezone TO 'America/New_York'",
+		"ALTER ROLE CURRENT_USER IN DATABASE "+pristine+" SET extra_float_digits TO 1",
+		"ALTER DATABASE "+work+" SET timezone TO 'Asia/Tokyo'",
+		"ALTER DATABASE "+work+" SET search_path TO app, public",
+		"ALTER DATABASE "+work+" SET datestyle TO 'SQL, DMY'",
+		"ALTER ROLE CURRENT_USER IN DATABASE "+work+" SET intervalstyle TO 'iso_8601'")
+	if err := p.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := settings(pristine), settings(work); got != want {
+		t.Fatalf("settings of the pristine database %q, want the working database's %q", got, want)
+	}
+	working, err := p.Fingerprint(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := p.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(working, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	if err := p.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := p.Fingerprint(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(restored, seeded); len(d) > 0 {
+		t.Fatalf("after the restore the working database differs from the seeded fingerprint: %v", d)
+	}
+}
+
 func TestPgSettingValue(t *testing.T) {
 	for _, c := range []struct{ name, value, want string }{
 		{"timezone", "Europe/Belgrade", `'Europe/Belgrade'`},
