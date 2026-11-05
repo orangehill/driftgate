@@ -32,9 +32,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# How long one test package may run before go test stops it (go's default
+# is 10m). The slowest packages (internal/data, internal/state with SQL
+# Server) take 5-9 minutes on a normal runner; a slower runner must not fail
+# a sound build. Each job's timeout-minutes is the outer bound: a job that
+# hangs is stopped there, whatever this value is.
+env:
+  GO_TEST_TIMEOUT: 20m
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       mariadb:
         image: mariadb:11.4
@@ -110,7 +119,7 @@ jobs:
       # driftgate process they start takes them from 5 s to 100 s. The
       # SQLite tests of the packages run here with it.
       - name: Test
-        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -skip '^Test(EndToEnd|Crash\w*)SQLite$' ./...
+        run: go test -race -timeout "$GO_TEST_TIMEOUT" -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -skip '^Test(EndToEnd|Crash\w*)SQLite$' ./...
       - name: Coverage report
         if: github.event_name == 'push' && github.workflow == 'ci'
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
@@ -241,6 +250,7 @@ jobs:
   # waits for it.
   sqlserver:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
@@ -262,7 +272,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        run: go test -race -count=1 -timeout 20m -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
+        run: go test -race -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./internal/appconf/ ./internal/dbdsn/ ./internal/config/
       # Every driftgate process the tests start would run under the race
       # detector too; they run without it, as in the sqlite job.
       - name: End to end and crashes
@@ -282,6 +292,7 @@ jobs:
   sqlserver-versions:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -309,7 +320,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        run: go test -count=1 -timeout 20m -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
+        run: go test -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
       - name: TLS
         env:
           IMAGE: mcr.microsoft.com/mssql/server:${{ matrix.version }}
