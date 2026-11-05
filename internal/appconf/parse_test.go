@@ -129,6 +129,11 @@ func TestFromValue(t *testing.T) {
 		{"file:hunter2@tcp(db:3306)/app?x=a@b", "", "", "the connection string names no server (Server=, Host=) (the value is not shown)"},
 		{"file:hunter2@tcp/app", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
 		{"file:hunter2@/app", "", "file:hunter2@/app", ""},
+		{"file:hunter2@cloudsql(p:r:i)/app", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		{"file:hunter2@tcp(db:3306)/app?loc=Asia/Tokyo", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		// A plain path whose folder ends in @ reads as the MySQL driver's
+		// form: in a DSN such a file is written file:///….
+		{"/srv/data@/app.db", "", "/srv/data@/app.db", ""},
 		{"oauth2:s@/app", "", "oauth2:s@/app", ""},
 		{"oracle:s@/app", "", "oracle:s@/app", ""},
 		// ADO.NET.

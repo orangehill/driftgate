@@ -627,8 +627,9 @@ SQLAlchemy's `sqlite://`), a file outside the project, a network share
 an encrypted file (SQLCipher, a `Password=` of Microsoft.Data.Sqlite) and
 a file that `|DataDirectory|` names. A value in the MySQL driver's form
 (`user:password@tcp(host)/db`, `user@/db`) is MySQL's even when the user
-reads like a scheme (`file:`, `sqlite:`), so a folder ending in `@` needs
-a plain path or `file:///…`. A relative path is taken as the
+reads like a scheme (`file:`, `sqlite:`), so in a DSN or URL a folder
+ending in `@` needs `file:///…` (a plain path does in `DB_DATABASE`,
+`working:` and `--database`). A relative path is taken as the
 framework takes it; where the application opens it from the folder it
 runs in, `init` and `setup` add a note to check it:
 

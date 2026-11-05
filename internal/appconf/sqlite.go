@@ -53,8 +53,35 @@ func sqliteValue(v string) (p parts, ok bool, err error) {
 		}
 		return parts{}, false, nil
 	}
+	if !strings.Contains(v, "://") && atNetwork(v) {
+		// user:pass@net(…)/db whose network mysqlNetwork does not know (one
+		// registered with RegisterDialContext) or whose last / is in its
+		// parameters: not a file, and its password must not become a path.
+		return parts{}, true, errNotDSN
+	}
 	p, err = fromSQLiteValue(v)
 	return p, true, err
+}
+
+// errNotDSN refuses a value read as none of the forms, without showing it.
+const errNotDSN = constError("not a database URL, a MySQL DSN or a connection string (the value is not shown)")
+
+// atNetwork reports an @ followed by a name and a (, as the MySQL driver
+// writes its network and address (@tcp(…), @cloudsql(…)), anywhere in v.
+func atNetwork(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if v[i] != '@' {
+			continue
+		}
+		j := i + 1
+		for j < len(v) && (isLetter(v[j]) || ('0' <= v[j] && v[j] <= '9') || v[j] == '_' || v[j] == '-' || v[j] == '.') {
+			j++
+		}
+		if j > i+1 && j < len(v) && v[j] == '(' {
+			return true
+		}
+	}
+	return false
 }
 
 // mysqlNetwork reports the MySQL driver's own form, read as the driver
@@ -62,8 +89,9 @@ func sqliteValue(v string) (p parts, ok bool, err error) {
 // before the last @ ahead of the last /, then a network: none (the
 // default), tcp, tcp4, tcp6 or unix, with or without an address. Such a
 // value is never an SQLite file: its user's password would be written as
-// a path. (An SQLite file whose folder ends in @ must be written without
-// a scheme or as file:///….)
+// a path. (In a DSN or URL, an SQLite file whose folder ends in @ must be
+// written as file:///…; a plain path does in DB_DATABASE, working: and
+// --database.)
 func mysqlNetwork(v string) bool {
 	slash := strings.LastIndexByte(v, '/')
 	if slash < 0 {

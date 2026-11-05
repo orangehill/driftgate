@@ -229,7 +229,7 @@ func fromValue(v string) (parts, error) {
 	case isSQLiteValue(v):
 		return fromSQLiteValue(v)
 	}
-	return parts{}, errors.New("not a database URL, a MySQL DSN or a connection string (the value is not shown)")
+	return parts{}, errNotDSN
 }
 
 // connString reports an ADO.NET connection string that names a server: it
