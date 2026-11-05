@@ -456,20 +456,10 @@ func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tab
 	}
 
 	// The pristine side is read on connections of its own, while this one
-	// reads dst: its chunk hashes, and the fingerprint the result must match.
+	// reads dst: its chunk hashes, and, once the chunks are copied, the
+	// fingerprint the result must match.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var want string
-	var wantErr error
-	checked := make(chan struct{})
-	go func() {
-		defer close(checked)
-		want, wantErr = m.tableHash(ctx, nil, src, t)
-	}()
-	defer func() {
-		cancel()
-		<-checked
-	}()
 	id := qi(pk[0])
 	// Every column with a NULL flag, so NULL and '' differ; two separators
 	// and orders, so a value that holds a separator does not shift the rest.
@@ -518,6 +508,19 @@ func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tab
 	if len(diff)*4 > len(a)+1 {
 		return false, nil
 	}
+	// Started only now: a table that is copied whole needs no hash, and a
+	// query cancelled halfway would close its connection.
+	var want string
+	var wantErr error
+	checked := make(chan struct{})
+	go func() {
+		defer close(checked)
+		want, wantErr = m.tableHash(ctx, nil, src, t)
+	}()
+	defer func() {
+		cancel()
+		<-checked
+	}()
 	sort.Slice(diff, func(i, j int) bool { return diff[i] < diff[j] })
 	// Every differing chunk is emptied before any is filled: a unique value
 	// that moved between chunks is then not in the way.
