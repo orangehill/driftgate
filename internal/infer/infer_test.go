@@ -145,6 +145,11 @@ func TestPatternNarrow(t *testing.T) {
 		{[]string{"amount_401", "amount_402"}, []string{"amount_999"}, nil},
 		{[]string{"ERR_500", "ERR_503"}, []string{"ERR_504"}, []string{"ERR_5000"}},
 		{[]string{"status_201", "status_204"}, []string{"status_200"}, []string{"status_2010"}},
+		// A run padded with zeros keeps its width; code and err are words
+		// of their own, not part of one (cherry, terraform).
+		{[]string{"ref_00123", "ref_00124"}, []string{"ref_00999"}, []string{"ref_100000", "ref_123"}},
+		{[]string{"cherry_998", "cherry_999"}, []string{"cherry_1000"}, nil},
+		{[]string{"terraform_100", "terraform_101"}, []string{"terraform_1000"}, nil},
 		{[]string{"tmp_3", "tmp_9"}, []string{"tmp_123456"}, nil},
 		{[]string{"page 1 of 3", "page 2 of 3"}, nil, []string{"page 1 of 4"}},
 		{[]string{"5", "7"}, []string{"700000"}, []string{"-5"}},

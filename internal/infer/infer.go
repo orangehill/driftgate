@@ -101,7 +101,12 @@ func runFormat(parts []string, before, after string, grow bool) string {
 		// more common than a code after a lower-case one, and a counter
 		// that crosses 999 would drift on every proposal; a code of a
 		// lower-case word that changes width then drifts as a change.
-		suffixed := suffixedID().MatchString(before) && !(lo == hi && lo >= 3 && codeWord().MatchString(before))
+		// A run padded with zeros (ref_00123) has a width of its own.
+		padded := false
+		for _, p := range parts {
+			padded = padded || len(p) > 1 && p[0] == '0'
+		}
+		suffixed := suffixedID().MatchString(before) && !padded && !(lo == hi && lo >= 3 && codeWord().MatchString(before))
 		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) || suffixed || grow {
 			return `\d+`
 		}
@@ -193,7 +198,7 @@ var (
 	suffixedID = lazy.Regexp(`(?i)(?:^|[^a-z0-9])[a-z]+_$`)
 	// codeWord ends the text before the digits of a code: an upper-case
 	// word, or one that names a code.
-	codeWord = lazy.Regexp(`(?:^|[^A-Za-z0-9])[A-Z][A-Z0-9]*_$|(?i)(?:code|http|status|err)[a-z]*_$`)
+	codeWord = lazy.Regexp(`(?:^|[^A-Za-z0-9])[A-Z][A-Z0-9]*_$|(?i)(?:^|[^a-z])(?:code|http|status|err)[a-z]*_$`)
 	// unitAfter starts the text after a run of digits that measures
 	// something: 12ms, 3 s, 512KB.
 	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
