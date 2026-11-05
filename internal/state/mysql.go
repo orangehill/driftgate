@@ -103,8 +103,17 @@ func NewMySQL(o Options) (*MySQL, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The connections a fingerprint or a restore uses at the same time
+	// (checksums, copyTables, rowDiff) stay open for the next one: a new
+	// connection costs a server that resolves the client's name a reverse
+	// DNS lookup (database/sql keeps 2 by default).
+	db.SetMaxIdleConns(mysqlIdleConns)
 	return &MySQL{o: o, db: db}, nil
 }
+
+// mysqlIdleConns is how many connections the pool keeps open: copyTables'
+// connections, each with rowDiff's two of its own.
+const mysqlIdleConns = 12
 
 func (m *MySQL) Name() string  { return m.o.Name }
 func (m *MySQL) Partial() bool { return true }

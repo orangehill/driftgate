@@ -449,6 +449,14 @@ anything else through commands.
   `CHARACTER SET … COLLATE …` and a restore stopped with "left 1 items
   different from the pristine copy"; a pristine copy seeded by those
   releases needs one `driftgate seed`.
+- MySQL/MariaDB in a container: start the server with
+  `--skip-name-resolve` (compose: `command: --skip-name-resolve`). Without it
+  the server looks up the name of every client that connects, and a slow
+  lookup makes each connection slow (measured: fingerprints of 622 requests
+  took 29 minutes, 45 seconds with it). The official images set it in
+  `/etc/my.cnf`, which a project's own mounted `my.cnf` replaces. Accounts
+  are then matched by address (`'app'@'%'`), not by host name. DriftGate
+  keeps its connections open between fingerprints and restores.
 
 #### Database DSNs
 
