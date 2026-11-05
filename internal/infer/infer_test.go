@@ -136,6 +136,15 @@ func TestPatternNarrow(t *testing.T) {
 		{[]string{"HTTP_401", "HTTP_403"}, []string{"HTTP_500"}, []string{"HTTP_5000", "HTTP_50"}},
 		{[]string{"error_code_401", "error_code_403"}, []string{"error_code_500"}, []string{"error_code_4031"}},
 		{[]string{"order_12 shipped", "order_13 shipped"}, []string{"order_99999 shipped"}, nil},
+		// What agrees inside a version stays; a counter after a lower-case
+		// word grows past its width, a code after an upper-case word or a
+		// word that names one keeps it.
+		{[]string{"v1.2.3 v1.2.3", "v1.2.4 v1.2.4"}, []string{"v1.2.40 v1.2.5"}, []string{"v1.2.4 v9.2.4", "v9.2.4 v1.2.4"}},
+		{[]string{"Laravel v10.48.2", "Laravel v10.48.3"}, []string{"Laravel v10.48.10"}, []string{"Laravel v11.48.3", "Laravel v10.49.3"}},
+		{[]string{"job_998", "job_999"}, []string{"job_1000"}, nil},
+		{[]string{"amount_401", "amount_402"}, []string{"amount_999"}, nil},
+		{[]string{"ERR_500", "ERR_503"}, []string{"ERR_504"}, []string{"ERR_5000"}},
+		{[]string{"status_201", "status_204"}, []string{"status_200"}, []string{"status_2010"}},
 		{[]string{"tmp_3", "tmp_9"}, []string{"tmp_123456"}, nil},
 		{[]string{"page 1 of 3", "page 2 of 3"}, nil, []string{"page 1 of 4"}},
 		{[]string{"5", "7"}, []string{"700000"}, []string{"-5"}},

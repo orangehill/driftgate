@@ -94,9 +94,14 @@ func runFormat(parts []string, before, after string, grow bool) string {
 	}
 	switch {
 	case c == `\d`:
-		// An id with a word before it (user_42) grows; a code of one width
-		// of three or more (HTTP_401, error_code_403) keeps it.
-		suffixed := suffixedID().MatchString(before) && !(lo == hi && lo >= 3)
+		// An id with a word before it (user_42, job_998) grows; a code
+		// keeps one width of three or more that every sample has: one after
+		// an upper-case word (HTTP_401, ERR_500) or a word that names a
+		// code (error_code_403, status_201). A counter after a word is far
+		// more common than a code after a lower-case one, and a counter
+		// that crosses 999 would drift on every proposal; a code of a
+		// lower-case word that changes width then drifts as a change.
+		suffixed := suffixedID().MatchString(before) && !(lo == hi && lo >= 3 && codeWord().MatchString(before))
 		if counterKey().MatchString(before) || unitAfter().MatchString(after) || pathID(before, after) || suffixed || grow {
 			return `\d+`
 		}
@@ -186,6 +191,9 @@ var (
 	counterKey = lazy.Regexp(`(?i)(?:^|[^a-z])(?:id|ids|count|views|size|length|seq|num|number|bytes|\w*_?pages|of)["']?\s*[:=]?\s*["']?$`)
 	// suffixedID ends the text before the digits of an id such as user_42.
 	suffixedID = lazy.Regexp(`(?i)(?:^|[^a-z0-9])[a-z]+_$`)
+	// codeWord ends the text before the digits of a code: an upper-case
+	// word, or one that names a code.
+	codeWord = lazy.Regexp(`(?:^|[^A-Za-z0-9])[A-Z][A-Z0-9]*_$|(?i)(?:code|http|status|err)[a-z]*_$`)
 	// unitAfter starts the text after a run of digits that measures
 	// something: 12ms, 3 s, 512KB.
 	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
@@ -302,6 +310,12 @@ func Pattern(values []string) string {
 			// A word that is the same everywhere stays as it is (a cookie
 			// name, a weekday); digits stay a class, since times and counters
 			// can agree by chance in a few runs.
+			// What agrees inside a version or a range stays: v1 of v1.2.3
+			// and v1.2.4 is the major version.
+			if equal && grown.in(j) {
+				b.WriteString(regexp.QuoteMeta(parts[0]))
+				continue
+			}
 			if equal && calendarWord().MatchString(parts[0]) {
 				b.WriteString(`[A-Z][a-z]{2}`) // the day and month of a date change with time
 				continue
