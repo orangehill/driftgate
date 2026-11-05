@@ -40,6 +40,10 @@ const rowDiffChunk = 1024
 // different, as a hash that misses a change would.
 var rowDiffMiss func(chunk int64) bool
 
+// rowDiffHash, set by tests, is called when rowDiff starts the hash of the
+// source table.
+var rowDiffHash func(table string)
+
 // tableJob is one table to make equal to its source.
 type tableJob struct {
 	t          string
@@ -423,6 +427,9 @@ func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tab
 	var want string
 	var wantErr error
 	checked := make(chan struct{})
+	if rowDiffHash != nil {
+		rowDiffHash(t)
+	}
 	go func() {
 		defer close(checked)
 		want, wantErr = m.tableHash(ctx, nil, src, t)

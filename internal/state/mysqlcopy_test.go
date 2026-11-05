@@ -546,3 +546,68 @@ func testMySQLImplicitCollation(t *testing.T, dsn string) {
 		}
 	}
 }
+
+// TestMySQLKeepsConnections: a fingerprint and a restore that copies
+// several tables at once close none of the connections they used, and a
+// chunked restore that declines (most chunks differ) starts no hash of the
+// pristine table, whose cancelled query would close its connection.
+func TestMySQLKeepsConnections(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) { testMySQLKeepsConnections(t, dsn) })
+	}
+}
+
+func testMySQLKeepsConnections(t *testing.T, dsn string) {
+	ctx := context.Background()
+	work, pristine := "dgt_conns", "dgt_conns_pristine"
+	root := mysqlAdmin(t, dsn, "")
+	mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+	t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+	db := mysqlAdmin(t, dsn, work)
+	var rows []string
+	for i := range 5000 {
+		rows = append(rows, fmt.Sprintf("(%d, 'v%d')", i, i))
+	}
+	for _, tb := range []string{"a", "b", "c", "d", "e"} {
+		mustExec(t, db, "CREATE TABLE "+tb+" (id INT PRIMARY KEY, v VARCHAR(20))", "INSERT INTO "+tb+" VALUES "+strings.Join(rows, ", "))
+	}
+	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fp0 := mustFingerprint(t, m)
+	defer func(v int64) { rowDiffMin = v }(rowDiffMin)
+	rowDiffMin = 0
+	var mu sync.Mutex
+	var hashed []string
+	rowDiffHash = func(table string) { mu.Lock(); hashed = append(hashed, table); mu.Unlock() }
+	defer func() { rowDiffHash = nil }()
+	cycle := func(writes ...string) {
+		t.Helper()
+		mustExec(t, db, writes...)
+		changed := Diff(fp0, mustFingerprint(t, m))
+		if err := m.Restore(ctx, changed); err != nil {
+			t.Fatal(err)
+		}
+		if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+			t.Fatalf("after the restore %v", d)
+		}
+	}
+	every := []string{"UPDATE a SET v = 'x'", "UPDATE b SET v = 'x'", "UPDATE c SET v = 'x'", "UPDATE d SET v = 'x'", "UPDATE e SET v = 'x' WHERE id = 7"}
+	cycle(every...) // opens the connections
+	closed := m.db.Stats().MaxIdleClosed
+	hashed = nil
+	cycle(every...)
+	if n := m.db.Stats().MaxIdleClosed - closed; n > 0 {
+		t.Errorf("%d connections closed", n)
+	}
+	// a to d differ in every chunk: declined; e in one: copied by chunks.
+	if !reflect.DeepEqual(hashed, []string{"e"}) {
+		t.Errorf("pristine tables hashed: %v, want [e]", hashed)
+	}
+}
