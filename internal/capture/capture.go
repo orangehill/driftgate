@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -452,14 +453,54 @@ func projectRoots(root string) []string {
 var homeSpaced = regexp.MustCompile(`(?i)^(?:/(?:Users|home)/|/mnt/[a-z]/Users/|[a-z]:\\Users\\)[^/\\]*\s`)
 
 // namesUser reports a folder not recorded as ~/… whose absolute path
-// would name the user: in a home folder whose name has a space, or in
-// this machine's own home when HomeRelative cannot write it as ~/… (a
-// home with white space). It is not recorded:
-// meta.json goes into the repository with baselines: git. Its traces are
-// then compared as they are, which can only make a difference, never hide
-// one.
+// would name the user: in a home folder whose name has a space (the
+// comparison reads a home folder's name up to white space), in this
+// machine's home when its path has white space, or in the real path of
+// a home of a known form linked elsewhere (/home/jane to
+// /nfs/home/jane). It is not recorded: meta.json goes into the repository
+// with baselines: git. Its traces are then compared as they are, which
+// can only make a difference, never hide one. A home of another form (a
+// service account's /var/lib/jenkins, /srv/app) is recorded as it is.
 func namesUser(folder string) bool {
-	return homeSpaced.MatchString(folder) || compare.InLocalHome(folder)
+	if homeSpaced.MatchString(folder) {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || len(strings.FieldsFunc(home, isSep)) == 0 {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		real = home
+	}
+	return inUserHome(folder, home, real)
+}
+
+// inUserHome is namesUser's test of this machine's home and its real path.
+func inUserHome(folder, home, real string) bool {
+	for _, h := range []string{home, real} {
+		if strings.ContainsAny(h, " \t") && inFolder(folder, h) {
+			return true
+		}
+	}
+	_, known := compare.HomeRelative(home)
+	return known && real != home && inFolder(folder, real)
+}
+
+func isSep(c rune) bool { return c == '/' || c == '\\' }
+
+// inFolder reports a path in folder h or h itself, without letter case
+// where the system opens paths so (macOS, Windows).
+func inFolder(path, h string) bool {
+	h = strings.TrimRight(h, `/\\`)
+	if len(path) < len(h) {
+		return false
+	}
+	p := path[:len(h)]
+	if p != h && (runtime.GOOS == "linux" || !strings.EqualFold(p, h)) {
+		return false
+	}
+	return len(path) == len(h) || path[len(h)] == '/' || path[len(h)] == '\\'
 }
 
 // asidePrefix starts the name of a previous capture of tag moved aside; it

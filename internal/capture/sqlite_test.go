@@ -604,27 +604,28 @@ func TestProjectRootsInHome(t *testing.T) {
 			t.Errorf("%s: %v, want %q", root, got, want)
 		}
 	}
-	// This machine's home of another form ($HOME): ~/…; with white
-	// space: not recorded.
-	for home, want := range map[string]string{"/data/home/jane": "~/src/shop", "/var/lib/jenkins": "~/src/shop", "/data/home/Jane Doe": ""} {
-		t.Setenv("HOME", home)
-		got := projectRoots(home + "/src/shop")
-		if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
-			t.Errorf("HOME %s: %v, want %q", home, got, want)
+	// A home with white space, and the real path of a home of a known
+	// form linked elsewhere, name the user: not recorded. A home of
+	// another form (a service account's) is recorded as it is.
+	for _, c := range []struct {
+		folder, home, real string
+		names              bool
+	}{
+		{"/nfs/home/jane/src/shop", "/home/jane", "/nfs/home/jane", true},
+		{"/nfs/home/jane", "/home/jane", "/nfs/home/jane", true},
+		{"/nfs/home/janet/src/shop", "/home/jane", "/nfs/home/jane", false},
+		{"/data/home/Jane Doe/src/shop", "/data/home/Jane Doe", "/data/home/Jane Doe", true},
+		{"/var/lib/jenkins/jobs/shop", "/var/lib/jenkins", "/var/lib/jenkins", false},
+		{"/srv/app", "/srv/app", "/srv/app", false},
+	} {
+		if got := inUserHome(c.folder, c.home, c.real); got != c.names {
+			t.Errorf("%s (home %s, real %s): %v", c.folder, c.home, c.real, got)
 		}
 	}
-	// A home that is a link (to /nfs/home/<name>): the real path of the
-	// project is in its real path, also ~/….
-	real := t.TempDir()
-	link := filepath.Join(t.TempDir(), "jane")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
+	t.Setenv("HOME", "/var/lib/jenkins")
+	if got := projectRoots("/var/lib/jenkins/jobs/shop"); len(got) != 1 || got[0] != "/var/lib/jenkins/jobs/shop" {
+		t.Errorf("Jenkins' home: %v", got)
 	}
-	if err := os.MkdirAll(filepath.Join(real, "src", "shop"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", link)
-	if got := projectRoots(filepath.Join(link, "src", "shop")); len(got) != 1 || got[0] != "~/src/shop" {
-		t.Errorf("home that is a link: %v", got)
-	}
+	// A letter of another byte length without case (İ, K) panics no one.
+	_ = inFolder("D:\\ilker\\x", "D:\\İlker")
 }

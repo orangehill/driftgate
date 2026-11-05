@@ -2,14 +2,10 @@ package compare
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/orangehill/driftgate/internal/lazy"
 )
@@ -67,138 +63,27 @@ const (
 	homeDoubled = `(?i:[a-z]:\\\\Users\\\\` + homeName + `)`
 )
 
-var homeStart = lazy.Regexp(`^` + homePlain + `([/\\].*)?$`)
-
-// localHomes are this machine's home folder ($HOME) and its real path
-// (a home linked to /nfs/home/<name>), each when the forms of homePlain
-// do not know it (a service account's /var/lib/jenkins, /srv/app): a
-// folder in it is recorded as ~/… too, and the home folder before a ~/…
-// folder may be one of them. A home with white space is left out: the
-// comparison reads a home folder's path up to white space.
-func localHomes() []string {
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	list := []string{h}
-	if real, err := filepath.EvalSymlinks(h); err == nil {
-		list = append(list, real)
-	}
-	var out []string
-	for _, x := range list {
-		x = strings.TrimRight(x, `/\\`)
-		if len(restNames(x)) == 0 || strings.ContainsAny(x, " \t") || homeStart().MatchString(x) || slices.Contains(out, x) {
-			continue
-		}
-		out = append(out, x)
-	}
-	return out
-}
-
-// InLocalHome reports a folder in this machine's home folder or its real
-// path, of any form, white space too: its absolute path names the user.
-func InLocalHome(folder string) bool {
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	list := []string{h}
-	if real, err := filepath.EvalSymlinks(h); err == nil {
-		list = append(list, real)
-	}
-	for _, x := range list {
-		x = strings.TrimRight(x, `/\\`)
-		if len(restNames(x)) == 0 {
-			continue
-		}
-		if _, ok := inFolder(folder, x); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// inFolder reports a path in folder h or h itself, without letter case
-// where the system opens paths so (macOS, Windows), and the rest from its
-// separator.
-func inFolder(path, h string) (string, bool) {
-	p, hh := path, h
-	if runtime.GOOS != "linux" {
-		p, hh = strings.ToLower(p), strings.ToLower(hh)
-	}
-	if !strings.HasPrefix(p, hh) || len(p) > len(hh) && p[len(hh)] != '/' && p[len(hh)] != '\\' {
-		return "", false
-	}
-	return path[len(h):], true
-}
-
-// homeRegexps match the home folder before a ~/… folder, as written, with
-// / escaped and with \ doubled: the forms of homePlain and this
-// machine's localHomes. They are made once per set of homes.
-func homeRegexps() [3]*regexp.Regexp {
-	homes := localHomes()
-	key := strings.Join(homes, "\x00")
-	homeCache.Lock()
-	defer homeCache.Unlock()
-	if r, ok := homeCache.m[key]; ok {
-		return r
-	}
-	plain, escaped, doubled := homePlain, homeEscaped, homeDoubled
-	for _, h := range homes {
-		q := func(s string) string {
-			s = regexp.QuoteMeta(s)
-			if runtime.GOOS != "linux" {
-				s = "(?i:" + s + ")"
-			}
-			return s
-		}
-		plain += "|" + q(h)
-		if strings.Contains(h, "/") {
-			escaped += "|" + q(strings.ReplaceAll(h, "/", `\/`))
-		}
-		if strings.Contains(h, `\`) {
-			doubled += "|" + q(strings.ReplaceAll(h, `\`, `\\`))
-		}
-	}
-	r := [3]*regexp.Regexp{regexp.MustCompile(`^(?:` + plain + `)$`), regexp.MustCompile(`^(?:` + escaped + `)$`), regexp.MustCompile(`^(?:` + doubled + `)$`)}
-	if homeCache.m == nil {
-		homeCache.m = map[string][3]*regexp.Regexp{}
-	}
-	homeCache.m[key] = r
-	return r
-}
-
-var homeCache struct {
-	sync.Mutex
-	m map[string][3]*regexp.Regexp
-}
+var (
+	homeBefore = [3]func() *regexp.Regexp{lazy.Regexp(`^` + homePlain + `$`), lazy.Regexp(`^` + homeEscaped + `$`), lazy.Regexp(`^` + homeDoubled + `$`)}
+	homeStart  = lazy.Regexp(`^` + homePlain + `([/\\].*)?$`)
+)
 
 // HomeRelative tells a folder in a home folder of a form the comparison
 // knows (inHome): rest is the rest from its separator (/Sites/shop of
 // /Users/alice/Sites/shop) when it has two names or more, and the folder
 // is recorded as ~ and the rest; else rest is "", and the folder (the
 // home folder itself, one name in it: /app is also a path of a URL) is
-// not recorded, as its absolute path names the user. A folder in this
-// machine's own home of another form (localHomes) is one too. A folder
-// elsewhere is recorded as it is.
+// not recorded, as its absolute path names the user. A folder elsewhere
+// is recorded as it is.
 func HomeRelative(folder string) (rest string, inHome bool) {
-	if m := homeStart().FindStringSubmatch(folder); m != nil {
-		rest = m[1]
-	} else {
-		in := false
-		for _, h := range localHomes() {
-			if rest, in = inFolder(folder, h); in {
-				break
-			}
-		}
-		if !in {
-			return "", false
-		}
+	m := homeStart().FindStringSubmatch(folder)
+	if m == nil {
+		return "", false
 	}
-	if len(restNames(rest)) < 2 {
+	if len(restNames(m[1])) < 2 {
 		return "", true
 	}
-	return rest, true
+	return m[1], true
 }
 
 // homeLook is how far before the rest of a ~/… folder its home folder is
@@ -245,8 +130,7 @@ func rootForms(list []string) []rootForm {
 			if rest == "" || rest[0] != '/' && rest[0] != '\\' || len(restNames(rest)) < 2 {
 				continue
 			}
-			h := homeRegexps()
-			r, plain, escaped, doubled = rest, h[0], h[1], h[2]
+			r, plain, escaped, doubled = rest, homeBefore[0](), homeBefore[1](), homeBefore[2]()
 		} else if len(names) < 2 {
 			continue
 		}

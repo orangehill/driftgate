@@ -321,13 +321,11 @@ capture or CI's (`/home/runner/work/…` is in the runner's home). The home
 folder itself and one name in it are not recorded (their path names the
 user, and a record of them would take any path of any home folder, or a
 URL's, for the project's): their traces are compared as they are. A
-folder in the home folder of the machine that captures (`$HOME` and its
-real path) is recorded as `~/…` too when that home has another form (a
-service account's `/var/lib/jenkins`, a home linked to
-`/nfs/home/<name>`); `compare` on that machine takes its home for one.
-A folder in a home whose name has a space is not recorded: its absolute
-path names the user. A folder elsewhere (a container's `/srv/…`) is
-recorded as it is, absolute. A debug
+folder whose absolute path would name the user is not recorded either:
+in a home whose name has a space, or in the real path of a home of those
+forms linked elsewhere (`/home/<name>` to `/nfs/home/<name>`). A folder
+elsewhere (a container's `/srv/…`, a service account's home such as
+`/var/lib/jenkins/…`) is recorded as it is, absolute. A debug
 error page or JSON writes the application's folder into its stack trace
 (Laravel with `APP_DEBUG`): two checkouts of the project (the main
 worktree and a git worktree, a developer's machine and CI) are in
