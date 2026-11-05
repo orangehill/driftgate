@@ -271,7 +271,7 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 	// did not track: row_tracking came or went after the baseline.
 	noted := map[string]bool{}
 	untracked := func(item string, other []string, why string) bool {
-		if other == nil || slices.Contains(other, item) {
+		if other == nil || tracks(other, item) {
 			return false
 		}
 		if !noted[item] {
@@ -665,4 +665,35 @@ func sameNumber(a, b *jsonx.Value) bool {
 	x, ok1 := new(big.Float).SetPrec(4096).SetString(a.Text)
 	y, ok2 := new(big.Float).SetPrec(4096).SetString(b.Text)
 	return ok1 && ok2 && x.Cmp(y) == 0
+}
+
+// tracks reports whether the tables another side tracked (meta.RowTracking:
+// <component>/table:<name>, from the configuration) hold item, the table
+// a row change names as the driver read it. The drivers match a table
+// more loosely than its configured name: SQL Server and others without
+// letter case, PostgreSQL a name without a schema in any schema. So does
+// this, without letter case and by the name without its schema too: a
+// table taken for tracked keeps its rows compared, and a looser match can
+// only show a difference, never hide one.
+func tracks(other []string, item string) bool {
+	comp, name, ok := strings.Cut(item, "/table:")
+	if !ok {
+		return slices.Contains(other, item)
+	}
+	bare := func(n string) string {
+		if i := strings.LastIndexByte(n, '.'); i >= 0 {
+			return n[i+1:]
+		}
+		return n
+	}
+	for _, o := range other {
+		oc, on, ok := strings.Cut(o, "/table:")
+		if !ok || oc != comp {
+			continue
+		}
+		if strings.EqualFold(on, name) || strings.EqualFold(bare(on), bare(name)) {
+			return true
+		}
+	}
+	return false
 }

@@ -253,6 +253,19 @@ func TestRowTrackingAfterBaseline(t *testing.T) {
 	if drifts, notes := OneNotes("x", b, c, allowlist.Empty(), LevelValues); len(drifts) != 3 || len(notes) != 0 {
 		t.Errorf("a baseline that does not say: %+v %q", drifts, notes)
 	}
+	// The driver names the table in another letter case or schema than
+	// the configuration (SQL Server dbo.Users for users, PostgreSQL
+	// app.users for users): it is tracked on both sides, and its rows are
+	// compared.
+	for _, item := range []string{"db/table:dbo.Users", "db/table:app.users"} {
+		cfg := []string{"db/table:dbo.users", "db/table:public.users"}
+		bb := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=1", Change: "updated", Columns: []string{"name"}}}}
+		cc := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=2", Change: "updated", Columns: []string{"name"}}}}
+		drifts, notes := OneNotes("x", Side{Record: rec(bb), RowTables: cfg}, Side{Record: rec(cc), RowTables: cfg}, allowlist.Empty(), LevelValues)
+		if len(drifts) != 2 || len(notes) != 0 {
+			t.Errorf("%s: drifts %+v, notes %q", item, drifts, notes)
+		}
+	}
 }
 
 func TestContentLengthFollowsBody(t *testing.T) {

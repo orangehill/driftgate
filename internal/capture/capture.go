@@ -16,6 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -425,7 +427,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 // ~ and the rest: meta.json goes into the repository with baselines: git,
 // and names no user that way; the comparison takes it for that path in
 // any home folder of those forms. The home folder itself, and one name in
-// it, are not written (their path names the user); any other folder is
+// it, are not written (their path names the user), nor a folder whose
+// absolute path would name the user (namesUser); any other folder is
 // written as it is.
 func projectRoots(root string) []string {
 	out := []string{root}
@@ -437,11 +440,38 @@ func projectRoots(root string) []string {
 		switch rest, home := compare.HomeRelative(r); {
 		case rest != "":
 			kept = append(kept, "~"+rest)
-		case !home:
+		case !home && !namesUser(r):
 			kept = append(kept, r)
 		}
 	}
 	return slices.Compact(kept)
+}
+
+// homeSpaced is a home folder of a known form whose name has a space
+// (/Users/Jane Doe, C:\Users\Jane Doe): ~/… cannot stand for it, as the
+// comparison reads a home folder's name up to white space.
+var homeSpaced = regexp.MustCompile(`(?i)^(?:/(?:Users|home)/|/mnt/[a-z]/Users/|[a-z]:\\Users\\)[^/\\]*\s`)
+
+// namesUser reports a folder not recorded as ~/… whose absolute path
+// would name the user: in a home folder whose name has a space, or in the
+// home folder of this user ($HOME) in a form the comparison does not know
+// (/data/home/jane). It is not recorded: meta.json goes into the
+// repository with baselines: git. Its traces are then compared as they
+// are, which can only make a difference, never hide one.
+func namesUser(folder string) bool {
+	if homeSpaced.MatchString(folder) {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		return false
+	}
+	home = strings.TrimRight(home, `/\`)
+	f, h := folder, home
+	if runtime.GOOS != "linux" {
+		f, h = strings.ToLower(f), strings.ToLower(h)
+	}
+	return f == h || strings.HasPrefix(f, h+"/") || strings.HasPrefix(f, h+`\`)
 }
 
 // asidePrefix starts the name of a previous capture of tag moved aside; it

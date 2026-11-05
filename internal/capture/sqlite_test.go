@@ -585,6 +585,7 @@ func TestProjectRootsInHome(t *testing.T) {
 	if filepath.Separator != '/' {
 		t.Skip("paths of Unix")
 	}
+	t.Setenv("HOME", "/data/home/jane")
 	for root, want := range map[string]string{
 		"/Users/alice/Sites/shop":     "~/Sites/shop",
 		"/mnt/c/Users/alice/src/shop": "~/src/shop",
@@ -593,6 +594,11 @@ func TestProjectRootsInHome(t *testing.T) {
 		"/var/lib/jenkins/jobs/shop":  "/var/lib/jenkins/jobs/shop",
 		"/Users/alice":                "",
 		"/Users/alice/app":            "",
+		// An absolute path would name the user: not recorded.
+		"/Users/Jane Doe/Sites/shop": "",
+		"/home/Jane Doe/work/shop":   "",
+		"/data/home/jane/src/shop":   "",
+		"/data/home/janet/src/shop":  "/data/home/janet/src/shop",
 	} {
 		got := projectRoots(root)
 		if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
