@@ -278,8 +278,9 @@ func (m *MySQL) copyOne(ctx context.Context, c *sql.Conn, src, dst string, j tab
 // the pristine copy's record). So a column's COLLATE that is the table's
 // own collation, without a CHARACTER SET before it, is left out: the column
 // takes the same collation from the table. Nothing in quotes, backquotes or
-// parentheses (enum values, defaults, comments, expressions) is changed;
-// MariaDB, which marks no column, never prints such a COLLATE.
+// parentheses (enum values, defaults, comments, expressions) is changed.
+// MariaDB records no such mark: where it prints such a COLLATE, leaving it
+// out changes nothing either.
 func recreate(def string) string {
 	type word struct {
 		s          string
