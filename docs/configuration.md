@@ -1129,7 +1129,10 @@ answer was 500, after the restore of db ended 3 database sessions of
 the application`, and a count of such requests in every format). The
 count is of every session of other programs the restore ended in the
 working database, not only the application's pool: a queue worker or an
-open SSMS window adds to it. A request that changes data is never sent again; if
+open SSMS window adds to it. Close tools such as SSMS, Azure Data Studio
+or a database client of the IDE on the working database while you
+capture: each of their sessions allows one more request to be sent again.
+A request that changes data is never sent again; if
 it is the first after such a restore and fails this way, let the
 application's pool check a connection before it uses it, or keep no idle
 connections. From

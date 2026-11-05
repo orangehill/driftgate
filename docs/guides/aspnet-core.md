@@ -165,7 +165,7 @@ request on each pooled connection can then fail once, as with any client
 whose server ended its session, and the pool connects again. DriftGate
 sends a read-only `GET` answered with 5xx then once more, as many as
 the sessions the restore ended (a worker or an SSMS window on the
-database counts too), and the report notes each and counts them (a 5xx
+database counts too, so close such tools while you capture), and the report notes each and counts them (a 5xx
 that stays is kept); a request that changes data is never sent again, so a write
 that is the first request after such a restore can fail: turn pooling
 off in development (`Pooling=False` in the connection string) when that
