@@ -626,11 +626,11 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 			// is copied on its own), which no check can tell from a
 			// consistent one; a PostgreSQL template copy, an SQLite
 			// VACUUM INTO and a SQL Server backup are of one moment.
-			w, err := c.Fingerprint(ctx, nil)
-			if err != nil {
-				return envErr("state %s: fingerprint: %v", c.Name(), err)
-			}
-			if d := state.Diff(w, f); len(d) > 0 {
+			// The check only warns: an error here leaves the copy and its
+			// record as they are.
+			if w, err := c.Fingerprint(ctx, nil); err != nil {
+				fmt.Fprintf(opt.Out, "warning: %s: the working database could not be compared with the pristine copy just made: %v\n", c.Name(), err)
+			} else if d := state.Diff(w, f); len(d) > 0 {
 				advice := "the copy is of one moment and stays the pristine copy"
 				if sc.Driver == config.MySQL {
 					advice = "a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write"
