@@ -349,3 +349,39 @@ func TestMySQLNotMySQL(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 }
+
+// TestMySQLCreateTable: only a column's COLLATE that is the table's collation,
+// without CHARACTER SET, is left out; nothing in quotes or parentheses.
+func TestMySQLCreateTable(t *testing.T) {
+	const tail = "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci"
+	for _, c := range []struct{ def, want string }{
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci DEFAULT NULL" + tail,
+			"CREATE TABLE `t` (\n  `a` varchar(255) DEFAULT NULL" + tail},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci,\n  `b` text COLLATE utf8mb3_unicode_ci" + tail,
+			"CREATE TABLE `t` (\n  `a` varchar(255),\n  `b` text" + tail},
+		// Named: kept.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL" + tail, ""},
+		// Another collation, or a longer name: kept.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_bin DEFAULT NULL" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci_x DEFAULT NULL" + tail, ""},
+		// In an enum value, a default, a comment, an expression, a name.
+		{"CREATE TABLE `t` (\n  `a` enum('x'' COLLATE utf8mb3_unicode_ci','y\\\\') CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` enum('x\\\\',' COLLATE utf8mb3_unicode_ci') COLLATE utf8mb3_unicode_ci" + tail,
+			"CREATE TABLE `t` (\n  `a` enum('x\\\\',' COLLATE utf8mb3_unicode_ci')" + tail},
+		{"CREATE TABLE `t` (\n  `a` int DEFAULT NULL COMMENT 'x COLLATE utf8mb3_unicode_ci'" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(5) GENERATED ALWAYS AS ((_utf8mb3'a' COLLATE utf8mb3_unicode_ci)) VIRTUAL" + tail, ""},
+		{"CREATE TABLE `t` (\n  `a COLLATE utf8mb3_unicode_ci` int" + tail, ""},
+		// No collation among the table's options (MySQL 5.7 prints none for
+		// a character set's default), or one only in its comment.
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3", ""},
+		{"CREATE TABLE `t` (\n  `a` varchar(255) COLLATE utf8mb3_unicode_ci\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COMMENT='COLLATE=utf8mb3_unicode_ci'", ""},
+	} {
+		want := c.want
+		if want == "" {
+			want = c.def
+		}
+		if got := MySQLCreateTable(c.def); got != want {
+			t.Errorf("MySQLCreateTable(%q)\n= %q\nwant %q", c.def, got, want)
+		}
+	}
+}
