@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -128,6 +129,20 @@ func testMySQL(t *testing.T, dsn string) {
 	}
 	if len(fp0) != 5 { // 3 tables, 1 view, 1 trigger
 		t.Fatalf("fingerprint items: %v", fp0)
+	}
+	// What a seed records is the pristine copy's own fingerprint: the
+	// working database's while nothing wrote in between. Reading it leaves
+	// the working database's counters as they were.
+	last, tables := maps.Clone(m.last), m.tables
+	seeded, err := m.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(fp0, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	if !maps.Equal(m.last, last) || m.tables != tables {
+		t.Fatal("the seeded fingerprint changed the working database's counters")
 	}
 	rows0, err := m.Rows(ctx, []string{"table:news", "table:tags"})
 	if err != nil {
@@ -269,6 +284,18 @@ func testPostgres(t *testing.T, dsn string) {
 	}
 	if len(fp0) != 5 { // 2 tables, 1 view, 2 sequences
 		t.Fatalf("fingerprint items: %v", fp0)
+	}
+	seeded, err := p.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(fp0, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	// The pristine database accepts connections only while it is read.
+	var allow bool
+	if err := p.admin.QueryRow("SELECT datallowconn FROM pg_database WHERE datname = $1", pristine).Scan(&allow); err != nil || allow {
+		t.Fatalf("the pristine database accepts connections after its fingerprint: %v %v", allow, err)
 	}
 	rows0, err := p.Rows(ctx, []string{"table:public.news"})
 	if err != nil {
