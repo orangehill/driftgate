@@ -97,8 +97,31 @@ func TestLine(t *testing.T) {
 		{[]string{"psql", "-p", "5432", "-h", "h"}, `psql -p 5432 -h h`},
 		{[]string{"docker", "run", "-p", "8080:80", "img"}, `docker run -p 8080:80 img`},
 		{[]string{"docker", "exec", "db", "mysql", "-p", "1234"}, `docker exec db mysql -p ***`},
-		{[]string{"sshpass", "-p", "1234", "ssh", "h"}, `sshpass -p *** ssh h`},
 		{[]string{"x", "--primary-key", "id"}, `x --primary-key id`},
+		// A command ssh runs, a command substitution, a literal glued to a
+		// reference, SQL that sets a password, shells of other kinds.
+		{[]string{"ssh", "-p", "22", "host", "mysql -pS3cret db"}, `ssh -p 22 host "mysql -p*** db"`},
+		{[]string{"sh", "-c", "ssh h 'sqlcmd -U sa -P S3cret'"}, `sh -c "ssh h \"sqlcmd -U sa -P ***\""`},
+		{[]string{"sh", "-c", "x=$(mysql -pS3cret -e 'select 1')"}, ""},
+		{[]string{"sh", "-c", "x=`mysql -pS3cret`"}, ""},
+		{[]string{"sh", "-c", `mysql -p"$PW"S3cret`}, `sh -c "mysql -p***"`},
+		{[]string{"sh", "-c", `mysql -p$PW'S3cret'`}, `sh -c "mysql -p***"`},
+		{[]string{"sh", "-c", `mysql -p"$PW"`}, `sh -c "mysql -p\"$PW\""`},
+		{[]string{"mysql", "-e", "ALTER USER root IDENTIFIED BY 'S3cret'"}, `mysql -e "ALTER USER root IDENTIFIED BY ***"`},
+		{[]string{"sqlcmd", "-Q", "CREATE LOGIN x WITH PASSWORD=N'S3cret'"}, `sqlcmd -Q "CREATE LOGIN x WITH PASSWORD=***"`},
+		{[]string{"sh", "-c", "psql <<SQL\nALTER ROLE x PASSWORD 'S3cret';\nSQL"}, ""},
+		{[]string{"pwsh", "-Command", "sqlcmd -S h -U sa -P S3cret"}, `pwsh -Command "sqlcmd -S h -U sa -P ***"`},
+		{[]string{"cmd", "/c", "mysql -pS3cret"}, `cmd /c "mysql -p***"`},
+		{[]string{"redis-cli", "-u", "redis://:S3cret@h:6379"}, `redis-cli -u redis://:***@h:6379`},
+		{[]string{"redis-cli", "AUTH", "S3cret"}, `redis-cli AUTH ***`},
+		{[]string{"curl", "-b", "sid=S3cret"}, `curl -b ***`},
+		{[]string{"curl", "-d", `{"password":"a\"S3cret"}`}, `curl -d "{\"password\":***}"`},
+		{[]string{"sqlcmd", "-v", "Pw=S3cret"}, `sqlcmd -v Pw=***`},
+		{[]string{"sh", "-c", "echo S3cret | docker login -u u --password-stdin"}, `sh -c "echo *** | docker login -u u --password-stdin"`},
+		{[]string{"htpasswd", "-b", "f", "u", "S3cret"}, ""},
+		{[]string{"git", "clone", "https://x-access-token:S3cret@github.com/o/r"}, `git clone https://x-access-token:***@github.com/o/r`},
+		{[]string{"mongosh", "mongodb://u:S3cret@h/db?authSource=admin"}, `mongosh mongodb://u:***@h/db?authSource=admin`},
+		{[]string{"sshpass", "-p", "1234", "ssh", "h"}, `sshpass -p *** ssh h`},
 	} {
 		got := Line(c.argv)
 		if strings.Contains(got, "S3c") || strings.Contains(got, "S3 ") || strings.Contains(got, "cret") || strings.Contains(got, "p@ss") {

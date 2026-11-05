@@ -31,9 +31,12 @@ to do it.
     project's commands, which GitHub masks only for secrets it knows.
   - DriftGate shows a command it runs or that failed (`seed:`, `prepare:`,
     a command step in `run.log`) with its passwords, secrets, tokens, keys,
-    cookies and signatures as `***`. Arguments are never expanded, so a `$`
-    is part of a value except in a script a shell runs (`sh -c "…"`), where
-    only a bare `$NAME` or `${NAME}` is shown. What a command prints is not
+    cookies and signatures as `***`, also the password SQL sets
+    (`IDENTIFIED BY '…'`, `PASSWORD '…'`). Arguments are never expanded, so
+    a `$` is part of a value except in a script a shell runs (`sh -c "…"`,
+    `pwsh -c`, `cmd /c`, the command `ssh` runs, `$(…)`), where only a bare
+    `$NAME` or `${NAME}` is shown. It is a courtesy for the log, made to
+    hide too much rather than too little; what a command prints is not
     redacted.
 - The `sql` of `params` is checked to be a single `SELECT` (or `WITH …
   SELECT`) without statements and functions that write or reach the

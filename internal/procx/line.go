@@ -11,7 +11,8 @@ import (
 // Line is a command (argv) as one line, for messages and logs: an argument
 // with a space, quote or backslash (or an empty one) quoted, and every
 // password, secret, token, key, cookie or signature in it shown as ***, in
-// an argument of its own and inside a shell script (sh -c "…") alike.
+// an argument of its own and inside a shell script (sh -c "…", a command
+// ssh runs, $(…)) alike.
 //
 // DriftGate runs argv as it is, never through a shell: a $ in an argument
 // is part of the value. Only in a script that a shell runs (the argument
@@ -19,12 +20,13 @@ import (
 // which holds no value and stays; anything else in a secret's place ($ in
 // single quotes or escaped, a value around a reference, $(command)) is ***.
 // What is not a secret stays as written; when in doubt, a value is hidden.
+// It is for display only: what a command prints is not redacted.
 func Line(argv []string) string {
 	ws := make([]word, len(argv))
 	for i, a := range argv {
 		ws[i] = word{raw: a, value: a}
 	}
-	shown := redactWords(ws)
+	shown := redactWords(ws, 0)
 	parts := make([]string, len(argv))
 	for i, a := range shown {
 		if a == "" || strings.ContainsAny(a, " \t\n\"'\\") {
@@ -36,23 +38,47 @@ func Line(argv []string) string {
 }
 
 // word is an argument of a command: as written (in a script, with its
-// quotes) and as the program receives it. In a script's word, a $ that the
-// shell expands is refMark in value.
+// quotes) and as the program receives it. In a script's word, a reference
+// the shell expands is refMark, what it names, and refEnd ($PW is
+// "\x00PW\x01", so -p"$PW"x is not taken for one); a command substitution
+// is refMark (redacted command) refEnd.
 type word struct {
 	raw, value string
 	op         bool // an operator of a script: ; & | && || ( ) < > or a newline
 	space      bool // what separates words in a script
+	subst      bool // a command substitution in it showed a secret
 }
 
-const refMark = "\x00"
+const (
+	refMark = "\x00"
+	refEnd  = "\x01"
+	// maxDepth bounds scripts in scripts (sh -c "bash -c '…'", $(…)): one
+	// deeper is shown as *** whole.
+	maxDepth = 16
+)
+
+// plain is a value with its references written as the shell does.
+func plain(v string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(v, refMark, "$"), refEnd, "")
+}
 
 // redactWords returns every word as it is shown: as written when it holds
 // no secret, its value with the secrets as *** otherwise. What a word means
 // depends on the words of its command before it, which a command keeps as
 // it goes (linear in the words).
-func redactWords(ws []word) []string {
+func redactWords(ws []word, depth int) []string {
 	out := make([]string, len(ws))
 	var c command
+	hideNext := false // the word after <<< is standard input
+	// Each command's first word and where it starts, for echo … | x
+	// --password-stdin.
+	var starts []int
+	var firsts []string
+	var pipes []bool
+	newCommand := func(i int, pipe bool) {
+		starts, firsts, pipes = append(starts, i), append(firsts, ""), append(pipes, pipe)
+	}
+	newCommand(0, false)
 	for i := range ws {
 		w := &ws[i]
 		out[i] = w.raw
@@ -60,53 +86,154 @@ func redactWords(ws []word) []string {
 			continue
 		}
 		if w.op {
-			if w.value != "<" && w.value != ">" && w.value != ">>" {
-				c = command{}
-			} else {
+			switch w.value {
+			case "<", ">", ">>", "<<":
 				c.prev = ""
+			case "<<<":
+				c.prev = ""
+				hideNext = true
+			default:
+				if c.stdin && len(starts) > 1 && pipes[len(pipes)-1] {
+					hideArguments(ws, out, starts[len(starts)-2], starts[len(starts)-1], firsts[len(firsts)-2])
+				}
+				c = command{}
+				newCommand(i+1, w.value == "|")
 			}
 			continue
 		}
 		v := w.value
 		var shown string
-		if c.script() {
-			shown = redactScript(strings.ReplaceAll(v, refMark, "$"))
-		} else {
+		switch {
+		case hideNext:
+			shown = hide(v)
+			hideNext = false
+		case c.script():
+			shown = redactScript(plain(v), depth+1)
+		case c.ssh == sshRemote:
+			// ssh runs the words after the host in a shell of the other
+			// machine, joined: one with a space or an operator is a script,
+			// others are words of the command it goes on.
+			if strings.ContainsAny(v, " \t\n;&|") {
+				shown = redactScript(plain(v), depth+1)
+			} else {
+				shown = redactWord(&c, v)
+			}
+		default:
 			shown = redactWord(&c, v)
 		}
-		if shown != v {
+		if shown != v || w.subst {
 			out[i] = render(w, shown)
+		}
+		if firsts[len(firsts)-1] == "" {
+			firsts[len(firsts)-1] = base(v)
 		}
 		c.add(v)
 	}
+	if c.stdin && len(starts) > 1 && pipes[len(pipes)-1] {
+		hideArguments(ws, out, starts[len(starts)-2], starts[len(starts)-1], firsts[len(firsts)-2])
+	}
 	return out
+}
+
+// hideArguments hides the arguments of the command from ws[start:end] when
+// it is echo or printf: what it pipes to a command that reads a password
+// from standard input (docker login --password-stdin).
+func hideArguments(ws []word, out []string, start, end int, first string) {
+	if first != "echo" && first != "printf" {
+		return
+	}
+	seen := false
+	for k := start; k < end && k < len(ws); k++ {
+		if ws[k].space || ws[k].op {
+			continue
+		}
+		if seen {
+			out[k] = "***"
+		}
+		seen = true
+	}
 }
 
 // command is what the words of a simple command so far say about the next
 // one.
 type command struct {
 	prev string // the word just before, "" after a redirection
-	// prog is the nearest program with a -p of its own meaning (program).
-	prog  string
-	redis bool // redis-cli is one of the words
+	// prog is the nearest program with a -p of its own meaning (portP,
+	// flagP, passwordP).
+	prog string
 	// shell: a shell is one of the words before prev (sh … -c, script);
 	// shellNow: one of them all.
 	shell, shellNow bool
+	// Programs whose options or words name a secret: redis-cli -a and
+	// AUTH, curl -b, openssl -k, gh secret set --body, htpasswd -b.
+	redis, redisAuth, curl, openssl, gh, ghSecret, htpasswd, htBatch bool
+	htArgs                                                           int
+	ssh                                                              int  // sshNone, sshHost (looking for it), sshRemote
+	sshArg                                                           bool // the next word is an ssh option's argument
+	stdin                                                            bool // a word reads a password from standard input
+}
+
+const (
+	sshNone = iota
+	sshHost
+	sshRemote
+)
+
+// sshArgs are the options of ssh that take an argument.
+const sshArgs = "BbcDEeFIiJLlmOoPpQRSWw"
+
+// base is the name of a program, also of a Windows path (C:\…\cmd.exe).
+func base(v string) string {
+	if strings.IndexByte(v, '\\') >= 0 {
+		v = strings.ReplaceAll(v, `\`, "/")
+	}
+	b := filepath.Base(v)
+	if strings.ContainsAny(b, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		b = strings.ToLower(b)
+	}
+	return strings.TrimSuffix(b, ".exe")
 }
 
 func (c *command) add(v string) {
-	b := filepath.Base(v)
+	b := base(v)
 	if portP[b] || flagP[b] || passwordP[b] {
 		c.prog = b
 	}
+	switch {
+	case c.ssh == sshNone && b == "ssh":
+		c.ssh = sshHost
+	case c.ssh == sshHost && c.sshArg:
+		c.sshArg = false
+	case c.ssh == sshHost && strings.HasPrefix(v, "-"):
+		c.sshArg = len(v) == 2 && strings.IndexByte(sshArgs, v[1]) >= 0
+	case c.ssh == sshHost:
+		c.ssh = sshRemote
+	}
 	c.redis = c.redis || b == "redis-cli"
+	c.redisAuth = c.redisAuth || c.redis && strings.EqualFold(v, "auth")
+	c.curl = c.curl || b == "curl"
+	c.openssl = c.openssl || b == "openssl"
+	c.ghSecret = c.ghSecret || c.gh && v == "secret"
+	c.gh = c.gh || b == "gh"
+	switch {
+	case b == "htpasswd":
+		c.htpasswd = true
+	case c.htpasswd && len(v) > 1 && v[0] == '-' && v[1] != '-' && strings.IndexByte(v, 'b') >= 0:
+		c.htBatch = true
+	case c.htBatch && !strings.HasPrefix(v, "-"):
+		c.htArgs++
+	}
+	c.stdin = c.stdin || strings.HasSuffix(v, "-stdin") && stdinOption().MatchString(v)
 	c.shell = c.shellNow
 	c.shellNow = c.shellNow || shells[b]
 	c.prev = v
 }
 
+// stdinOption reads a password from standard input.
+var stdinOption = lazy.Regexp(`(?i)^--?[a-z0-9-]*(?:pass|secret|token|key)[a-z0-9-]*-stdin$`)
+
 // script reports whether the next word is a script a shell runs: sh -c,
-// bash -lc, docker exec x sh -c.
+// bash -lc, docker exec x sh -c, pwsh -Command, cmd /c.
 func (c *command) script() bool {
 	return c.shell && scriptFlag().MatchString(c.prev)
 }
@@ -114,7 +241,7 @@ func (c *command) script() bool {
 // render shows a word whose value changed: plain in an argument of its own
 // (Line quotes it), in double quotes inside a script when it needs them.
 func render(w *word, v string) string {
-	v = strings.ReplaceAll(v, refMark, "$")
+	v = plain(v)
 	if w.raw == w.value || !strings.ContainsAny(v, " \t\n\"'\\;&|<>()`") {
 		return v
 	}
@@ -122,15 +249,22 @@ func render(w *word, v string) string {
 	return `"` + r.Replace(v) + `"`
 }
 
-var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "su": true}
+// shells run the argument after -c (or -Command, /c) as a script. fish,
+// PowerShell and cmd are read as a POSIX shell would: enough to find an
+// option and its value, an assignment or a connection string in them.
+var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "su": true,
+	"fish": true, "pwsh": true, "powershell": true, "cmd": true}
 
-var scriptFlag = lazy.Regexp(`^-[a-z]*c[a-z]*$`)
+var scriptFlag = lazy.Regexp(`(?i)^(?:-[a-z]*c[a-z]*|-command|/[ck])$`)
 
 // redactScript shows a shell script with its secrets as ***.
-func redactScript(s string) string {
-	ws := lex(s)
+func redactScript(s string, depth int) string {
+	if depth > maxDepth {
+		return "***"
+	}
+	ws := lex(sqlPasswords(s), depth)
 	var b strings.Builder
-	for _, a := range redactWords(ws) {
+	for _, a := range redactWords(ws, depth) {
 		b.WriteString(a)
 	}
 	return b.String()
@@ -138,9 +272,10 @@ func redactScript(s string) string {
 
 // lex splits a shell script into words, the spaces between them and its
 // operators, enough to find secrets: quotes and escapes are removed from a
-// word's value and a $ that the shell expands is refMark.
-func lex(s string) []word {
-	var out []word
+// word's value, a reference is marked (word) and the command of a
+// substitution, $(…) or `…`, is redacted.
+func lex(s string, depth int) []word {
+	out := make([]word, 0, len(s)/2+1)
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -161,13 +296,27 @@ func lex(s string) []word {
 			j := i + 1
 			if j < len(s) && s[j] == c {
 				j++
+				if c == '<' && j < len(s) && s[j] == '<' {
+					j++ // <<<
+				}
 			}
 			out = append(out, word{raw: s[i:j], value: s[i:j], op: true})
 			i = j
 			continue
 		}
-		var v strings.Builder
+		// A word without quotes, escapes or expansions is its value.
 		j := i
+		for j < len(s) && strings.IndexByte(" \t\n;()&|<>\\'\"$`", s[j]) < 0 {
+			j++
+		}
+		if j == len(s) || strings.IndexByte(" \t\n;()&|<>", s[j]) >= 0 {
+			out = append(out, word{raw: s[i:j], value: s[i:j]})
+			i = j
+			continue
+		}
+		var v strings.Builder
+		v.WriteString(s[i:j])
+		subst := false
 	word:
 		for j < len(s) {
 			switch c := s[j]; c {
@@ -197,58 +346,91 @@ func lex(s string) []word {
 						v.WriteByte(s[j+1])
 						j += 2
 					case s[j] == '$' || s[j] == '`':
-						v.WriteString(refMark)
-						if s[j] == '`' {
-							v.WriteByte('`')
-						}
-						j++
+						var changed bool
+						j, changed = expansion(s, j, &v, depth)
+						subst = subst || changed
 					default:
 						v.WriteByte(s[j])
 						j++
 					}
 				}
 				j = min(j+1, len(s)) // the closing quote, if there is one
-			case '$':
-				v.WriteString(refMark)
-				j++
-				if j < len(s) && s[j] == '(' {
-					// $(command): to its closing parenthesis, whole.
-					k, depth := j, 0
-					for ; k < len(s); k++ {
-						if s[k] == '(' {
-							depth++
-						} else if s[k] == ')' {
-							depth--
-							if depth == 0 {
-								k++
-								break
-							}
-						}
-					}
-					v.WriteString(s[j:min(k, len(s))])
-					j = k
-				}
-			case '`':
-				k := strings.IndexByte(s[j+1:], '`')
-				end := len(s)
-				if k >= 0 {
-					end = j + 2 + k
-				}
-				v.WriteString(refMark + s[j:end])
-				j = end
+			case '$', '`':
+				var changed bool
+				j, changed = expansion(s, j, &v, depth)
+				subst = subst || changed
 			default:
 				v.WriteByte(c)
 				j++
 			}
 		}
-		out = append(out, word{raw: s[i:j], value: v.String()})
+		out = append(out, word{raw: s[i:j], value: v.String(), subst: subst})
 		i = j
 	}
 	return out
 }
 
+// expansion writes the expansion at s[j] ($NAME, ${…}, $(…), `…`) into v
+// and returns where it ends, and whether the command of a substitution
+// showed a secret.
+func expansion(s string, j int, v *strings.Builder, depth int) (int, bool) {
+	if s[j] == '`' {
+		k := strings.IndexByte(s[j+1:], '`')
+		if k < 0 {
+			v.WriteString(refMark + "(" + s[j+1:] + ")" + refEnd)
+			return len(s), false
+		}
+		return j + k + 2, substitution(s[j+1:j+1+k], v, depth)
+	}
+	j++ // $
+	switch {
+	case j < len(s) && s[j] == '(':
+		// $(command): to its closing parenthesis.
+		open := 0
+		for k := j; k < len(s); k++ {
+			switch s[k] {
+			case '(':
+				open++
+			case ')':
+				if open--; open == 0 {
+					return k + 1, substitution(s[j+1:k], v, depth)
+				}
+			}
+		}
+		v.WriteString(refMark + s[j:] + refEnd)
+		return len(s), false
+	case j < len(s) && s[j] == '{':
+		k := strings.IndexByte(s[j:], '}')
+		if k < 0 {
+			v.WriteString(refMark + s[j:] + refEnd)
+			return len(s), false
+		}
+		v.WriteString(refMark + s[j:j+k+1] + refEnd)
+		return j + k + 1, false
+	case j < len(s) && (s[j] == '_' || s[j] >= 'A' && s[j] <= 'Z' || s[j] >= 'a' && s[j] <= 'z'):
+		k := j
+		for k < len(s) && (s[k] == '_' || s[k] >= 'A' && s[k] <= 'Z' || s[k] >= 'a' && s[k] <= 'z' || s[k] >= '0' && s[k] <= '9') {
+			k++
+		}
+		v.WriteString(refMark + s[j:k] + refEnd)
+		return k, false
+	case j < len(s) && strings.IndexByte("0123456789?$!#@*-", s[j]) >= 0:
+		v.WriteString(refMark + s[j:j+1] + refEnd)
+		return j + 1, false
+	}
+	v.WriteByte('$')
+	return j, false
+}
+
+// substitution writes a command substitution with its command redacted.
+func substitution(cmd string, v *strings.Builder, depth int) bool {
+	shown := redactScript(cmd, depth+1)
+	v.WriteString(refMark + "(" + shown + ")" + refEnd)
+	return shown != cmd
+}
+
 // ref is a value that is only a reference to a variable: $NAME, ${NAME}.
-var ref = lazy.Regexp(`^` + refMark + `(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9])$`)
+var ref = lazy.Regexp(`^` + refMark + `(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9])` + refEnd + `$`)
 
 // hide is *** for a value that is not empty and not a reference.
 func hide(v string) string {
@@ -258,12 +440,30 @@ func hide(v string) string {
 	return "***"
 }
 
+// sqlPassword is a password SQL sets: IDENTIFIED BY '…' (MySQL), PASSWORD
+// '…' (PostgreSQL), PASSWORD = '…' or N'…' (SQL Server), SET PASSWORD =
+// PASSWORD('…').
+var sqlPassword = lazy.Regexp(`(?i)(\bidentified(?:\s+with\s+\S+)?\s+by|\bpassword)((?:\s*=\s*|\s+)(?:password\s*\(\s*)?N?)('(?:[^']|'')*'|"(?:[^"\\]|\\.)*")`)
+
+// sqlPasswords hides the passwords SQL in a text sets (mysql -e, psql -c,
+// a here-document, tinker's --execute).
+func sqlPasswords(s string) string {
+	if !strings.ContainsAny(s, "'\"") {
+		return s
+	}
+	if l := strings.ToLower(s); !strings.Contains(l, "password") && !strings.Contains(l, "identified") {
+		return s
+	}
+	return sqlPassword().ReplaceAllString(s, "${1}${2}***")
+}
+
 var (
 	// secretName is in the name of an option, variable, key or header whose
 	// value is a secret.
-	secretName = lazy.Regexp(`(?i)pass|pwd|secret|token|key|auth|cookie|session|credential|signature|^-*sig$|[_-]sig$`)
-	// notSecretKey are names with key that name a column or an order.
-	notSecretKey = lazy.Regexp(`(?i)(?:primary|foreign|sort|partition|unique|cache)[_-]?keys?$`)
+	secretName = lazy.Regexp(`(?i)pass|pw|secret|token|key|auth|cookie|session|credential|signature|^-*sig$|[_-]sig$`)
+	// notSecretKey are names with key that name a column or an order, and
+	// with auth that name no secret (MongoDB's authSource, --author).
+	notSecretKey = lazy.Regexp(`(?i)(?:primary|foreign|sort|partition|unique|cache)[_-]?keys?$|(?:^|[^a-z])auth(?:source|mechanism|or|ors|ority)$`)
 )
 
 func isSecretName(name string) bool {
@@ -296,19 +496,30 @@ var consoleCommand = lazy.Regexp(`^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$`)
 // of its command so far (c).
 func redactWord(c *command, v string) string {
 	prev, prog := c.prev, c.prog
-	if p := filepath.Base(prev); (p == "artisan" || p == "console") && consoleCommand().MatchString(v) {
+	if p := base(prev); (p == "artisan" || p == "console") && consoleCommand().MatchString(v) {
 		return v
 	}
+	if strings.HasSuffix(prev, "=") && optionName().MatchString(prev[:len(prev)-1]) {
+		prev = prev[:len(prev)-1] // --password= x
+	}
 	switch {
+	case c.redisAuth: // redis-cli AUTH [user] password
+		return hide(v)
+	case c.htBatch && c.htArgs >= 1 && !strings.HasPrefix(v, "-"): // htpasswd -b file user password
+		return hide(v)
 	case prev == "-p" && flagP[prog]:
 	case prev == "-p" && portP[prog] && port().MatchString(v):
 	case prev == "-p" || prev == "-P":
 		return hide(v)
-	case prev == "-a" && c.redis:
+	case prev == "-a" && c.redis, prev == "-b" && c.curl, prev == "-k" && c.openssl,
+		(prev == "--body" || prev == "-b") && c.ghSecret:
 		return hide(v)
 	case optionName().MatchString(prev) && isSecretName(prev):
 		return hide(v)
-	case prev == "-u" || prev == "--user":
+	case bareName().MatchString(prev) && isSecretName(prev):
+		// aws configure set aws_secret_access_key x
+		return hide(v)
+	case (prev == "-u" || prev == "--user" || prev == "-U") && !strings.Contains(v, "://"):
 		if user, pw, ok := strings.Cut(v, ":"); ok {
 			return user + ":" + hide(pw)
 		}
@@ -324,8 +535,10 @@ func redactWord(c *command, v string) string {
 		}
 	}
 	// -uuser:password, --user=user:password
-	if m := userOption().FindStringSubmatch(v); m != nil {
-		return m[1] + hide(m[2])
+	if strings.HasPrefix(v, "-u") || strings.HasPrefix(v, "--user=") {
+		if m := userOption().FindStringSubmatch(v); m != nil {
+			return m[1] + hide(m[2])
+		}
 	}
 	// --name=value with a secret's name: all of the rest
 	if name, val, ok := strings.Cut(v, "="); ok && optionName().MatchString(name) && isSecretName(name) {
@@ -333,11 +546,18 @@ func redactWord(c *command, v string) string {
 	}
 	// Name: value, a header with a secret's name: all of the rest but an
 	// authorization's scheme.
-	if m := header().FindStringSubmatch(v); m != nil && isSecretName(m[1]) {
-		return m[1] + ":" + m[2] + m[3] + hide(m[4])
+	if strings.IndexByte(v, ':') >= 0 {
+		if m := header().FindStringSubmatch(v); m != nil && isSecretName(m[1]) {
+			return m[1] + ":" + m[2] + m[3] + hide(m[4])
+		}
 	}
-	return assignments(url(v))
+	return sqlPasswords(assignments(url(v)))
 }
+
+// bareName is a word that only names a setting (aws_secret_access_key,
+// password), not a program (sshpass), an option, a command of a console
+// (key:generate) or a path.
+var bareName = lazy.Regexp(`(?i)^(?:[a-z][a-z0-9]*_[a-z0-9_]*|password|passwd)$`)
 
 var (
 	userOption = lazy.Regexp(`^((?:-u|--user=)[^:\s]*:)(.*)$`)
@@ -348,6 +568,9 @@ var (
 // url shows a URL's password (scheme://user:password@host) as ***, up to
 // the last @ of the word: a password may hold @ or /.
 func url(v string) string {
+	if !strings.Contains(v, "://") {
+		return v
+	}
 	return urlPass().ReplaceAllStringFunc(v, func(m string) string {
 		i := strings.Index(m, "://")
 		j := strings.IndexByte(m[i+3:], ':') + i + 3
@@ -366,7 +589,10 @@ var assignName = lazy.Regexp(`([A-Za-z0-9_.+-]+)["']?[ \t]*([=:])[ \t]*`)
 // or brace when it starts with one, else to the next ; in a connection
 // string, else to the next space, ; or &.
 func assignments(v string) string {
-	conn := connString().MatchString(v)
+	if strings.IndexAny(v, "=:") < 0 {
+		return v
+	}
+	conn := strings.IndexByte(v, ';') >= 0 && connString().MatchString(v)
 	var b strings.Builder
 	last := 0
 	for pos := 0; pos < len(v); {
@@ -379,7 +605,8 @@ func assignments(v string) string {
 		}
 		name, sep := v[m[2]:m[3]], v[m[4]:m[5]]
 		start := m[1]
-		if !isSecretName(name) || sep == ":" && strings.HasPrefix(v[m[5]:], "//") {
+		// Not a URL's scheme (https:) or user (://user:password@, url).
+		if !isSecretName(name) || sep == ":" && (strings.HasPrefix(v[m[5]:], "//") || strings.HasSuffix(v[:m[2]], "://")) {
 			pos = m[1]
 			if pos == m[0] {
 				pos++
@@ -409,7 +636,19 @@ func valueEnd(v string, start int, conn, rest bool) int {
 	if start >= len(v) {
 		return start
 	}
-	if c := v[start]; c == '"' || c == '\'' || c == '{' {
+	if c := v[start]; c == '"' {
+		// to the closing quote; a backslash escapes one (JSON)
+		for k := start + 1; k < len(v); k++ {
+			switch v[k] {
+			case '\\':
+				k++
+			case '"':
+				return k + 1
+			}
+		}
+		return len(v)
+	}
+	if c := v[start]; c == '\'' || c == '{' {
 		closer := c
 		if c == '{' {
 			closer = '}'
