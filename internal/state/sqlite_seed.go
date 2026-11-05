@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,11 +142,23 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 			return err
 		}
 	}
-	if len(objs.excluded) > 0 {
-		// The triggers of the excluded tables are dropped around the
+	// The excluded tables and the restore_empty ones lose their rows; a
+	// virtual table among them is made again (recreate).
+	emptied := append([]string{}, objs.excluded...)
+	recreate := maps.Clone(objs.exvirtual)
+	for _, name := range objs.order {
+		if t := objs.tables[name]; t.restoreOnly && !t.shadow && s.o.restoreEmptyTable(owned(t)) {
+			emptied = append(emptied, name)
+			if t.virtual {
+				recreate[name] = t.sql
+			}
+		}
+	}
+	if len(emptied) > 0 {
+		// The triggers of the tables emptied are dropped around the
 		// deletes, so none fires.
 		excluded := map[string]bool{}
-		for _, t := range objs.excluded {
+		for _, t := range emptied {
 			excluded[asciiLower(t)] = true
 		}
 		var trigs []string
@@ -160,9 +173,9 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 		// A virtual table is made again instead: a delete from a full-text
 		// index only adds delete markers, and its terms stay in the pages
 		// of its shadow tables.
-		for _, t := range objs.excluded {
+		for _, t := range emptied {
 			stmts := []string{"DELETE FROM main." + qs(t)}
-			if def, ok := objs.exvirtual[t]; ok {
+			if def, ok := recreate[t]; ok {
 				stmts = []string{"DROP TABLE main." + qs(t), def}
 			}
 			for _, q := range stmts {
@@ -178,7 +191,7 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 		}
 		// ANALYZE's statistics of the excluded tables and their indexes:
 		// sqlite_stat4 (and stat3) keep samples of index keys, real values.
-		if err := dropStats(ctx, c, append(append([]string{}, objs.excluded...), objs.exshadow...)); err != nil {
+		if err := dropStats(ctx, c, append(emptied, objs.exshadow...)); err != nil {
 			return err
 		}
 	}
@@ -187,6 +200,14 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 	}
 	committed = true
 	return nil
+}
+
+// owned is the name of a table, or of a shadow table's virtual table.
+func owned(t *sqliteTable) string {
+	if t.owner != "" {
+		return t.owner
+	}
+	return t.name
 }
 
 // dropStats deletes the statistics ANALYZE kept of the tables (and their
@@ -287,4 +308,94 @@ func syncDir(dir string) {
 	}
 	d.Sync()
 	d.Close()
+}
+
+// SQLiteFromPristine makes the database file working, which must not
+// exist, a copy of the pristine file pristine (made by Seed) without the
+// pristine mark: the working file of a new checkout, with the data the
+// pristine copy's baselines were captured from. The copy is written next
+// to it and linked into place, which fails when a file got there
+// meanwhile, so a copy that stops leaves no file and nothing is written
+// over. Files SQLite keeps next to a database (-wal, -shm, -journal) that
+// are there already would be read as the new file's: refused.
+func SQLiteFromPristine(ctx context.Context, pristine, working string) error {
+	for _, suf := range append([]string{""}, sqliteSidecars...) {
+		if _, err := os.Lstat(working + suf); err == nil {
+			return fmt.Errorf("%s exists", working+suf)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	// Read-only, but not query_only: VACUUM INTO writes the new file.
+	src, err := sqliteOpen(pristine, []string{"mode=ro", "_pragma=busy_timeout(10000)", "_pragma=trusted_schema(0)"})
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	var marked int
+	if err := src.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?", pristineTable).Scan(&marked); err != nil {
+		return fmt.Errorf("pristine file %s: %w", pristine, err)
+	}
+	if marked == 0 {
+		return fmt.Errorf("%s is no pristine copy made by driftgate seed", pristine)
+	}
+	if err := os.MkdirAll(filepath.Dir(working), 0o755); err != nil {
+		return err
+	}
+	tmp := working + sqliteNew
+	if err := removeNew(tmp); err != nil {
+		return err
+	}
+	err = func() error {
+		if _, err := src.ExecContext(ctx, "VACUUM main INTO ?", tmp); err != nil {
+			return fmt.Errorf("copy of %s: %w", pristine, err)
+		}
+		db, err := sqliteOpen(tmp, []string{"mode=rw", "_pragma=trusted_schema(0)"})
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, "DROP TABLE "+qs(pristineTable)); err != nil {
+			return err
+		}
+		if err := db.Close(); err != nil {
+			return err
+		}
+		return syncFile(tmp)
+	}()
+	if err == nil {
+		err = placeNew(tmp, working)
+	}
+	removeNew(tmp)
+	if err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(working))
+	return nil
+}
+
+// linkFile is os.Link (a test makes it fail as a file system without
+// hard links does).
+var linkFile = os.Link
+
+// placeNew puts the new file tmp at path, which must not exist: a hard
+// link, which fails when a file is there; where the file system has none
+// (exFAT, some network and container mounts), an empty file made there
+// with O_EXCL, which fails the same way, and the new file renamed over
+// it.
+func placeNew(tmp, path string) error {
+	err := linkFile(tmp, path)
+	if err == nil || errors.Is(err, os.ErrExist) {
+		return err
+	}
+	f, cerr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if cerr != nil {
+		return cerr
+	}
+	f.Close()
+	if rerr := os.Rename(tmp, path); rerr != nil {
+		os.Remove(path)
+		return fmt.Errorf("%w (and without a hard link: %v)", err, rerr)
+	}
+	return nil
 }

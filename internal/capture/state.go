@@ -86,6 +86,13 @@ type pristineFile struct {
 	Created     string            `json:"created"`
 	PristineID  string            `json:"pristine_id,omitempty"` // pristineIdentifier; none for other components and in a file of an earlier release
 	Fingerprint state.Fingerprint `json:"fingerprint"`
+	// RestoreOnly is the component's restore_only at the seed, sorted, and
+	// RestoreOnlyFingerprint the fingerprint of those tables in the
+	// pristine copy (state.RestoreOnly); a capture with another
+	// restore_only asks for a seed.
+	RestoreOnly            []string          `json:"restore_only,omitempty"`
+	RestoreEmpty           []string          `json:"restore_empty,omitempty"` // as RestoreOnly, for restore_empty (their fingerprint is in RestoreOnlyFingerprint)
+	RestoreOnlyFingerprint state.Fingerprint `json:"restore_only_fingerprint,omitempty"`
 }
 
 // pristinePath is the pristine file of a database component on a server.
@@ -153,6 +160,7 @@ type tracker struct {
 	time     *Time
 	comps    []state.Component
 	pristine states              // fingerprint of the pristine copy, per database component
+	ro       states              // fingerprint of the restore_only tables of the pristine copy, per component that has them
 	formats  map[string]int      // the format the pristine fingerprints were recorded in
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
@@ -207,7 +215,7 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			closeAll()
 			return nil, nil, configErr("state %s: %v", n, err)
 		}
-		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RowTracking: sc.RowTracking, Log: log,
+		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RestoreOnly: sc.RestoreOnly, RestoreEmpty: sc.RestoreEmpty, RowTracking: sc.RowTracking, Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
 		// The record's path names the pristine file of SQLite and is
 		// removed by a seed; MySQL and PostgreSQL need it for neither.
@@ -272,7 +280,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -293,6 +301,23 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		if pf.Driver != sc.Driver || pf.Working != sc.Working || pf.Pristine != sc.Pristine {
 			t.close()
 			return nil, envErr("state %s: the pristine copy was made for another configuration; run driftgate seed", c.Name())
+		}
+		// The pristine copy keeps the rows of restore_only tables, not of
+		// excluded ones, and its record has their fingerprint apart.
+		if !slices.Equal(pf.RestoreOnly, sortedCopy(sc.RestoreOnly)) {
+			t.close()
+			return nil, envErr("state %s: restore_only changed since the pristine copy was made (it was %v); run driftgate seed", c.Name(), pf.RestoreOnly)
+		}
+		if !slices.Equal(pf.RestoreEmpty, sortedCopy(sc.RestoreEmpty)) {
+			t.close()
+			return nil, envErr("state %s: restore_empty changed since the pristine copy was made (it was %v); run driftgate seed", c.Name(), pf.RestoreEmpty)
+		}
+		if len(sc.RestoreOnly)+len(sc.RestoreEmpty) > 0 {
+			if _, ok := c.(state.RestoreOnly); !ok {
+				t.close()
+				return nil, configErr("state %s: restore_only is not supported by driver %s", c.Name(), sc.Driver)
+			}
+			t.ro[c.Name()] = pf.RestoreOnlyFingerprint
 		}
 		// The record is of one pristine copy; a seed that keeps its record
 		// in another store (another project or machine on the same server,
@@ -397,12 +422,26 @@ func (t *tracker) restore(ctx context.Context) error {
 		} else {
 			items = t.dirty[c.Name()]
 		}
-		if len(items) == 0 {
+		// The restore_only tables are no part of the fingerprints that
+		// tell what changed: they are read now, every time.
+		var ro []string
+		if want, ok := t.ro[c.Name()]; ok {
+			cur, err := c.(state.RestoreOnly).RestoreOnlyFingerprint(ctx, false)
+			if err != nil {
+				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			}
+			ro = state.Diff(cur, want)
+		}
+		if len(items)+len(ro) == 0 {
 			continue
 		}
-		fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
+		if len(ro) > 0 {
+			fmt.Fprintf(t.out, "restoring %s: %d changed %s, %d restore_only %s …\n", c.Name(), len(items), plural(len(items), "item", "items"), len(ro), plural(len(ro), "table", "tables"))
+		} else {
+			fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
+		}
 		start := time.Now()
-		err := c.Restore(ctx, items)
+		err := c.Restore(ctx, append(append([]string{}, items...), ro...))
 		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
 			n := e.EndedSessions()
 			ended += n
@@ -413,9 +452,13 @@ func (t *tracker) restore(ctx context.Context) error {
 		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
-		got, err := c.Fingerprint(ctx, items)
-		if err != nil {
-			return envErr("state %s: fingerprint: %v", c.Name(), err)
+		// The restore_only tables are not checked: the application may
+		// write them at any time, and they decide no pass.
+		var got state.Fingerprint
+		if len(items) > 0 {
+			if got, err = c.Fingerprint(ctx, items); err != nil {
+				return envErr("state %s: fingerprint: %v", c.Name(), err)
+			}
 		}
 		if d := state.Diff(got, pf.Subset(items)); len(d) > 0 {
 			if t.formats[c.Name()] != state.FingerprintFormat {
@@ -427,6 +470,19 @@ func (t *tracker) restore(ctx context.Context) error {
 	}
 	t.dirty = map[string][]string{}
 	return nil
+}
+
+// restoreOnlyNow reports whether every item of d (<component>/<item>) is a
+// restore_only table now (its pristine copy's record has it): the
+// baseline's state holds it from before it was restore_only.
+func (t *tracker) restoreOnlyNow(d []string) bool {
+	for _, it := range d {
+		comp, item, _ := strings.Cut(it, "/")
+		if _, ok := t.ro[comp][item]; !ok {
+			return false
+		}
+	}
+	return len(d) > 0
 }
 
 // staleHint explains a restore that left items different when the
@@ -505,6 +561,16 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 			len(other), limit(other, 30))
 	}
 	return toMeta(now), nil
+}
+
+// sortedCopy is list sorted, without changing list; nil for none.
+func sortedCopy(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	out := slices.Clone(list)
+	sort.Strings(out)
+	return out
 }
 
 func plural(n int, one, many string) string {
@@ -657,6 +723,16 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,
 			Created: time.Now().UTC().Format(time.RFC3339), Fingerprint: f}
+		if len(sc.RestoreOnly)+len(sc.RestoreEmpty) > 0 {
+			ro, ok := c.(state.RestoreOnly)
+			if !ok {
+				return configErr("state %s: restore_only is not supported by driver %s", c.Name(), sc.Driver)
+			}
+			if pf.RestoreOnlyFingerprint, err = ro.RestoreOnlyFingerprint(ctx, true); err != nil {
+				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			}
+			pf.RestoreOnly, pf.RestoreEmpty = sortedCopy(sc.RestoreOnly), sortedCopy(sc.RestoreEmpty)
+		}
 		if pi, ok := c.(pristineIdentifier); ok {
 			if pf.PristineID, err = pi.PristineID(ctx); err != nil {
 				return envErr("state %s: %v", c.Name(), err)
@@ -724,7 +800,10 @@ func serverOf(p *config.Project, sc config.Component, dsn string) (string, error
 		// Stat only: closing a handle of a file SQLite has open in this
 		// process would drop its locks.
 		if _, err := os.Stat(working); errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("working: %s: not found", sc.Working)
+			if config.MainCheckout(p.Root) != "" {
+				return "", fmt.Errorf("working: %s: not found in this worktree (git does not carry it): driftgate setup makes it a copy of the main worktree's pristine copy, or the application's migrations make it", sc.Working)
+			}
+			return "", fmt.Errorf("working: %s: not found; the application's migrations make it", sc.Working)
 		} else if err != nil {
 			return "", fmt.Errorf("working: %w", err)
 		}

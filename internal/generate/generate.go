@@ -10,8 +10,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -51,7 +54,14 @@ type Result struct {
 	Catalog   *catalog.Catalog
 	Generated int
 	Skipped   []Skip
+	// Unused are the entries of requests: in the configuration that name
+	// no generated request (requests 2: match …).
+	Unused []string
 }
+
+// ErrSetting is an entry of requests: in the configuration that generate
+// refuses.
+var ErrSetting = errors.New("requests")
 
 // IsGenerated reports whether an entry came from generate.
 func IsGenerated(r catalog.Request) bool { return r.Source != nil && r.Source.Template != "" }
@@ -92,6 +102,9 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		}
 		generated = append(generated, reqs...)
 	}
+	if err := g.checkSettings(); err != nil {
+		return nil, err
+	}
 	out := &catalog.Catalog{Version: catalog.Version, Requests: append(manual.Requests, generated...), Sequences: manual.Sequences}
 	g.res.Generated = len(generated)
 	out.Sequences = append(out.Sequences, g.sequences(out)...)
@@ -118,6 +131,45 @@ type generator struct {
 	bases    map[string]string   // ID base of each route and method
 	skipUnit func(routes.Route, string) bool
 	from     []catalog.Request // generated requests that take a value from a response
+	hits     []settingHits     // what each entry of requests: named
+}
+
+// settingHits are the routes and methods an entry of requests: named.
+type settingHits struct {
+	routes  map[string]bool
+	methods map[string]bool
+}
+
+// checkSettings refuses an entry of requests: that says mutates: false
+// of a request whose method changes data other than POST (DELETE, PUT,
+// PATCH, any other verb), or of requests of more than one route: such
+// a request would run with the read-only ones, at the same time, without
+// a restore before it, and a glob that marks many at once (match: "POST
+// *") would turn off that guard for every write it covers. It lists the
+// entries that name no generated request.
+func (g *generator) checkSettings() error {
+	for i, rs := range g.o.Project.Requests {
+		h := settingHits{}
+		if i < len(g.hits) {
+			h = g.hits[i]
+		}
+		if len(h.routes) == 0 {
+			g.res.Unused = append(g.res.Unused, fmt.Sprintf("requests %d (match %q)", i+1, rs.Match))
+			continue
+		}
+		if rs.Mutates == nil || *rs.Mutates {
+			continue
+		}
+		for _, m := range slices.Sorted(maps.Keys(h.methods)) {
+			if m != "POST" && !catalog.SafeMethod(m) {
+				return fmt.Errorf("%w %d (match %q): mutates: false names a %s request, which changes data; say it only of a request that only reads, such as a search sent as POST", ErrSetting, i+1, rs.Match, m)
+			}
+		}
+		if len(h.routes) > 1 {
+			return fmt.Errorf("%w %d (match %q): mutates: false names requests of %d routes (%s); say it of one route at a time, as each must only read", ErrSetting, i+1, rs.Match, len(h.routes), strings.Join(slices.Sorted(maps.Keys(h.routes)), ", "))
+		}
+	}
+	return nil
 }
 
 func (g *generator) skip(route routes.Route, tpl, format string, a ...any) {
@@ -139,6 +191,34 @@ func observed(p *config.Project, target, method, path, id string) bool {
 		}
 	}
 	return false
+}
+
+// setting is what requests: in the configuration sets for the request,
+// matched as observed matches: the last entry that names it wins, for
+// mutates and for the body each. It notes what each entry named.
+func (g *generator) setting(route string, target, method, path, id string) (mutates *bool, body json.RawMessage) {
+	p := g.o.Project
+	for i, rs := range p.Requests {
+		if rs.Target != "" && rs.Target != target {
+			continue
+		}
+		if !glob.Match(rs.Match, method+" "+path) && !glob.Match(rs.Match, path) && !glob.Match(rs.Match, id) {
+			continue
+		}
+		for len(g.hits) <= i {
+			g.hits = append(g.hits, settingHits{routes: map[string]bool{}, methods: map[string]bool{}})
+		}
+		g.hits[i].routes[route] = true
+		g.hits[i].methods[method] = true
+		if rs.Mutates != nil {
+			v := *rs.Mutates
+			mutates = &v
+		}
+		if b, err := rs.JSONBody(); err == nil && b != nil {
+			body = b
+		}
+	}
+	return mutates, body
 }
 
 // queryString writes the required query parameters of a route: a value under
@@ -449,12 +529,20 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 	}
 	var out []catalog.Request
 	add := func(tpl, suffix string, b binding, ident string, headers [][2]string, reqBody json.RawMessage) {
-		if len(reqBody) > 0 && route.BodyType != "" {
+		id := g.id(base + b.label + suffix)
+		mutates, setBody := g.setting(route.Label(), route.Target, m, route.Path, id)
+		if mutates == nil {
+			mutates = catalog.MutatesFor(m)
+		}
+		switch {
+		case setBody != nil && tpl != "empty-body":
+			reqBody = setBody // JSON: sent as application/json
+		case len(reqBody) > 0 && route.BodyType != "":
 			headers = append(append([][2]string{}, headers...), [2]string{"content-type", route.BodyType})
 		}
 		r := catalog.Request{
-			ID: g.id(base + b.label + suffix), Target: route.Target, Method: m, Path: b.path(route) + query, Identity: ident,
-			Headers: headers, Body: reqBody, Mutates: catalog.MutatesFor(m),
+			ID: id, Target: route.Target, Method: m, Path: b.path(route) + query, Identity: ident,
+			Headers: headers, Body: reqBody, Mutates: mutates,
 			Source: &catalog.Source{Route: route.Key(), Template: tpl},
 		}
 		r.Observe = observed(g.o.Project, route.Target, m, route.Path, r.ID)

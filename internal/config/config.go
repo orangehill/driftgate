@@ -7,6 +7,7 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,7 @@ type Config struct {
 	Params     []Param              `yaml:"params,omitempty"`
 	Storage    Storage              `yaml:"storage,omitempty"`
 	Observe    []Observe            `yaml:"observe,omitempty"`
+	Requests   []RequestSetting     `yaml:"requests,omitempty"` // whether generated requests change data, and their bodies
 	Bisect     Bisect               `yaml:"bisect,omitempty"`
 	Data       Data                 `yaml:"data,omitempty"`
 	Uploads    Uploads              `yaml:"uploads,omitempty"`
@@ -156,6 +158,155 @@ type Observe struct {
 	Target string `yaml:"target,omitempty"` // only requests of this service
 	Match  string `yaml:"match"`            // glob over "METHOD /route/path", "/route/path" or the request ID
 	Reason string `yaml:"reason,omitempty"` // why it cannot be compared
+}
+
+// RequestSetting sets what generate writes into the requests it names, as
+// observe names them: whether they change data, and their JSON body. The
+// catalog of the next generate has it, so a request is marked once, here,
+// and stays so however often the catalog is generated again.
+type RequestSetting struct {
+	Target  string     `yaml:"target,omitempty"`  // only requests of this service
+	Match   string     `yaml:"match"`             // glob over "METHOD /route/path", "/route/path" or the request ID
+	Mutates *bool      `yaml:"mutates,omitempty"` // the request changes data (true), or only reads (false)
+	Body    *yaml.Node `yaml:"body,omitempty"`    // the JSON body, as YAML (a mapping, a list, a value; null is JSON's null)
+}
+
+// UnmarshalYAML keeps the body as its YAML node, body: null too (JSON's
+// null), which a plain decode leaves out; other keys decode as usual,
+// and a key the entry does not have is an error, as everywhere else.
+func (r *RequestSetting) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: an entry of requests is a mapping", n.Line)
+	}
+	type plain RequestSetting
+	var p plain
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		var err error
+		switch k.Value {
+		case "target":
+			err = v.Decode(&p.Target)
+		case "match":
+			err = v.Decode(&p.Match)
+		case "mutates":
+			err = v.Decode(&p.Mutates)
+		case "body":
+			// body: with nothing after it is no body; null or ~ is JSON's.
+			if v.Kind != yaml.ScalarNode || v.ShortTag() != "!!null" || v.Value != "" {
+				p.Body = v
+			}
+		default:
+			err = fmt.Errorf("line %d: field %s not found in type config.RequestSetting", k.Line, k.Value)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	*r = RequestSetting(p)
+	return nil
+}
+
+// jsonNumber is a number as JSON writes it.
+var jsonNumber = lazy.Regexp(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// JSONBody is the body as JSON, nil when none is set. It is written from
+// the YAML as written, not as YAML reads it: a number keeps its digits
+// (a large integer, 1.0), a date stays the text it is, and keys are
+// strings. A value JSON has no form for, or would read as another one
+// (0x1F, 007, .inf, a binary), is refused: quote it for a string.
+func (r RequestSetting) JSONBody() (json.RawMessage, error) {
+	if r.Body == nil || r.Body.Kind == 0 {
+		return nil, nil
+	}
+	var b bytes.Buffer
+	if err := writeJSON(&b, r.Body, 0); err != nil {
+		return nil, fmt.Errorf("body: %w", err)
+	}
+	return b.Bytes(), nil
+}
+
+// bodyMax bounds a body written from YAML: aliases repeat what they name,
+// and a few lines of them make gigabytes (yaml.v3 guards its own decoding
+// of them, not this walk).
+const bodyMax = 10 << 20
+
+func writeJSON(b *bytes.Buffer, n *yaml.Node, depth int) error {
+	if depth > 100 {
+		return errors.New("nested too deep")
+	}
+	if b.Len() > bodyMax {
+		return fmt.Errorf("larger than %d MB (aliases repeat what they name)", bodyMax>>20)
+	}
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) != 1 {
+			return errors.New("not one value")
+		}
+		return writeJSON(b, n.Content[0], depth+1)
+	case yaml.AliasNode:
+		return writeJSON(b, n.Alias, depth+1)
+	case yaml.SequenceNode:
+		b.WriteByte('[')
+		for i, c := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeJSON(b, c, depth+1); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case yaml.MappingNode:
+		b.WriteByte('{')
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: merge keys (<<) are not supported in a body: write the keys out", k.Line)
+			}
+			if k.Kind != yaml.ScalarNode || k.ShortTag() != "!!str" {
+				return fmt.Errorf("line %d: the key %q is not a string: quote it", k.Line, k.Value)
+			}
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			key, _ := json.Marshal(k.Value)
+			b.Write(key)
+			b.WriteByte(':')
+			if err := writeJSON(b, n.Content[i+1], depth+1); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case yaml.ScalarNode:
+		switch n.ShortTag() {
+		case "!!str", "!!timestamp":
+			if n.Style == 0 && n.ShortTag() == "!!str" && jsonNumber().MatchString(n.Value) {
+				b.WriteString(n.Value) // a number YAML cannot hold (1e400): JSON's, as written
+				break
+			}
+			v, _ := json.Marshal(n.Value)
+			b.Write(v)
+		case "!!int", "!!float":
+			if !jsonNumber().MatchString(n.Value) {
+				return fmt.Errorf("line %d: %s is no JSON number: write it as one, or quote it for a string", n.Line, n.Value)
+			}
+			b.WriteString(n.Value)
+		case "!!bool":
+			switch n.Value {
+			case "true", "false":
+				b.WriteString(n.Value)
+			default:
+				return fmt.Errorf("line %d: write %s as true or false, or quote it for a string", n.Line, n.Value)
+			}
+		case "!!null":
+			b.WriteString("null")
+		default:
+			return fmt.Errorf("line %d: a value tagged %s has no JSON form", n.Line, n.ShortTag())
+		}
+	default:
+		return errors.New("not a value")
+	}
+	return nil
 }
 
 // Services returns the targets by name; a configuration with one target has
@@ -379,12 +530,16 @@ type Tokens struct {
 // with a built-in driver, or anything else through restore and fingerprint
 // commands.
 type Component struct {
-	Driver      string   `yaml:"driver,omitempty"`   // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
-	DSN         Secret   `yaml:"dsn,omitempty"`      // SQLite: optional, cross-checked with working
-	Working     string   `yaml:"working,omitempty"`  // database the application uses; SQLite: its file, relative to the project root
-	Pristine    string   `yaml:"pristine,omitempty"` // its pristine copy; default <working>_pristine (SQLite: a file of the local store)
-	Exclude     []string `yaml:"exclude,omitempty"`  // tables never fingerprinted or restored (globs)
-	RowTracking []string `yaml:"row_tracking,omitempty"`
+	Driver      string   `yaml:"driver,omitempty"`       // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
+	DSN         Secret   `yaml:"dsn,omitempty"`          // SQLite: optional, cross-checked with working
+	Working     string   `yaml:"working,omitempty"`      // database the application uses; SQLite: its file, relative to the project root
+	Pristine    string   `yaml:"pristine,omitempty"`     // its pristine copy; default <working>_pristine (SQLite: a file of the local store)
+	Exclude     []string `yaml:"exclude,omitempty"`      // tables never fingerprinted or restored (globs)
+	RestoreOnly []string `yaml:"restore_only,omitempty"` // tables restored, their rows kept in the pristine copy, but never fingerprinted (globs)
+	// RestoreEmpty are restore_only tables restored to no rows: the
+	// pristine copy leaves their rows out, as an excluded table's (a cache).
+	RestoreEmpty []string `yaml:"restore_empty,omitempty"`
+	RowTracking  []string `yaml:"row_tracking,omitempty"`
 	// AllowRemote lets the database be on a host outside target.allow_hosts.
 	// A restore rewrites its tables, so a wrong DSN must not reach a server
 	// that is not a copy.
@@ -410,8 +565,8 @@ func (c Component) validate() error {
 		switch {
 		case len(c.Restore) == 0:
 			return errors.New("needs a driver (" + drivers + ") or a restore command")
-		case !c.DSN.IsZero() || c.Working != "" || c.Pristine != "" || len(c.Exclude) > 0 || len(c.RowTracking) > 0:
-			return errors.New("dsn, working, pristine, exclude and row_tracking need a driver")
+		case !c.DSN.IsZero() || c.Working != "" || c.Pristine != "" || len(c.Exclude) > 0 || len(c.RestoreOnly) > 0 || len(c.RestoreEmpty) > 0 || len(c.RowTracking) > 0:
+			return errors.New("dsn, working, pristine, exclude, restore_only, restore_empty and row_tracking need a driver")
 		}
 		return nil
 	case MySQL, "mariadb", Postgres, SQLServer, "mssql":
@@ -429,18 +584,46 @@ func (c Component) validate() error {
 		return errors.New("restore and fingerprint commands are for components without a driver")
 	}
 	for _, t := range c.RowTracking {
-		if c.trackedExcluded(t) {
+		if c.matches(c.Exclude, t, false) {
 			return fmt.Errorf("row_tracking table %s is excluded", t)
+		}
+		if c.matches(c.RestoreOnly, t, true) || c.matches(c.RestoreEmpty, t, true) {
+			key := "restore_only"
+			if c.matches(c.RestoreEmpty, t, true) {
+				key = "restore_empty"
+			}
+			return fmt.Errorf("row_tracking table %s is %s, whose rows are not compared", t, key)
+		}
+	}
+	// A table is in one of exclude, restore_only and restore_empty: a
+	// name of one list that a glob of another matches is refused here;
+	// tables that only two globs match are refused when the driver lists
+	// them (exclude and restore_only), or are restored to no rows.
+	lists := []struct {
+		key   string
+		globs []string
+	}{{"excluded", c.Exclude}, {"restore_only", c.RestoreOnly}, {"restore_empty", c.RestoreEmpty}}
+	for _, a := range lists {
+		for _, b := range lists {
+			if a.key == b.key {
+				continue
+			}
+			for _, t := range a.globs {
+				if c.matches(b.globs, t, true) {
+					return fmt.Errorf("%s table %s is %s too; name it in one of them", a.key, t, b.key)
+				}
+			}
 		}
 	}
 	return nil
 }
 
-// trackedExcluded reports whether a glob of exclude matches row_tracking
-// table t as the driver's component matches it: SQLite in ASCII without
-// case, SQL Server without case and with or without the schema (dbo for
-// a table named without one), the others as written.
-func (c Component) trackedExcluded(t string) bool {
+// matches reports whether a glob of globs matches table t as the driver's
+// component matches it: SQLite in ASCII without case, SQL Server without
+// case and with or without the schema (dbo for a table named without
+// one), with bare also PostgreSQL with or without the schema, the others
+// as written.
+func (c Component) matches(globs []string, t string, bare bool) bool {
 	names, fold := []string{t}, func(s string) string { return s }
 	switch c.Driver {
 	case SQLite:
@@ -452,8 +635,12 @@ func (c Component) trackedExcluded(t string) bool {
 			schema, name = "dbo", t
 		}
 		names = []string{schema + "." + name, name}
+	case Postgres:
+		if _, name, ok := strings.Cut(t, "."); ok && bare {
+			names = append(names, name)
+		}
 	}
-	for _, g := range c.Exclude {
+	for _, g := range globs {
 		for _, n := range names {
 			if glob.Match(fold(g), fold(n)) {
 				return true
@@ -737,6 +924,21 @@ func newProject(c Config, root, mode string) (*Project, error) {
 			if _, err := c.TargetFor(o.Target); err != nil {
 				return nil, fmt.Errorf("%s: observe %d: %w", FileName, i+1, err)
 			}
+		}
+	}
+	for i, rs := range c.Requests {
+		if rs.Target != "" {
+			if _, err := c.TargetFor(rs.Target); err != nil {
+				return nil, fmt.Errorf("%s: requests %d: %w", FileName, i+1, err)
+			}
+		}
+		switch _, err := rs.JSONBody(); {
+		case rs.Match == "":
+			return nil, fmt.Errorf("%s: requests %d: needs match", FileName, i+1)
+		case rs.Mutates == nil && rs.Body == nil:
+			return nil, fmt.Errorf("%s: requests %d: needs mutates or body", FileName, i+1)
+		case err != nil:
+			return nil, fmt.Errorf("%s: requests %d: %v", FileName, i+1, err)
 		}
 	}
 	for i, pr := range c.Params {

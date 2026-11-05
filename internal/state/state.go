@@ -172,6 +172,20 @@ type Component interface {
 	Close() error
 }
 
+// RestoreOnly is a database component that restores tables without
+// fingerprinting them (Options.RestoreOnly): tables the application writes
+// on every request or outside requests (sessions, caches, queues) whose
+// rows should still start from the pristine copy's. Fingerprint leaves
+// them out as it leaves out excluded tables, so they are no side effect and
+// no part of the state a baseline is checked against; Restore takes their
+// items as any other.
+type RestoreOnly interface {
+	// RestoreOnlyFingerprint hashes the restore_only tables of the working
+	// state, or with pristine of the pristine copy, as the items Restore
+	// takes. It reads them every time: no fingerprint keeps them.
+	RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
+}
+
 // SessionEnder is a Component whose Restore may end the application's own
 // sessions with the database (SQL Server's restore of the whole database
 // takes it offline): the application's pooled connections then fail once

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -359,7 +360,8 @@ func TestSetupToBaseline(t *testing.T) {
 	if code != ExitClean || !strings.Contains(out, "baseline local made") || !strings.Contains(out, "created a key for") {
 		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
 	}
-	for _, w := range []string{"framework:  openapi", "app:        " + srv.URL, "routes:     3 found: 2 covered, 0 excluded, 1 uncovered", "uncovered routes (1): driftgate coverage lists them", "baseline:   local in .driftgate/baselines/local", "database:   none"} {
+	for _, w := range []string{"framework:  openapi", "app:        " + srv.URL, "routes:     3 found: 2 covered, 0 excluded, 1 uncovered", "uncovered routes (1): driftgate coverage lists them", "baseline:   local in .driftgate/baselines/local", "database:   none",
+		"mode:       freeze: every drift fails, and driftgate accept is refused; mode: evolve in .driftgate/driftgate.yaml lets a drift be accepted with a reason"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("summary without %q:\n%s", w, out)
 		}
@@ -604,7 +606,7 @@ func TestSetupControlCharacters(t *testing.T) {
 	var back struct {
 		State map[string]config.Component `yaml:"state"`
 	}
-	if got := stateBlock(appconfDatabase("shop: #x"), true); yaml.Unmarshal([]byte(got), &back) != nil || back.State["db"].Working != "shop: #x" {
+	if got := stateBlock(appconfDatabase("shop: #x"), true, appconf.Tables{}); yaml.Unmarshal([]byte(got), &back) != nil || back.State["db"].Working != "shop: #x" {
 		t.Errorf("the name is not quoted:\n%s", got)
 	}
 }
@@ -669,5 +671,22 @@ func TestDescribeAndServer(t *testing.T) {
 	a.Driver, b.Driver = appconf.Postgres, appconf.Postgres
 	if server(a) != server(b) {
 		t.Error("PostgreSQL localhost (TCP) not taken for 127.0.0.1")
+	}
+}
+
+// TestSetupSummaryPristine: the summary says that the data as it was
+// became the pristine copy, and the mode.
+func TestSetupSummaryPristine(t *testing.T) {
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values", Target: config.Target{BaseURL: "http://127.0.0.1:1"}}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	s := &setup{a: &asker{yes: true}, out: &out, errOut: &out, copied: "the data in the database as it was now: every capture starts from it; after the data changes, driftgate seed --skip-commands takes it as it is again (driftgate seed runs the seed: commands first)"}
+	s.summary(p, detected{})
+	for _, w := range []string{"pristine:   the data in the database as it was now: every capture starts from it", "mode:       evolve: a drift may be accepted with a reason (driftgate accept)"} {
+		if !strings.Contains(out.String(), w) {
+			t.Errorf("summary without %q:\n%s", w, out.String())
+		}
 	}
 }

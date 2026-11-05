@@ -82,7 +82,8 @@ state:
     driver: sqlserver
     dsn: { appsettings: src/Shop.Api/Shop.Api.csproj, key: "ConnectionStrings:Default" }
     working: Shop
-    exclude: [dbo.SessionCache, dbo.DataProtectionKeys, "HangFire.*"]
+    exclude: [dbo.DataProtectionKeys, "HangFire.*"]
+    restore_empty: [dbo.SessionCache]
 seed:
   - ["dotnet", "ef", "database", "update", "--project", "src/Shop.Api"]
 ```
@@ -118,19 +119,26 @@ in with an SQL login only.
 ## 4. What to exclude
 
 Exclude what the application writes on every request or outside
-requests; restoring it would log users out or drop queued work, and its
-writes make every fingerprint read it:
+requests and what a reset would disturb while it runs; its writes would
+make every fingerprint read it. `setup` proposes the last two from the
+`.csproj`:
 
-- the session and cache table of `AddDistributedSqlServerCache` (made by
-  `dotnet sql-cache create`), `dbo.SessionCache` above;
 - the Data Protection key ring when it is kept in the database
   (`PersistKeysToDbContext`), which the application writes when it makes
   or rotates a key;
 - background job tables (Hangfire's `HangFire` schema), and the tables a
   `BackgroundService` writes on its own.
 
+The table of `AddDistributedSqlServerCache` (made by `dotnet sql-cache
+create`), `dbo.SessionCache` above, is a cache: `restore_empty` empties
+it at every restore and never compares it, so a cached value does not
+carry over from one capture to the next
+([restore_only](../configuration.md#restore_only)). Used for sessions,
+excluding it keeps a browser's session through restores.
+
 An excluded table keeps its definition in the pristine copy, without
-rows.
+rows, as does a restore_empty one; a restore_only table keeps its rows
+there.
 
 ## 5. Concurrency tokens
 

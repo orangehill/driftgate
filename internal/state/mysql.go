@@ -27,8 +27,12 @@ type Options struct {
 	Working     string   // database the application uses
 	Pristine    string   // its pristine copy
 	Exclude     []string // globs over table names; never fingerprinted or restored
-	RowTracking []string // tables whose changed rows are recorded
-	Log         io.Writer
+	RestoreOnly []string // globs over table names; restored, but no item of Fingerprint (RestoreOnly)
+	// RestoreEmpty are restore_only tables whose pristine copy has no
+	// rows: Seed leaves them out as it leaves out an excluded table's.
+	RestoreEmpty []string
+	RowTracking  []string // tables whose changed rows are recorded
+	Log          io.Writer
 	// Dial, when set, makes every connection to the server: only to an
 	// allowed host (dbx.AllowDial).
 	Dial dbx.DialFunc
@@ -48,6 +52,35 @@ func (o Options) excluded(table string) bool {
 		}
 	}
 	return false
+}
+
+// restoreOnly reports whether a table is restore_only (Options.RestoreOnly
+// or RestoreEmpty).
+func (o Options) restoreOnly(table string) bool {
+	return matchAny(o.RestoreOnly, table) || matchAny(o.RestoreEmpty, table)
+}
+
+// restoreEmpty reports whether a table is restored to no rows
+// (Options.RestoreEmpty).
+func (o Options) restoreEmpty(table string) bool { return matchAny(o.RestoreEmpty, table) }
+
+// restoreOnlyGlobs are the globs of RestoreOnly and RestoreEmpty.
+func (o Options) restoreOnlyGlobs() []string {
+	return append(append([]string{}, o.RestoreOnly...), o.RestoreEmpty...)
+}
+
+func matchAny(globs []string, table string) bool {
+	for _, g := range globs {
+		if glob.Match(g, table) {
+			return true
+		}
+	}
+	return false
+}
+
+// bothErr is the error of a table that both exclude and restore_only name.
+func (o Options) bothErr(table string) error {
+	return fmt.Errorf("state %s: table %s is both excluded and restore_only; name it in one of them", o.Name, table)
 }
 
 func (o Options) tracked(table string) bool { return contains(o.RowTracking, table) }
@@ -238,6 +271,7 @@ func binlogReaders(ctx context.Context, c *sql.Conn) (string, error) {
 type mysqlObjects struct {
 	tables, views, sequences []string
 	excludedTables           []string           // still needed as structure: views may use them
+	restoreOnly              []string           // tables restored but not fingerprinted (Options.RestoreOnly)
 	kind                     map[string]string  // name → table, view or sequence
 	triggers                 []dbx.MySQLTrigger // by table, timing, event and firing order
 }
@@ -269,6 +303,9 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			}
 		case m.o.excluded(name):
 			if typ == "BASE TABLE" {
+				if m.o.restoreOnly(name) {
+					return nil, m.o.bothErr(name)
+				}
 				o.excludedTables = append(o.excludedTables, name)
 			}
 		case typ == "SEQUENCE":
@@ -276,6 +313,9 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			o.kind[name] = "sequence"
 		case typ == "SYSTEM VERSIONED":
 			return nil, fmt.Errorf("state %s: %s is a system-versioned table, whose history cannot be restored; add it to exclude", m.o.Name, name)
+		case m.o.restoreOnly(name):
+			o.restoreOnly = append(o.restoreOnly, name)
+			o.kind[name] = "table"
 		default:
 			o.tables = append(o.tables, name)
 			o.kind[name] = "table"
@@ -503,29 +543,8 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 	}
 	want := func(item string) bool { return items == nil || contains(items, item) }
 	f := Fingerprint{}
-	var tables []string
-	creates := map[string]string{}
-	for _, t := range objs.tables {
-		if !want("table:" + t) {
-			continue
-		}
-		def, err := showCreate(ctx, c, "TABLE", db, t)
-		if err != nil {
-			return nil, err
-		}
-		tables = append(tables, t)
-		creates[t] = def
-	}
-	sums, err := m.checksums(ctx, c, db, tables, creates)
-	if err != nil {
+	if err := m.hashTables(ctx, c, db, objs.tables, want, f); err != nil {
 		return nil, err
-	}
-	for _, t := range tables {
-		sum, ok := sums[t]
-		if !ok {
-			return nil, fmt.Errorf("CHECKSUM TABLE returned no row for %s", t)
-		}
-		f["table:"+t] = hash([]byte(creates[t] + "\x00" + sum))
 	}
 	for _, v := range objs.views {
 		if !want("view:" + v) {
@@ -570,6 +589,60 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 			f["trigger:"+tr.Name] = hash([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s\x00%s",
 				tr.Table, tr.Timing, tr.Event, tr.Order, r["sql_mode"], r["SQL Original Statement"])))
 		}
+	}
+	return f, nil
+}
+
+// hashTables adds to f the item of every table of db that want accepts:
+// its CREATE statement and its checksum.
+func (m *MySQL) hashTables(ctx context.Context, c *sql.Conn, db string, names []string, want func(string) bool, f Fingerprint) error {
+	var tables []string
+	creates := map[string]string{}
+	for _, t := range names {
+		if !want("table:" + t) {
+			continue
+		}
+		def, err := showCreate(ctx, c, "TABLE", db, t)
+		if err != nil {
+			return err
+		}
+		tables = append(tables, t)
+		creates[t] = def
+	}
+	sums, err := m.checksums(ctx, c, db, tables, creates)
+	if err != nil {
+		return err
+	}
+	for _, t := range tables {
+		sum, ok := sums[t]
+		if !ok {
+			return fmt.Errorf("CHECKSUM TABLE returned no row for %s", t)
+		}
+		f["table:"+t] = hash([]byte(creates[t] + "\x00" + sum))
+	}
+	return nil
+}
+
+// RestoreOnlyFingerprint hashes the restore_only tables of the working
+// database, or of the pristine one (RestoreOnly). It leaves the last
+// fingerprint and its counters as they were.
+func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	c, err := m.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	db := m.o.Working
+	if pristine {
+		db = m.o.Pristine
+	}
+	objs, err := m.objects(ctx, c, db)
+	if err != nil {
+		return nil, err
+	}
+	f := Fingerprint{}
+	if err := m.hashTables(ctx, c, db, objs.restoreOnly, func(string) bool { return true }, f); err != nil {
+		return nil, err
 	}
 	return f, nil
 }
@@ -1047,7 +1120,7 @@ func (m *MySQL) Restore(ctx context.Context, items []string) error {
 const pristineTable = "driftgate_pristine"
 
 // Seed copies the working database into a new pristine database. Excluded
-// tables are copied without rows, so views that use them still work. The
+// and restore_empty tables are copied without rows, so views that use them still work. The
 // mark (pristineTable) is made first, so a seed that stops halfway leaves a
 // database the next seed may drop; DriftGate's record of the pristine
 // fingerprint is removed before a seed (capture.Seed), so such a database is
@@ -1089,7 +1162,16 @@ func (m *MySQL) Seed(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, t := range objs.excludedTables {
+	copied := append([]string{}, objs.tables...)
+	empty := append([]string{}, objs.excludedTables...)
+	for _, t := range objs.restoreOnly {
+		if m.o.restoreEmpty(t) {
+			empty = append(empty, t)
+		} else {
+			copied = append(copied, t)
+		}
+	}
+	for _, t := range empty {
 		def, err := showCreate(ctx, c, "TABLE", m.o.Working, t)
 		if err != nil {
 			return err
@@ -1102,7 +1184,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	for _, tr := range objs.triggers {
 		trigs = append(trigs, tr.Name)
 	}
-	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, objs.tables, objs.views, objs.sequences, trigs)
+	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, copied, objs.views, objs.sequences, trigs)
 	return err
 }
 

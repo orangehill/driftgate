@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -77,6 +78,10 @@ type Options struct {
 	// names (the decision of concurrency: auto); it applies to the
 	// read-only requests only, as every concurrency does.
 	Concurrency map[string]int
+	// NotBefore: the prepare commands and the requests start at this
+	// moment, not before (a capture repeated for the same baseline, whose
+	// timestamps must fall in other seconds than the last run's).
+	NotBefore time.Time
 }
 
 // Summary of a finished capture.
@@ -270,6 +275,12 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 
+	// A capture stopped before it began (an interrupt, a stack that is
+	// down) fails here: the send loop below takes a cancelled context or a
+	// free worker, whichever select picks.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Every capture starts from the pristine state, so two captures of the
 	// same code see the same data.
 	if err := tr.restore(ctx); err != nil {
@@ -294,8 +305,22 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 					name := filepath.Base(opt.Baseline.Dir)
 					return nil, envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
 				}
-				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v", len(d), limit(d, 30))
+				run := "driftgate run"
+				if name := filepath.Base(opt.Baseline.Dir); name != "local" && filepath.Dir(opt.Baseline.Dir) == filepath.Clean(p.Layout.Baselines) {
+					run += " --baseline " + name
+				}
+				if tr.restoreOnlyNow(d) {
+					return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
+				}
+				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
 			}
+		}
+	}
+	if wait := time.Until(opt.NotBefore); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 	if err := r.prepare(ctx); err != nil {
@@ -362,7 +387,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		saveEnded(p, tr)
 	}
 
-	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck}
+	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
+		RowTracking: rowTrackingItems(p)}
 	if r.sum.Tracked {
 		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
 	}
@@ -387,6 +413,35 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	tr.time.Total = time.Since(began)
 	r.sum.Time = *tr.time
 	return r.sum, nil
+}
+
+// projectRoots are the folder of the project and, when it differs, its
+// real path (an application reports the folder it runs from resolved:
+// /private/tmp for /tmp on macOS).
+//
+// A folder in a home folder of a form the comparison knows
+// (compare.HomeRelative: /Users/<name>, /home/<name>, WSL's
+// /mnt/<drive>/Users/<name> …), with two names or more in it, is written
+// ~ and the rest: meta.json goes into the repository with baselines: git,
+// and names no user that way; the comparison takes it for that path in
+// any home folder of those forms. The home folder itself, and one name in
+// it, are not written (their path names the user); any other folder is
+// written as it is.
+func projectRoots(root string) []string {
+	out := []string{root}
+	if real, err := filepath.EvalSymlinks(root); err == nil && real != root {
+		out = append(out, real)
+	}
+	var kept []string
+	for _, r := range out {
+		switch rest, home := compare.HomeRelative(r); {
+		case rest != "":
+			kept = append(kept, "~"+rest)
+		case !home:
+			kept = append(kept, r)
+		}
+	}
+	return slices.Compact(kept)
 }
 
 // asidePrefix starts the name of a previous capture of tag moved aside; it
@@ -533,7 +588,7 @@ func byMethodHint(reqs []catalog.Request) string {
 	if len(by) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(`; %s change data only by their method (the catalog does not say mutates): write "mutates": false on those that only read (a search sent as POST)`, listRequests(by))
+	return fmt.Sprintf(`; %s change data only by their method (the catalog does not say mutates): say mutates: false for those that only read (a search sent as POST), under requests: in driftgate.yaml, then driftgate generate --write (an entry written by hand: "mutates": false in the catalog)`, listRequests(by))
 }
 
 // ByMethod lists the selected requests (only: a glob over IDs, or empty)
@@ -729,6 +784,11 @@ func (r *runner) parallel(ctx context.Context, reqs []catalog.Request, workers i
 	var firstErr error
 send:
 	for _, req := range reqs {
+		// Cancelled, no request more is handed out: select would pick a
+		// ready worker as often as the cancellation.
+		if firstErr = ctx.Err(); firstErr != nil {
+			break
+		}
 		select {
 		case jobs <- req:
 		case firstErr = <-errs:
@@ -784,6 +844,30 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 	err = r.write(req, res)
 	collect(res, size)
 	return cur, err
+}
+
+// rowTrackingItems are the tables whose rows the capture tracks
+// (meta.RowTracking), from the configuration, named as the rows of a side
+// effect name them (the drivers' Rows): PostgreSQL's in public and SQL
+// Server's in dbo when row_tracking names no schema. [] for none: every
+// request, read-only or not and whichever ran, has its rows recorded of
+// these tables only.
+func rowTrackingItems(p *config.Project) []string {
+	out := []string{}
+	for name, sc := range p.State {
+		for _, t := range sc.RowTracking {
+			switch {
+			case strings.Contains(t, "."):
+			case sc.Driver == config.Postgres:
+				t = "public." + t
+			case sc.Driver == config.SQLServer || sc.Driver == "mssql":
+				t = "dbo." + t
+			}
+			out = append(out, name+"/table:"+t)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // send sends a request within the rate limits. Parameters that come from an

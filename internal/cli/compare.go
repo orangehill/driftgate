@@ -476,9 +476,10 @@ func hideErrors(drifts []compare.Drift) {
 	}
 }
 
-// compareOne compares one request of two sets; origins are the sets' own
-// origins per service (setOrigins), nil for two captures of one origin.
-func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string][2][]string, allow *allowlist.List, level compare.Level, showPrivate bool) (report.Result, error) {
+// compareOne compares one request of two sets; origins are what they were
+// captured from where that differs (setOrigins), nil for two captures of
+// one origin in one folder.
+func compareOne(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool) (report.Result, error) {
 	id := req.ID
 	res := report.Result{ID: id, Level: level.String()}
 	bRec, err := base.Record(id)
@@ -507,8 +508,13 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	noBody := missingPrivate(base, bRec) || missingPrivate(cur, cRec)
 	b := compare.Side{Record: bRec, NoBody: noBody}
 	c := compare.Side{Record: cRec, NoBody: noBody}
-	if o, ok := origins[req.Target]; ok {
-		b.Origins, c.Origins = o[0], o[1]
+	if origins != nil {
+		if o, ok := origins.origins[req.Target]; ok {
+			b.Origins, c.Origins = o[0], o[1]
+		}
+		b.Roots, c.Roots = origins.roots[0], origins.roots[1]
+		b.Folders, c.Folders = origins.folders, origins.folders
+		b.RowTables, c.RowTables = origins.rowTables[0], origins.rowTables[1]
 	}
 	// Two bodies with one name are the same bytes, which is all the
 	// comparison needs to know of them: neither is read.

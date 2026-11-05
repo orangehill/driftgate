@@ -66,7 +66,7 @@ func mustExec(t *testing.T, db *sql.DB, stmts ...string) {
 	}
 }
 
-func mysqlAdmin(t *testing.T, dsn, database string) *sql.DB {
+func mysqlAdmin(t testing.TB, dsn, database string) *sql.DB {
 	t.Helper()
 	cfg, err := mysqlDSN(dsn)
 	if err != nil {

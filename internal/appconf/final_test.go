@@ -188,3 +188,43 @@ func TestLocalHostIsNotGuessed(t *testing.T) {
 		t.Errorf("Find: %s", got)
 	}
 }
+
+// TestNodeDotenv: the type key of a NestJS setting (TypeORM, MikroORM,
+// Sequelize) names the driver; DB_CONNECTION, Laravel's, wins over it.
+func TestNodeDotenv(t *testing.T) {
+	for _, tt := range []struct{ env, driver, dsn, file, err string }{
+		{env: "DB_TYPE=mysql\nDB_HOST=127.0.0.1\nDB_USERNAME=u\nDB_PASSWORD=p\nDB_DATABASE=app\n", driver: MySQL, dsn: "mysql://u:p@127.0.0.1:3306/"},
+		{env: "DB_TYPE=mariadb\nDB_HOST=127.0.0.1\nDB_PORT=3307\nDB_USERNAME=u\nDB_NAME=app\n", driver: MySQL, dsn: "mysql://u@127.0.0.1:3307/"},
+		{env: "DB_TYPE=aurora-postgres\nDB_HOST=db\nDB_USERNAME=u\nDB_NAME=app\n", driver: Postgres, dsn: "postgres://u@db:5432/"},
+		{env: "DB_TYPE=mssql\nDB_HOST=db\nDB_PORT=1433\nDB_USERNAME=sa\nDB_PASSWORD=p\nDB_DATABASE=Shop\n", driver: SQLServer, dsn: "sqlserver://sa:p@db:1433?encrypt=true"},
+		{env: "DB_TYPE=better-sqlite3\nDB_DATABASE=data/app.db\n", driver: SQLite, file: "data/app.db"},
+		{env: "DB_TYPE=sqlite\n", err: "DB_TYPE is sqlite, and no DB_DATABASE or DB_NAME names the file"},
+		{env: "DB_TYPE=mongodb\nDB_HOST=db\nDB_USERNAME=u\n", driver: ""}, // no Node setting: Laravel's keys, which name no driver
+		{env: "DB_TYPE=postgres\nDB_TYPE=mysql\nDB_HOST=db\n", err: "DB_TYPE is set twice"},
+		{env: "DB_CONNECTION=pgsql\nDB_TYPE=mysql\nDB_HOST=db\nDB_USERNAME=u\n", driver: Postgres, dsn: "postgres://u@db:5432/"},
+		{env: "TYPEORM_CONNECTION=postgres\nTYPEORM_HOST=db\nTYPEORM_USERNAME=u\nTYPEORM_DATABASE=app\n", driver: Postgres, dsn: "postgres://u@db:5432/"},
+		{env: "DATABASE_TYPE=mysql\nDATABASE_HOST=127.0.0.1\nDATABASE_USERNAME=u\nDATABASE_NAME=app\n", driver: MySQL, dsn: "mysql://u@127.0.0.1:3306/"},
+	} {
+		root := writeTree(t, map[string]string{".env": tt.env})
+		r := Ref{Source: Dotenv, File: ".env"}
+		p, err := r.read(root, lookup(nil))
+		if tt.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.err) {
+				t.Errorf("%q: error %v, want %q", tt.env, err, tt.err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: %v", tt.env, err)
+			continue
+		}
+		if p.driver != tt.driver || p.file != tt.file {
+			t.Errorf("%q: driver %q, file %q", tt.env, p.driver, p.file)
+		}
+		if tt.dsn != "" {
+			if got := dsnOf(t, root, r, tt.driver, nil); got != tt.dsn {
+				t.Errorf("%q: DSN %s, want %s", tt.env, got, tt.dsn)
+			}
+		}
+	}
+}
