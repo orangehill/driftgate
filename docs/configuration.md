@@ -456,10 +456,14 @@ anything else through commands.
   `--skip-name-resolve` (compose: `command: --skip-name-resolve`). Without it
   the server looks up the name of every client that connects, and a slow
   lookup makes each connection slow (measured: fingerprints of 622 requests
-  took 29 minutes, 45 seconds with it). The official images set it in
-  `/etc/my.cnf`, which a project's own mounted `my.cnf` replaces. Accounts
-  are then matched by address (`'app'@'%'`), not by host name. DriftGate
-  keeps its connections open between fingerprints and restores.
+  took 29 minutes, 45 seconds with it). The official images set it in a
+  file a project's own mounted configuration can replace: `mysql` in
+  `/etc/my.cnf`, `mariadb` in `/etc/mysql/mariadb.conf.d/05-skipcache.cnf`. Accounts are then matched by address
+  (`'app'@'%'`), not by host name.
+- MySQL/MariaDB: DriftGate keeps up to 12 connections per database
+  component open for the whole command, so fingerprints and restores do not
+  connect again (3 components: 36, against the default `max_connections`
+  of 151, MariaDB 10.3: 100).
 
 #### Database DSNs
 
