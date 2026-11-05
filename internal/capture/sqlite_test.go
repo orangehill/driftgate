@@ -604,28 +604,20 @@ func TestProjectRootsInHome(t *testing.T) {
 			t.Errorf("%s: %v, want %q", root, got, want)
 		}
 	}
-	// A home with white space, and the real path of a home of a known
-	// form linked elsewhere, name the user: not recorded. A home of
-	// another form (a service account's) is recorded as it is.
-	for _, c := range []struct {
-		folder, home, real string
-		names              bool
-	}{
-		{"/nfs/home/jane/src/shop", "/home/jane", "/nfs/home/jane", true},
-		{"/nfs/home/jane", "/home/jane", "/nfs/home/jane", true},
-		{"/nfs/home/janet/src/shop", "/home/jane", "/nfs/home/jane", false},
-		{"/data/home/Jane Doe/src/shop", "/data/home/Jane Doe", "/data/home/Jane Doe", true},
-		{"/var/lib/jenkins/jobs/shop", "/var/lib/jenkins", "/var/lib/jenkins", false},
-		{"/srv/app", "/srv/app", "/srv/app", false},
+	// This machine's home ($HOME): a person's of another form is ~/…, a
+	// service account's is recorded as it is, one with white space not at
+	// all.
+	for home, c := range map[string][2]string{
+		"/data/home/jane":     {"/data/home/jane/src/shop", "~/src/shop"},
+		"/nfs/home/jane":      {"/nfs/home/jane/src/shop", "~/src/shop"},
+		"/var/lib/jenkins":    {"/var/lib/jenkins/jobs/shop", "/var/lib/jenkins/jobs/shop"},
+		"/srv/app":            {"/srv/app", "/srv/app"},
+		"/data/home/Jane Doe": {"/data/home/Jane Doe/src/shop", ""},
 	} {
-		if got := inUserHome(c.folder, c.home, c.real); got != c.names {
-			t.Errorf("%s (home %s, real %s): %v", c.folder, c.home, c.real, got)
+		t.Setenv("HOME", home)
+		got := projectRoots(c[0])
+		if c[1] == "" && len(got) != 0 || c[1] != "" && (len(got) != 1 || got[0] != c[1]) {
+			t.Errorf("HOME %s: %s: %v, want %q", home, c[0], got, c[1])
 		}
 	}
-	t.Setenv("HOME", "/var/lib/jenkins")
-	if got := projectRoots("/var/lib/jenkins/jobs/shop"); len(got) != 1 || got[0] != "/var/lib/jenkins/jobs/shop" {
-		t.Errorf("Jenkins' home: %v", got)
-	}
-	// A letter of another byte length without case (İ, K) panics no one.
-	_ = inFolder("D:\\ilker\\x", "D:\\İlker")
 }

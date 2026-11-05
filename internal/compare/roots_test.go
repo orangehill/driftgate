@@ -2,6 +2,8 @@ package compare
 
 import (
 	"fmt"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,6 +121,16 @@ func TestRootsInHome(t *testing.T) {
 		b.Roots, cs.Roots = []string{"~/Sites/shop"}, []string{"/srv/other"}
 		if ds := both(t, nil, b, cs); len(ds) == 0 {
 			t.Errorf("%s taken for the project's folder", body)
+		}
+	}
+	// This machine's home of another form, a person's: a capture there
+	// recorded ~/…, and the comparison here takes that home for one.
+	if runtime.GOOS != "windows" {
+		t.Setenv("HOME", "/nfs/home/jane")
+		b, cs := side(200, jsonType, trace("/Users/alice/Sites/shop")), side(200, jsonType, trace("/nfs/home/jane/wt/shop"))
+		b.Roots, cs.Roots = []string{"~/Sites/shop"}, []string{"~/wt/shop"}
+		if ds := both(t, nil, b, cs); len(ds) != 0 {
+			t.Errorf("a home of another form: %+v", ds)
 		}
 	}
 	forms := rootForms([]string{`~\src\shop`})
@@ -302,5 +314,31 @@ func TestHomeInAnyCase(t *testing.T) {
 	b.Roots, cs.Roots = []string{"~/Sites/shop"}, []string{"~/Sites/shop"}
 	if ds := both(t, nil, b, cs); len(ds) != 0 {
 		t.Errorf("a home in another case: %+v", ds)
+	}
+}
+
+// TestLocalHomes: a person's home of another form, and the real path of
+// a home of a known form, are taken for home folders; a service
+// account's home and a known form itself are not.
+func TestLocalHomes(t *testing.T) {
+	for _, c := range []struct {
+		home, real string
+		want       []string
+	}{
+		{"/home/jane", "/home/jane", nil},
+		{"/home/jane", "/nfs/home/jane", []string{"/nfs/home/jane"}},
+		{"/home/jane", "/var/home/jane", []string{"/var/home/jane"}},
+		{"/nfs/home/jane", "/nfs/home/jane", []string{"/nfs/home/jane"}},
+		{"/var/lib/jenkins", "/var/lib/jenkins", nil},
+		{"/srv/app", "/srv/app", nil},
+		{"/data/home/Jane Doe", "/data/home/Jane Doe", nil},
+	} {
+		if got := localHomesOf(c.home, c.real); !slices.Equal(got, c.want) {
+			t.Errorf("%s (%s): %q, want %q", c.home, c.real, got, c.want)
+		}
+	}
+	// A letter of another byte length without case (İ, K) is a miss.
+	if _, ok := inFolder(`D:\ilker\x`, `D:\İlker`); ok && runtime.GOOS == "linux" {
+		t.Error("İ taken for i on Linux")
 	}
 }

@@ -2,10 +2,14 @@ package compare
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/orangehill/driftgate/internal/lazy"
 )
@@ -63,27 +67,171 @@ const (
 	homeDoubled = `(?i:[a-z]:\\\\Users\\\\` + homeName + `)`
 )
 
-var (
-	homeBefore = [3]func() *regexp.Regexp{lazy.Regexp(`^` + homePlain + `$`), lazy.Regexp(`^` + homeEscaped + `$`), lazy.Regexp(`^` + homeDoubled + `$`)}
-	homeStart  = lazy.Regexp(`^` + homePlain + `([/\\].*)?$`)
-)
+var homeStart = lazy.Regexp(`^` + homePlain + `([/\\].*)?$`)
+
+// localHomes are this machine's home folder ($HOME) and its real path,
+// each when the forms of homePlain do not know it, and only a person's:
+// a folder in one is recorded as ~/… too, and the home folder before a
+// ~/… folder may be one of them (in memory: the comparison on this
+// machine). A person's home is one of a known form linked elsewhere
+// (/home/jane to /nfs/home/jane: its real path), or a home of another
+// form outside the system's folders (/nfs/home/jane, /data/home/jane).
+// A service account's home (/var/lib/jenkins, /srv/app, /opt/…, /usr/…)
+// names no person: a folder there is recorded as it is, and compares on
+// any machine. A home with white space is left out: the comparison reads
+// a home folder's path up to white space (namesUser leaves its folders
+// unrecorded).
+func localHomes() []string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	real := h
+	if r, err := filepath.EvalSymlinks(h); err == nil {
+		real = r
+	}
+	return localHomesOf(trimSeps(h), trimSeps(real))
+}
+
+// localHomesOf is localHomes of home h and its real path.
+func localHomesOf(h, real string) []string {
+	if !homeStart().MatchString(h) && systemHome(h) {
+		return nil
+	}
+	var out []string
+	for _, x := range []string{h, real} {
+		if len(restNames(x)) == 0 || strings.ContainsAny(x, " \t") || homeStart().MatchString(x) || slices.Contains(out, x) {
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
+// systemHome reports a home folder under the system's own folders, as a
+// service account has one.
+func systemHome(h string) bool {
+	h = strings.ReplaceAll(h, `\`, "/")
+	for _, p := range []string{"/var/", "/srv/", "/opt/", "/usr/"} {
+		if strings.HasPrefix(h, p) || h+"/" == p {
+			return true
+		}
+	}
+	return false
+}
+
+func trimSeps(s string) string { return strings.TrimRight(s, `/\`) }
+
+// InLocalHome reports a folder in this machine's home folder or its real
+// path when that path has white space: its absolute path names the user,
+// and ~/… cannot stand for it.
+func InLocalHome(folder string) bool {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	list := []string{h}
+	if real, err := filepath.EvalSymlinks(h); err == nil {
+		list = append(list, real)
+	}
+	for _, x := range list {
+		x = trimSeps(x)
+		if len(restNames(x)) == 0 || !strings.ContainsAny(x, " \t") {
+			continue
+		}
+		if _, ok := inFolder(folder, x); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// inFolder reports a path in folder h or h itself, without letter case
+// where the system opens paths so (macOS, Windows), and the rest from its
+// separator. Letters are compared rune by rune on a slice of h's length,
+// so a letter of another byte length without case is a miss, never a
+// slice past the path.
+func inFolder(path, h string) (string, bool) {
+	if len(path) < len(h) {
+		return "", false
+	}
+	p := path[:len(h)]
+	if p != h && (runtime.GOOS == "linux" || !strings.EqualFold(p, h)) {
+		return "", false
+	}
+	if len(path) > len(h) && path[len(h)] != '/' && path[len(h)] != '\\' {
+		return "", false
+	}
+	return path[len(h):], true
+}
+
+// homeRegexps match the home folder before a ~/… folder, as written, with
+// / escaped and with \ doubled: the forms of homePlain and this
+// machine's localHomes. They are made once per set of homes.
+func homeRegexps() [3]*regexp.Regexp {
+	homes := localHomes()
+	key := strings.Join(homes, "\x00")
+	homeCache.Lock()
+	defer homeCache.Unlock()
+	if r, ok := homeCache.m[key]; ok {
+		return r
+	}
+	plain, escaped, doubled := homePlain, homeEscaped, homeDoubled
+	for _, h := range homes {
+		q := func(s string) string {
+			s = regexp.QuoteMeta(s)
+			if runtime.GOOS != "linux" {
+				s = "(?i:" + s + ")"
+			}
+			return s
+		}
+		plain += "|" + q(h)
+		if strings.Contains(h, "/") {
+			escaped += "|" + q(strings.ReplaceAll(h, "/", `\/`))
+		}
+		if strings.Contains(h, `\`) {
+			doubled += "|" + q(strings.ReplaceAll(h, `\`, `\\`))
+		}
+	}
+	r := [3]*regexp.Regexp{regexp.MustCompile(`^(?:` + plain + `)$`), regexp.MustCompile(`^(?:` + escaped + `)$`), regexp.MustCompile(`^(?:` + doubled + `)$`)}
+	if homeCache.m == nil {
+		homeCache.m = map[string][3]*regexp.Regexp{}
+	}
+	homeCache.m[key] = r
+	return r
+}
+
+var homeCache struct {
+	sync.Mutex
+	m map[string][3]*regexp.Regexp
+}
 
 // HomeRelative tells a folder in a home folder of a form the comparison
 // knows (inHome): rest is the rest from its separator (/Sites/shop of
 // /Users/alice/Sites/shop) when it has two names or more, and the folder
 // is recorded as ~ and the rest; else rest is "", and the folder (the
 // home folder itself, one name in it: /app is also a path of a URL) is
-// not recorded, as its absolute path names the user. A folder elsewhere
-// is recorded as it is.
+// not recorded, as its absolute path names the user. A folder in this
+// machine's own home of another form (localHomes) is one too. A folder
+// elsewhere is recorded as it is.
 func HomeRelative(folder string) (rest string, inHome bool) {
-	m := homeStart().FindStringSubmatch(folder)
-	if m == nil {
-		return "", false
+	if m := homeStart().FindStringSubmatch(folder); m != nil {
+		rest = m[1]
+	} else {
+		in := false
+		for _, h := range localHomes() {
+			if rest, in = inFolder(folder, h); in {
+				break
+			}
+		}
+		if !in {
+			return "", false
+		}
 	}
-	if len(restNames(m[1])) < 2 {
+	if len(restNames(rest)) < 2 {
 		return "", true
 	}
-	return m[1], true
+	return rest, true
 }
 
 // homeLook is how far before the rest of a ~/… folder its home folder is
@@ -130,7 +278,8 @@ func rootForms(list []string) []rootForm {
 			if rest == "" || rest[0] != '/' && rest[0] != '\\' || len(restNames(rest)) < 2 {
 				continue
 			}
-			r, plain, escaped, doubled = rest, homeBefore[0](), homeBefore[1](), homeBefore[2]()
+			h := homeRegexps()
+			r, plain, escaped, doubled = rest, h[0], h[1], h[2]
 		} else if len(names) < 2 {
 			continue
 		}
