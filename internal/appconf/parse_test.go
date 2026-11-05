@@ -125,6 +125,12 @@ func TestFromValue(t *testing.T) {
 		{"file:hunter2@tcp(127.0.0.1:3306)/app", "", "file:hunter2@tcp(127.0.0.1:3306)/app", ""},
 		{"sqlite:hunter2@unix(/tmp/mysql.sock)/app", "", "sqlite:hunter2@unix(/tmp/mysql.sock)/app", ""},
 		{"sqlite3:hunter2@tcp6([::1]:3306)/app", "", "sqlite3:hunter2@tcp6([::1]:3306)/app", ""},
+		// Not an SQLite path either, and refused without the value.
+		{"file:hunter2@tcp(db:3306)/app?x=a@b", "", "", "the connection string names no server (Server=, Host=) (the value is not shown)"},
+		{"file:hunter2@tcp/app", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		{"file:hunter2@/app", "", "file:hunter2@/app", ""},
+		{"oauth2:s@/app", "", "oauth2:s@/app", ""},
+		{"oracle:s@/app", "", "oracle:s@/app", ""},
 		// ADO.NET.
 		{"Server=db;Port=3307;Database=app;Uid=u;Pwd=p", MySQL, "mysql://u:p@db:3307/", ""},
 		{"Server=db1,db2;Database=app;User ID=u;Password=p", MySQL, "mysql://u:p@db1:3306/", ""},

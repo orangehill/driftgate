@@ -57,18 +57,35 @@ func sqliteValue(v string) (p parts, ok bool, err error) {
 	return p, true, err
 }
 
-// mysqlNetwork reports the MySQL driver's own form: a user (which may read
-// like a scheme, sqlite:… or oauth2:…) before an @ and a network address.
-// file:data@/app.db stays an SQLite file.
+// mysqlNetwork reports the MySQL driver's own form, read as the driver
+// reads it: a user (which may read like a scheme, sqlite:… or oauth2:…)
+// before the last @ ahead of the last /, then a network: none (the
+// default), tcp, tcp4, tcp6 or unix, with or without an address. Such a
+// value is never an SQLite file: its user's password would be written as
+// a path. (An SQLite file whose folder ends in @ must be written without
+// a scheme or as file:///….)
 func mysqlNetwork(v string) bool {
-	at := strings.LastIndexByte(v, '@')
+	slash := strings.LastIndexByte(v, '/')
+	if slash < 0 {
+		return false
+	}
+	at := strings.LastIndexByte(v[:slash], '@')
 	if at < 0 {
 		return false
 	}
-	for _, n := range []string{"tcp(", "tcp4(", "tcp6(", "unix("} {
-		if strings.HasPrefix(v[at+1:], n) {
-			return true
+	net := v[at+1 : slash]
+	if net == "" {
+		return true
+	}
+	if i := strings.IndexByte(net, '('); i >= 0 {
+		if !strings.HasSuffix(net, ")") {
+			return false
 		}
+		net = net[:i]
+	}
+	switch net {
+	case "tcp", "tcp4", "tcp6", "unix":
+		return true
 	}
 	return false
 }

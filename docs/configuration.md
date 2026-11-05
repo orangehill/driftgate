@@ -625,7 +625,10 @@ of the project is refused. Refused too: an in-memory database (`:memory:`, `mode
 SQLAlchemy's `sqlite://`), a file outside the project, a network share
 (`\\server\share\…`), a URL with a host (other than `file://localhost/`),
 an encrypted file (SQLCipher, a `Password=` of Microsoft.Data.Sqlite) and
-a file that `|DataDirectory|` names. A relative path is taken as the
+a file that `|DataDirectory|` names. A value in the MySQL driver's form
+(`user:password@tcp(host)/db`, `user@/db`) is MySQL's even when the user
+reads like a scheme (`file:`, `sqlite:`), so a folder ending in `@` needs
+a plain path or `file:///…`. A relative path is taken as the
 framework takes it; where the application opens it from the folder it
 runs in, `init` and `setup` add a note to check it:
 

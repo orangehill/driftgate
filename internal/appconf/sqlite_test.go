@@ -40,7 +40,6 @@ func TestSQLiteValues(t *testing.T) {
 		"sqlite+pysqlite:///db.sqlite3?mode=ro": "db.sqlite3",
 		"file:app.db?nolock=0&vfs=unix":         "app.db",
 		"sqlite:db.sqlite3":                     "db.sqlite3",
-		"file:data@/app.db":                     "data@/app.db",
 		"sqlite3:storage/development.sqlite3":   "storage/development.sqlite3",
 		"sqlite3:///srv/app.sqlite3":            "/srv/app.sqlite3",
 		"jdbc:sqlite:app.db":                    "app.db",
