@@ -485,16 +485,18 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	if err != nil {
 		return res, envErr(err)
 	}
-	if bRec == nil {
-		res.Outcome, res.Note = report.Skipped, report.NoteNoBaseline
-		return res, nil
-	}
 	cRec, err := cur.Record(id)
 	if err != nil {
 		return res, envErr(err)
 	}
+	if bRec == nil {
+		res.Outcome, res.Note = report.Skipped, report.NoteNoBaseline
+		resentNotes(&res, bRec, cRec)
+		return res, nil
+	}
 	if req.Observe {
 		res.Outcome, res.Note = report.Observed, observation(bRec, cRec)
+		resentNotes(&res, bRec, cRec)
 		return res, nil
 	}
 	// Never by the ref alone: without the body there is nothing to compare
@@ -529,17 +531,7 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 	} else if !showPrivate && len(req.ParamsFrom) > 0 {
 		hideErrors(res.Drifts) // its path may hold values of a private body
 	}
-	// A request capture sent again after a restore ended the
-	// application's database sessions: never silent.
-	for _, x := range []struct {
-		what string
-		rec  *snapshot.Record
-	}{{"baseline", bRec}, {"capture", cRec}} {
-		if x.rec != nil && x.rec.Resent != nil {
-			res.Notes = append(res.Notes, fmt.Sprintf("sent again in the %s: the first answer was %d, after %s", x.what, x.rec.Resent.First, x.rec.Resent.After))
-			res.Resent = true
-		}
-	}
+	resentNotes(&res, bRec, cRec)
 	res.Outcome = report.Pass
 	if len(res.Drifts) > 0 {
 		res.Outcome = report.Drift
@@ -551,6 +543,21 @@ func compareOne(req catalog.Request, base, cur *snapshot.Set, origins map[string
 		}
 	}
 	return res, nil
+}
+
+// resentNotes notes a request a side sent again after a restore ended the
+// application's database sessions: never silent, also when the request is
+// observed or has no baseline.
+func resentNotes(res *report.Result, bRec, cRec *snapshot.Record) {
+	for _, x := range []struct {
+		what string
+		rec  *snapshot.Record
+	}{{"baseline", bRec}, {"capture", cRec}} {
+		if x.rec != nil && x.rec.Resent != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("sent again in the %s: the first answer was %d, after %s", x.what, x.rec.Resent.First, x.rec.Resent.After))
+			res.Resent = true
+		}
+	}
 }
 
 // sameBody reports two records whose bodies have the same name: the same
