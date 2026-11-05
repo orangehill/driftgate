@@ -492,7 +492,7 @@ func isSep(c rune) bool { return c == '/' || c == '\\' }
 // inFolder reports a path in folder h or h itself, without letter case
 // where the system opens paths so (macOS, Windows).
 func inFolder(path, h string) bool {
-	h = strings.TrimRight(h, `/\\`)
+	h = strings.TrimRight(h, `/\`)
 	if len(path) < len(h) {
 		return false
 	}
