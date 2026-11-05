@@ -311,7 +311,7 @@ A release is built only from a tag `vX.Y.Z` on a commit of `main`, by
 (format, vet, staticcheck, tests against MariaDB, MySQL and PostgreSQL,
 of SQLite on Linux, macOS and Windows, of SQL Server 2017, 2019, 2022 and 2025
 with a check of its TLS against a server with a certificate of a test CA,
-fuzzing, `govulncheck` without findings, and the size and package limits of
+fuzzing, `govulncheck` without findings, and the size report and the package limits of
 the binaries on the six platforms, which pull requests pass too). It is
 published from the `release` environment. Each release has:
 

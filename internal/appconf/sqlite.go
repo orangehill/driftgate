@@ -48,7 +48,7 @@ func sqliteValue(v string) (p parts, ok bool, err error) {
 		return parts{}, false, nil
 	}
 	if !sqliteScheme(scheme) {
-		if _, other := driverName(scheme); other != "" && !strings.Contains(v, "://") {
+		if _, other := driverName(scheme); other != "" && !strings.Contains(v, "://") && !isDriverForm(v) {
 			return parts{other: other}, true, nil
 		}
 		return parts{}, false, nil

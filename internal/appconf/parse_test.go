@@ -119,6 +119,9 @@ func TestFromValue(t *testing.T) {
 		// The MySQL driver's own form is used as it is.
 		{"u:p@tcp(db:3306)/app?parseTime=true", MySQL, "u:p@tcp(db:3306)/app?parseTime=true", ""},
 		{"u:p@unix(/tmp/mysql.sock)/app", "", "u:p@unix(/tmp/mysql.sock)/app", ""},
+		// A user that reads like another engine's scheme is a user.
+		{"oauth2:s@tcp(127.0.0.1:3306)/app", "", "oauth2:s@tcp(127.0.0.1:3306)/app", ""},
+		{"oraclesync:s@tcp(db:3306)/app", "", "oraclesync:s@tcp(db:3306)/app", ""},
 		// ADO.NET.
 		{"Server=db;Port=3307;Database=app;Uid=u;Pwd=p", MySQL, "mysql://u:p@db:3307/", ""},
 		{"Server=db1,db2;Database=app;User ID=u;Password=p", MySQL, "mysql://u:p@db1:3306/", ""},
