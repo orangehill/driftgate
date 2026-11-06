@@ -56,8 +56,9 @@ var sqlSecurityInvoker = lazy.Regexp(`\bSQL SECURITY INVOKER\b`)
 // (no CREATE), or not a trigger on it (TRIGGER granted on some tables
 // only), gets the probe on one of tables, the tables of db: the trigger's
 // own table when db has it, else the first. Its body is empty, so it does
-// nothing while it exists. A database without tables holds no trigger, so
-// none can be lost, and nothing is probed. A view's probe selects a
+// nothing while it exists. At seed, a working database without tables has
+// no trigger to copy, and nothing is probed; a restore into a database
+// without tables, where no probe can be made, is refused before any drop. A view's probe selects a
 // constant, so that it needs no table. A seed probes in the working
 // database (db is not target), where the login may only read: a view it
 // may not create there is not probed, and the CREATE in the pristine copy
@@ -241,8 +242,12 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 			on = it.table
 		case len(tables) > 0:
 			on = tables[0]
-		default:
+		case db != target: // a seed: the working database has no trigger to copy
 			return false, nil
+		default:
+			// A restore into a database without tables: the trigger's table
+			// is copied first, which this login may not create either.
+			return false, fmt.Errorf("trigger %s cannot be tried before the restore: this login may not make a probe table in %s (%v), and %s has no table to try it on; give the login CREATE on %s", it.name, db, e, db, db)
 		}
 		if e := create(qi(db) + "." + qi(on)); e != nil {
 			return false, createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)

@@ -432,3 +432,74 @@ func TestMySQLUndoSequences(t *testing.T) {
 		})
 	}
 }
+
+// TestMySQLSeedNotMade: a seed that fails after it began to make the
+// pristine copy says that a new seed makes the missing objects, not a
+// restore.
+func TestMySQLSeedNotMade(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "seednotmade", nil,
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)", "CREATE VIEW v AS SELECT id FROM items"})
+			m := f.open(t, f.dsn, Options{})
+			m.hooks = &mysqlHooks{copyFails: func() error { return errors.New("copy failed") }}
+			err := m.Seed(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "copy failed. Not made, so missing from "+f.pristine+" until driftgate seed runs again: trigger t1, view v") {
+				t.Fatalf("seed: %v", err)
+			}
+		})
+	}
+}
+
+// TestMySQLUndoRenamedTable: a trigger dropped with a table the pristine
+// copy has under another name is named as on another table there, not as
+// one the pristine copy lacks.
+func TestMySQLUndoRenamedTable(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "undorenamed", nil,
+				[]string{"CREATE TABLE a (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE TRIGGER tr AFTER INSERT ON a FOR EACH ROW INSERT INTO log VALUES (NEW.id)"})
+			m := f.open(t, f.dsn, Options{})
+			if err := m.Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, f.rootWork, "RENAME TABLE a TO b")
+			m.hooks = &mysqlHooks{dropRefused: func(kind, name string) bool { return kind == "table" && name == "b" }}
+			err := m.Restore(context.Background(), []string{"table:b"})
+			if err == nil || !strings.Contains(err.Error(), "trigger tr (on table b here, on a in the pristine copy)") || strings.Contains(err.Error(), "nothing of that name") {
+				t.Fatalf("restore: %v", err)
+			}
+		})
+	}
+}
+
+// TestMySQLProbeNoTables: a restore into a working database without
+// tables, by a login that may not create one, cannot try a trigger's
+// DEFINER: it is refused before the view is dropped.
+func TestMySQLProbeNoTables(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "probenotables", []string{"GRANT SELECT, DROP, CREATE VIEW, SHOW VIEW, TRIGGER ON {w}.* TO {u}", "GRANT ALL ON {p}.* TO {u}"},
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE DEFINER = 'dgt_probenotables'@'%' TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)",
+					"CREATE DEFINER = 'dgt_probenotables'@'%' VIEW v AS SELECT 1 AS a"})
+			if err := f.open(t, f.dsn, Options{}).Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, f.rootWork, "DROP TABLE items", "DROP TABLE log")
+			before := definerObjects(t, f.root, f.work)
+			err := f.open(t, f.app, Options{}).Restore(context.Background(), []string{"table:items", "table:log", "view:v"})
+			if err == nil || !strings.Contains(err.Error(), "trigger t1 cannot be tried before the restore") {
+				t.Fatalf("restore: %v", err)
+			}
+			if after := definerObjects(t, f.root, f.work); after != before {
+				t.Fatalf("after the refused restore: %s, was %s", after, before)
+			}
+		})
+	}
+}

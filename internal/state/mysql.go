@@ -1187,6 +1187,12 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
+	// What makes again what a failure leaves missing: a restore of the
+	// working database, or a seed of the pristine copy.
+	recovery := "the next successful restore"
+	if dst == m.o.Pristine {
+		recovery = "driftgate seed runs again"
+	}
 	var dropped []dropItem
 	for _, d := range drops {
 		var err error
@@ -1199,7 +1205,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost != nil {
 				return nil, lost
 			}
-			return nil, undoDrops(dst, dropped, srcObjs.kind, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
+			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
 	}
@@ -1213,11 +1219,11 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		extra, err = m.copyTables(ctx, c, src, dst, jobs)
 	}
 	if err != nil {
-		return nil, notMade(dst, err, lost, seqs, trigDefs, pending)
+		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
 	}
 	for i, q := range seqs {
 		if err := makeSeq(q); err != nil {
-			return nil, notMade(dst, err, lost, seqs[i:], trigDefs, pending)
+			return nil, notMade(dst, recovery, err, lost, seqs[i:], trigDefs, pending)
 		}
 	}
 
@@ -1227,7 +1233,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost == nil {
 				err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
 			}
-			return nil, notMade(dst, err, lost, nil, trigDefs[i:], pending)
+			return nil, notMade(dst, recovery, err, lost, nil, trigDefs[i:], pending)
 		}
 	}
 
@@ -1238,7 +1244,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		for name, v := range pending {
 			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
 				if lost != nil {
-					return nil, notMade(dst, lost, lost, nil, nil, pending)
+					return nil, notMade(dst, recovery, lost, lost, nil, nil, pending)
 				}
 				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
 				continue
@@ -1246,7 +1252,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			delete(pending, name)
 		}
 		if len(pending) == before { // no view could be created in this pass
-			return nil, notMade(dst, lastErr, nil, nil, nil, pending)
+			return nil, notMade(dst, recovery, lastErr, nil, nil, nil, pending)
 		}
 	}
 	return extra, nil
@@ -1347,17 +1353,28 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 // (its creation failed, or it is of another kind in the pristine copy);
 // and what is gone, which no restore makes again (the pristine copy has
 // nothing of that name).
-func undoDrops(dst string, dropped []dropItem, srcKind map[string]string, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
+func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]string, srcTriggers, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
 	create func(stmt, mode, collation string) error, makeSeq func(string) error, refused error) error {
 	var again, missing, gone []string
 	isDropped := map[string]bool{}
 	inTrigDefs := func(name string) bool {
 		return slices.ContainsFunc(trigDefs, func(r map[string]string) bool { return r["name"] == name })
 	}
+	// The table of each trigger, in the pristine copy and in dst: a
+	// trigger may be on another table in one of them (a renamed table).
+	srcTable, dstTable := map[string]string{}, map[string]string{}
+	for _, tr := range srcTriggers {
+		srcTable[tr.Name] = tr.Table
+	}
+	for _, tr := range dstTriggers {
+		dstTable[tr.Name] = tr.Table
+	}
 	for _, d := range dropped {
 		isDropped[d.kind+" "+d.name] = true
 		switch {
 		case d.kind == "trigger" && inTrigDefs(d.name):
+		case d.kind == "trigger" && srcTable[d.name] != "":
+			missing = append(missing, fmt.Sprintf("trigger %s (on table %s here, on %s in the pristine copy)", d.name, dstTable[d.name], srcTable[d.name]))
 		case d.kind == "trigger":
 			gone = append(gone, "trigger "+d.name)
 		case srcKind[d.name] == "":
@@ -1403,7 +1420,11 @@ func undoDrops(dst string, dropped []dropItem, srcKind map[string]string, dstTri
 			missing = append(missing, fmt.Sprintf("trigger %s (%v)", r["name"], err))
 			continue
 		}
-		again = append(again, "trigger "+r["name"])
+		if t := dstTable[r["name"]]; t != "" && t != r["table"] {
+			again = append(again, fmt.Sprintf("trigger %s (on table %s, as in the pristine copy; it was on %s)", r["name"], r["table"], t))
+		} else {
+			again = append(again, "trigger "+r["name"])
+		}
 		triggersAgain = true
 		present[r["name"]] = dbx.MySQLTrigger{Name: r["name"], Table: r["table"], Timing: r["timing"], Event: r["event"]}
 	}
@@ -1437,11 +1458,11 @@ func undoDrops(dst string, dropped []dropItem, srcKind map[string]string, dstTri
 	if len(again) > 0 {
 		more += fmt.Sprintf(". Dropped before the refusal and made again from the pristine copy: %s", strings.Join(again, ", "))
 		if triggersAgain {
-			more += " (each trigger next to its pristine neighbour; where the working copy's triggers of a table were reordered, or others stand between, the firing order may differ from the pristine one until the next successful restore)"
+			more += " (each trigger next to its pristine neighbour; where the working copy's triggers of a table were reordered, or others stand between, the firing order may differ from the pristine one until " + recovery + ")"
 		}
 	}
 	if len(missing) > 0 {
-		more += fmt.Sprintf(". Now missing from %s, and made again by the next successful restore: %s", dst, strings.Join(missing, "; "))
+		more += fmt.Sprintf(". Now missing from %s until %s: %s", dst, recovery, strings.Join(missing, "; "))
 	}
 	if len(gone) > 0 {
 		more += fmt.Sprintf(". Dropped from %s, as the pristine copy has nothing of that name, which no restore makes again: %s", dst, strings.Join(gone, ", "))
@@ -1450,10 +1471,10 @@ func undoDrops(dst string, dropped []dropItem, srcKind map[string]string, dstTri
 }
 
 // notMade adds to err, a failure after the drops, the sequences (seqs),
-// triggers and views that are not made yet: missing from dst until the
-// next successful restore. A lost session (lost) is returned in err's
+// triggers and views that are not made yet: missing from dst until
+// recovery (the next successful restore, or a new seed). A lost session (lost) is returned in err's
 // place, with them.
-func notMade(dst string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
+func notMade(dst, recovery string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
 	if lost != nil {
 		err = lost
 	}
@@ -1473,7 +1494,7 @@ func notMade(dst string, err, lost error, seqs []string, trigDefs []map[string]s
 	if len(names) == 0 {
 		return err
 	}
-	return fmt.Errorf("%w. Not made, so missing from %s until the next successful restore: %s", err, dst, strings.Join(names, ", "))
+	return fmt.Errorf("%w. Not made, so missing from %s until %s: %s", err, dst, recovery, strings.Join(names, ", "))
 }
 
 // forEachRow and firingOrder match, at the start of the text, FOR EACH ROW
