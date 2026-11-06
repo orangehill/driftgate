@@ -443,6 +443,17 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
 		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
+	if opt.ReadOnly {
+		// What it left out, as the catalog was: a comparison reads the
+		// list, not the catalog of its own time.
+		meta.ReadOnlySkipped = []string{}
+		for id := range skip {
+			if opt.Only == "" || glob.Match(opt.Only, id) {
+				meta.ReadOnlySkipped = append(meta.ReadOnlySkipped, id)
+			}
+		}
+		sort.Strings(meta.ReadOnlySkipped)
+	}
 	if r.sum.Tracked {
 		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
 	}

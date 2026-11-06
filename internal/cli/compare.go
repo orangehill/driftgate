@@ -279,7 +279,10 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 			unreliable = true
 		}
 		if meta != nil && meta.ReadOnly && s.set == cur {
-			notSent = cat.ReadOnlySkips()
+			notSent = make(map[string]bool, len(meta.ReadOnlySkipped))
+			for _, id := range meta.ReadOnlySkipped {
+				notSent[id] = true
+			}
 		}
 		if meta != nil && meta.Unreliable && !o.skipFingerprint {
 			return 0, configErr("%s was captured with --skip-fingerprint-check; compare it only with the same flag", s.name)

@@ -448,6 +448,16 @@ func TestReadOnlyCapture(t *testing.T) {
 	if len(r.UnusedRules) != 0 {
 		t.Errorf("a rule of a request not sent is called stale: %+v", r.UnusedRules)
 	}
+	// What the capture left out is recorded in it: a catalog changed
+	// since (post-user now says mutates: false) does not change which
+	// requests it did not send.
+	catPath := filepath.Join(root, "driftgate", "catalog.json")
+	raw, _ := os.ReadFile(catPath)
+	write(t, catPath, strings.Replace(string(raw), `"path":"/users","body":{},"mutates":true`, `"path":"/users","body":{},"mutates":false`, 1))
+	if code, r := compareJSON(t, cfg, "ro", "capture:full"); code != ExitClean || r.Skipped != 4 {
+		t.Fatalf("catalog changed since: exit %d, %d skipped: %+v", code, r.Skipped, r.Results)
+	}
+	write(t, catPath, string(raw))
 	// A capture that sent everything compared with a read-only one as
 	// its baseline: the requests it lacks have no baseline.
 	if code, r := compareJSON(t, cfg, "full", "capture:ro"); code != ExitClean || r.Skipped != 4 {

@@ -749,9 +749,11 @@ restoring api …
 `POST`). It leaves out the requests that change data, command steps (but
 those marked `mutates: false`) and every request of a sequence that holds
 one of them, as its later requests may need the earlier ones. The capture
-says how many it left out and records `read_only` in its `meta.json`; a
-comparison of it skips them (`not sent: capture --read-only`) and lists
-those that change data under what the result does not cover. A request
+says how many it left out and records `read_only` and the IDs it left
+out (`read_only_skipped`) in its `meta.json`. A comparison of it skips
+those, whatever the catalog says by then (`not sent: capture
+--read-only`), and lists those that change data under what the result
+does not cover. A request
 missing from it for any other reason still drifts.
 
 With a configuration without `state:` nothing is restored, seeded or
