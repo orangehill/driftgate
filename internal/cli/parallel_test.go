@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,5 +100,18 @@ func TestParallelCollectsAfterLargeItem(t *testing.T) {
 	runtime.ReadMemStats(&m)
 	if m.NumGC == before {
 		t.Fatal("no collection after a large item")
+	}
+}
+
+// A panic in an item is its error, with exit 3, and the process goes on.
+func TestParallelPanic(t *testing.T) {
+	err := parallel(3, func(int) int64 { return 1 }, func(i int) error {
+		if i == 1 {
+			panic("a body the code cannot handle")
+		}
+		return nil
+	})
+	if err == nil || classify(err) != ExitEnv || !strings.Contains(err.Error(), "internal error") {
+		t.Fatalf("got %v", err)
 	}
 }

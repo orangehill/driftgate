@@ -119,17 +119,32 @@ func (c *comparer) keyed(path string, r *allowlist.ArrayRule, b, v *jsonx.Value)
 		} else {
 			for _, i := range missing {
 				c.add(KindKeyMissing, path+"["+bSteps[i]+"]", memberText(b.Items[i]), "") // the item, as a missing key's value
+				c.digestAs(bSteps[i], "")
+				if c.witnessing {
+					c.witness(c.source(path+"["+bSteps[i]+"]", b.Items[i]))
+				}
 			}
 			for j, step := range cSteps {
 				if _, extra := at[cIDs[j]]; extra {
 					c.add(KindKeyExtra, path+"["+step+"]", "", memberText(v.Items[j]))
+					c.digestAs("", step)
+					if c.witnessing {
+						c.witness(c.source(path+"["+step+"]", v.Items[j]), c.textsSource(cSteps))
+					}
 				}
 			}
 		}
 	}
 	switch {
 	case moved && r.AnyOrder:
-		c.lengths++ // other bytes the rule explains
+		var from []int // when every item is paired: which current item stands for each
+		if len(pairs) == len(b.Items) && len(pairs) == len(v.Items) {
+			from = make([]int, len(pairs))
+			for _, p := range pairs {
+				from[p[0]] = p[1]
+			}
+		}
+		c.allowOrder(b, v, from)
 	case moved:
 		// The shared items in the baseline's order and in the current one.
 		bo, co := make([]string, len(pairs)), make([]int, len(pairs))
@@ -142,6 +157,9 @@ func (c *comparer) keyed(path string, r *allowlist.ArrayRule, b, v *jsonx.Value)
 			cs[k] = cSteps[j]
 		}
 		c.add(KindItemOrder, path, keyList(bo), keyList(cs))
+		if c.witnessing {
+			c.witness(c.textsSource(bo), c.textsSource(cs)) // keyList shows 20
+		}
 	}
 	for _, p := range pairs {
 		c.walk(path+"["+bSteps[p[0]]+"]", b.Items[p[0]], v.Items[p[1]])

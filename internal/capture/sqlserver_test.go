@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -534,4 +535,71 @@ func TestSQLServerPristineReplaced(t *testing.T) {
 		t.Fatalf("seed again: %v\n%s", err, out.String())
 	}
 	captureSQLServer(t, p, sqlServerCatalog(false), "c", &out)
+}
+
+// TestPrepareThatWritesSQLServer: on SQL Server, a prepare that writes
+// through the application (a row in users) is named with the table; one
+// that writes only to the excluded sessions table is not, and neither
+// takes a fingerprint more. With a tokens command, the one fingerprint
+// more between them is reused when nothing moved.
+func TestPrepareThatWritesSQLServer(t *testing.T) {
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl not found")
+	}
+	s := newSQLServerCapture(t)
+	app := newSQLServerApp(t, s.open(t, s.work))
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	p := s.project(t, srv.URL)
+	var out bytes.Buffer
+	if err := Seed(context.Background(), p, SeedOptions{Out: &out}); err != nil {
+		t.Fatalf("seed: %v\n%s", err, out.String())
+	}
+	run := func(tokens bool, prepare ...string) *Summary {
+		t.Helper()
+		return capturePrepared(t, p, sqlServerCatalog(false), tokens, &out, prepare...)
+	}
+	clean := run(false, "true")
+	for _, c := range []struct {
+		name    string
+		prepare []string
+		want    string
+	}{
+		{"sessions only", []string{curl, "-sf", srv.URL + "/users"}, ""},
+		{"a user", []string{curl, "-sf", "-X", "POST", "-H", "Content-Type: application/json", "-d", `{"email":"p@x"}`, srv.URL + "/users"}, "db/table:dbo.users"},
+	} {
+		sum := run(false, c.prepare...)
+		if got := strings.Join(sum.Prepared, ","); got != c.want || sum.Time.Fingerprints != clean.Time.Fingerprints {
+			t.Errorf("%s: prepared %q, want %q; %d fingerprints, %d with a prepare that writes nothing", c.name, got, c.want, sum.Time.Fingerprints, clean.Time.Fingerprints)
+		}
+	}
+	if len(clean.Prepared) != 0 {
+		t.Errorf("a prepare that writes nothing: %v", clean.Prepared)
+	}
+	if both := run(true, "true"); len(both.Prepared) != 0 || both.Time.Fingerprints != clean.Time.Fingerprints+1 {
+		t.Errorf("with a tokens command: prepared %v, %d fingerprints, %d without", both.Prepared, both.Time.Fingerprints, clean.Time.Fingerprints)
+	}
+	// A restore of the whole database (after the application's view) ends
+	// the application's sessions; prepare, run after it, is not blamed.
+	if sum := capturePrepared(t, p, sqlServerCatalog(true), false, &out, "true"); len(sum.Prepared) != 0 || !strings.Contains(out.String(), "restoring the whole database") {
+		t.Errorf("after a restore of the whole database: prepared %v\n%s", sum.Prepared, out.String())
+	}
+}
+
+// capturePrepared captures cat with prepare as the only prepare command,
+// and with a tokens command that writes nothing when tokens is set.
+func capturePrepared(t *testing.T, p *config.Project, cat *catalog.Catalog, tokens bool, out *bytes.Buffer, prepare ...string) *Summary {
+	t.Helper()
+	p.Prepare = []config.Command{{Run: prepare}}
+	p.Tokens.Command = nil
+	if tokens {
+		p.Tokens.Command = []string{"echo", "{}"}
+	}
+	out.Reset()
+	sum, err := Run(context.Background(), p, cat, Options{Tag: "c", Force: true, Restore: "each", Out: out, Log: out})
+	if err != nil {
+		t.Fatalf("capture: %v\n%s", err, out.String())
+	}
+	return sum
 }

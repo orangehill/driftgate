@@ -80,8 +80,9 @@ var commands = []commandHelp{
 		{name: "all", text: "generate requests for every route, also the covered ones"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "coverage", summary: "routes of the inventory without a catalog request (exit 1 when there are any)", flags: []flagHelp{
+	{name: "coverage", summary: "routes of the inventory without a catalog request that succeeds (exit 1 when there are any)", flags: []flagHelp{
 		{name: "format", arg: "text|json", text: "output format (default text)"},
+		{name: "baseline", arg: "<name>", text: "baseline whose answers decide which requests succeed (default local, when it exists; none: the catalog alone)"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
 	{name: "har import", args: "<file.har>", summary: "adds the requests of a HAR file (recorded in a browser) to the catalog", flags: []flagHelp{
@@ -100,7 +101,7 @@ var commands = []commandHelp{
 		{name: "only", arg: "<glob>", text: "only requests whose ID matches"},
 		{name: "force", text: "replace an existing capture with this tag"},
 		{name: "restore", arg: "once|each", text: "restore the state once (default), or also before every sequence"},
-		{name: "repeat", arg: "N", text: "capture N times on the same state and propose allowlist entries for values that differ (default 1)"},
+		{name: "repeat", arg: "N", text: "capture N times on the same state and propose allowlist entries for values that differ (default 1); the capture keeps the median response time of each request"},
 		{name: "baseline", arg: "<name>", text: "the state must match the one this baseline was captured from (default local)"},
 		{name: "allow-remote", text: "allow a target outside allow_hosts"},
 		{name: "allow-remote-mutations", text: "with --allow-remote, also send requests that change data or are repeated to it"},
@@ -139,6 +140,14 @@ var commands = []commandHelp{
 		{name: "ref", arg: "<ticket>", text: "ticket or link kept with the acceptance"},
 		{name: "comparison", arg: "<id>", text: "the comparison review showed; accept refuses a newer one"},
 	}},
+	{name: "expect", args: "<request|glob|group:N>...", summary: "records drifts of the last comparison that a change intends, by ticket, without changing the baseline (also in mode freeze): compare then passes a request every drift of which is exactly a recorded one, and fails on any other drift", flags: []flagHelp{
+		{name: "ref", arg: "<ticket>", text: "ticket or link of the change that intends the drifts", required: true},
+		{name: "reason", arg: `"…"`, text: "why the change makes these drifts", required: true},
+		{name: "comparison", arg: "<id>", text: "the comparison review showed; expect refuses a newer one"},
+		{name: "drop", arg: "<ref>", text: "remove the expectations of this ref instead (no requests; with --reason)"},
+		{name: "import", arg: "<file>", text: "take a ref's expectations file from another checkout (a worktree) instead, after checking it"},
+		{name: "baseline", arg: "<name>", text: "with --drop or --import: the baseline (default: the last comparison's, else local)"},
+	}},
 	{name: "verify", summary: "checks baselines against their manifest and acceptance log (exit 1 when they disagree)", flags: []flagHelp{
 		{name: "baseline", arg: "<name>", text: "check this baseline only (default: all)"},
 		{name: "adopt", text: "write the manifest of a baseline made before manifests (once)"},
@@ -150,6 +159,7 @@ var commands = []commandHelp{
 		{name: "only", arg: "<glob>", text: "chase these requests; without a comparison yet, the requests to chase"},
 		{name: "baseline", arg: "<name>", text: "baseline to compare with when there is no comparison yet (default local)"},
 		{name: "format", arg: "text|json", text: "output format (default text)"},
+		{name: "expected", text: "chase the drifts expectations name too (driftgate expect); without it they are left out, as accepted ones are"},
 	}},
 	{name: "data classify", summary: "proposes rules for the columns classify.yaml does not cover", flags: []flagHelp{
 		{name: "write", text: "add the proposed rules to classify.yaml"},
@@ -163,6 +173,12 @@ var commands = []commandHelp{
 		{name: "format", arg: "text|json", text: "output format (default text)"},
 	}},
 	{name: "baselines", args: "local|git", summary: "moves the project to baselines: local (everything in .driftgate/, which git ignores) or git (driftgate.yaml and driftgate/ in the repository, the store in ~/.driftgate); a switch to git first checks the baselines as verify does"},
+	{name: "baselines rebase", args: "<name>", summary: "makes a capture the content of a baseline (after a merge), with the checks of a baseline made by run and one line in the acceptance log; closes the expectations the new baseline holds", flags: []flagHelp{
+		{name: "from", arg: "<tag>", text: "the capture that becomes the baseline's content (all of the catalog)", required: true},
+		{name: "reason", arg: `"…"`, text: "why the baseline takes the capture", required: true},
+		{name: "ref", arg: "<ticket>", text: "ticket or link kept with the log line"},
+		{name: "allow-freeze", text: "rebase in mode freeze too (for changes reviewed elsewhere, such as a merge)"},
+	}},
 	{name: "key create", summary: "creates the project key: .driftgate/key with baselines: local, the macOS Keychain with baselines: git"},
 	{name: "version", summary: "prints the version", local: true},
 }
@@ -183,7 +199,8 @@ them; --target <service> works on the named ones only, and run says so.
 Common flags:
   --config <path>   configuration file (default: .driftgate/driftgate.yaml or driftgate.yaml here or in the nearest folder above)
 
-driftgate help <command> (or <command> --help) describes a command and its flags.
+driftgate help <command> (or <command> --help) describes a command and its flags;
+driftgate help catalog and help allowlist the fields of those files.
 
 Exit codes: 0 clean, 1 drift (also: changed routes, uncovered routes, a stale
 catalog with --check, findings of allowlist check), 2 configuration error, 3 environment error or an incomplete
@@ -309,8 +326,17 @@ func helpCmd(args []string, out io.Writer) error {
 	}
 	name := strings.Join(args, " ")
 	cmds := group(name)
+	if t := lookupTopic(name); t != nil {
+		// A file's fields, then the commands of the same name.
+		writeTopic(out, t)
+		if len(cmds) > 0 {
+			fmt.Fprintln(out)
+			writeHelp(out, cmds)
+		}
+		return nil
+	}
 	if len(cmds) == 0 {
-		return configErr("unknown command %q (run 'driftgate help')", name)
+		return configErr("unknown command or topic %q (run 'driftgate help'; what to use for a task: %s)", name, tasksDoc)
 	}
 	writeHelp(out, cmds)
 	return nil

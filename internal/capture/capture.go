@@ -7,6 +7,7 @@
 package capture
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -89,6 +90,14 @@ type Summary struct {
 	Writers      map[string][]string      // read-only requests that changed the state → items
 	Unattributed []string                 // items read-only requests changed that no single request explains
 	Time         Time                     // where the time went
+
+	// Retried are the read-only requests answered only after a retry (one
+	// that recovered), with the outcome of their first send.
+	Retried map[string]*snapshot.Retry
+	// Prepared are the items prepare changed after a restore: from the
+	// fingerprints taken anyway (with a tokens command, one more after
+	// the first restore, and the later restores are not checked).
+	Prepared []string
 }
 
 // Time is where a capture spent its time.
@@ -200,6 +209,10 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
 	}
 
+	if err := checkAllCommands(p, readonly, units); err != nil {
+		return nil, err
+	}
+
 	set, err := p.Capture(opt.Tag)
 	if err != nil {
 		return nil, err // config.ErrInvalid for a tag, else the store's
@@ -265,7 +278,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
 		timings: map[string]int64{},
-		sum:     &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{}}}
+		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
+			Retried: map[string]*snapshot.Retry{}}}
 	if r.uploads, err = prepareUploads(p, append(append([]catalog.Request{}, readonly...), unitRequests(units)...)); err != nil {
 		return nil, err
 	}
@@ -290,15 +304,27 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		}
 		if meta != nil && meta.State != nil {
 			if d := flatten(diffStates(fromMeta(meta.State), start)); len(d) > 0 {
+				name := filepath.Base(opt.Baseline.Dir)
 				if meta.StateFormat != state.FingerprintFormat {
-					name := filepath.Base(opt.Baseline.Dir)
 					return nil, envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
 				}
-				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v", len(d), limit(d, 30))
+				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; when the data changed on purpose (a new seed or migration), capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), name)
 			}
 		}
 	}
-	if err := r.prepare(ctx); err != nil {
+	if err := r.runPrepare(ctx); err != nil {
+		return nil, err
+	}
+	// What prepare changed: the fingerprint after the tokens command is
+	// taken anyway; one between the two only when both are configured, so
+	// a tokens command that writes (a login) is not taken for prepare.
+	var mid states
+	if r.sum.Tracked && len(p.Prepare) > 0 && len(p.Tokens.Command) > 0 {
+		if mid, err = tr.fingerprint(ctx, nil); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.reloadTokens(ctx); err != nil {
 		return nil, err
 	}
 	before, err := tr.fingerprint(ctx, nil)
@@ -306,13 +332,24 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	tr.markDirty(diffStates(start, before))
+	switch {
+	case mid != nil:
+		r.prepared(diffStates(start, mid))
+	case len(p.Tokens.Command) == 0:
+		r.prepared(diffStates(start, before))
+	}
 	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
 	}
 
 	r.base = opt.Baseline
+	r.retry = newRetrying(readonly)
 	if err := r.byService(ctx, readonly, true); err != nil {
+		r.retry.release()
+		return nil, err
+	}
+	if err := r.retryDeferred(ctx); err != nil {
 		return nil, err
 	}
 	if r.sum.Tracked && len(readonly) > 0 {
@@ -330,7 +367,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	if len(units) > 0 {
 		for _, g := range p.Guards {
-			if err := state.Run(ctx, p.Root, g.Command, opt.Env, opt.Log); err != nil {
+			if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
 				return nil, envErr("guard %q failed: %v", g.Name, err)
 			}
 			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
@@ -564,6 +601,11 @@ type service struct {
 	// remote is a target outside its allow_hosts (--allow-remote): every
 	// send keeps the rate limits, the sends of a repeated request too.
 	remote bool
+	// retries is how many times a read-only request that failed under
+	// load is sent again (target.retry); timeout is the time limit of a
+	// request.
+	retries int
+	timeout time.Duration
 }
 
 // newService makes the client, rate limits and slots of the service of req.
@@ -594,7 +636,8 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 		u, err := url.Parse(t.BaseURL)
 		remote = err != nil || strict.Check(ctx, u.Hostname()) != nil
 	}
-	return &service{client: client, limits: newLimiter(t.RateLimits), slots: make(chan struct{}, t.Concurrency.Fixed()), remote: remote}, nil
+	return &service{client: client, limits: newLimiter(t.RateLimits), slots: make(chan struct{}, t.Concurrency.Fixed()), remote: remote,
+		retries: t.Retries(), timeout: cmp.Or(t.Timeout.Duration, httpx.DefaultTimeout)}, nil
 }
 
 type runner struct {
@@ -608,6 +651,7 @@ type runner struct {
 	tokens   map[string]string
 	uploads  map[string]multipartBody // requests with files, by ID
 	tainted  bool                     // a real file was uploaded since the last restore
+	retry    *retrying                // retries of the read-only phase; nil: none
 	out, log io.Writer
 	env      []string // added to the environment of the project's commands
 
@@ -619,12 +663,43 @@ type runner struct {
 // prepare runs the prepare commands and reloads the tokens, which a restore
 // or a prepare may have changed.
 func (r *runner) prepare(ctx context.Context) error {
+	if err := r.runPrepare(ctx); err != nil {
+		return err
+	}
+	return r.reloadTokens(ctx)
+}
+
+// prepared adds what prepare changed after a restore to the summary.
+func (r *runner) prepared(changed map[string][]string) {
+	if len(r.p.Prepare) == 0 || len(changed) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	for _, it := range r.sum.Prepared {
+		seen[it] = true
+	}
+	for _, it := range flatten(changed) {
+		if !seen[it] {
+			r.sum.Prepared = append(r.sum.Prepared, it)
+		}
+	}
+	sort.Strings(r.sum.Prepared)
+}
+
+// runPrepare runs the prepare commands.
+func (r *runner) runPrepare(ctx context.Context) error {
 	for _, cmd := range r.p.Prepare {
 		fmt.Fprintf(r.out, "prepare: %s\n", commandLine(cmd))
-		if err := state.Run(ctx, r.p.Root, cmd, r.env, r.log); err != nil {
+		if err := runCommand(ctx, r.p, cmd, r.env, r.log); err != nil {
 			return envErr("prepare: %v", err)
 		}
 	}
+	return nil
+}
+
+// reloadTokens reads the tokens again, which a restore or a prepare may
+// have changed.
+func (r *runner) reloadTokens(ctx context.Context) error {
 	tokens, err := loadTokens(ctx, r.p, r.env)
 	if err != nil {
 		return err
@@ -651,7 +726,11 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.tr.markDirty(diffStates(r.start, now))
+	changed := diffStates(r.start, now)
+	r.tr.markDirty(changed)
+	if len(r.p.Tokens.Command) == 0 {
+		r.prepared(changed) // the restore brought back r.start: prepare made the rest
+	}
 	return now, nil
 }
 
@@ -707,13 +786,13 @@ func (r *runner) parallel(ctx context.Context, reqs []catalog.Request, workers i
 						return
 					}
 				}
-				res := r.send(ctx, req)
-				if q != nil {
-					res = r.resendAfterRestore(ctx, req, res)
-				}
 				if q == nil {
-					res.Release()
+					r.send(ctx, req).Release()
 					continue
+				}
+				res, ok := r.sendRead(ctx, req)
+				if !ok {
+					continue // sent again after the read-only phase
 				}
 				if r.sum.Tracked {
 					res.Record.SideEffects = &snapshot.SideEffects{Items: []string{}}
@@ -900,6 +979,15 @@ func (r *runner) write(req catalog.Request, res httpx.Result) error {
 	}
 	if unscanned != "" {
 		r.sum.Unscanned[req.ID] = unscanned
+	}
+	if rt := res.Record.Retry; rt != nil {
+		what := fmt.Sprintf("failed in all %d sends", rt.Sends)
+		if rt.Recovered {
+			r.sum.Retried[req.ID] = rt
+			what = "after a retry"
+		}
+		fmt.Fprintf(r.out, "%-4s %s  %dms  (%s: the first send gave %s after %dms)\n", status, req.ID, res.Duration.Milliseconds(), what, rt.First(), rt.MS)
+		return nil
 	}
 	fmt.Fprintf(r.out, "%-4s %s  %dms\n", status, req.ID, res.Duration.Milliseconds())
 	return nil

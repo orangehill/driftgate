@@ -320,16 +320,28 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 // failed step, like a request without a response.
 func (r *runner) command(ctx context.Context, req catalog.Request) httpx.Result {
 	rec := &snapshot.Record{ID: req.ID, Headers: [][2]string{}, Body: snapshot.Body{Storage: req.Storage}}
+	dir, stdin, err := r.p.CommandPaths(stepCommand(req))
+	if err != nil {
+		rec.Error = err.Error()
+		return httpx.Result{Record: rec}
+	}
 	ctx, cancel := context.WithTimeout(ctx, CommandTimeout)
 	defer cancel()
 	cmd := procx.Command(ctx, req.Command[0], req.Command[1:]...)
-	cmd.Dir = r.p.Root
+	cmd.Dir = dir
+	in, closeIn, err := openStdin(stdin)
+	if err != nil {
+		rec.Error = err.Error()
+		return httpx.Result{Record: rec}
+	}
+	defer closeIn()
+	cmd.Stdin = in
 	cmd.Env = append(secret.Environ(), r.env...) // the project key never reaches a command
 	stdout := &limitedBuffer{max: httpx.MaxBody}
 	stderr := &limitedBuffer{max: 64 << 10}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	start := time.Now()
-	err := procx.Run(cmd)
+	err = procx.Run(cmd)
 	dur := time.Since(start)
 	var exit *exec.ExitError
 	code := 0

@@ -32,12 +32,14 @@ to do it.
   - DriftGate shows a command it runs or that failed (`seed:`, `prepare:`,
     a command step in `run.log`) with its passwords, secrets, tokens, keys,
     cookies and signatures as `***`, also the password SQL sets
-    (`IDENTIFIED BY '…'`, `PASSWORD '…'`). Arguments are never expanded, so
-    a `$` is part of a value except in a script a shell runs (`sh -c "…"`,
-    `pwsh -c`, `cmd /c`, the command `ssh` runs, `$(…)`), where only a bare
-    `$NAME` or `${NAME}` is shown. It is a courtesy for the log, made to
-    hide too much rather than too little; what a command prints is not
-    redacted.
+    (`IDENTIFIED BY '…'`, `PASSWORD '…'`); a command with `stdin` and `dir`
+    shows them after it (`mysql shop < ~/Data/shop.sql (in api)`), each a
+    word of its own, also in the error of one that is missing. Arguments
+    are never expanded, so a `$` is part of a value except in a script a
+    shell runs (`sh -c "…"`, `pwsh -c`, `cmd /c`, the command `ssh` runs,
+    `$(…)`), where only a bare `$NAME` or `${NAME}` is shown. It is a
+    courtesy for the log, made to hide too much rather than too little;
+    what a command prints is not redacted.
 - The `sql` of `params` is checked to be a single `SELECT` (or `WITH …
   SELECT`) without statements and functions that write or reach the
   server's files, programs or other connections, and runs in a read-only
@@ -78,8 +80,9 @@ to do it.
 - Protect the baselines with a CODEOWNERS entry
   (`/driftgate/baselines/ @<owner>`): `manifest.json` and the hash-chained
   `acceptances.jsonl` catch hand and accidental edits (`driftgate verify`),
-  but they are not a signature. Real protection comes from git history and
-  review.
+  as the chain and seal of a ref's expectations file
+  (`driftgate expect`) do, but they are not a signature. Real protection
+  comes from git history and review: an expectation lets a drift pass.
 
 ## Where requests and connections go
 
@@ -249,7 +252,7 @@ to do it.
   compared, the result stays incomplete.
 - Reports (text, JSON, JUnit, Markdown), the last comparison and the
   acceptance log show the kind and place of a difference in a private body,
-  never its values; an object key that is not a plain name (an e-mail
+  never its values (an expectation names them by a keyed hash); an object key that is not a plain name (an e-mail
   address used as a key) is hidden in the path. `compare --show-private`
   shows values on your own machine only and keeps nothing.
 - Every **public** body is scanned by a personal-data detector: e-mail

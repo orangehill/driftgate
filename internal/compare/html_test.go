@@ -548,3 +548,54 @@ func TestNuxtPayloadCycles(t *testing.T) {
 		t.Fatalf("map: %s", got)
 	}
 }
+
+// TestHTMLTemplateWhitespace: what templates do around an element that
+// comes or goes (indentation, line breaks, a block, br, a script) is the
+// element's drift, not a text drift; a text drift is reported where the
+// text reads otherwise (words joined, a text moved, the spacing next to a
+// replaced element).
+func TestHTMLTemplateWhitespace(t *testing.T) {
+	h := [][2]string{{"content-type", "text/html"}}
+	page := func(s string) Side { return side(200, h, "<html><body>"+s+"</body></html>") }
+	for _, tc := range []struct {
+		name, base, cur string
+		text            bool
+	}{
+		{"block removed between texts", "<div>\n  Total\n  <div class=\"d\">-10%</div>\n  100 EUR\n</div>", "<div>\n  Total\n  \n  100 EUR\n</div>", false},
+		{"block added between texts", "<div>\n  Total\n  100 EUR\n</div>", "<div>\n  Total\n  <div class=\"d\">-10%</div>\n  100 EUR\n</div>", false},
+		{"br removed", "<p>Street 1<br>\n City</p>", "<p>Street 1\n City</p>", false},
+		{"br removed, no space", "<p>Street 1<br>City</p>", "<p>Street 1 City</p>", false},
+		{"br added", "<p>Street 1 City</p>", "<p>Street 1<br> City</p>", false},
+		{"p removed inside td", "<td>\n Bob\n <p>admin</p>\n Smith\n</td>", "<td>\n Bob\n Smith\n</td>", false},
+		{"inline removed", "<p>Hello <span>x</span> world</p>", "<p>Hello world</p>", false},
+		{"inline removed, space inside", "<p>Hello<span> x </span>world</p>", "<p>Hello world</p>", false},
+		{"inline removed, a space where it was", "<p>Hello<b>x</b>world</p>", "<p>Hello world</p>", false},
+		{"icon swapped", "<button><i class=\"fa\"></i> Save</button>", "<button><svg></svg> Save</button>", false},
+		{"comment removed", "<p>Hello <!-- c --> world</p>", "<p>Hello world</p>", false},
+		{"script removed", "<div>Price\n<script>var a=1</script>\n10</div>", "<div>Price\n10</div>", false},
+		{"style removed", "<div>Price\n<style>.a{}</style>\n10</div>", "<div>Price 10</div>", false},
+		{"custom element removed", "<div>Price <x-badge>new</x-badge> 10</div>", "<div>Price 10</div>", false},
+		{"template removed", "<div>Price <template>new</template> 10</div>", "<div>Price 10</div>", false},
+		{"img removed", "<p>Logo <img src=a.png> Inc</p>", "<p>Logo Inc</p>", false},
+		{"whitespace around a kept block", "<div>a\n<div>q</div>\nb</div>", "<div>a<div>q</div>b</div>", false},
+		{"textarea removed", "<form>Note <textarea> x </textarea> end</form>", "<form>Note end</form>", false},
+		{"spaceless", "<ul>\n <li>a</li>\n <li>b</li>\n</ul>", "<ul><li>a</li><li>b</li></ul>", false},
+		{"element removed between spans", "<span>A</span>\n<em>new</em>\n<span>B</span>", "<span>A</span>\n<span>B</span>", false},
+		{"block replaced", "<div>Total <div>a</div> 100</div>", "<div>Total <section>a</section> 100</div>", false},
+		{"label removed", "<div class=row>\n  Name:\n  <label>req</label>\n  <input name=n>\n  hint\n</div>", "<div class=row>\n  Name:\n  <input name=n>\n  hint\n</div>", false},
+		{"li removed", "<ul>x<li>a</li>y</ul>", "<ul>x y</ul>", false},
+		{"words joined", "<p>Hello <b>x</b> world</p>", "<p>Helloworld</p>", true},
+		{"words joined, no space before", "<p>Hello<b>x</b>world</p>", "<p>Helloworld</p>", true},
+		{"text moved", "<p>a <b>x</b> b</p>", "<p>a b <b>x</b></p>", true},
+		{"spacing next to a replaced element", "<div>a<b id=\"1\"></b>a</div>", "<div>a <b id=\"x y\"></b>a</div>", true},
+	} {
+		ds := run(t, nil, LevelValues, page(tc.base), page(tc.cur))
+		got := false
+		for _, d := range ds {
+			got = got || d.Kind == KindText
+		}
+		if got != tc.text {
+			t.Errorf("%s: text drift %v, want %v: %s", tc.name, got, tc.text, driftList(ds))
+		}
+	}
+}

@@ -1,5 +1,21 @@
 # Configuration
 
+## What to use for what
+
+| Task or symptom | What to use |
+|---|---|
+| a value that may change on every request (a time, a token) | a body or header rule in [`allowlist.yaml`](#allowlistyaml), with a format and a reason |
+| the same header differs on every request (another server stack: `server`, `x-powered-by`, `via`) | a header rule: `name`, `format` (or `ignore_case`) and `reason` ([header rules](#allowlistyaml)); for those three headers the [line on the one change almost every request has](commands.md#compare) proposes it with the exact new value. Any other header that changed is fixed, accepted or expected |
+| rows in another order (`item-order`; another database server or ORM) | an array rule: `key` pairs the items by an id, `any_order` allows the order ([arrays](#allowlistyaml)) |
+| uploading a file | a [`multipart`](#multipart) catalog entry with a fixture from the uploads folder |
+| a queue worker, an artisan or other command, an import or export, an admin path that changes the schema | a [command step](#command-steps) (`"output": true` compares what it prints), or a catalog request for the path; [side checks](guides/side-checks.md) |
+| measured, not compared (a value no rule can describe) | [`observe`](#observe) |
+| what the gate does not check | `driftgate coverage` and the [not-covered summary](commands.md#compare) after every comparison |
+| two server stacks (database, PHP, web server) | [upgrading the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server) |
+
+`driftgate help catalog` and `driftgate help allowlist` list the fields of
+those files.
+
 DriftGate reads one configuration file and a few files beside it. Where
 they are is set by [`baselines`](#baselines). A new project (`driftgate
 init`) keeps all of them in the project's own `.driftgate/` folder, which
@@ -42,7 +58,7 @@ the YAML files an unknown key is an error, not a warning, and so is a second
 document after `---` in `driftgate.yaml` and `exclusions.yaml` (it would be
 ignored).
 
-Contents: [driftgate.yaml](#driftgateyaml) ·
+Contents: [what to use for what](#what-to-use-for-what) · [driftgate.yaml](#driftgateyaml) ·
 [allowlist.yaml](#allowlistyaml) · [exclusions.yaml](#exclusionsyaml) ·
 [catalog.json](#catalogjson) · [classify.yaml](#classifyyaml)
 
@@ -114,7 +130,7 @@ observe:
 |---|---|---|---|
 | `version` | int | required | `1` |
 | `project` | string | required | a simple name (letters, digits, `. _ -`); names the local store and the Keychain entry |
-| `mode` | `freeze` \| `evolve` | `freeze` | `freeze`: every drift fails and `accept` is refused; `evolve`: drifts may be accepted with a reason |
+| `mode` | `freeze` \| `evolve` | `freeze` | `freeze`: every drift fails unless a ticket expects exactly that drift ([`expect`](commands.md#expect)), and `accept` is refused; `evolve`: drifts may be accepted with a reason |
 | `level` | `status` \| `shape` \| `types` \| `values` | `values` | how far comparison goes: status only; + keys, order and nesting; + the type of every value; + exact values. A catalog entry can set its own level; `compare --level` can only make it stricter |
 | [`baselines`](#baselines) | `local` \| `git` | where `driftgate.yaml` is | where the project's files, the store and the key are |
 | [`store`](#store) | path | `.driftgate/store` (local), `~/.driftgate/<project>` (git) | local store |
@@ -140,7 +156,9 @@ observe:
 
 Commands (`seed`, `prepare`, guards, restore and fingerprint, `tokens.command`,
 adapters, bisect hooks) are lists: the program and its arguments, run
-without a shell, from the project folder. A shell is written explicitly
+without a shell, from the project folder (`seed`, `prepare` and guards may
+also name a folder and a standard input, see
+[seed, prepare, guards](#seed-prepare-guards)). A shell is written explicitly
 (`["sh", "-c", "…"]`) and shows in the diff. Commands never receive
 `DRIFTGATE_KEY` or the variable named by `key.env`.
 
@@ -258,6 +276,7 @@ instead; see [several services](guides/multi-service.md).
 | `follow_redirects` | bool | `false` | follow redirects instead of recording them (at most 10). A redirect from `https` to `http` is refused (the request fails); one to another host or port keeps only `User-Agent`, `Accept`, `Accept-Encoding` and `Accept-Language`, not the identity's token nor the catalog's headers |
 | `rate_limits` | list of `{match, per_minute}` | | spaces requests whose path (or `METHOD path`) matches the glob; `per_minute` must be positive |
 | `aliases` | list of origins | | other origins under which the application writes its own URLs (`APP_URL`, a second host name) |
+| `retry` | int, `0` to `3` | `1` | how many times a read-only `GET`, `HEAD` or `OPTIONS` request that failed under load (a timeout, a reset connection, a `502`, `503` or `504` status) is sent again; `0`: never. See [retries](#retries) |
 
 <!-- check: config-fragment -->
 ```yaml
@@ -308,6 +327,52 @@ target:
 
 A target outside `allow_hosts` needs `capture --allow-remote`; requests that
 change data need `--allow-remote-mutations` as well.
+
+#### Retries
+
+A development server under the load of a capture now and then times out,
+drops a connection or answers `502`, `503` or `504` once. A read-only
+request of a safe method (`GET`, `HEAD`, `OPTIONS`) whose send fails so
+is sent again, up to `retry` times (default once), within `rate_limits`.
+The resends wait until the other read-only requests are done and go one
+at a time: without the load, a resend that passes is evidence, not luck.
+No retry is spent on what cannot recover; these keep their first
+response:
+
+- a request whose baseline response failed the same way: the same
+  status, a failed request on both sides, or a retry in the baseline that
+  did not recover;
+- the timeouts of a service (and its `504`s that took as long as
+  `timeout`) once one of its resends, sent alone, timed out again;
+- the `502`, `503` and `504` answers of a service once two of its
+  resends got one again (an application in maintenance mode answers
+  `503` to everything).
+
+Not retried: a `500` (an exception of the application, such as the first
+call after a restore on a cold cache, stays a drift), any other method
+(also with `"mutates": false`), requests that change data (also a `GET`
+the baseline knows writes: its response there has side effects), sequences
+(and so no request that takes a parameter from another response),
+command steps, repeated requests and a refused connection (the
+application is not running). A request already sent again after a
+restore that ended the application's database sessions (SQL Server, see
+below) is retried only when that second answer is a load failure; its
+record then keeps both (`resent` with the first answer, `retry` with the
+second). A resend that fails in another way than load (a refused
+connection, an interrupt) did not recover.
+
+A retry never makes a failure pass unseen. The record of the response
+keeps the first send's outcome and whether a later send recovered
+(`"retry": {"sends": 2, "status": 503, "ms": 41, "recovered": true}`, or
+`"error": "timeout"`), never compared but shown everywhere: the capture
+names the requests answered only after a retry, `run` warns when it makes
+a baseline from such a response (and so does `accept`), and `compare` and
+`report` show a request that passed only after a retry as a class of its
+own in every format (see [compare](commands.md#compare)). It counts as
+passed: the exit code does not change. A request that failed in every
+send is never a pass after a retry: it shows as failed in all its sends.
+A request that is retried in every run fails now and then for a reason of
+its own; set `retry: 0` to see each failure as a drift.
 
 ### identities and tokens
 
@@ -588,7 +653,7 @@ state:
 
 **Anything else** (Redis, files, a search index): `restore` (required) and
 optionally `fingerprint`, a command whose output must be the same after
-every restore. `dsn`, `working`, `pristine`, `exclude` and `row_tracking`
+every restore ([recipes](guides/side-checks.md#files-on-disk-and-redis)). `dsn`, `working`, `pristine`, `exclude` and `row_tracking`
 need a driver.
 
 <!-- check: config-fragment -->
@@ -1146,7 +1211,8 @@ as many requests answered with 5xx once more: a `GET` or
 `HEAD` to a target on an allowed host, not a `repeat:`, a step of a
 sequence or one the baseline knows writes (a `GET` can write). Each is
 sent at most twice, the second answer is kept (a 5xx that stays is the
-application's), and every report notes it (`sent again …: the first
+application's; only a load failure such as a `503` is then
+[retried](#retries)), and every report notes it (`sent again …: the first
 answer was 500, after the restore of db ended 3 database sessions of
 the application`, and a count of such requests in every format). The
 count is of every session of other programs the restore ended in the
@@ -1157,7 +1223,11 @@ capture: each of their sessions allows one more request to be sent again.
 A request that changes data is never sent again; if
 it is the first after such a restore and fails this way, let the
 application's pool check a connection before it uses it, or keep no idle
-connections. From
+connections. `prepare` runs right after the restore, before any request:
+a command of its that asks the application over HTTP (a warm-up `curl`)
+meets the ended connections first and stops the capture; run such a
+step in a process of its own (`php artisan …`), or let it try again
+(`curl -sf --retry 3`, which retries a `500`). From
 step 2 until the rows are copied back the working database is
 `RESTRICTED_USER`: the application cannot connect, so none of its writes to
 excluded tables is lost. Limits of that:
@@ -1355,10 +1425,60 @@ guards:
     command: ["sh", "-c", "grep -q '^QUEUE_CONNECTION=sync' .env"]
 ```
 
+A command of `seed`, `prepare` or a guard (and only these; restore,
+fingerprint, `tokens.command`, adapters and bisect hooks stay lists) may
+also be a mapping: `run` is the list, `dir` the folder it runs in
+(default the project folder) and `stdin` a file given as its standard
+input, still without a shell. Both paths are relative to the project
+folder; `~` and `~/` are the home folder. A folder or file that is
+missing stops the command before the first of its list runs (exit 3), so
+a seed never stops halfway for it. A release before this form refuses a
+`driftgate.yaml` that uses it.
+
+<!-- check: config-fragment -->
+```yaml
+seed:
+  - run: ["mysql", "--defaults-extra-file=.my.cnf", "shop"]
+    stdin: ~/Data/shop.sql
+  - run: ["php", "artisan", "migrate", "--force"]
+    dir: api
+guards:
+  - name: mail goes to the log
+    command: { run: ["grep", "-q", "^MAIL_MAILER=log"], stdin: api/.env }
+```
+
+A program in a container reads the file through `docker exec`. The
+command must pass its standard input on: `docker exec` needs `-i`, and
+`docker compose exec` needs `-T` (no terminal); without them the command
+gets no input.
+
+<!-- check: config-fragment -->
+```yaml
+seed:
+  - run: ["docker", "exec", "-i", "app", "php"]
+    stdin: database/fixtures.php
+  - run: ["docker", "compose", "exec", "-T", "db", "mysql", "shop"]
+    stdin: ~/Data/shop.sql
+```
+
 A step whose result does not depend on the restored data, such as building
 a view or configuration cache, belongs before the capture, not in `prepare`
 (unless a `state:` component restores the files it writes): `prepare` runs
 after every restore, so its time multiplies with the number of restores.
+
+A `prepare` that changes the restored state (a data migration that stamps
+`updated_at` on every row) does so before every capture, and a value it
+writes anew each time drifts in every run. The capture fingerprints the
+state right after the restore and after `prepare` anyway; when the two
+differ, it warns that the state changed between the restore and the end
+of `prepare` and names the changed tables or components. If the step does
+not depend on the restored data, move it to `seed`: the pristine copy then
+holds its result. A `tokens.command` runs right after `prepare`; what it
+writes (the tokens of a login) is not taken for `prepare`'s: with both
+configured, the first capture takes one more fingerprint between them,
+and the later restores (before the requests that change data, `--restore
+each`) are checked only without a `tokens.command`. Only components with
+a fingerprint are seen. The warning never changes the exit code.
 
 ### discover
 
@@ -1421,7 +1541,9 @@ discover:
 ### templates, generate, params
 
 `templates:` lists the variants `generate` makes for every route method
-(default `[ok]`; `init` usually writes `[ok, not-found, json]`):
+(default `[ok]`; `init` usually writes `[ok, not-found, json]`, and
+`[ok, not-found, json, json-errors]` for Laravel, Symfony, Rails and
+Spring Boot):
 
 | Template | Request |
 |---|---|
@@ -1432,6 +1554,46 @@ discover:
 | `identities` | a route that needs authentication, once per other identity |
 | `json` | with `Accept: application/json` |
 | `empty-body` | a route that takes a body, with `{}` |
+| `json-errors` | each request of `not-found`, `invalid-param`, `anonymous` and `empty-body` once more with `Accept: application/json` (ID suffix `-json`) |
+
+`json` and `json-errors` matter where the framework negotiates by
+`Accept`: Laravel, Symfony, Rails and Spring Boot answer a browser with an
+error page or a redirect (to the login page, back to the form with the
+validation errors) and an API client with a JSON body (401, 404, 422). A
+change of that JSON body is invisible without a request that sends the
+header. `json-errors` adds one request per error variant, never for `ok`
+(that is `json`) or `identities`, and its requests are error variants:
+they never cover a route. An `Accept` header the variant has is replaced.
+With `[ok, not-found, json, json-errors]` it adds one request per route
+method with a required path parameter: at most a third more requests, when
+every route has one; `generate` says how many (`… (N of them json-errors)`).
+Frameworks that always answer JSON (FastAPI, NestJS, ASP.NET) gain nothing
+from it.
+
+To adopt it in a project made before it, add it to `templates:` and run
+`driftgate generate --write`, then `driftgate run` and `accept` the new
+requests. `generate` and `run` say so once (a `note:`, once per local
+store) to a project whose `discover:` uses the `laravel`, `symfony`,
+`rails` or `spring` adapter; a project that finds its routes only through
+`openapi` gets no note. Releases before `json-errors` refuse a
+configuration that names it: everyone working on the project needs a
+release that knows it.
+
+A rate limit is not generated: write a repeated request by hand
+([repeat](#repeat)), once more with the header, so the JSON body of a 429
+is compared too:
+
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {"id": "search-throttle", "method": "GET", "path": "/api/search?q=shoes", "repeat": 61, "storage": "public"},
+  {"id": "search-throttle-json", "method": "GET", "path": "/api/search?q=shoes", "repeat": 61, "storage": "public",
+   "headers": [["accept", "application/json"]]}
+ ]
+}
+```
 
 `generate.identity` is the identity used for routes that need
 authentication; it must be under `identities:` or come from `tokens:`.
@@ -1588,7 +1750,13 @@ attributes of a page, cells and header values.
 A JSON body whose whitespace layout changed (compact and pretty-printed,
 another indentation, line ends, spaces around `:` and after `,`) is an
 `encoding` drift at `$`; the same encoder's output that only nests deeper
-is not.
+is not. A byte order mark that came or went, and another encoding (UTF-8,
+UTF-16, UTF-32), are an `encoding` drift at `$` whatever else changed; a
+body in UTF-16 or UTF-32 is compared as its text. Other bytes that change no value (keys written with
+escapes, `"\u0061"` for `"a"`) are a drift only when nothing else in the
+body changed. A value a rule covers, written otherwise (`"a\/b"` for
+`"a/b"`), is no drift: the rule covers how it is written; the rest of the
+body is compared without it.
 
 <!-- check: allowlist -->
 ```yaml
@@ -1702,9 +1870,11 @@ first part that differs; that holds also when a rule let a cell change.
 Not compared: the document properties (`docProps/`: creation time,
 author, application) and how the ZIP archive is written. Rows and cells
 without their optional reference (`r`) are placed where the standard puts
-them. In a CSV, quoting and line ends that differ while the cells are the
-same are a `body` drift; when a rule let a cell change, the line ends and
-the byte order mark are still compared.
+them. In a CSV, quoting, line ends, blank lines and empty fields at the
+end of a record that differ while the cells are the same are a `body`
+drift, the line ends also when a rule let a cell change; a byte order
+mark that came or went is a `body` drift whatever else changed. (An [expectation](commands.md#expect) of a drift covers all
+of these: they are in its digest.)
 
 - The worksheet is written as in the report: a name of letters, digits,
   `_` and `.` as it is (`Users`, `Članovi`); any other in single
@@ -1754,6 +1924,26 @@ the item (`user.id`):
   as without the rule, and the report notes it (`notes` of the request in
   JSON, a `note:` line in text and markdown).
 
+**Items in another order (no rule).** In an array no rule pairs by key,
+the same items in another order (rows of an `ORDER BY` on a column with
+equal values, which another database server or version returns in
+another order) are one `item-order` drift at the array, not a drift at
+every index: `$.data: 3 items → same 3 items, other order: 2, 0, 1` (for
+every item now, the baseline item it is; at most 20). The items are
+equal as the comparison sees them at its level, with the allowlist's
+rules; what still differs within a pair (a value written otherwise) is
+reported at the baseline item's path. When all items but one of each
+side are equal, those two are paired and compared too (`2 of 3 items the
+same`); when more items changed, which went where is ambiguous and the
+array is compared by position. It stays a drift: the order of a list can
+matter to a client. A note names the rule to add, ready to paste under
+`arrays:`: with `key:` when every item has an `id` (or `uuid`, `_id`,
+`key`, `slug`, `code`) of its own, which pairs the items and still
+reports one that changed, came or went; otherwise an array rule with
+`any_order: true` and no key, which keeps the items by position and lets
+the same items come in another order. An expectation of the drift
+(`driftgate expect`) holds only for the same items in the same order.
+
 Body rules reach keyed items with a glob as before (`$.data[*].updated_at`
 matches `$.data[id=42].updated_at`); a rule written with an index
 (`$.data[0].x`) no longer matches an array paired by key. Drifts of one
@@ -1764,8 +1954,8 @@ body the key of an item is hidden in the report (`$.data[id=(private)]`,
 | Key | Meaning |
 |---|---|
 | `path` | a glob over JSON paths of arrays (in a body, in JSON embedded in a page, in the RSC payload), required; the first array rule that matches an array pairs its items |
-| `key` | the member that identifies an item, or member names joined by dots (`user.id`), required |
-| `any_order` | the items may come in any order |
+| `key` | the member that identifies an item, or member names joined by dots (`user.id`); required unless `any_order` |
+| `any_order` | the items may come in any order; without `key`, the same items (as above) in another order are no drift, and anything else is compared by position. The rest of the document, how it is written included (an escaped key, spacing inside an item that moved), is compared as without the rule: with the items put back in the baseline's order, orders inside items that moved too, in JSON bodies, in JSON in a page and in UTF-16. A document whose items cannot be put back (a devalue payload, compared decoded) is compared as it is, and its order shows as an `encoding` drift |
 | `reason` | required |
 | `request` | glob over request IDs; empty: every request |
 | `target` | only requests of this service |
@@ -1805,6 +1995,44 @@ routes:
 | `route` | `METHOD /path` glob; without a method it matches every method. Required |
 | `reason` | required |
 | `target` | only routes of this service; empty: every service |
+
+`known_failures:` acknowledges requests that fail in the baseline (a 500
+kept for years, an upload broken until a later upgrade step) without
+dropping them: `generate` keeps them, `capture` and `compare` treat them as
+any other request, and `coverage` and `run` list them instead of failing on
+their routes ([coverage](commands.md#coverage)). An exclusion would drop the
+request, and its answer would no longer be compared at all. A known failure
+whose requests succeed now, or that matches no request, is reported as
+stale: remove it once the fix is accepted. Releases before `known_failures:`
+refuse the file.
+
+<!-- check: exclusions -->
+```yaml
+version: 1
+routes: []
+known_failures:
+  - request: post-api-tree-reorder
+    reason: Answers 500 since the move to nested sets; fixed in the Laravel 9 step.
+    ref: SHOP-412
+    status: 500
+  - request: 'post-api-uploads-*'
+    reason: Uploads break until the storage driver is replaced.
+    status: 5xx
+```
+
+| Key | Meaning |
+|---|---|
+| `request` | request ID or glob. Required |
+| `reason` | required |
+| `ref` | ticket or link |
+| `status` | the failure acknowledged: a status (`500`, also among the sends of a repeated request), a class (`5xx`, `4xx`), `error` (no answer) or `timeout` (no answer in time); without it, any failure |
+
+A request takes the first known failure whose glob matches it. When that
+one names a status its failure does not have (the 500 became a 404, the
+timeout a refused connection), the request is reported as failed, with a
+note that its known failure changed. A known failure that acknowledges
+failures on more than 5 routes is reported as broad: such a glob also
+hides the new failures it reaches.
 
 ---
 
@@ -1870,7 +2098,7 @@ with their own ID.
 | `source` | where the entry came from (`route`, `template`, `import`); written by the tool |
 | `multipart` | a `multipart/form-data` body (below); not with `body` |
 | `repeat` | send the request N times (1 to 10000) |
-| `command`, `output`, `output_ignore` | a command step instead of a request (below) |
+| `command`, `output`, `output_ignore`, `dir`, `stdin` | a command step instead of a request (below) |
 
 **Sequences** run their requests in order, together. `restore: "before"`
 restores the state before the sequence (`capture --restore each` does that
@@ -1949,7 +2177,12 @@ worker inside a sequence. It has no `method`, `path`, body, headers,
 parameters or identity, and is not repeated. Its exit code and side effects
 are compared like a request's; its standard output only with
 `"output": true`, with the text the `output_ignore` regular expressions
-match removed first (here, timestamps). When a step fails, the log shows
+match removed first (here, timestamps; [side checks](guides/side-checks.md)
+has recipes for a schema dump, compiler and mail output). `dir` is the folder the step runs
+in and `stdin` a file given as its standard input, both relative to the
+project folder as for [seed and prepare](#seed-prepare-guards); a missing
+one stops the capture before anything is sent. A release before these
+fields refuses a catalog that uses them (an unknown field). When a step fails, the log shows
 the last lines it wrote to standard error, never its standard output: that
 is its body, private, or public but not yet scanned for personal data.
 

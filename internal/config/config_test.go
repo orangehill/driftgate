@@ -52,7 +52,7 @@ func TestStateValidation(t *testing.T) {
 		}
 	}
 	cfg := base
-	cfg.Prepare = [][]string{{}}
+	cfg.Prepare = []Command{{}}
 	if _, err := New(cfg, t.TempDir()); err == nil {
 		t.Error("empty prepare command accepted")
 	}
@@ -209,8 +209,9 @@ func TestStoreInRepository(t *testing.T) {
 	}
 }
 
-// TestLoadRefuses: a negative timeout (http.Client would wait forever) and
-// a second YAML document (ignored, with every setting in it).
+// TestLoadRefuses: a negative timeout (http.Client would wait forever), a
+// retry out of its range and a second YAML document (ignored, with every
+// setting in it).
 func TestLoadRefuses(t *testing.T) {
 	base := "version: 1\nproject: p\n"
 	for cfg, want := range map[string]string{
@@ -219,6 +220,9 @@ func TestLoadRefuses(t *testing.T) {
 		base + "---\nstore: /tmp/elsewhere\n":          "only one YAML document",
 		base + "---\n":                                 "",
 		base + "target:\n  timeout: 0s\n":              "",
+		base + "target:\n  retry: 4\n":                 "target.retry must be from 0 (no retry) to 3",
+		base + "targets:\n  api:\n    retry: -1\n":     "targets.api.retry must be from 0",
+		base + "target:\n  retry: 0\n":                 "",
 	} {
 		path := filepath.Join(t.TempDir(), FileName)
 		if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {

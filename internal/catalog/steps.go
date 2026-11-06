@@ -82,8 +82,8 @@ func validateStep(r Request) error {
 				return fmt.Errorf("output_ignore: %w", err)
 			}
 		}
-	} else if r.Output || len(r.OutputIgnore) > 0 {
-		return errors.New("output and output_ignore belong to command steps")
+	} else if r.Output || len(r.OutputIgnore) > 0 || r.Dir != "" || r.Stdin != "" {
+		return errors.New("output, output_ignore, dir and stdin belong to command steps")
 	}
 	if r.Multipart == nil {
 		return nil

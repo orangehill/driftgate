@@ -2,6 +2,7 @@ package compare
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"maps"
 	"mime"
@@ -122,14 +123,39 @@ func (c *comparer) sheets(base, cur Side) bool {
 	rules := c.level >= LevelValues && c.allow.HasCellRules()
 	allowed := 0
 	pairs, missing, extra := pairSheets(bs, cs)
+	// A worksheet missing, new or moved changes the rest of the workbook
+	// too (its list of worksheets), which is then not reported by itself
+	// (below): what else changed there (styles, a macro project) is in the
+	// witness of these drifts, so they are expected only with it.
+	var restB, restC []byte
+	if kind == "xlsx" && c.witnessing && c.level >= LevelValues && (len(missing) > 0 || len(extra) > 0 || !inOrder(pairs)) {
+		restB, restC = c.partsSource(bw.Rest), c.partsSource(cw.Rest)
+	}
+	// Where a worksheet stood or stands: the order of both workbooks.
+	order := func(list []sheet.Sheet) []byte {
+		names := make([]string, len(list))
+		for i, s := range list {
+			names[i] = s.PathName()
+		}
+		return c.textsSource(names)
+	}
 	for _, i := range missing {
 		c.add(KindSheetMissing, prefix(bs[i]), cellCount(bs[i]), renamed(bs[i], cs, extra, prefix))
+		if c.witnessing {
+			c.witness(c.sheetSource(prefix(bs[i]), bs[i]), order(bs), order(cs), restB, restC)
+		}
 	}
 	for _, j := range extra {
 		c.add(KindSheetExtra, prefix(cs[j]), "", cellCount(cs[j]))
+		if c.witnessing {
+			c.witness(c.sheetSource(prefix(cs[j]), cs[j]), order(bs), order(cs), restB, restC)
+		}
 	}
 	if !inOrder(pairs) {
 		c.add(KindSheetOrder, "xlsx", listText(sheetNames(bs, pairs, 0)), listText(sheetNames(cs, pairs, 1)))
+		if c.witnessing {
+			c.witness(pairsSource(pairs), restB, restC)
+		}
 	}
 	for _, p := range pairs {
 		b, v := bs[p[0]], cs[p[1]]
@@ -143,6 +169,9 @@ func (c *comparer) sheets(base, cur Side) bool {
 				// Number 1 and text "1": the type changed, whatever the text.
 				if c.level >= LevelTypes {
 					c.add(KindType, where, bm.Type, cm.Type)
+					if c.witnessing {
+						c.witness([]byte(bv), []byte(cv))
+					}
 				}
 				continue
 			}
@@ -189,6 +218,12 @@ func (c *comparer) sheets(base, cur Side) bool {
 			}
 			c.add(KindCell, where, bv, cv)
 			c.drifts[len(c.drifts)-1].Texts = [2]string{bv, cv}
+			if rules {
+				_, parts := c.allow.CellRules(c.id, where)
+				if c.witnessing {
+					c.parted(where, bv, cv, len(parts) > 0, true)
+				}
+			}
 		}
 	}
 	if c.level < LevelValues {
@@ -202,19 +237,35 @@ func (c *comparer) sheets(base, cur Side) bool {
 		moved := len(missing) > 0 || len(extra) > 0 || !inOrder(pairs)
 		if b, v, ok := c.rest(bw.Rest, cw.Rest); !ok && !moved {
 			c.add(KindBody, "xlsx", b, v)
+			if c.witnessing {
+				c.witness(c.partsSource(bw.Rest), c.partsSource(cw.Rest))
+			}
 		}
 		return true
 	}
 	// Same cells, other bytes in a CSV: quoting, line endings, a byte order
 	// mark. A cell a rule let change makes other bytes by itself; then the
 	// line endings and the byte order mark are still compared.
+	// A byte order mark is a drift whatever else changed. Line endings,
+	// quotes, blank lines and empty fields are the same cells: a drift
+	// only when nothing else changed, and in the witness of every drift of
+	// the file otherwise (foldEncodings), so that an expectation stays exact.
+	sb, sc := csvStyle(base.Body), csvStyle(cur.Body)
+	if sb.bom != sc.bom {
+		c.add(KindBody, kind, bomText(sb.bom), bomText(sc.bom))
+	}
+	sb.bom, sc.bom = false, false
 	switch {
 	case len(c.drifts) > before:
 	case allowed == 0:
 		c.add(KindBody, kind, fmt.Sprintf("%d bytes", len(base.Body)), fmt.Sprintf("%d bytes", len(cur.Body)))
-	case csvStyle(base.Body) != csvStyle(cur.Body):
-		c.add(KindBody, kind, csvStyle(base.Body).String(), csvStyle(cur.Body).String())
+		if c.witnessing {
+			c.witness(base.Body, cur.Body)
+		}
+	case sb != sc:
+		c.add(KindBody, kind, sb.String(), sc.String())
 	}
+	c.document(true, kind, base.Body, cur.Body)
 	return true
 }
 
@@ -278,6 +329,13 @@ func csvStyle(b []byte) style {
 	}
 }
 
+func bomText(bom bool) string {
+	if bom {
+		return "byte order mark"
+	}
+	return "no byte order mark"
+}
+
 func (s style) String() string {
 	var out []string
 	if s.bom {
@@ -328,6 +386,91 @@ func cellCount(s sheet.Sheet) string {
 		return "1 cell"
 	}
 	return strconv.Itoa(len(s.Cells)) + " cells"
+}
+
+// csvLayout writes how a CSV file is written apart from its cells, by
+// place: for every record the blank lines before it, its fields (whether
+// each is in quotes, and its source where it is not the field written
+// plainly or in quotes with doubled quotes, with CRLF line ends or as
+// they are) and how it ends; and what
+// follows the last record. With the cells it gives the file back (a byte
+// order mark apart, which is a drift of its own): a field quoted in
+// another cell, a line end of another record, an empty field more, a
+// blank line or a quote written lazily all change it. Fields of an
+// encoder's files are written one way, so cells the rules let change
+// leave it as it is.
+func csvLayout(body []byte) []byte {
+	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	r := csv.NewReader(bytes.NewReader(body))
+	r.FieldsPerRecord, r.LazyQuotes, r.ReuseRecord = -1, true, true
+	lines := []int{0} // where each line starts
+	at := func(line, col int) int {
+		for len(lines) < line {
+			n := lines[len(lines)-1]
+			lines = append(lines, n+bytes.IndexByte(body[n:], '\n')+1)
+		}
+		return lines[line-1] + col - 1
+	}
+	e := &canon{}
+	last := 0
+	var records int
+	for {
+		rec, err := r.Read()
+		if err != nil {
+			break
+		}
+		end := int(r.InputOffset())
+		span := body[last:end]
+		term := len(span) - len(bytes.TrimSuffix(bytes.TrimSuffix(span, []byte("\n")), []byte("\r")))
+		if !bytes.HasSuffix(span, []byte("\n")) {
+			term = 0
+		}
+		starts := make([]int, len(rec)+1)
+		for i := range rec {
+			starts[i] = at(r.FieldPos(i))
+		}
+		starts[len(rec)] = end - term + 1
+		if !fields(body, starts) {
+			// Not one comma between the fields: the record as it is.
+			e.bytes(span).list(0).bytes(nil)
+			last, records = end, records+1
+			continue
+		}
+		e.bytes(body[last:starts[0]]).list(len(rec))
+		for i, v := range rec {
+			raw := body[starts[i] : starts[i+1]-1]
+			quoted := len(raw) > 0 && raw[0] == '"'
+			plain := v
+			if quoted {
+				plain = `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
+			}
+			e.bool(quoted)
+			switch {
+			case string(raw) == plain:
+				e.int(0)
+			case quoted && strings.Contains(plain, "\n") && string(raw) == strings.ReplaceAll(plain, "\n", "\r\n"):
+				e.int(1) // its line ends CRLF, as the reader gives LF
+			default:
+				e.int(2).bytes(raw)
+			}
+		}
+		e.bytes(body[end-term : end])
+		last, records = end, records+1
+	}
+	out := &canon{}
+	out.list(records).bytes(e.b).bytes(body[last:])
+	return out.b
+}
+
+// fields reports whether the fields of a record start in order with one
+// comma before each but the first.
+func fields(body []byte, starts []int) bool {
+	for i := 1; i < len(starts); i++ {
+		if starts[i]-1 < starts[i-1] || starts[i] > len(body)+1 || i < len(starts)-1 && body[starts[i]-1] != ',' {
+			return false
+		}
+	}
+	return true
 }
 
 // renamed tells, for a worksheet missing now, the new worksheet that holds
@@ -389,6 +532,10 @@ func (c *comparer) lines(base, cur Side) bool {
 		}
 		if i >= len(bl) || i >= len(cl) || b != v {
 			c.add(KindBody, "line "+strconv.Itoa(i+1), b, v)
+			// Only the first differing line is shown; the rest is in the witness.
+			if c.witnessing {
+				c.witness(base.Body, cur.Body)
+			}
 			return true
 		}
 	}

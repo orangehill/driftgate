@@ -89,6 +89,9 @@ type captureOptions struct {
 	skipFingerprint      bool
 	quiet                bool
 	calibrate            bool // decide concurrency: auto (after the repeats agree)
+	// first, when set, gets the summary of the first capture (run makes
+	// the baseline from it).
+	first func(*capture.Summary)
 }
 
 // captureSet captures the catalog under tag, repeated as the options say,
@@ -159,6 +162,9 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 		if i == 0 {
 			first = sum
+			if o.first != nil {
+				o.first(sum)
+			}
 			code = summarize(out, errOut, tag, sum)
 			if len(sum.Failed) > 0 {
 				// More runs would only fail the same way.
@@ -170,11 +176,21 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 	}
 	if len(tags) > 1 {
+		if err := keepMedianTimings(p, tags); err != nil {
+			return 0, err
+		}
 		c, err := repeatReport(out, p, cat, allow, tags)
 		if err != nil {
 			return 0, err
 		}
 		code = max(code, c)
+		if c == ExitClean {
+			// The capture says it was checked: a rebase takes it as run
+			// takes two equal captures.
+			if err := markAgreed(p, tags[0], len(tags)); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if o.calibrate {
 		if code != ExitClean {
@@ -186,6 +202,54 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 	}
 	return code, nil
+}
+
+// keepMedianTimings gives the capture kept (the first of tags) the median
+// time of each request over all runs, so the times a comparison or a
+// baseline made by run reads are not those of one noisy run.
+func keepMedianTimings(p *config.Project, tags []string) error {
+	var runs []map[string]int64
+	for _, tag := range tags {
+		set, err := p.Capture(tag)
+		if err != nil {
+			return failed(err)
+		}
+		if t := timings(set); t != nil {
+			runs = append(runs, t)
+		}
+	}
+	if len(runs) < 2 {
+		return nil
+	}
+	set, err := p.Capture(tags[0])
+	if err != nil {
+		return failed(err)
+	}
+	if err := snapshot.WriteJSON(filepath.Join(set.Dir, "timings.json"), report.MedianTimings(runs)); err != nil {
+		return envErr(err)
+	}
+	return nil
+}
+
+// markAgreed records in a capture's meta.json how many captures of the
+// same state gave its responses.
+func markAgreed(p *config.Project, tag string, n int) error {
+	set, err := p.Capture(tag)
+	if err != nil {
+		return failed(err)
+	}
+	meta, err := set.Meta()
+	if err != nil {
+		return envErr(err)
+	}
+	if meta == nil {
+		return envErr(fmt.Errorf("capture %s has no meta.json", tag))
+	}
+	meta.Agreed = n
+	if err := set.WriteMeta(*meta); err != nil {
+		return envErr(err)
+	}
+	return nil
 }
 
 // byMethodNote names the requests that change data only by their method
@@ -234,6 +298,8 @@ func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
 	if len(sum.Unattributed) > 0 {
 		fmt.Fprintf(out, "\nread-only requests changed %s, but no single request does it alone (an order effect or background work)\n", strings.Join(sum.Unattributed, ", "))
 	}
+	retriedNote(out, sum)
+	preparedNote(out, sum)
 	if len(sum.Personal) > 0 {
 		ids := make([]string, 0, len(sum.Personal))
 		for id := range sum.Personal {
@@ -483,7 +549,7 @@ func short(s string) string {
 	return s[:60] + " … " + s[len(s)-30:]
 }
 
-func yamlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+var yamlQuote = compare.YAMLQuote
 
 func seedCmd(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("seed", flag.ContinueOnError)

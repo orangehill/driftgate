@@ -70,6 +70,9 @@ type Record struct {
 	// answer (capture's resend after a restore that ended the
 	// application's database sessions).
 	Resent *Resent `json:"resent,omitempty"`
+	// Retry is set when a read-only request was sent again after its first
+	// send failed under load. Never compared; every report shows it.
+	Retry *Retry `json:"retry,omitempty"`
 }
 
 // Resent is why a request was sent again, and the status of its first
@@ -77,6 +80,32 @@ type Record struct {
 type Resent struct {
 	After string `json:"after"` // "the restore of db ended 3 database sessions of the application"
 	First int    `json:"first"` // the first answer's status
+}
+
+// Retry says a read-only request was sent again after a load failure (a
+// timeout, a reset connection, a 502, 503 or 504 status): the record is
+// the response of the last send, and this is the outcome of the first.
+// Recovered says the last send no longer failed so; a request that failed
+// in every send is never a pass after a retry.
+type Retry struct {
+	Sends     int    `json:"sends"`            // sends in all, the last one recorded
+	Status    int    `json:"status,omitempty"` // the first send's status
+	Error     string `json:"error,omitempty"`  // or its failure: timeout, connection reset
+	MS        int64  `json:"ms"`               // the first send's time
+	Recovered bool   `json:"recovered"`
+}
+
+// Passed reports a response that came only after a retry: a retry that
+// recovered. Nil and an unrecovered retry are not.
+func (r *Retry) Passed() bool { return r != nil && r.Recovered }
+
+// First is the first send's outcome, as a report shows it: "503" or
+// "timeout".
+func (r *Retry) First() string {
+	if r.Error != "" {
+		return r.Error
+	}
+	return fmt.Sprint(r.Status)
 }
 
 // SideEffects are the changes one request made to the state.
@@ -106,6 +135,10 @@ type Meta struct {
 	StateFormat int `json:"state_format,omitempty"`
 	// Unreliable marks a capture made with --skip-fingerprint-check.
 	Unreliable bool `json:"unreliable,omitempty"`
+	// Agreed is how many captures of the same state gave the same
+	// responses (capture --repeat, the two of run's first baseline); 0
+	// for a capture made once.
+	Agreed int `json:"agreed,omitempty"`
 	// Incomplete marks a capture that has not finished: it is written
 	// first and replaced at the end, so an interrupted capture is not
 	// taken for one whose requests are missing.
@@ -331,6 +364,38 @@ type Set struct {
 
 	mu      sync.Mutex
 	written map[string]bool // public bodies this Set wrote
+	// read are the public bodies Body read and found to match their name.
+	read sync.Map
+	// HashReads makes Record note the SHA-256 of every record file it
+	// reads, so that a check or a digest of the set need not read it again
+	// (Known).
+	HashReads bool
+	sums      sync.Map // slash path → SHA-256
+}
+
+// Known returns the SHA-256 of a file of the set (a slash path) that was
+// read and hashed already: a record read with HashReads, a public body
+// Body read (whose name is its SHA-256).
+func (s *Set) Known(rel string) (string, bool) {
+	if name, ok := strings.CutPrefix(rel, "bodies/"); ok {
+		return name, s.ReadBody(name)
+	}
+	v, ok := s.sums.Load(rel)
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
+}
+
+// ErrBodyChanged is the error of a public body whose content does not
+// match its name.
+var ErrBodyChanged = errors.New("content does not match its name")
+
+// ReadBody reports whether Body read the public body of that name and
+// found it to match.
+func (s *Set) ReadBody(name string) bool {
+	_, ok := s.read.Load(name)
+	return ok
 }
 
 // wrote reports whether the Set wrote the public body sum before; with
@@ -398,6 +463,9 @@ func (s *Set) readRecord(id string) (*Record, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if s.HashReads {
+		s.sums.Store("responses/"+id+".json", Sum(raw))
 	}
 	var r Record
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -496,8 +564,9 @@ func (s *Set) Body(r *Record) ([]byte, error) {
 		return nil, err
 	}
 	if Sum(body) != r.Body.SHA256 {
-		return nil, fmt.Errorf("body %s: content does not match its name", r.Body.SHA256)
+		return nil, fmt.Errorf("body %s: %w", r.Body.SHA256, ErrBodyChanged)
 	}
+	s.read.Store(r.Body.SHA256, true)
 	return body, nil
 }
 

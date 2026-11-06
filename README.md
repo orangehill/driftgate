@@ -314,6 +314,8 @@ pull-request comment, in the job summary and as a JUnit file. Full guide:
   (also `allowlist check`, which finds rules that cannot apply, and
   `verify --migrate-state` / `--migrate-private` for baselines of an earlier
   release)
+- [What to use for what](docs/configuration.md#what-to-use-for-what): an
+  upload, rows in another order, a command, a value that may change, a gap
 - [Configuration](docs/configuration.md): `driftgate.yaml`,
   `allowlist.yaml`, `exclusions.yaml`, `classify.yaml`, `catalog.json`
 - [Security model](docs/security.md)
@@ -323,7 +325,8 @@ pull-request comment, in the job summary and as a JUnit file. Full guide:
   [Several services](docs/guides/multi-service.md) ·
   [CI with GitHub Actions](docs/guides/github-actions.md) ·
   [Anonymized test data](docs/guides/test-data.md) ·
-  [Upgrading a framework](docs/guides/framework-upgrade.md) ·
+  [Upgrading a framework](docs/guides/framework-upgrade.md) or
+  [the server](docs/guides/framework-upgrade.md#upgrading-the-server-database-php-web-server) ·
   [Bisect](docs/guides/bisect.md) ·
   [Recording through a proxy](docs/guides/record.md)
 

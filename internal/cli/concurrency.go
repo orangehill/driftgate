@@ -289,8 +289,13 @@ func differences(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		if err != nil {
 			return nil, err
 		}
-		if res.Outcome == report.Drift {
+		switch {
+		case res.Outcome == report.Drift:
 			add(name, req.ID)
+		case res.Retry.Passed() && !res.BaselineRetry.Passed():
+			// A load failure the retry covered, which the sequential
+			// capture did not have, is a failure of the setting.
+			add(name, req.ID+" (failed at first: "+res.Retry.First()+")")
 		}
 	}
 	for id := range par.Writers {

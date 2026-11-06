@@ -168,6 +168,9 @@ func driftLines(res Result, maxDrifts, pad int) []string {
 	if len(rest) > 0 {
 		out = append(out, collapsedLine(rest))
 	}
+	if res.Retry != nil {
+		out = append(out, res.RetryText())
+	}
 	return out
 }
 

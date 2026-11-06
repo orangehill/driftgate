@@ -41,6 +41,8 @@ type Request struct {
 	Multipart    *Multipart `json:"multipart,omitempty"`
 	Repeat       int        `json:"repeat,omitempty"`
 	Command      []string   `json:"command,omitempty"`
+	Dir          string     `json:"dir,omitempty"`   // where a command step runs; default the project root
+	Stdin        string     `json:"stdin,omitempty"` // a file given to a command step as standard input
 	Output       bool       `json:"output,omitempty"`
 	OutputIgnore []string   `json:"output_ignore,omitempty"`
 }

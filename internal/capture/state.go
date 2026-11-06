@@ -19,7 +19,6 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
-	"github.com/orangehill/driftgate/internal/procx"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -585,12 +584,17 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 	if len(p.State) == 0 {
 		return configErr("no state components are configured")
 	}
+	if !opt.SkipCommands {
+		if err := checkCommands(p, "seed", p.Seed); err != nil {
+			return err
+		}
+	}
 	for _, cmd := range p.Seed {
 		if opt.SkipCommands {
 			break
 		}
 		fmt.Fprintf(opt.Out, "seed: %s\n", commandLine(cmd))
-		if err := state.Run(ctx, p.Root, cmd, nil, opt.Log); err != nil {
+		if err := runCommand(ctx, p, cmd, nil, opt.Log); err != nil {
 			return envErr("seed: %v", err)
 		}
 	}
@@ -759,6 +763,6 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 	return true, nil
 }
 
-// commandLine is a command of driftgate.yaml as one line, its secrets
-// shown as *** (procx.Line).
-func commandLine(cmd []string) string { return procx.Line(cmd) }
+// commandLine is a command of driftgate.yaml as one line, with its stdin
+// file and dir, its secrets shown as *** (config.Command.String).
+func commandLine(cmd config.Command) string { return cmd.String() }

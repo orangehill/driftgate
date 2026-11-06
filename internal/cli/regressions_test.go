@@ -260,7 +260,8 @@ func TestRegressionSlowEndpoint(t *testing.T) {
 
 // TestRegressionRowOrder: a list read without ORDER BY comes back in
 // another order after the database's statistics changed (a fresh copy, a
-// new server version). Positional arrays report each moved value.
+// new server version). An array no rule pairs by key reports the same
+// items in another order as one drift at the array.
 func TestRegressionRowOrder(t *testing.T) {
 	list := func(ids ...int) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -275,8 +276,10 @@ func TestRegressionRowOrder(t *testing.T) {
 	if code != ExitDrift {
 		t.Fatalf("exit %d", code)
 	}
-	has(t, drifts["home"], compare.KindValue, "$.items[0].id")
-	has(t, drifts["home"], compare.KindValue, "$.items[1].id")
+	has(t, drifts["home"], compare.KindItemOrder, "$.items")
+	if len(drifts["home"]) != 1 {
+		t.Errorf("drifts %+v, want only the order", drifts["home"])
+	}
 }
 
 // TestRegressionDeleteLeavesTables: deleting a module drops its tables.

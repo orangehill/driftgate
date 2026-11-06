@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/catalog"
@@ -224,7 +225,7 @@ func TestPerMethod(t *testing.T) {
 	if res.Generated != 1 || res.Catalog.Requests[0].ID != "get-items" {
 		t.Fatalf("with POST excluded: %+v", res.Catalog.Requests)
 	}
-	c := routes.Check(inv, res.Catalog, excl)
+	c := routes.CheckWith(inv, res.Catalog, excl, nil)
 	if !reflect.DeepEqual(c.Covered, []string{"GET /items"}) || c.Excluded["POST /items"] != "x" {
 		t.Fatalf("coverage per method: %+v", c)
 	}
@@ -242,5 +243,60 @@ func TestRequiredQuery(t *testing.T) {
 	}
 	if r := routes.Match(inv, res.Catalog.Requests[0]); r == nil {
 		t.Fatal("a request with a query does not reach its route")
+	}
+}
+
+// TestJSONErrors: json-errors adds an Accept: application/json twin after
+// each error variant, never after the ok request, and the twins do not
+// cover a route.
+func TestJSONErrors(t *testing.T) {
+	p := project(t, config.Config{
+		Templates:  []string{"ok", "not-found", "anonymous", "empty-body", "json-errors"},
+		Identities: map[string]config.Identity{"admin": {Env: "X"}},
+		Generate:   config.Generate{Identity: "admin"},
+		Params:     []config.Param{{Name: "id", Value: "1"}},
+	})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"PUT"}, Path: "/api/items/{id}", Auth: true, Body: json.RawMessage(`{"name":"x"}`), BodyType: "application/json"},
+	}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	got := map[string]catalog.Request{}
+	for _, r := range res.Catalog.Requests {
+		ids, got[r.ID] = append(ids, r.ID), r
+	}
+	want := []string{"put-api-items-id",
+		"put-api-items-id-not-found", "put-api-items-id-not-found-json",
+		"put-api-items-id-anonymous", "put-api-items-id-anonymous-json",
+		"put-api-items-id-empty-body", "put-api-items-id-empty-body-json"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ids\n got %v\nwant %v", ids, want)
+	}
+	j := got["put-api-items-id-anonymous-json"]
+	if j.Identity != "" || j.Source.Template != "json-errors" || string(j.Body) != `{"name":"x"}` ||
+		!reflect.DeepEqual(j.Headers, [][2]string{{"accept", "application/json"}, {"content-type", "application/json"}}) {
+		t.Errorf("anonymous json twin: %+v", j)
+	}
+	if got["put-api-items-id-not-found"].Headers[0][0] == "accept" {
+		t.Error("the error variant itself changed")
+	}
+	// A route that takes files: the empty-body twin sends an empty form too.
+	inv.Routes[0].Files = []routes.FileField{{Field: "photo", Kind: "png"}}
+	withFiles, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range withFiles.Catalog.Requests {
+		if r.Multipart == nil || strings.Contains(r.ID, "empty-body") != (len(r.Multipart.Files) == 0) {
+			t.Errorf("multipart of %s: %+v", r.ID, r.Multipart)
+		}
+	}
+	// Only the ok request covers the route.
+	res.Catalog.Requests = res.Catalog.Requests[1:]
+	if c := routes.CheckWith(inv, res.Catalog, &routes.Exclusions{}, nil); len(c.Covered) != 0 {
+		t.Errorf("an error variant covers: %+v", c)
 	}
 }

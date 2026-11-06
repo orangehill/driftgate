@@ -334,6 +334,20 @@ type Exclusion struct {
 type Exclusions struct {
 	Version int         `yaml:"version"`
 	Routes  []Exclusion `yaml:"routes"`
+	// KnownFailures acknowledge requests meant to succeed that fail in the
+	// baseline: they stay in the catalog and are compared, and coverage
+	// lists them instead of failing on them.
+	KnownFailures []KnownFailure `yaml:"known_failures,omitempty"`
+}
+
+// KnownFailure acknowledges a known error in the baseline.
+type KnownFailure struct {
+	Request string `yaml:"request"` // request ID or glob
+	Reason  string `yaml:"reason"`
+	Ref     string `yaml:"ref,omitempty"` // ticket or link
+	// Status narrows it to one failure: a status (500), a class (5xx,
+	// 4xx), error (no answer) or timeout; empty: any failure.
+	Status string `yaml:"status,omitempty"`
 }
 
 // onlyDocument reports whether dec, past its first document, holds nothing
@@ -374,6 +388,14 @@ func LoadExclusions(path string) (*Exclusions, error) {
 	for i, x := range e.Routes {
 		if x.Route == "" || strings.TrimSpace(x.Reason) == "" {
 			return nil, fmt.Errorf("%s: exclusion %d needs route and reason", path, i+1)
+		}
+	}
+	for i, k := range e.KnownFailures {
+		if k.Request == "" || strings.TrimSpace(k.Reason) == "" {
+			return nil, fmt.Errorf("%s: known failure %d needs request and reason", path, i+1)
+		}
+		if !validKnownStatus(k.Status) {
+			return nil, fmt.Errorf("%s: known failure %d: status %q is not a status (500), a class (5xx), error or timeout", path, i+1, k.Status)
 		}
 	}
 	return &e, nil
@@ -502,96 +524,6 @@ func Match(inv *Inventory, req catalog.Request) *Route {
 		}
 	}
 	return best
-}
-
-// Coverage is the result of checking a catalog against the inventory.
-type Coverage struct {
-	Covered   []string            // route keys reached by a request
-	Excluded  map[string]string   // route key → reason
-	Uncovered []string            // neither reached by a request that should succeed nor excluded
-	Negative  []string            // reached only by requests that expect an error (not-found, invalid-param…); also in Uncovered
-	Requests  map[string][]string // route key → request IDs
-	Unknown   []string            // requests that reach no route
-	Stale     []string            // exclusions that match no route
-	NoBody    []string            // routes that take a body and have no sample
-}
-
-// Check computes coverage.
-func Check(inv *Inventory, cat *catalog.Catalog, excl *Exclusions) *Coverage {
-	// Coverage is counted per method of a route (see Units): GET /items and
-	// POST /items are checked separately.
-	c := &Coverage{Excluded: map[string]string{}, Requests: map[string][]string{}}
-	unitKey := func(r *Route, unit string) string {
-		k := unit + " " + r.Path
-		if r.Domain != "" {
-			k = r.Domain + " " + k
-		}
-		if r.Target != "" {
-			k = r.Target + ": " + k
-		}
-		return k
-	}
-	positive := map[string]bool{}
-	for _, req := range cat.Requests {
-		if req.IsCommand() {
-			continue // a command step reaches no route
-		}
-		r := Match(inv, req)
-		if r == nil {
-			c.Unknown = append(c.Unknown, req.ID)
-			continue
-		}
-		k := unitKey(r, r.UnitOf(req.Method))
-		c.Requests[k] = append(c.Requests[k], req.ID)
-		if !expectsError(req) {
-			positive[k] = true
-		}
-	}
-	used := map[int]bool{}
-	for i := range inv.Routes {
-		r := &inv.Routes[i]
-		for _, unit := range r.Units() {
-			k := unitKey(r, unit)
-			switch x := excl.ExcludedUnit(*r, unit); {
-			case positive[k]:
-				c.Covered = append(c.Covered, k)
-			case x != nil:
-				c.Excluded[k] = x.Reason
-			default:
-				c.Uncovered = append(c.Uncovered, k)
-				if len(c.Requests[k]) > 0 {
-					c.Negative = append(c.Negative, k)
-				}
-			}
-			if takesBody(Route{Methods: []string{unit}}) && len(r.Body) == 0 && excl.ExcludedUnit(*r, unit) == nil {
-				c.NoBody = append(c.NoBody, k)
-			}
-		}
-		for i := range excl.Routes {
-			if excl.Routes[i].excludes(*r) {
-				used[i] = true
-			}
-		}
-	}
-	for i, x := range excl.Routes {
-		if !used[i] {
-			c.Stale = append(c.Stale, x.Route)
-		}
-	}
-	return c
-}
-
-// expectsError reports a generated request that checks an error case: it
-// shows the route answers, not that it works.
-func expectsError(r catalog.Request) bool {
-	if r.Source == nil {
-		return false
-	}
-	switch r.Source.Template {
-	case "not-found", "invalid-param", "anonymous", "empty-body":
-		return true
-	}
-	return false
 }
 
 func takesBody(r Route) bool {

@@ -59,11 +59,36 @@ func TestCompareTimingsAndKeyedArrays(t *testing.T) {
 	if _, out, _ := runCLI(t, "report", "--config", cfg, "--format", "markdown"); !strings.Contains(out, "pub-news 100 → 900 ms") {
 		t.Errorf("markdown:\n%s", out)
 	}
+	if code, out, _ := runCLI(t, "report", "--config", cfg, "--format", "junit", "--exit-code"); code != ExitDrift || !strings.Contains(out, `<property name="slower:pub-news" value="100 → 900 ms">`) {
+		t.Errorf("junit: %d\n%s", code, out)
+	}
 	// Slower but the same responses: still clean.
 	l55, _ := p.Capture("l55")
 	write(t, filepath.Join(l55.Dir, "timings.json"), `{"pub-news":5000,"api-me":4000,"mut-login":5000}`)
 	if code, out, _ := runCLI(t, "compare", "l55", "--config", cfg); code != ExitClean || !strings.Contains(out, "3 requests at least 2×") {
 		t.Errorf("clean but slower: %d\n%s", code, out)
+	}
+}
+
+// TestRepeatKeepsMedianTimings: with --repeat, the capture kept holds the
+// median time of each request over the runs.
+func TestRepeatKeepsMedianTimings(t *testing.T) {
+	_, cfg := setsFixture(t)
+	p, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := []string{"l56", "l55"}
+	first, _ := p.Capture("l56")
+	second, _ := p.Capture("l55")
+	write(t, filepath.Join(first.Dir, "timings.json"), `{"pub-news":900,"api-me":40}`)
+	write(t, filepath.Join(second.Dir, "timings.json"), `{"pub-news":100,"api-me":45,"mut-login":50}`)
+	if err := keepMedianTimings(p, tags); err != nil {
+		t.Fatal(err)
+	}
+	got := timings(first)
+	if got["pub-news"] != 500 || got["api-me"] != 42 || got["mut-login"] != 50 {
+		t.Errorf("median timings %v", got)
 	}
 }
 

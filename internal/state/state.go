@@ -238,11 +238,17 @@ func (c *Command) Fingerprint(ctx context.Context, items []string) (Fingerprint,
 // so a working restore or migration does not fill the report with its own
 // messages; only the end of it is kept.
 func Run(ctx context.Context, root string, argv, env []string, log io.Writer) error {
+	return RunIn(ctx, root, nil, argv, env, log)
+}
+
+// RunIn is Run from dir, with stdin (nil: none) as standard input.
+func RunIn(ctx context.Context, dir string, stdin io.Reader, argv, env []string, log io.Writer) error {
 	if len(argv) == 0 {
 		return nil
 	}
 	cmd := procx.Command(ctx, argv[0], argv[1:]...)
-	cmd.Dir = root
+	cmd.Dir = dir
+	cmd.Stdin = stdin
 	cmd.Env = append(secret.Environ(), env...)
 	out := &tail{max: 64 << 10}
 	cmd.Stdout, cmd.Stderr = out, out

@@ -103,9 +103,23 @@ func TestCommandLine(t *testing.T) {
 		{[]string{"env", "API_TOKEN=s3cr", "MYSQL_PWD=s3cr", "DB_PASSWORD=s3cr", "APP_ENV=local"}, `env API_TOKEN=*** MYSQL_PWD=*** DB_PASSWORD=*** APP_ENV=local`},
 		{[]string{"php", "artisan", "migrate:fresh", "--seed", "--force"}, `php artisan migrate:fresh --seed --force`},
 	} {
-		got := commandLine(c.cmd)
+		got := commandLine(config.Command{Run: c.cmd})
 		if got != c.want || strings.Contains(got, "s3cr") {
 			t.Errorf("%q: %s, want %s", c.cmd, got, c.want)
+		}
+	}
+	// The mapping form: its stdin file and dir follow, each a word of its
+	// own; a -p before them never makes them its value.
+	for _, c := range []struct {
+		cmd  config.Command
+		want string
+	}{
+		{config.Command{Run: []string{"mysql", "-ps3cr", "shop"}, Stdin: "~/Data/shop.sql"}, `mysql -p*** shop < ~/Data/shop.sql`},
+		{config.Command{Run: []string{"mysql", "-u", "root", "-p"}, Stdin: "dump.sql", Dir: "my db"}, `mysql -u root -p < dump.sql (in "my db")`},
+		{config.Command{Run: []string{"psql", "-d", "app"}, Stdin: "postgres://app:s3cr@db/app.sql"}, `psql -d app < postgres://app:***@db/app.sql`},
+	} {
+		if got := commandLine(c.cmd); got != c.want || strings.Contains(got, "s3cr") {
+			t.Errorf("%+v: %s, want %s", c.cmd, got, c.want)
 		}
 	}
 }

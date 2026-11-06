@@ -17,6 +17,7 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/discover"
 	"github.com/orangehill/driftgate/internal/generate"
+	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/har"
 	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/report"
@@ -274,8 +275,12 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		return 0, configErr("generated catalog: %v", err)
 	}
 	added, removed, changed := diffCatalogs(cat, res.Catalog)
-	fmt.Fprintf(out, "%d generated requests; against %s: %d added, %d removed, %d changed\n",
-		res.Generated, p.Layout.Catalog, len(added), len(removed), len(changed))
+	twins := ""
+	if n := countTemplate(res.Catalog, routes.JSONErrors); n > 0 {
+		twins = fmt.Sprintf(" (%d of them %s)", n, routes.JSONErrors)
+	}
+	fmt.Fprintf(out, "%d generated requests%s; against %s: %d added, %d removed, %d changed\n",
+		res.Generated, twins, p.Layout.Catalog, len(added), len(removed), len(changed))
 	list := func(label string, ids []string) {
 		for i, id := range ids {
 			if i == 30 {
@@ -291,6 +296,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	if len(res.Skipped) > 0 {
 		printSkipped(out, res.Skipped, rel(p.Root, p.Layout.Config))
 	}
+	jsonErrorsNote(p, out, o.check)
 	differs := len(added)+len(removed)+len(changed) > 0
 	switch {
 	case o.write:
@@ -349,6 +355,7 @@ func coverageCmd(args []string, out io.Writer) (int, error) {
 	fs := flag.NewFlagSet("coverage", flag.ContinueOnError)
 	cfg := fs.String("config", "", "")
 	format := fs.String("format", "text", "")
+	baseline := fs.String("baseline", "", "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -369,12 +376,87 @@ func coverageCmd(args []string, out io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return checkCoverage(sel, cat, inv, excl, *format, out)
+	// The default baseline is checked when it exists; one named must exist;
+	// none checks the catalog alone.
+	var answers map[string]routes.Answer
+	if *baseline != "none" {
+		name := *baseline
+		if name == "" {
+			name = "local"
+		}
+		if answers, err = readAnswers(p, name, nil); err != nil {
+			return 0, err
+		}
+		if answers == nil && *baseline != "" {
+			return 0, configErr("baseline %s does not exist (coverage --baseline none checks the catalog alone)", name)
+		}
+	}
+	_, code, err := checkCoverage(sel, cat, inv, excl, answers, *format, out)
+	return code, err
 }
 
 // checkCoverage prints which routes of the selected services the catalog
-// covers, in format text or json; uncovered routes are exit 1.
-func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, format string, out io.Writer) (int, error) {
+// covers, in format text or json; uncovered routes are exit 1. answers are
+// a baseline's by request ID (nil without one): a request covers its route
+// only when it did not fail there.
+func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer, format string, out io.Writer) (*routes.Coverage, int, error) {
+	c := coverageOf(sel, cat, inv, excl, answers)
+	inv = sel.routes(inv)
+	code := ExitClean
+	if len(c.Uncovered) > 0 {
+		code = ExitDrift
+	}
+	h := c.Health
+	if format == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", " ")
+		return c, code, enc.Encode(map[string]any{
+			"routes": len(inv.Routes), "covered": c.Covered, "excluded": c.Excluded, "uncovered": c.Uncovered,
+			"only_error_cases": c.Negative, "unknown_requests": c.Unknown, "stale_exclusions": c.Stale, "routes_without_body": c.NoBody,
+			"baseline_checked": answers != nil, "failed_in_baseline": c.Failed, "requests_failed_in_baseline": h.Failed,
+			"known_failure_routes": c.Known, "known_failures": h.Known, "stale_known_failures": h.Stale, "broad_known_failures": h.Broad,
+			"only_error_answers": c.ErrorOnly,
+		})
+	}
+	known := ""
+	if len(c.Known) > 0 {
+		known = fmt.Sprintf(", %d with known failures", len(c.Known))
+	}
+	fmt.Fprintf(out, "%d routes: %d covered, %d excluded, %d uncovered%s\n", len(inv.Routes), len(c.Covered), len(c.Excluded), len(c.Uncovered), known)
+	apart := map[string]bool{}
+	for _, k := range c.Negative {
+		apart[k] = true
+	}
+	for _, f := range c.Failed {
+		apart[f.Route] = true
+	}
+	var none []string
+	for _, k := range c.Uncovered {
+		if !apart[k] {
+			none = append(none, k)
+		}
+	}
+	section(out, "Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
+	section(out, "Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
+	section(out, failedRoutesTitle, failedRouteLines(c.Failed))
+	section(out, failedRequestsTitle, failureLines(h.Failed))
+	section(out, "Routes reached only by requests that answered an error (written by hand; covered, but nothing shows the route works)", c.ErrorOnly)
+	section(out, knownTitle, failureLines(h.Known))
+	section(out, staleKnownTitle, h.Stale)
+	section(out, fmt.Sprintf("Known failures that acknowledge failures on more than %d routes (a glob that broad also hides new failures: narrow it)", routes.BroadKnown), h.Broad)
+	section(out, "Catalog requests that reach no route", c.Unknown)
+	section(out, "Exclusions that match no route", c.Stale)
+	section(out, "Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
+	if code == ExitClean {
+		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
+	}
+	return c, code, nil
+}
+
+// coverageOf is the coverage of the selected services' routes by their
+// requests; answers are a baseline's by request ID (nil without one).
+func coverageOf(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer) *routes.Coverage {
+	whole := cat
 	inv, cat = sel.routes(inv), sel.requests(cat)
 	if sel != nil {
 		var kept []routes.Exclusion
@@ -384,50 +466,28 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 			}
 		}
 		excl.Routes = kept
+		// Known failures of the other services' requests are theirs.
+		var known []routes.KnownFailure
+		for _, k := range excl.KnownFailures {
+			if matchesAny(k.Request, cat) || !matchesAny(k.Request, whole) {
+				known = append(known, k)
+			}
+		}
+		excl.KnownFailures = known
 	}
-	c := routes.Check(inv, cat, excl)
+	c := routes.CheckWith(inv, cat, excl, answers)
 	c.Stale = staleExclusions(excl, c.Stale)
-	code := ExitClean
-	if len(c.Uncovered) > 0 {
-		code = ExitDrift
-	}
-	if format == "json" {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", " ")
-		return code, enc.Encode(map[string]any{
-			"routes": len(inv.Routes), "covered": c.Covered, "excluded": c.Excluded, "uncovered": c.Uncovered,
-			"only_error_cases": c.Negative, "unknown_requests": c.Unknown, "stale_exclusions": c.Stale, "routes_without_body": c.NoBody,
-		})
-	}
-	fmt.Fprintf(out, "%d routes: %d covered, %d excluded, %d uncovered\n", len(inv.Routes), len(c.Covered), len(c.Excluded), len(c.Uncovered))
-	section := func(title string, items []string) {
-		if len(items) == 0 {
-			return
-		}
-		fmt.Fprintf(out, "\n%s:\n", title)
-		for _, it := range items {
-			fmt.Fprintf(out, "  %s\n", it)
+	return c
+}
+
+// matchesAny reports whether a glob matches the ID of a request of cat.
+func matchesAny(pattern string, cat *catalog.Catalog) bool {
+	for _, r := range cat.Requests {
+		if glob.Match(pattern, r.ID) {
+			return true
 		}
 	}
-	negative := map[string]bool{}
-	for _, k := range c.Negative {
-		negative[k] = true
-	}
-	var none []string
-	for _, k := range c.Uncovered {
-		if !negative[k] {
-			none = append(none, k)
-		}
-	}
-	section("Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
-	section("Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
-	section("Catalog requests that reach no route", c.Unknown)
-	section("Exclusions that match no route", c.Stale)
-	section("Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
-	if code == ExitClean {
-		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
-	}
-	return code, nil
+	return false
 }
 
 func harCmd(args []string, out io.Writer) error {

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -80,8 +81,9 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	// Each method of a route is generated unless it is excluded or (without
 	// --all) a hand-written entry already reaches it.
+	byHand := reached(o.Inventory, manual)
 	g.skipUnit = func(route routes.Route, unit string) bool {
-		return o.Exclusions.ExcludedUnit(route, unit) != nil || (!o.All && reached(o.Inventory, manual, route, unit))
+		return o.Exclusions.ExcludedUnit(route, unit) != nil || (!o.All && byHand[reachKey(route, unit)])
 	}
 	g.assignBases(o.Inventory.Routes)
 	var generated []catalog.Request
@@ -99,15 +101,21 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	return g.res, nil
 }
 
-// reached reports whether an entry written by hand already reaches the
-// route with this method.
-func reached(inv *routes.Inventory, cat *catalog.Catalog, route routes.Route, unit string) bool {
+// reached is the route methods the entries written by hand reach, by
+// reachKey.
+func reached(inv *routes.Inventory, cat *catalog.Catalog) map[string]bool {
+	m := routes.NewMatcher(inv)
+	out := map[string]bool{}
 	for _, r := range cat.Requests {
-		if m := routes.Match(inv, r); m != nil && m.Target == route.Target && m.Key() == route.Key() && m.Domain == route.Domain && m.UnitOf(r.Method) == unit {
-			return true
+		if route := m.Match(r); route != nil {
+			out[reachKey(*route, route.UnitOf(r.Method))] = true
 		}
 	}
-	return false
+	return out
+}
+
+func reachKey(route routes.Route, unit string) string {
+	return route.Target + "\x00" + route.Domain + "\x00" + route.Key() + "\x00" + unit
 }
 
 type generator struct {
@@ -530,7 +538,46 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 			}
 		}
 	}
-	return withMultipart(route, out), nil
+	out = withMultipart(route, out)
+	if slices.Contains(templates, routes.JSONErrors) {
+		out = g.jsonErrors(route, out)
+	}
+	return out, nil
+}
+
+// jsonErrors adds after each request of an error template the same request
+// with Accept: application/json (ID suffix -json): frameworks such as
+// Laravel, Symfony, Rails and Spring Boot render an error as a page or a
+// redirect for a browser and as JSON for an API client, and a change of
+// the JSON error body would otherwise go unseen.
+func (g *generator) jsonErrors(route routes.Route, reqs []catalog.Request) []catalog.Request {
+	out := make([]catalog.Request, 0, 2*len(reqs))
+	for _, r := range reqs {
+		out = append(out, r)
+		if r.Source == nil || !slices.Contains(routes.ErrorTemplates, r.Source.Template) {
+			continue
+		}
+		j := r
+		j.ID = g.id(r.ID + "-json")
+		j.Headers = [][2]string{{"accept", "application/json"}}
+		for _, h := range r.Headers {
+			if !strings.EqualFold(h[0], "accept") {
+				j.Headers = append(j.Headers, h)
+			}
+		}
+		j.Source = &catalog.Source{Route: r.Source.Route, Template: routes.JSONErrors}
+		if r.Multipart != nil {
+			mp := *r.Multipart
+			j.Multipart = &mp
+		}
+		j.Storage = g.storage(j.ID)
+		j.Observe = observed(g.o.Project, route.Target, r.Method, route.Path, j.ID)
+		if len(r.ParamsFrom) > 0 {
+			g.from = append(g.from, j)
+		}
+		out = append(out, j)
+	}
+	return out
 }
 
 // sequences puts every request that takes a value from a response into one

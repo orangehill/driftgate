@@ -38,6 +38,8 @@ type exitError struct {
 
 func (e *exitError) Error() string { return e.err.Error() }
 
+func (e *exitError) Unwrap() error { return e.err }
+
 func configErr(format string, a ...any) error {
 	return &exitError{ExitConfig, fmt.Errorf(format, a...)}
 }
@@ -143,6 +145,8 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 		code, err = reviewCmd(args[1:], stdout)
 	case "accept":
 		code, err = acceptCmd(args[1:], stdout)
+	case "expect":
+		code, err = expectCmd(args[1:], stdout)
 	case "verify":
 		code, err = verifyCmd(args[1:], stdout)
 	case "bisect":
@@ -166,6 +170,10 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 	case "setup":
 		code, err = setupCmd(args[1:], stdout, stderr)
 	case "baselines":
+		if len(args) > 1 && args[1] == "rebase" {
+			code, err = rebaseCmd(args[2:], stdout)
+			break
+		}
 		err = baselinesCmd(args[1:], stdout, stderr)
 	case "key":
 		if args[1] != "create" {
@@ -177,7 +185,7 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 	case "help", "-h", "--help":
 		err = helpCmd(args[1:], stdout)
 	default:
-		err = configErr("unknown command %q (run 'driftgate help')", args[0])
+		err = configErr("unknown command %q (run 'driftgate help'; what to use for a task: %s)", args[0], tasksDoc)
 	}
 	return code, err
 }
