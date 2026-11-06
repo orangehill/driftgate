@@ -615,9 +615,12 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   it were). Each `DEFINER` is first tried on a short-lived probe object,
   so a restore the login may not create a trigger or view for stops
   before it drops anything, and names the object; a seed stops before it
-  drops the old pristine copy. A seed tries the probe in the working
-  database: a view the login may not create there at all is not tried,
-  and its refusal then comes from the new pristine copy. The server may
+  drops the old pristine copy. A probe cannot be tried in two cases: a
+  seed tries it in the working database, where the login may not create
+  the view at all, and a trigger's probe needs a table to sit on, which a
+  login with `TRIGGER` on some tables only does not have in a database
+  without those tables. There the refusal comes from the real `CREATE`,
+  after the drops, and the message names what is missing. The server may
   still refuse a drop (on MySQL, an object whose `DEFINER` has
   `SYSTEM_USER`, such as root): the objects dropped before it are then
   made again from the pristine copy, and the message names any that
