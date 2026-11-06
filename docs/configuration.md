@@ -611,18 +611,22 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   `SET_USER_ID` before, and `SYSTEM_USER` for an account that has it, such
   as root), `SET USER` (MariaDB) or `SUPER`, and with the binary log on, a
   login without `SUPER` may create a trigger only when
-  `log_bin_trust_function_creators` is on. Each `DEFINER` is first tried
-  on a short-lived probe object, so a seed or restore the login may not
-  create a trigger or view for stops before it drops anything, and names
-  the object. The server may still refuse a drop (on MySQL, an object
-  whose `DEFINER` has `SYSTEM_USER`, such as root): the objects dropped
-  before it are then made again from the pristine copy, and the message
-  names any that could not be, which the next successful restore makes
-  again. Best: create the triggers and views with the application's
-  login as their `DEFINER` (run the migrations as it) and seed again.
+  `log_bin_trust_function_creators` is on (a Galera node checks as if
+  it were). Each `DEFINER` is first tried on a short-lived probe object,
+  so a restore the login may not create a trigger or view for stops
+  before it drops anything, and names the object; a seed stops before it
+  drops the old pristine copy. A seed tries the probe in the working
+  database: a view the login may not create there at all is not tried,
+  and its refusal then comes from the new pristine copy. The server may
+  still refuse a drop (on MySQL, an object whose `DEFINER` has
+  `SYSTEM_USER`, such as root): the objects dropped before it are then
+  made again from the pristine copy, and the message names any that
+  could not be, which the next successful restore makes again. Best:
+  create the triggers and views with the application's login as their
+  `DEFINER` (run the migrations as it) and seed again.
 - MySQL/MariaDB: the prefix `dgt_probe_` is reserved for those probes;
-  an object named `dgt_probe_` and 16 hexadecimal digits is never
-  fingerprinted, copied or restored, and a seed or restore drops it.
+  an object named `dgt_probe_` and 16 lowercase hexadecimal digits is
+  never fingerprinted, copied or restored, and a seed or restore drops it.
 - Give the DSN a user limited to the working and pristine databases (for
   PostgreSQL with `CREATEDB`), not a superuser and not one with MySQL's
   `FILE` privilege. The one exception is a disposable database in a local
