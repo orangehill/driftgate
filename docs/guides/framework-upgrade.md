@@ -92,7 +92,7 @@ driftgate expect group:3 --ref APP-512 --reason "Dates are ISO 8601 since Larave
 When the ticket is merged and the baseline is rebased on the merged code
 (`driftgate baselines rebase local --from <capture> --reason "…"
 --allow-freeze`), the expectations it now holds are closed; `driftgate
-expect --drop APP-512` removes one that is no longer wanted.
+expect --drop APP-512 --reason "…"` removes one that is no longer wanted.
 
 ## 4. When the cause is not obvious
 

@@ -271,7 +271,7 @@ func (r *Report) UnmetNote() string {
 		}
 		list = append(list, fmt.Sprintf("%s %s (%s)", u.Ref, u.Request, u.Why))
 	}
-	return fmt.Sprintf("warning: %s not met in this comparison (driftgate expect --drop <ref> removes a stale one): %s",
+	return fmt.Sprintf("warning: %s not met in this comparison (driftgate expect --drop <ref> --reason \"…\" removes a stale one): %s",
 		plural(n, "expectation"), strings.Join(list, "; "))
 }
 

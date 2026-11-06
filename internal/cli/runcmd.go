@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/orangehill/driftgate/internal/baseline"
 	"github.com/orangehill/driftgate/internal/capture"
@@ -369,7 +371,10 @@ func failReasons(out io.Writer, reasons []string) {
 // one of its name: they name drifts against that one.
 func leftOver(p *config.Project, base *snapshot.Set, name string, out io.Writer) {
 	dir := baseline.ExpectDir(base.Dir)
-	if left, _ := os.ReadDir(dir); len(left) > 0 {
+	left, _ := os.ReadDir(dir)
+	// A file a killed write left is no expectation (baseline.readRefs).
+	left = slices.DeleteFunc(left, func(e os.DirEntry) bool { return strings.HasPrefix(e.Name(), snapshot.TempPrefix) })
+	if len(left) > 0 {
 		fmt.Fprintf(out, "warning: %s/ holds expectations of an earlier baseline %s; they name drifts against that one, so check them (driftgate expect --drop <ref> --reason …, or remove the folder)\n",
 			rel(p.Root, dir), name)
 	}

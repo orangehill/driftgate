@@ -566,7 +566,7 @@ func closeSatisfied(p *config.Project, base *snapshot.Set, name, why, capture st
 		fmt.Fprintf(out, "closed the expectations of %s the baseline now holds: %s (%s)\n", ref, strings.Join(ids, ", "), rel(p.Root, refPath(base, ref)))
 	}
 	if kept > 0 {
-		fmt.Fprintf(out, "%s kept: their drifts are not all in the baseline (driftgate expect --drop <ref> removes one)\n", count(kept, "expectation", "expectations"))
+		fmt.Fprintf(out, "%s kept: their drifts are not all in the baseline (driftgate expect --drop <ref> --reason \"…\" removes one)\n", count(kept, "expectation", "expectations"))
 	}
 	return nil
 }

@@ -1528,7 +1528,7 @@ rebased baseline local on capture main: 7 requests changed
   ...
 logged in .driftgate/baselines/local/acceptances.jsonl
 closed the expectations of API-9 the baseline now holds: faq-create, news-item (.driftgate/baselines/local.expectations/API-9.jsonl)
-1 expectation kept: their drifts are not all in the baseline (driftgate expect --drop <ref> removes one)
+1 expectation kept: their drifts are not all in the baseline (driftgate expect --drop <ref> --reason "…" removes one)
 ```
 
 ## key create
