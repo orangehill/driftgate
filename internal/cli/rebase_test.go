@@ -166,3 +166,22 @@ func TestRunWarnsOfLeftOverExpectations(t *testing.T) {
 		t.Fatalf("run: %d\n%s", code, out)
 	}
 }
+
+// TestRunIgnoresLeftOverWrite: a folder of expectations that holds only a
+// file a killed write left holds no expectations: a new baseline made
+// there gives no warning.
+func TestRunIgnoresLeftOverWrite(t *testing.T) {
+	p, base := expectProject(t)
+	os.RemoveAll(base)
+	dir := baseline.ExpectDir(base)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, snapshot.TempPrefix+"123"), []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := runCLI(t, "run", "--config", p.cfg)
+	if code != ExitClean || strings.Contains(out, "holds expectations of an earlier baseline") {
+		t.Fatalf("run: %d\n%s", code, out)
+	}
+}
