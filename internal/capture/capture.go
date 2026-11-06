@@ -373,27 +373,13 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 	// The guards are checked once restore and prepare have set up the
 	// environment they check, before the first request, so one that fails
-	// stops the capture in seconds, not after the read-only requests. They
-	// only check: one that writes to the tracked state is refused here,
-	// rather than taken for a read-only request that wrote.
-	if len(units) > 0 && len(p.Guards) > 0 {
-		var guarded states
-		if r.sum.Tracked {
-			if guarded, err = tr.fingerprint(ctx, nil); err != nil {
-				return nil, err
-			}
-		}
+	// stops the capture in seconds, not after the read-only requests; and
+	// before the fingerprint the read-only phase starts from, so a write
+	// of one (guards only check, but a command may log itself) is part of
+	// that state and never taken for a request's.
+	if len(units) > 0 {
 		if err := checkGuards(ctx, p, opt, true); err != nil {
 			return nil, err
-		}
-		if r.sum.Tracked {
-			now, err := tr.fingerprint(ctx, nil)
-			if err != nil {
-				return nil, err
-			}
-			if d := flatten(diffStates(guarded, now)); len(d) > 0 {
-				return nil, configErr("the guards changed the tracked state (%v): a guard must only check, never write to the databases under state: (a command that logs itself to a table writes); change it so it does not", limit(d, 10))
-			}
 		}
 	}
 	before, err := tr.fingerprint(ctx, nil)

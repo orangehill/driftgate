@@ -630,15 +630,14 @@ func guardProject(t *testing.T, guard, requests string) (cfg, root string) {
 	return cfg, root
 }
 
-// TestGuardThatWrites: a guard that writes to the tracked state is
-// refused as such before any request, not taken for a read-only request
-// that wrote.
+// TestGuardThatWrites: a guard that writes to the tracked state (it
+// should only check) does not stop the capture, and its write is part of
+// the state the read-only requests start from, never taken for theirs.
 func TestGuardThatWrites(t *testing.T) {
 	cfg, _ := guardProject(t, `["sh", "-c", "echo row >> data"]`,
 		`{"id":"news","method":"GET","path":"/news","storage":"public"},{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`)
 	code, out, errOut := runCLI(t, "capture", "c", "--config", cfg)
-	if code != ExitConfig || !strings.Contains(errOut, "the guards changed the tracked state") || strings.Contains(out, "read-only requests changed") ||
-		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) {
+	if code != ExitClean || strings.Contains(out, "read-only requests changed") || strings.Contains(out, "mutates: true") {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
 }
