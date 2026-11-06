@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/compare"
@@ -108,16 +109,49 @@ func (r Request) Mutating() bool {
 // written in the path itself (17 of /api/users/17), not a {parameter}:
 // on another copy of the data that id may be a real record. Empty when
 // there is none; the query is not read.
+//
+// Two kinds of number are not ids and are passed over: an API version, a
+// number of one or two digits right after a segment api or v (/api/2/users,
+// /v/1/items; v2 is not a number anyway), and a date, a year from 1900 to
+// 2099 followed by a month (1 to 12) and perhaps a day (1 to 31), as in
+// /reports/2024/05 or /posts/2024/5/17. A year alone (/stats/2024) may as
+// well be an id, and is one.
 func LiteralID(path string) string {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
-	for _, seg := range strings.Split(path, "/") {
-		if seg != "" && strings.Trim(seg, "0123456789") == "" {
-			return seg
+	segs := strings.Split(path, "/")
+	for i := 0; i < len(segs); i++ {
+		seg := segs[i]
+		if !number(seg) {
+			continue
 		}
+		if i > 0 && len(seg) <= 2 && (strings.EqualFold(segs[i-1], "api") || strings.EqualFold(segs[i-1], "v")) {
+			continue // a version
+		}
+		if inRange(seg, 4, 1900, 2099) && i+1 < len(segs) && inRange(segs[i+1], 2, 1, 12) {
+			i++ // the month
+			if i+1 < len(segs) && inRange(segs[i+1], 2, 1, 31) {
+				i++ // the day
+			}
+			continue
+		}
+		return seg
 	}
 	return ""
+}
+
+// number reports a path segment of digits only.
+func number(seg string) bool { return seg != "" && strings.Trim(seg, "0123456789") == "" }
+
+// inRange reports a segment of up to digits digits whose value is from lo
+// to hi.
+func inRange(seg string, digits, lo, hi int) bool {
+	if !number(seg) || len(seg) > digits {
+		return false
+	}
+	n, _ := strconv.Atoi(seg)
+	return lo <= n && n <= hi
 }
 
 // MutatingByMethod reports a request that changes data only because of its
