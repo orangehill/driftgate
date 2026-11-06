@@ -77,12 +77,13 @@ func ParseConnectTo(s string) (host, port string, err error) {
 	return host, port, nil
 }
 
-// ConnectTo makes every connection to the host and port of baseURL (its
-// scheme's port when it names none) go to addr (a host name or IP address
-// with an optional port; without one, the same port), as curl
-// --connect-to HOST:PORT:… does; another port of that host is not
-// changed: requests keep the URL's
-// host name in the Host header, TLS server name and certificate check.
+// ConnectTo makes the connections to the host name of baseURL go to addr
+// (a host name or IP address with an optional port), as curl
+// --connect-to does: requests keep the URL's host name in the Host
+// header, TLS server name and certificate check. The host name never goes
+// where DNS says: without a port in addr, every port of it goes to addr's
+// host on that port; with one, base_url's port (its scheme's when it
+// names none) goes to addr, and any other port of that host is refused.
 // The allow-list applies to addr, the address actually connected to, and
 // Check of the host name checks addr. Empty addr changes nothing.
 func (a *Allow) ConnectTo(baseURL, addr string) error {
@@ -106,15 +107,20 @@ func (a *Allow) ConnectTo(baseURL, addr string) error {
 }
 
 // pinnedAddr is host and port as a connection to them goes (ConnectTo);
-// an empty port is the base URL's (Check of its host name).
-func (a *Allow) pinnedAddr(host, port string) (string, string) {
-	if to, ok := a.pin[strings.ToLower(host)]; ok && (port == "" || port == to.from) {
-		host = to.host
-		if to.port != "" {
-			port = to.port
-		}
+// an empty port is the base URL's (Check of its host name). Another port
+// of a host name pinned to an address with a port is an error: it never
+// goes where DNS says.
+func (a *Allow) pinnedAddr(host, port string) (string, string, error) {
+	to, ok := a.pin[strings.ToLower(host)]
+	switch {
+	case !ok:
+		return host, port, nil
+	case to.port == "":
+		return to.host, port, nil
+	case port == "" || port == to.from:
+		return to.host, to.port, nil
 	}
-	return host, port
+	return "", "", fmt.Errorf("%w: connect_to covers %s only, not port %s", ErrHostNotAllowed, net.JoinHostPort(host, to.from), port)
 }
 
 func (a *Allow) lookupIP(ctx context.Context, host string) ([]net.IP, error) {
@@ -162,7 +168,7 @@ func (a *Allow) ipAllowed(ip net.IP) bool {
 // every address it resolves to inside an allowed range. A host sent
 // elsewhere (ConnectTo) is checked by where it goes.
 func (a *Allow) Check(ctx context.Context, host string) error {
-	host, _ = a.pinnedAddr(host, "")
+	host, _, _ = a.pinnedAddr(host, "")
 	if a.any || a.names[strings.ToLower(host)] {
 		return nil
 	}
@@ -188,7 +194,9 @@ func (a *Allow) Dial(ctx context.Context, network, addr string) (net.Conn, error
 		return nil, err
 	}
 	if a.pin != nil {
-		host, port = a.pinnedAddr(host, port)
+		if host, port, err = a.pinnedAddr(host, port); err != nil {
+			return nil, err
+		}
 		addr = net.JoinHostPort(host, port)
 	}
 	if a.any || a.names[strings.ToLower(host)] {
