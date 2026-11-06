@@ -135,6 +135,8 @@ type MySQL struct {
 	probeMu    sync.Mutex
 	probed     map[string]bool
 	probeNoted map[string]bool // probes left behind already logged (noteProbe)
+	hooks      *mysqlHooks     // tests only
+	lockNote   sync.Once       // the note that GET_LOCK is not supported
 	login      string
 }
 
@@ -1177,10 +1179,18 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
 	}
+	// The sequences made below, in order: those src has.
+	var seqs []string
+	for _, q := range sequences {
+		if srcObjs.kind[q] == "sequence" {
+			seqs = append(seqs, q)
+		}
+	}
+	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
 	var dropped []dropItem
 	for _, d := range drops {
 		var err error
-		if dropRefused != nil && dropRefused(d.kind, d.name) {
+		if m.hooks != nil && m.hooks.dropRefused != nil && m.hooks.dropRefused(d.kind, d.name) {
 			err = &mysql.MySQLError{Number: 1227, Message: "refused by a test"}
 		} else {
 			err = dropObject(ctx, c, dst, d.name, d.kind)
@@ -1189,34 +1199,25 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost != nil {
 				return nil, lost
 			}
-			return nil, undoDrops(dst, dropped, dstObjs.triggers, trigDefs, pending, create, err)
+			return nil, undoDrops(dst, dropped, srcObjs.kind, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
 	}
-	// From here on every trigger of trigDefs and view of pending is
-	// missing from dst until it is made: a failure names them (notMade).
-	extra, err := m.copyTables(ctx, c, src, dst, jobs)
-	if err != nil {
-		return nil, notMade(dst, err, lost, trigDefs, pending)
+	// From here on every sequence of seqs, trigger of trigDefs and view of
+	// pending is missing from dst until it is made: a failure names them
+	// (notMade).
+	var extra map[string]int64
+	if m.hooks != nil && m.hooks.copyFails != nil {
+		err = m.hooks.copyFails()
+	} else {
+		extra, err = m.copyTables(ctx, c, src, dst, jobs)
 	}
-
-	for _, s := range sequences {
-		if srcObjs.kind[s] != "sequence" {
-			continue
-		}
-		def, err := showCreate(ctx, c, "SEQUENCE", src, s)
-		if err != nil {
-			return nil, notMade(dst, err, lost, trigDefs, pending)
-		}
-		if _, err := c.ExecContext(ctx, def); err != nil {
-			return nil, notMade(dst, fmt.Errorf("sequence %s: %w", s, err), lost, trigDefs, pending)
-		}
-		var next int64
-		if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(s)).Scan(&next); err != nil {
-			return nil, notMade(dst, err, lost, trigDefs, pending)
-		}
-		if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(s), next)); err != nil {
-			return nil, notMade(dst, fmt.Errorf("sequence %s: %w", s, err), lost, trigDefs, pending)
+	if err != nil {
+		return nil, notMade(dst, err, lost, seqs, trigDefs, pending)
+	}
+	for i, q := range seqs {
+		if err := makeSeq(q); err != nil {
+			return nil, notMade(dst, err, lost, seqs[i:], trigDefs, pending)
 		}
 	}
 
@@ -1226,7 +1227,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost == nil {
 				err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
 			}
-			return nil, notMade(dst, err, lost, trigDefs[i:], pending)
+			return nil, notMade(dst, err, lost, nil, trigDefs[i:], pending)
 		}
 	}
 
@@ -1237,7 +1238,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		for name, v := range pending {
 			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
 				if lost != nil {
-					return nil, lost
+					return nil, notMade(dst, lost, lost, nil, nil, pending)
 				}
 				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
 				continue
@@ -1245,7 +1246,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			delete(pending, name)
 		}
 		if len(pending) == before { // no view could be created in this pass
-			return nil, notMade(dst, lastErr, nil, nil, pending)
+			return nil, notMade(dst, lastErr, nil, nil, nil, pending)
 		}
 	}
 	return extra, nil
@@ -1294,7 +1295,7 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 	const why = "DriftGate creates triggers and views with their DEFINER and does not change it: a trigger, and a view with SQL SECURITY DEFINER, run with their definer's rights, and the DEFINER is part of the fingerprint"
 	switch {
 	case me.Number == 1419:
-		msg := fmt.Sprintf("%s %s cannot be created in %s: the server writes a binary log and log_bin_trust_function_creators is off, so a login without SUPER may create no trigger; set it on the server (as an administrator: SET PERSIST log_bin_trust_function_creators = 1) or give the login SUPER", kind, name, db)
+		msg := fmt.Sprintf("%s %s cannot be created in %s: the server writes a binary log (or is a Galera node) and log_bin_trust_function_creators is off, so a login without SUPER may create no trigger; set it on the server (as an administrator: SET PERSIST log_bin_trust_function_creators = 1) or give the login SUPER", kind, name, db)
 		if other != "" {
 			msg += fmt.Sprintf(". Its DEFINER %s is not this login (%s) either: %s; grant it, or create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again", other, login, setDefiner)
 		}
@@ -1306,31 +1307,70 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 	return fmt.Errorf("%s %s: %w", kind, name, me)
 }
 
-// dropRefused, set by tests, has the drops it names refused as the server
-// refuses one (1227), without sending them.
-var dropRefused func(kind, name string) bool
+// mysqlHooks, set by tests on a MySQL, make a restore fail where a server
+// would: dropRefused refuses the drops it names (1227) without sending
+// them, and copyFails replaces the copy of the tables with its error.
+type mysqlHooks struct {
+	dropRefused func(kind, name string) bool
+	copyFails   func() error
+}
+
+// copySequence makes sequence q of dst as src has it, where it goes on.
+func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
+	def, err := showCreate(ctx, c, "SEQUENCE", src, q)
+	if err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, def); err != nil {
+		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	var next int64
+	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(q)).Scan(&next); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(q), next)); err != nil {
+		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	return nil
+}
 
 // undoDrops answers a drop the server refused (refused) after the drops
-// of dropped succeeded: the triggers and views among them are made again
-// from their definitions in the pristine copy (trigDefs, in firing order
-// per table, and views), which definerProbe showed the login may create,
-// so dst keeps every trigger and view, those in their pristine form. A
-// trigger is made again next to its pristine neighbour that dst still has
-// (FOLLOWS or PRECEDES; dstTriggers are dst's before the drops), so the
-// firing order is the pristine one. The message names what was made
-// again, what is missing and the next successful restore makes again (its
-// creation failed), and what is gone and no restore makes again (the
-// pristine copy has no such object).
-func undoDrops(dst string, dropped []dropItem, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef, create func(stmt, mode, collation string) error, refused error) error {
+// of dropped succeeded: the sequences, triggers and views among them that
+// the pristine copy has (srcKind; trigDefs, in firing order per table;
+// views) are made again from it, which definerProbe showed the login may
+// do for the triggers and views. A trigger is made again next to its
+// pristine neighbour that dst still has (FOLLOWS or PRECEDES; dstTriggers
+// are dst's before the drops); when the working copy's triggers of that
+// table were reordered, or others stand between, the order may still
+// differ from the pristine one, which the message says. It names what was
+// made again; what is missing and the next successful restore makes again
+// (its creation failed, or it is of another kind in the pristine copy);
+// and what is gone, which no restore makes again (the pristine copy has
+// nothing of that name).
+func undoDrops(dst string, dropped []dropItem, srcKind map[string]string, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
+	create func(stmt, mode, collation string) error, makeSeq func(string) error, refused error) error {
 	var again, missing, gone []string
 	isDropped := map[string]bool{}
+	inTrigDefs := func(name string) bool {
+		return slices.ContainsFunc(trigDefs, func(r map[string]string) bool { return r["name"] == name })
+	}
 	for _, d := range dropped {
 		isDropped[d.kind+" "+d.name] = true
 		switch {
-		case d.kind == "trigger" && !slices.ContainsFunc(trigDefs, func(r map[string]string) bool { return r["name"] == d.name }),
-			d.kind == "view" && views[d.name].def == "",
-			d.kind != "trigger" && d.kind != "view":
+		case d.kind == "trigger" && inTrigDefs(d.name):
+		case d.kind == "trigger":
+			gone = append(gone, "trigger "+d.name)
+		case srcKind[d.name] == "":
 			gone = append(gone, d.kind+" "+d.name)
+		case d.kind == "view" && views[d.name].def != "":
+		case d.kind == "sequence" && srcKind[d.name] == "sequence":
+			if err := makeSeq(d.name); err != nil {
+				missing = append(missing, fmt.Sprintf("sequence %s (%v)", d.name, err))
+			} else {
+				again = append(again, "sequence "+d.name)
+			}
+		default: // another kind in the pristine copy: made by a restore
+			missing = append(missing, fmt.Sprintf("%s %s (a %s in the pristine copy)", d.kind, d.name, srcKind[d.name]))
 		}
 	}
 	// present: the triggers dst has now, by name, with their place.
@@ -1343,6 +1383,7 @@ func undoDrops(dst string, dropped []dropItem, dstTriggers []dbx.MySQLTrigger, t
 	same := func(r map[string]string, tr dbx.MySQLTrigger) bool {
 		return tr.Table == r["table"] && tr.Timing == r["timing"] && tr.Event == r["event"]
 	}
+	triggersAgain := false
 	for i, r := range trigDefs {
 		if !isDropped["trigger "+r["name"]] {
 			continue
@@ -1363,6 +1404,7 @@ func undoDrops(dst string, dropped []dropItem, dstTriggers []dbx.MySQLTrigger, t
 			continue
 		}
 		again = append(again, "trigger "+r["name"])
+		triggersAgain = true
 		present[r["name"]] = dbx.MySQLTrigger{Name: r["name"], Table: r["table"], Timing: r["timing"], Event: r["event"]}
 	}
 	// A view may use another view: create them until no more succeed.
@@ -1394,53 +1436,97 @@ func undoDrops(dst string, dropped []dropItem, dstTriggers []dbx.MySQLTrigger, t
 	more := ""
 	if len(again) > 0 {
 		more += fmt.Sprintf(". Dropped before the refusal and made again from the pristine copy: %s", strings.Join(again, ", "))
+		if triggersAgain {
+			more += " (each trigger next to its pristine neighbour; where the working copy's triggers of a table were reordered, or others stand between, the firing order may differ from the pristine one until the next successful restore)"
+		}
 	}
 	if len(missing) > 0 {
 		more += fmt.Sprintf(". Now missing from %s, and made again by the next successful restore: %s", dst, strings.Join(missing, "; "))
 	}
 	if len(gone) > 0 {
-		more += fmt.Sprintf(". Dropped from %s, as the pristine copy has no such object, which no restore makes again: %s", dst, strings.Join(gone, ", "))
+		more += fmt.Sprintf(". Dropped from %s, as the pristine copy has nothing of that name, which no restore makes again: %s", dst, strings.Join(gone, ", "))
 	}
 	return fmt.Errorf("%w%s", refused, more)
 }
 
-// notMade adds to err, a failure after the drops, the triggers and views
-// that were dropped and are not made again: missing from dst until the
-// next successful restore. A lost session (lost) is returned as it is,
-// with them.
-func notMade(dst string, err, lost error, trigDefs []map[string]string, views map[string]viewDef) error {
+// notMade adds to err, a failure after the drops, the sequences (seqs),
+// triggers and views that are not made yet: missing from dst until the
+// next successful restore. A lost session (lost) is returned in err's
+// place, with them.
+func notMade(dst string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
 	if lost != nil {
 		err = lost
 	}
 	var names []string
+	for _, q := range seqs {
+		names = append(names, "sequence "+q)
+	}
 	for _, r := range trigDefs {
 		names = append(names, "trigger "+r["name"])
 	}
+	var vs []string
 	for name := range views {
-		names = append(names, "view "+name)
+		vs = append(vs, "view "+name)
 	}
+	sort.Strings(vs)
+	names = append(names, vs...)
 	if len(names) == 0 {
 		return err
 	}
-	sort.Strings(names[len(trigDefs):])
 	return fmt.Errorf("%w. Not made, so missing from %s until the next successful restore: %s", err, dst, strings.Join(names, ", "))
 }
 
-// triggerOrder finds where a trigger statement's firing order goes: after
-// FOR EACH ROW, with the FOLLOWS or PRECEDES clause it may have.
-var triggerOrder = lazy.Regexp("(?is)^(.*?\\bFOR\\s+EACH\\s+ROW\\s+)(?:(?:FOLLOWS|PRECEDES)\\s+(?:`(?:[^`]|``)*`|[^\\s`]+)\\s+)?")
+// forEachRow and firingOrder match, at the start of the text, FOR EACH ROW
+// and the firing order that may follow it.
+var (
+	forEachRow  = lazy.Regexp(`(?i)^FOR\s+EACH\s+ROW\s+`)
+	firingOrder = lazy.Regexp("(?i)^(?:FOLLOWS|PRECEDES)\\s+(?:`(?:[^`]|``)*`|[^\\s`]+)\\s+")
+)
 
 // anchored is a trigger's CREATE statement with its firing order set to
-// anchor (FOLLOWS x, PRECEDES x), or with none when anchor is empty.
+// anchor (FOLLOWS x, PRECEDES x), or with none when anchor is empty. The
+// clause goes after FOR EACH ROW, found outside quoted names and strings:
+// a name before it may hold those words in backticks, and the body comes
+// after it.
 func anchored(stmt, anchor string) string {
-	m := triggerOrder().FindStringSubmatchIndex(stmt)
-	if m == nil {
-		return stmt
+	for i := 0; i < len(stmt); i++ {
+		if q := stmt[i]; q == '`' || q == '\'' || q == '"' {
+			for i++; i < len(stmt); i++ {
+				if stmt[i] == '\\' && q != '`' {
+					i++
+				} else if stmt[i] == q {
+					if i+1 < len(stmt) && stmt[i+1] == q { // doubled
+						i++
+						continue
+					}
+					break
+				}
+			}
+			continue
+		}
+		if i > 0 && isWordByte(stmt[i-1]) {
+			continue
+		}
+		m := forEachRow().FindStringIndex(stmt[i:])
+		if m == nil {
+			continue
+		}
+		j := i + m[1]
+		k := j
+		if o := firingOrder().FindStringIndex(stmt[j:]); o != nil {
+			k = j + o[1]
+		}
+		if anchor != "" {
+			anchor += " "
+		}
+		return stmt[:j] + anchor + stmt[k:]
 	}
-	if anchor != "" {
-		anchor += " "
-	}
-	return stmt[:m[3]] + anchor + stmt[m[1]:]
+	return stmt
+}
+
+// isWordByte reports a byte of an unquoted name or keyword.
+func isWordByte(b byte) bool {
+	return b == '_' || b == '$' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || b >= 0x80
 }
 
 // viewDef is a view's CREATE statement and the collation it was made with.

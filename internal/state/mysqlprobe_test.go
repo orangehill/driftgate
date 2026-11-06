@@ -3,9 +3,12 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/orangehill/driftgate/internal/dbx"
 )
@@ -49,6 +52,11 @@ func newProbeFixture(t *testing.T, dsn, name string, grants, objects []string) p
 	var version string
 	f.root.QueryRow("SELECT @@log_bin, VERSION()").Scan(&f.logBin, &version)
 	f.mariadb = strings.Contains(version, "MariaDB")
+	// A Galera node checks triggers as with the binary log on (1419).
+	var wsrep bool
+	if f.root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep {
+		f.logBin = true
+	}
 	user := "'dgt_" + name + "'@'%'"
 	mustExec(t, f.root, "DROP DATABASE IF EXISTS "+f.work, "DROP DATABASE IF EXISTS "+f.pristine, "DROP USER IF EXISTS "+user,
 		"CREATE DATABASE "+f.work, "CREATE USER "+user+" IDENTIFIED BY 'x'")
@@ -207,22 +215,27 @@ func TestMySQLProbeLock(t *testing.T) {
 			if err := f.open(t, f.dsn, Options{}).Seed(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			defer func(w int) { probeLockWait = w }(probeLockWait)
-			probeLockWait = 1
 			other, err := f.root.Conn(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer other.Close()
-			release, err := probeLock(context.Background(), other, f.work)
+			release, err := f.open(t, f.dsn, Options{}).probeLock(context.Background(), other, f.work)
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = f.open(t, f.dsn, Options{}).Restore(context.Background(), []string{"view:v"})
+			// The wait stays below the DSN's readTimeout (2 s): 1 s.
+			short := f.dsn + "?readTimeout=2s"
+			if strings.Contains(f.dsn, "?") {
+				short = f.dsn + "&readTimeout=2s"
+			}
+			err = f.open(t, short, Options{}).Restore(context.Background(), []string{"view:v"})
 			if err == nil || !strings.Contains(err.Error(), "was not free within 1 seconds: another DriftGate process") {
 				t.Fatalf("restore while locked: %v", err)
 			}
-			release()
+			if err := release(); err != nil {
+				t.Fatal(err)
+			}
 			if err := f.open(t, f.dsn, Options{}).Restore(context.Background(), []string{"view:v"}); err != nil {
 				t.Fatal(err)
 			}
@@ -238,6 +251,8 @@ func TestAnchored(t *testing.T) {
 		{"CREATE DEFINER=`a`@`%` trigger t before insert on x for each row precedes `u` set @a = 1", "FOLLOWS `s`", "CREATE DEFINER=`a`@`%` trigger t before insert on x for each row FOLLOWS `s` set @a = 1"},
 		{"CREATE DEFINER=`a`@`%` trigger t before insert on x for each row follows u set @a = 1", "", "CREATE DEFINER=`a`@`%` trigger t before insert on x for each row set @a = 1"},
 		{"CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET @a = 'FOR EACH ROW'; END", "PRECEDES `s`", "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW PRECEDES `s` BEGIN SET @a = 'FOR EACH ROW'; END"},
+		{"CREATE TRIGGER `for each row t` BEFORE INSERT ON `x FOR EACH ROW y` FOR EACH ROW SET @a = 1", "FOLLOWS `s`", "CREATE TRIGGER `for each row t` BEFORE INSERT ON `x FOR EACH ROW y` FOR EACH ROW FOLLOWS `s` SET @a = 1"},
+		{"CREATE TRIGGER `a``for each row ` BEFORE INSERT ON x for each row follows `b``c` SET @a = 1", "PRECEDES `s`", "CREATE TRIGGER `a``for each row ` BEFORE INSERT ON x for each row PRECEDES `s` SET @a = 1"},
 	} {
 		if got := anchored(c[0], c[1]); got != c[2] {
 			t.Errorf("%s %s:\n got %s\nwant %s", c[0], c[1], got, c[2])
@@ -276,8 +291,7 @@ func TestMySQLUndoTriggerOrder(t *testing.T) {
 				}
 				return strings.Join(out, " ")
 			}
-			defer func() { dropRefused = nil }()
-			dropRefused = func(kind, name string) bool { return kind == "trigger" && name == "t2" }
+			m.hooks = &mysqlHooks{dropRefused: func(kind, name string) bool { return kind == "trigger" && name == "t2" }}
 			err := m.Restore(context.Background(), []string{"table:items"})
 			if err == nil || !strings.Contains(err.Error(), "made again from the pristine copy: trigger t1") {
 				t.Fatalf("restore: %v", err)
@@ -287,7 +301,7 @@ func TestMySQLUndoTriggerOrder(t *testing.T) {
 			}
 			// t3 refused after t1 and t2: t1 then follows nothing left,
 			// t2 follows t1, and both precede t3.
-			dropRefused = func(kind, name string) bool { return kind == "trigger" && name == "t3" }
+			m.hooks = &mysqlHooks{dropRefused: func(kind, name string) bool { return kind == "trigger" && name == "t3" }}
 			if err := m.Restore(context.Background(), []string{"table:items"}); err == nil {
 				t.Fatal("restore: no error")
 			}
@@ -314,20 +328,105 @@ func TestMySQLUndoMessages(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustExec(t, f.rootWork, "CREATE TABLE extra (id INT PRIMARY KEY)", "CREATE VIEW wonly AS SELECT 1 AS a")
-			defer func() { dropRefused = nil }()
-			dropRefused = func(kind, name string) bool { return kind == "table" && name == "extra" }
+			m.hooks = &mysqlHooks{dropRefused: func(kind, name string) bool { return kind == "table" && name == "extra" }}
 			err := m.Restore(context.Background(), []string{"table:items", "table:extra", "view:wonly"})
 			if err == nil || !strings.Contains(err.Error(), "made again from the pristine copy: trigger t1") ||
-				!strings.Contains(err.Error(), "Dropped from "+f.work+", as the pristine copy has no such object, which no restore makes again: view wonly") {
+				!strings.Contains(err.Error(), "Dropped from "+f.work+", as the pristine copy has nothing of that name, which no restore makes again: view wonly") {
 				t.Fatalf("restore: %v", err)
 			}
 			if got := definerObjects(t, f.root, f.work); got != "trigger t1 dgt_undomsg@%, view v2 root@%" {
 				t.Fatalf("after the refused restore: %s", got)
 			}
-			dropRefused = nil
+			m.hooks = nil
 			mustExec(t, f.rootWork, "RENAME TABLE items TO items_old")
 			err = m.Restore(context.Background(), []string{"view:v2"})
 			if err == nil || !strings.Contains(err.Error(), "Not made, so missing from "+f.work+" until the next successful restore: view v2") {
+				t.Fatalf("restore: %v", err)
+			}
+		})
+	}
+}
+
+// TestLockUnsupported: the refusals of GET_LOCK by a cluster, and no other
+// error, let the probes run without the lock.
+func TestLockUnsupported(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&mysql.MySQLError{Number: 1235, Message: "This version of MariaDB doesn't yet support 'GET_LOCK in cluster (WSREP_ON=ON)'"}, true},
+		{&mysql.MySQLError{Number: 1105, Message: "Percona-XtraDB-Cluster prohibits use of GET_LOCK with pxc_strict_mode = ENFORCING"}, true},
+		{&mysql.MySQLError{Number: 1105, Message: "Unknown error"}, false},
+		{&mysql.MySQLError{Number: 1227, Message: "Access denied"}, false},
+		{errors.New("connection reset"), false},
+	} {
+		if got := lockUnsupported(c.err); got != c.want {
+			t.Errorf("%v: %v", c.err, got)
+		}
+	}
+}
+
+// TestMySQLProbeViewRefusedInRestore: a login that may drop views but not
+// create them in the working database is stopped by the probe, before the
+// view is dropped.
+func TestMySQLProbeViewRefusedInRestore(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "probenoview", []string{"GRANT SELECT, INSERT, DELETE, CREATE, DROP, TRIGGER, SHOW VIEW ON {w}.* TO {u}", "GRANT ALL ON {p}.* TO {u}"},
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE DEFINER = 'dgt_probenoview'@'%' VIEW v AS SELECT id FROM items"})
+			if err := f.open(t, f.dsn, Options{}).Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			before := definerObjects(t, f.root, f.work)
+			err := f.open(t, f.app, Options{}).Restore(context.Background(), []string{"view:v"})
+			if err == nil || !strings.Contains(err.Error(), "view v: Error 1142") {
+				t.Fatalf("restore: %v", err)
+			}
+			if after := definerObjects(t, f.root, f.work); after != before {
+				t.Fatalf("after the refused restore: %s, was %s", after, before)
+			}
+		})
+	}
+}
+
+// TestMySQLUndoSequences (MariaDB): a sequence dropped before a refused
+// drop is made again from the pristine copy; one the pristine copy lacks
+// is named as gone; a copy that fails after the drops names the sequences
+// not made.
+func TestMySQLUndoSequences(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "undoseq", nil,
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)"})
+			if !f.mariadb {
+				t.Skip("sequences are MariaDB's")
+			}
+			var wsrep int
+			if f.root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+				t.Skip("a Galera node copies no cached sequence (1235)")
+			}
+			mustExec(t, f.rootWork, "CREATE SEQUENCE s START WITH 5 NOCACHE")
+			m := f.open(t, f.dsn, Options{})
+			if err := m.Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, f.rootWork, "CREATE SEQUENCE wseq NOCACHE")
+			m.hooks = &mysqlHooks{dropRefused: func(kind, name string) bool { return kind == "trigger" && name == "t1" }}
+			err := m.Restore(context.Background(), []string{"sequence:s", "sequence:wseq", "table:items"})
+			if err == nil || !strings.Contains(err.Error(), "made again from the pristine copy: sequence s") ||
+				!strings.Contains(err.Error(), "which no restore makes again: sequence wseq") {
+				t.Fatalf("restore: %v", err)
+			}
+			var n int
+			if err := f.rootWork.QueryRow("SELECT NEXTVAL(s)").Scan(&n); err != nil || n != 5 {
+				t.Fatalf("sequence s: %d %v", n, err)
+			}
+			m.hooks = &mysqlHooks{copyFails: func() error { return errors.New("copy failed") }}
+			err = m.Restore(context.Background(), []string{"sequence:s", "table:items"})
+			if err == nil || !strings.Contains(err.Error(), "copy failed. Not made, so missing from "+f.work+" until the next successful restore: sequence s, trigger t1") {
 				t.Fatalf("restore: %v", err)
 			}
 		})

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -57,9 +58,12 @@ var sqlSecurityInvoker = lazy.Regexp(`\bSQL SECURITY INVOKER\b`)
 // own table when db has it, else the first. Its body is empty, so it does
 // nothing while it exists. A database without tables holds no trigger, so
 // none can be lost, and nothing is probed. A view's probe selects a
-// constant, so that it needs no table; a login that may not create a view
-// in db is not probed (a seed probes in the working database, where the
-// login may only read): the CREATE itself then says what it lacks.
+// constant, so that it needs no table. A seed probes in the working
+// database (db is not target), where the login may only read: a view it
+// may not create there is not probed, and the CREATE in the pristine copy
+// says what it lacks. In a restore (db is target) that refusal is the
+// CREATE's own, and stops it. A probe that was not made is not recorded
+// as passed.
 //
 // Each DEFINER is tried once per kind and database for the life of m: a
 // restore that makes triggers again after the first costs nothing more.
@@ -88,19 +92,27 @@ func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string
 	if len(work) == 0 && len(stale) == 0 {
 		return nil
 	}
-	unlock, err := probeLock(ctx, c, db)
+	unlock, err := m.probeLock(ctx, c, db)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer func() {
+		if e := unlock(); e != nil {
+			err = errors.Join(err, e)
+		}
+	}()
 	for name, kind := range stale {
 		if err := dropObject(ctx, c, db, name, kind); err != nil {
 			return fmt.Errorf("a probe left behind, %s %s in %s, cannot be dropped: %w; drop it by hand", kind, name, db, err)
 		}
 	}
 	for _, w := range work {
-		if err := probeOnce(ctx, c, db, target, tables, w.it, w.clause, w.sec); err != nil {
+		made, err := probeOnce(ctx, c, db, target, tables, w.it, w.clause, w.sec)
+		if err != nil {
 			return err
+		}
+		if !made {
+			continue
 		}
 		m.probeMu.Lock()
 		if m.probed == nil {
@@ -128,18 +140,52 @@ func viewSecurity(stmt string) string {
 var probeLockWait = 60
 
 // probeLock takes the named lock of db's probes (GET_LOCK, which MySQL
-// and MariaDB hold per session) and returns its release.
-func probeLock(ctx context.Context, c *sql.Conn, db string) (func(), error) {
+// and MariaDB hold per session) and returns its release. It waits
+// probeLockWait seconds, less than the DSN's readTimeout, which would
+// otherwise end the wait as a broken connection. A cluster that does not
+// support GET_LOCK (lockUnsupported) runs the probes without it, with one
+// note. A release that fails discards c, which would otherwise go back to
+// the pool holding the lock, and is returned as an error.
+func (m *MySQL) probeLock(ctx context.Context, c *sql.Conn, db string) (func() error, error) {
 	sum := sha256.Sum256([]byte(db))
 	name := "driftgate_probe_" + hex.EncodeToString(sum[:16])
+	wait := probeLockWait
+	if cfg, err := mysqlDSN(m.o.DSN); err == nil && cfg.ReadTimeout > 0 {
+		wait = max(0, min(wait, int(cfg.ReadTimeout/time.Second)-1))
+	}
 	var got sql.NullInt64
-	if err := c.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", name, probeLockWait).Scan(&got); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", name, wait).Scan(&got); err != nil {
+		if lockUnsupported(err) {
+			m.lockNote.Do(func() {
+				m.logf("state %s: the server does not support GET_LOCK (%v); the probes run without their lock, so do not seed or restore %s from two processes at once\n", m.o.Name, err, db)
+			})
+			return func() error { return nil }, nil
+		}
 		return nil, err
 	}
 	if !got.Valid || got.Int64 != 1 {
-		return nil, fmt.Errorf("the lock of the probes of %s (%s) was not free within %d seconds: another DriftGate process restores or seeds it", db, name, probeLockWait)
+		return nil, fmt.Errorf("the lock of the probes of %s (%s) was not free within %d seconds: another DriftGate process restores or seeds it", db, name, wait)
 	}
-	return func() { c.ExecContext(context.WithoutCancel(ctx), "DO RELEASE_LOCK(?)", name) }, nil
+	return func() error {
+		var released sql.NullInt64
+		if err := c.QueryRowContext(context.WithoutCancel(ctx), "SELECT RELEASE_LOCK(?)", name).Scan(&released); err != nil || released.Int64 != 1 {
+			discardConn(c)
+			return fmt.Errorf("the lock of the probes of %s (%s) could not be released (%v, %v); its connection is closed", db, name, released, err)
+		}
+		return nil
+	}, nil
+}
+
+// lockUnsupported reports a GET_LOCK a cluster refuses: MariaDB Galera
+// before 10.5 (1235, "doesn't yet support 'GET_LOCK in cluster'"), Percona
+// XtraDB Cluster with pxc_strict_mode ENFORCING (1105, "prohibits use of
+// GET_LOCK").
+func lockUnsupported(err error) bool {
+	var me *mysql.MySQLError
+	if !errors.As(err, &me) {
+		return false
+	}
+	return me.Number == 1235 || me.Number == 1105 && strings.Contains(me.Message, "GET_LOCK")
 }
 
 // probeDenied reports a refusal for want of a privilege on a database or
@@ -149,11 +195,12 @@ func probeDenied(err error) bool {
 	return errors.As(err, &me) && (me.Number == 1142 || me.Number == 1044)
 }
 
-// probeOnce makes and drops one probe of it in db. The probe is dropped
+// probeOnce makes and drops one probe of it in db, and reports whether it
+// made one (made is false when nothing could be probed). The probe is dropped
 // whatever happens, also when ctx is cancelled; a drop that fails is
 // reported with the probe's name (a login without DROP leaves it behind),
 // and the next seed or restore drops it (probeName).
-func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []string, it probeItem, clause, security string) (err error) {
+func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []string, it probeItem, clause, security string) (made bool, err error) {
 	name := probeID()
 	q := qi(db) + "." + qi(name)
 	var drops []string // what removes the probe, last first
@@ -176,17 +223,17 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 	case "trigger":
 		_, e := c.ExecContext(ctx, "CREATE TABLE "+q+" (id INT PRIMARY KEY)")
 		if e != nil && !probeDenied(e) {
-			return fmt.Errorf("trigger %s: a probe of its DEFINER: %w", it.name, e)
+			return false, fmt.Errorf("trigger %s: a probe of its DEFINER: %w", it.name, e)
 		}
 		if e == nil {
 			drops = append(drops, "DROP TABLE IF EXISTS "+q) // and its trigger
 			if e = create(q); e == nil {
-				return nil
+				return true, nil
 			}
 		}
 		// No CREATE, or TRIGGER on some tables only.
 		if !probeDenied(e) {
-			return createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
+			return false, createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
 		}
 		on := ""
 		switch {
@@ -195,25 +242,25 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 		case len(tables) > 0:
 			on = tables[0]
 		default:
-			return nil
+			return false, nil
 		}
 		if e := create(qi(db) + "." + qi(on)); e != nil {
-			return createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
+			return false, createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
 		}
 	case "view":
 		_, e := c.ExecContext(ctx, "CREATE "+clause+security+" VIEW "+q+" AS SELECT 1 AS probe")
 		switch {
 		case e == nil:
 			drops = append(drops, "DROP VIEW IF EXISTS "+q)
-		case probeDenied(e):
-			return nil
+		case probeDenied(e) && db != target:
+			return false, nil
 		default:
-			return createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
+			return false, createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)
 		}
 	default:
-		return fmt.Errorf("no probe for a %s", it.kind)
+		return false, fmt.Errorf("no probe for a %s", it.kind)
 	}
-	return nil
+	return true, nil
 }
 
 // probeID is a new probe name (probeName).

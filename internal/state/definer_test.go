@@ -328,6 +328,10 @@ func TestMySQLProbeWithoutCreate(t *testing.T) {
 			work, pristine := "dgt_nocreate", "dgt_nocreate_pristine"
 			var logBin int
 			root.QueryRow("SELECT @@log_bin").Scan(&logBin)
+			var wsrep int
+			if root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+				logBin = 1 // a Galera node checks triggers as with the binary log on
+			}
 			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_trig'@'%'",
 				"CREATE DATABASE "+work, "CREATE USER 'dgt_trig'@'%' IDENTIFIED BY 'x'",
 				"GRANT SELECT, TRIGGER ON "+work+".* TO 'dgt_trig'@'%'", "GRANT SELECT, TRIGGER ON "+pristine+".* TO 'dgt_trig'@'%'")
