@@ -9,7 +9,9 @@ import (
 
 // JUnit XML as GitHub (test-reporter actions), GitLab (artifacts:reports:junit)
 // and Jenkins (junit step) read it: one test case per request; a drifted
-// request fails with its drifts, a skipped or observed one is skipped.
+// request fails with its drifts, a skipped or observed one is skipped. An
+// incomplete result (exit 3) is one more case with an error naming why, so
+// a reader of the file alone never sees it green.
 
 type junitSuites struct {
 	XMLName  xml.Name     `xml:"testsuites"`
@@ -45,6 +47,7 @@ type junitCase struct {
 	Classname string        `xml:"classname,attr"`
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
+	Error     *junitFailure `xml:"error,omitempty"`
 	Skipped   *junitSkipped `xml:"skipped,omitempty"`
 	// SystemOut is the result's notes and, for a request that passed only
 	// after a retry, that: JUnit has no outcome for it, and every reader
@@ -131,7 +134,22 @@ func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 		suite.Tests++
 		suite.Cases = append(suite.Cases, c)
 	}
-	doc := junitSuites{Name: name, Tests: suite.Tests, Failures: suite.Failures, Skipped: suite.Skipped, Time: "0", Suites: []junitSuite{suite}}
+	if r.Incomplete() {
+		var why []string
+		for _, note := range []string{r.NothingNote(), r.PrivateNote(), r.ReadOnlyBaselineNote()} {
+			if note != "" {
+				why = append(why, note)
+			}
+		}
+		if len(why) == 0 {
+			why = append(why, "the result is incomplete")
+		}
+		suite.Cases = append(suite.Cases, junitCase{Name: "incomplete", Classname: "driftgate", Time: "0",
+			Error: &junitFailure{Message: why[0], Type: "incomplete", Text: strings.Join(why, "\n")}})
+		suite.Tests++
+		suite.Errors++
+	}
+	doc := junitSuites{Name: name, Tests: suite.Tests, Failures: suite.Failures, Errors: suite.Errors, Skipped: suite.Skipped, Time: "0", Suites: []junitSuite{suite}}
 	if _, err := io.WriteString(w, xml.Header); err != nil {
 		return err
 	}

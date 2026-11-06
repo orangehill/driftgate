@@ -834,6 +834,13 @@ baseline or capture is named `run`).
 The comparison is kept as the last comparison, which `report`, `review`,
 `accept`, `expect` and `bisect` read.
 
+In JUnit every request is a test case (a drifted one fails, a skipped or
+observed one is skipped); an incomplete result (exit 3: private bodies not
+on this machine, requests a read-only set left out, nothing compared) adds
+a test case `incomplete` with an `<error>` that says why, so the suite's
+`errors` count is not 0 and a CI that reads only the file does not see it
+pass.
+
 Against a baseline with [expectations](#expect), a drift an expectation
 names exactly is expected, and a request every drift of which is expected
 does not fail the comparison. The requests that fail come first, each
