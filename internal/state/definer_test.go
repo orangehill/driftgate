@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -121,30 +122,7 @@ func TestMySQLDefinerRefused(t *testing.T) {
 				t.Log(err)
 			}
 
-			// objects lists the triggers and views of the database with
-			// their DEFINERs, and any probe.
-			objects := func(db string) string {
-				t.Helper()
-				var out []string
-				for _, q := range []string{
-					"SELECT CONCAT('trigger ', TRIGGER_NAME, ' ', DEFINER) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?",
-					"SELECT CONCAT('view ', TABLE_NAME, ' ', DEFINER) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?",
-					"SELECT CONCAT('probe ', TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE 'dgt\\_probe\\_%'",
-				} {
-					rows, err := root.Query(q, db)
-					if err != nil {
-						t.Fatal(err)
-					}
-					for rows.Next() {
-						var s string
-						rows.Scan(&s)
-						out = append(out, s)
-					}
-					rows.Close()
-				}
-				sort.Strings(out)
-				return strings.Join(out, ", ")
-			}
+			objects := func(db string) string { return definerObjects(t, root, db) }
 			fingerprint := func(pristine bool) string {
 				t.Helper()
 				m := open(dsn)
@@ -206,7 +184,8 @@ func TestMySQLDefinerRefused(t *testing.T) {
 			// no fingerprint, and the next restore drops it.
 			mustExec(t, mysqlAdmin(t, dsn, work), "CREATE TABLE dgt_probe_0123456789abcdef (id INT PRIMARY KEY)",
 				"CREATE TRIGGER dgt_probe_0123456789abcdef BEFORE INSERT ON dgt_probe_0123456789abcdef FOR EACH ROW SET @x = 1",
-				"CREATE VIEW dgt_probe_fedcba9876543210 AS SELECT 1 AS a")
+				"CREATE VIEW dgt_probe_fedcba9876543210 AS SELECT 1 AS a",
+				"CREATE TRIGGER dgt_probe_00112233445566aa BEFORE INSERT ON items FOR EACH ROW BEGIN END")
 			if fingerprint(false) != workPrint {
 				t.Fatal("a probe left behind is in the fingerprint")
 			}
@@ -218,6 +197,150 @@ func TestMySQLDefinerRefused(t *testing.T) {
 			}
 			if fingerprint(false) != workPrint {
 				t.Fatal("the fingerprint changed")
+			}
+		})
+	}
+}
+
+// definerObjects lists the triggers and views of db with their DEFINERs,
+// and any probe (table, view or trigger).
+func definerObjects(t *testing.T, root *sql.DB, db string) string {
+	t.Helper()
+	var out []string
+	for _, q := range []string{
+		"SELECT CONCAT('trigger ', TRIGGER_NAME, ' ', DEFINER) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?",
+		"SELECT CONCAT('view ', TABLE_NAME, ' ', DEFINER) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?",
+		"SELECT CONCAT('probe ', TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE 'dgt\\_probe\\_%'",
+	} {
+		rows, err := root.Query(q, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var s string
+			rows.Scan(&s)
+			out = append(out, s)
+		}
+		rows.Close()
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
+
+// TestMySQLDropOthersFirst: a restore drops the views whose DEFINER is not
+// the login first. A view of the working database that root made again
+// since the seed (MySQL: root has SYSTEM_USER, so the login may not drop
+// it), named after another view the restore drops, is refused before that
+// other view is dropped: both stay.
+func TestMySQLDropOthersFirst(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			work, pristine := "dgt_droporder", "dgt_droporder_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_order'@'%'",
+				"CREATE DATABASE "+work, "CREATE USER 'dgt_order'@'%' IDENTIFIED BY 'x'",
+				"GRANT ALL ON "+work+".* TO 'dgt_order'@'%'", "GRANT ALL ON "+pristine+".* TO 'dgt_order'@'%'")
+			t.Cleanup(func() {
+				root.Exec("DROP DATABASE IF EXISTS " + work)
+				root.Exec("DROP DATABASE IF EXISTS " + pristine)
+				root.Exec("DROP USER IF EXISTS 'dgt_order'@'%'")
+			})
+			rootWork := mysqlAdmin(t, dsn, work)
+			mustExec(t, rootWork, "CREATE TABLE items (id INT PRIMARY KEY)",
+				"CREATE DEFINER = 'dgt_order'@'%' VIEW a_view AS SELECT id FROM items",
+				"CREATE DEFINER = 'dgt_order'@'%' VIEW b_view AS SELECT id FROM items")
+			seeder, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer seeder.Close()
+			if err := seeder.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			// root makes b_view again, as its own.
+			mustExec(t, rootWork, "DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items")
+			before := definerObjects(t, root, work)
+			app := *u
+			app.User = url.UserPassword("dgt_order", "x")
+			m, err := NewMySQL(Options{Name: "db", DSN: app.String(), Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			err = m.Restore(ctx, []string{"view:a_view", "view:b_view"})
+			after := definerObjects(t, root, work)
+			switch {
+			case err != nil:
+				// MySQL: b_view may not be dropped, and was tried first.
+				if !strings.Contains(err.Error(), "view b_view cannot be dropped from "+work) {
+					t.Fatalf("restore: %v", err)
+				}
+				if after != before {
+					t.Fatalf("after the refused restore: %s, was %s", after, before)
+				}
+			case after != "view a_view dgt_order@%, view b_view dgt_order@%":
+				// MariaDB: the drop is allowed, and the views are the
+				// pristine ones.
+				t.Fatalf("after the restore: %s", after)
+			}
+			t.Logf("%v: %s", err, after)
+		})
+	}
+}
+
+// TestMySQLProbeWithoutCreate: a login that may create triggers but not
+// tables probes on a table of the database, with a trigger that does
+// nothing: its restore is not refused for the probe, and no probe stays.
+func TestMySQLProbeWithoutCreate(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			work, pristine := "dgt_nocreate", "dgt_nocreate_pristine"
+			var logBin int
+			root.QueryRow("SELECT @@log_bin").Scan(&logBin)
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_trig'@'%'",
+				"CREATE DATABASE "+work, "CREATE USER 'dgt_trig'@'%' IDENTIFIED BY 'x'",
+				"GRANT SELECT, TRIGGER ON "+work+".* TO 'dgt_trig'@'%'", "GRANT SELECT, TRIGGER ON "+pristine+".* TO 'dgt_trig'@'%'")
+			t.Cleanup(func() {
+				root.Exec("DROP DATABASE IF EXISTS " + work)
+				root.Exec("DROP DATABASE IF EXISTS " + pristine)
+				root.Exec("DROP USER IF EXISTS 'dgt_trig'@'%'")
+			})
+			mustExec(t, mysqlAdmin(t, dsn, work), "CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (item INT)",
+				"CREATE DEFINER = 'dgt_trig'@'%' TRIGGER items_ai AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)")
+			seeder, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer seeder.Close()
+			if err := seeder.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			before := definerObjects(t, root, work)
+			app := *u
+			app.User = url.UserPassword("dgt_trig", "x")
+			m, err := NewMySQL(Options{Name: "db", DSN: app.String(), Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			err = m.Restore(ctx, []string{"trigger:items_ai"})
+			switch {
+			case logBin != 0:
+				// No trigger without SUPER: refused for that, not for the
+				// probe's table.
+				if err == nil || !strings.Contains(err.Error(), "log_bin_trust_function_creators is off") {
+					t.Fatalf("restore: %v", err)
+				}
+			case err != nil:
+				t.Fatalf("restore: %v", err)
+			}
+			if after := definerObjects(t, root, work); after != before {
+				t.Fatalf("after the restore: %s, was %s", after, before)
 			}
 		})
 	}

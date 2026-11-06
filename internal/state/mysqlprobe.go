@@ -5,7 +5,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/orangehill/driftgate/internal/lazy"
 )
@@ -41,7 +46,12 @@ var definerAny = lazy.Regexp("DEFINER=`(?:[^`]|``)*`(?:@`(?:[^`]|``)*`)?")
 // that it needs no table. Each DEFINER is tried once per kind and
 // database for the life of m: a restore that makes triggers again after
 // the first costs nothing more.
-func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string, items []probeItem) error {
+//
+// A login that may not create a table (CREATE) but may create triggers
+// gets its trigger probes on tables, the first of the database's tables:
+// the probe's body is empty, so it does nothing while it exists. A
+// database without tables has no trigger to lose, and nothing is probed.
+func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string, tables []string, items []probeItem) error {
 	for _, it := range items {
 		clause := definerAny().FindString(it.stmt)
 		security := ""
@@ -58,7 +68,7 @@ func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string
 		if done {
 			continue
 		}
-		if err := probeOnce(ctx, c, db, target, it, clause, security); err != nil {
+		if err := probeOnce(ctx, c, db, target, tables, it, clause, security); err != nil {
 			return err
 		}
 		m.probeMu.Lock()
@@ -76,18 +86,29 @@ var sqlSecurityInvoker = lazy.Regexp(`\bSQL SECURITY INVOKER\b`)
 // probeOnce makes and drops one probe of it in db. The probe is dropped
 // whatever happens, also when ctx is cancelled; one that a killed process
 // leaves behind is dropped by the next seed or restore (probeName).
-func probeOnce(ctx context.Context, c *sql.Conn, db, target string, it probeItem, clause, security string) error {
+func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []string, it probeItem, clause, security string) error {
 	b := make([]byte, 8)
 	rand.Read(b)
 	name := qi(db) + "." + qi("dgt_probe_"+hex.EncodeToString(b))
 	var stmt string
 	switch it.kind {
 	case "trigger":
-		defer c.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+name) // and its trigger
-		if _, err := c.ExecContext(ctx, "CREATE TABLE "+name+" (id INT PRIMARY KEY)"); err != nil {
+		on := name
+		_, err := c.ExecContext(ctx, "CREATE TABLE "+name+" (id INT PRIMARY KEY)")
+		var me *mysql.MySQLError
+		switch {
+		case err == nil:
+			defer c.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+name) // and its trigger
+		case errors.As(err, &me) && (me.Number == 1142 || me.Number == 1044): // no CREATE
+			if len(tables) == 0 {
+				return nil
+			}
+			on = qi(db) + "." + qi(tables[0])
+			defer c.ExecContext(context.WithoutCancel(ctx), "DROP TRIGGER IF EXISTS "+name)
+		default:
 			return fmt.Errorf("trigger %s: a probe of its DEFINER: %w", it.name, err)
 		}
-		stmt = "CREATE " + clause + " TRIGGER " + name + " BEFORE INSERT ON " + name + " FOR EACH ROW SET @driftgate_probe = 1"
+		stmt = "CREATE " + clause + " TRIGGER " + name + " BEFORE INSERT ON " + on + " FOR EACH ROW BEGIN END"
 	case "view":
 		defer c.ExecContext(context.WithoutCancel(ctx), "DROP VIEW IF EXISTS "+name)
 		stmt = "CREATE " + clause + security + " VIEW " + name + " AS SELECT 1 AS probe"
@@ -98,4 +119,79 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, it probeItem
 		return createRefused(ctx, c, it.kind, it.name, target, it.stmt, err)
 	}
 	return nil
+}
+
+// dropItem is an object copyObjects drops before it copies: its kind,
+// name and, for a trigger, its DEFINER (user@host).
+type dropItem struct{ kind, name, definer string }
+
+// dropFirstOthers puts first the drops of the views and triggers whose
+// DEFINER is not the login: a drop the server may refuse (MySQL: an object
+// whose DEFINER has SYSTEM_USER), which then happens before anything of
+// db is dropped. The order of the others is kept. The DEFINERs of views
+// are read only when a view is dropped.
+func (m *MySQL) dropFirstOthers(ctx context.Context, c *sql.Conn, db string, drops []dropItem) error {
+	views := false
+	for _, d := range drops {
+		views = views || d.kind == "view"
+	}
+	if len(drops) < 2 || !views && !slices.ContainsFunc(drops, func(d dropItem) bool { return d.kind == "trigger" }) {
+		return nil
+	}
+	if views {
+		rows, err := c.QueryContext(ctx, "SELECT TABLE_NAME, DEFINER FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?", db)
+		if err != nil {
+			return err
+		}
+		definers := map[string]string{}
+		for rows.Next() {
+			var name, definer string
+			if err := rows.Scan(&name, &definer); err != nil {
+				rows.Close()
+				return err
+			}
+			definers[name] = definer
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for i, d := range drops {
+			if d.kind == "view" {
+				drops[i].definer = definers[d.name]
+			}
+		}
+	}
+	m.probeMu.Lock()
+	login := m.login
+	m.probeMu.Unlock()
+	if login == "" {
+		if err := c.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&login); err != nil {
+			return err
+		}
+		m.probeMu.Lock()
+		m.login = login
+		m.probeMu.Unlock()
+	}
+	other := func(d dropItem) bool { return d.definer != "" && !sameAccount(d.definer, login) }
+	slices.SortStableFunc(drops, func(a, b dropItem) int {
+		switch {
+		case other(a) && !other(b):
+			return -1
+		case other(b) && !other(a):
+			return 1
+		}
+		return 0
+	})
+	return nil
+}
+
+// sameAccount reports whether two accounts written user@host are one: the
+// user as written, the host in any letter case.
+func sameAccount(a, b string) bool {
+	i, j := strings.LastIndexByte(a, '@'), strings.LastIndexByte(b, '@')
+	if i < 0 || j < 0 {
+		return a == b
+	}
+	return a[:i] == b[:j] && strings.EqualFold(a[i+1:], b[j+1:])
 }

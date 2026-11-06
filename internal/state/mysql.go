@@ -115,9 +115,11 @@ type MySQL struct {
 	binlogMu      sync.Mutex
 	binlogDecided bool
 	unlog         bool
-	// probed holds the DEFINERs definerProbe found the login may use.
+	// probed holds the DEFINERs definerProbe found the login may use;
+	// login is CURRENT_USER(), once read (dropFirstOthers).
 	probeMu sync.Mutex
 	probed  map[string]bool
+	login   string
 }
 
 // checksumConns is how many connections share the CHECKSUM TABLE work.
@@ -339,6 +341,14 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		return nil, err
 	}
 	for _, t := range trs {
+		if probeName().MatchString(t.Name) && !probeName().MatchString(t.Table) {
+			// A probe on a table of the application (definerProbe).
+			if o.probes == nil {
+				o.probes = map[string]string{}
+			}
+			o.probes[t.Name] = "trigger"
+			continue
+		}
 		if !m.o.excluded(t.Table) && !probeName().MatchString(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
@@ -978,31 +988,34 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	for name, v := range pending {
 		probes = append(probes, probeItem{"view", name, v.def})
 	}
-	if err := m.definerProbe(ctx, c, dst, dst, probes); err != nil {
+	if err := m.definerProbe(ctx, c, dst, dst, dstObjs.tables, probes); err != nil {
 		return nil, err
 	}
 
 	// Views first: they are created last, once their tables exist. An object
 	// that changed kind (a view that became a table) is dropped as what it is.
+	var drops []dropItem
 	for _, name := range append(append([]string{}, views...), sequences...) {
 		if k := dstObjs.kind[name]; k != "" {
-			if err := dropObject(ctx, c, dst, name, k); err != nil {
-				return nil, err
-			}
+			drops = append(drops, dropItem{kind: k, name: name})
 		}
 	}
 	for _, t := range tables {
 		if k := dstObjs.kind[t]; k != "" && k != "table" {
-			if err := dropObject(ctx, c, dst, t, k); err != nil {
-				return nil, err
-			}
+			drops = append(drops, dropItem{kind: k, name: t})
 		}
 	}
 	for _, tr := range dstObjs.triggers {
 		if trigTables[tr.Table] || contains(triggers, tr.Name) {
-			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+qi(dst)+"."+qi(tr.Name)); err != nil {
-				return nil, err
-			}
+			drops = append(drops, dropItem{kind: "trigger", name: tr.Name, definer: tr.Definer})
+		}
+	}
+	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
+		return nil, err
+	}
+	for _, d := range drops {
+		if err := dropObject(ctx, c, dst, d.name, d.kind); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1131,8 +1144,7 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 	other := ""
 	if m := definerClause().FindStringSubmatch(stmt); m != nil && login != "" {
 		user, host := strings.ReplaceAll(m[1], "``", "`"), strings.ReplaceAll(m[2], "``", "`")
-		at := strings.LastIndexByte(login, '@')
-		if at < 0 || login[:at] != user || !strings.EqualFold(login[at+1:], host) {
+		if !strings.Contains(login, "@") || !sameAccount(user+"@"+host, login) {
 			other = m[0][len("DEFINER="):]
 		}
 	}
@@ -1274,7 +1286,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 			probes = append(probes, probeItem{"view", v, r["Create View"]})
 		}
 	}
-	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, probes); err != nil {
+	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, objs.tables, probes); err != nil {
 		return err
 	}
 	if m.o.Replacing != nil {
