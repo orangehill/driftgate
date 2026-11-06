@@ -63,6 +63,38 @@ func TestMySQLDropPristine(t *testing.T) {
 	}
 }
 
+// TestMySQLMarkCharset: the mark names a working database whose name is
+// not Latin-1 also in a latin1 database: in a column of the database's
+// charset strict mode refuses it, and otherwise it is stored as ? and
+// clean no longer finds this working database in it.
+func TestMySQLMarkCharset(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			work, pristine := "dgt_работа", "dgt_работа_pristine"
+			root := mysqlAdmin(t, dsn, "")
+			mustExec(t, root, "DROP DATABASE IF EXISTS `"+work+"`", "DROP DATABASE IF EXISTS `"+pristine+"`",
+				"CREATE DATABASE `"+work+"` CHARACTER SET latin1", "CREATE TABLE `"+work+"`.news (id INT PRIMARY KEY)")
+			t.Cleanup(func() {
+				root.Exec("DROP DATABASE IF EXISTS `" + work + "`")
+				root.Exec("DROP DATABASE IF EXISTS `" + pristine + "`")
+			})
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if was, err := m.DropPristine(ctx); !was || err != nil {
+				t.Fatalf("drop: %v %v", was, err)
+			}
+		})
+	}
+}
+
 // TestPostgresDropPristine: as TestMySQLDropPristine.
 func TestPostgresDropPristine(t *testing.T) {
 	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")

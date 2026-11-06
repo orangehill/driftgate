@@ -1159,7 +1159,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	for _, q := range []string{
 		"DROP DATABASE IF EXISTS " + qi(m.o.Pristine),
 		"CREATE DATABASE " + qi(m.o.Pristine) + " CHARACTER SET " + charset + " COLLATE " + collation,
-		"CREATE TABLE " + mark + " (id TINYINT NOT NULL PRIMARY KEY, note VARCHAR(200) NOT NULL)",
+		"CREATE TABLE " + mark + " (id TINYINT NOT NULL PRIMARY KEY, note VARCHAR(200) CHARACTER SET utf8mb4 NOT NULL)",
 	} {
 		if _, err := c.ExecContext(ctx, q); err != nil {
 			return err
