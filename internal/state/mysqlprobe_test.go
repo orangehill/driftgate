@@ -229,3 +229,107 @@ func TestMySQLProbeLock(t *testing.T) {
 		})
 	}
 }
+
+// TestAnchored: the firing order goes after FOR EACH ROW, in place of one
+// the statement had.
+func TestAnchored(t *testing.T) {
+	for _, c := range [][3]string{
+		{"CREATE DEFINER=`a`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @a = 1", "FOLLOWS `s`", "CREATE DEFINER=`a`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW FOLLOWS `s` SET @a = 1"},
+		{"CREATE DEFINER=`a`@`%` trigger t before insert on x for each row precedes `u` set @a = 1", "FOLLOWS `s`", "CREATE DEFINER=`a`@`%` trigger t before insert on x for each row FOLLOWS `s` set @a = 1"},
+		{"CREATE DEFINER=`a`@`%` trigger t before insert on x for each row follows u set @a = 1", "", "CREATE DEFINER=`a`@`%` trigger t before insert on x for each row set @a = 1"},
+		{"CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET @a = 'FOR EACH ROW'; END", "PRECEDES `s`", "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW PRECEDES `s` BEGIN SET @a = 'FOR EACH ROW'; END"},
+	} {
+		if got := anchored(c[0], c[1]); got != c[2] {
+			t.Errorf("%s %s:\n got %s\nwant %s", c[0], c[1], got, c[2])
+		}
+	}
+}
+
+// TestMySQLUndoTriggerOrder: a restore drops t1 (another DEFINER) first,
+// then its drop of t2 is refused: t1 is made again before t2, as in the
+// pristine copy, not after it.
+func TestMySQLUndoTriggerOrder(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "undoorder", []string{"GRANT SELECT, INSERT ON {w}.* TO {u}"},
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT, what VARCHAR(10))"})
+			mustExec(t, f.rootWork,
+				"CREATE DEFINER = 'dgt_undoorder'@'%' TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id, 't1')",
+				"CREATE TRIGGER t2 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id, 't2')",
+				"CREATE TRIGGER t3 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id, 't3')")
+			m := f.open(t, f.dsn, Options{})
+			if err := m.Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			order := func() string {
+				rows, err := f.root.Query("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY ACTION_ORDER", f.work)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rows.Close()
+				var out []string
+				for rows.Next() {
+					var n string
+					rows.Scan(&n)
+					out = append(out, n)
+				}
+				return strings.Join(out, " ")
+			}
+			defer func() { dropRefused = nil }()
+			dropRefused = func(kind, name string) bool { return kind == "trigger" && name == "t2" }
+			err := m.Restore(context.Background(), []string{"table:items"})
+			if err == nil || !strings.Contains(err.Error(), "made again from the pristine copy: trigger t1") {
+				t.Fatalf("restore: %v", err)
+			}
+			if got := order(); got != "t1 t2 t3" {
+				t.Fatalf("firing order %s", got)
+			}
+			// t3 refused after t1 and t2: t1 then follows nothing left,
+			// t2 follows t1, and both precede t3.
+			dropRefused = func(kind, name string) bool { return kind == "trigger" && name == "t3" }
+			if err := m.Restore(context.Background(), []string{"table:items"}); err == nil {
+				t.Fatal("restore: no error")
+			}
+			if got := order(); got != "t1 t2 t3" {
+				t.Fatalf("firing order %s", got)
+			}
+		})
+	}
+}
+
+// TestMySQLUndoMessages: a refused drop of a table the pristine copy no
+// longer has makes the trigger dropped before it again, and names the view
+// dropped as the pristine copy has none, which no restore makes again. A
+// view that cannot be made after the drops is named as missing.
+func TestMySQLUndoMessages(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "undomsg", []string{"GRANT SELECT, INSERT ON {w}.* TO {u}"},
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)", "CREATE VIEW v2 AS SELECT id FROM items"})
+			mustExec(t, f.rootWork, "CREATE DEFINER = 'dgt_undomsg'@'%' TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)")
+			m := f.open(t, f.dsn, Options{})
+			if err := m.Seed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, f.rootWork, "CREATE TABLE extra (id INT PRIMARY KEY)", "CREATE VIEW wonly AS SELECT 1 AS a")
+			defer func() { dropRefused = nil }()
+			dropRefused = func(kind, name string) bool { return kind == "table" && name == "extra" }
+			err := m.Restore(context.Background(), []string{"table:items", "table:extra", "view:wonly"})
+			if err == nil || !strings.Contains(err.Error(), "made again from the pristine copy: trigger t1") ||
+				!strings.Contains(err.Error(), "Dropped from "+f.work+", as the pristine copy has no such object, which no restore makes again: view wonly") {
+				t.Fatalf("restore: %v", err)
+			}
+			if got := definerObjects(t, f.root, f.work); got != "trigger t1 dgt_undomsg@%, view v2 root@%" {
+				t.Fatalf("after the refused restore: %s", got)
+			}
+			dropRefused = nil
+			mustExec(t, f.rootWork, "RENAME TABLE items TO items_old")
+			err = m.Restore(context.Background(), []string{"view:v2"})
+			if err == nil || !strings.Contains(err.Error(), "Not made, so missing from "+f.work+" until the next successful restore: view v2") {
+				t.Fatalf("restore: %v", err)
+			}
+		})
+	}
+}
