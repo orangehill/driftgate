@@ -651,10 +651,11 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   file a project's own mounted configuration can replace: `mysql` in
   `/etc/my.cnf`, `mariadb` in `/etc/mysql/mariadb.conf.d/05-skipcache.cnf`. Accounts are then matched by address
   (`'app'@'%'`), not by host name.
-- MySQL/MariaDB: DriftGate keeps up to 12 connections per database
+- MySQL/MariaDB: DriftGate keeps up to 13 connections per database
   component open for the whole command, so fingerprints and restores do not
-  connect again (3 components: 36, against the default `max_connections`
-  of 151, MariaDB 10.3: 100).
+  connect again: 12, and one of its own that reads SHOW CREATE for many
+  objects in one query (3 components: 39, against the default
+  `max_connections` of 151, MariaDB 10.3: 100).
 
 #### restore_only
 

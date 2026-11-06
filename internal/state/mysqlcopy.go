@@ -47,7 +47,67 @@ var rowDiffHash func(table string)
 // tableJob is one table to make equal to its source.
 type tableJob struct {
 	t          string
-	sdef, ddef string // definitions; ddef is empty when dst has no such table
+	sdef, ddef string     // definitions; ddef is empty when dst has no such table
+	info       *tableInfo // what copying it reads of src.t; nil: read when needed
+}
+
+// tableInfo is what copying a table reads of its source, for all tables
+// of a copy in one query (tableInfos) instead of several for each.
+type tableInfo struct {
+	rows   int64    // TABLE_ROWS, the server's estimate
+	pk     []string // the primary key's columns
+	pkType string   // the type of its (last) column, lower case
+	all    []string // every column in order, quoted
+	stored []string // the columns that are not generated, quoted (copyTable)
+}
+
+// tableInfos reads the tableInfo of the tables of db, those it finds.
+func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (map[string]*tableInfo, error) {
+	out := map[string]*tableInfo{}
+	if len(tables) == 0 {
+		return out, nil
+	}
+	args := []any{db}
+	marks := make([]string, len(tables))
+	for i, t := range tables {
+		marks[i] = "?"
+		args = append(args, t)
+	}
+	rows, err := c.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, k.COLUMN_NAME IS NOT NULL, COALESCE(t.TABLE_ROWS, 0)
+		FROM information_schema.TABLES t
+		JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+		LEFT JOIN information_schema.KEY_COLUMN_USAGE k ON k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME
+			AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME = 'PRIMARY'
+		WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME IN (`+strings.Join(marks, ", ")+`)
+		ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var table, col, typ string
+		var extra sql.NullString
+		var key bool
+		var n int64
+		if err := rows.Scan(&table, &col, &typ, &extra, &key, &n); err != nil {
+			return nil, err
+		}
+		in := out[table]
+		if in == nil {
+			in = &tableInfo{rows: n}
+			out[table] = in
+		}
+		in.all = append(in.all, qi(col))
+		// As columns leaves them out: EXTRA NOT LIKE … (NULL is left out).
+		if x := strings.ToUpper(extra.String); extra.Valid && !strings.Contains(x, "VIRTUAL GENERATED") &&
+			!strings.Contains(x, "STORED GENERATED") && !strings.Contains(x, "PERSISTENT GENERATED") {
+			in.stored = append(in.stored, qi(col))
+		}
+		if key {
+			in.pk, in.pkType = append(in.pk, col), strings.ToLower(typ)
+		}
+	}
+	return out, rows.Err()
 }
 
 // copyTables runs the jobs on c and on extra connections of its own. It
@@ -57,6 +117,19 @@ type tableJob struct {
 func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jobs []tableJob) (map[string]int64, error) {
 	if _, err := m.mariadb(ctx, c); err != nil { // before the connections read it
 		return nil, err
+	}
+	// One read of what copying reads of each table; a table it does not
+	// find, or all of them when it fails, are read as before.
+	names := make([]string, len(jobs))
+	for i, j := range jobs {
+		names[i] = j.t
+	}
+	if infos, err := tableInfos(ctx, c, src, names); err == nil {
+		for i := range jobs {
+			jobs[i].info = infos[jobs[i].t]
+		}
+	} else if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	groups := [][]tableJob{jobs}
 	if copyConns > 1 && len(jobs) > 1 {
@@ -262,7 +335,7 @@ func (m *MySQL) copyOne(ctx context.Context, c *sql.Conn, src, dst string, j tab
 			return fmt.Errorf("%s: %w", t, err)
 		}
 	}
-	if err := copyTable(ctx, c, src, dst, t, ""); err != nil {
+	if err := j.copyRows(ctx, c, src, dst, ""); err != nil {
 		return fmt.Errorf("%s: %w", t, err)
 	}
 	if err := setAutoIncrement(ctx, c, dst, t, j.sdef); err != nil {
@@ -334,39 +407,24 @@ var intTypes = map[string]bool{"tinyint": true, "smallint": true, "mediumint": t
 // src.t. Either way dst.t is then copied whole.
 func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tableJob) (done bool, err error) {
 	t := j.t
-	var est int64
-	if err := c.QueryRowContext(ctx, "SELECT COALESCE(TABLE_ROWS, 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", src, t).Scan(&est); err != nil {
-		return false, err
-	}
-	if est < rowDiffMin || virtualColumn().MatchString(j.sdef) && m.purgeCrash() {
-		return false, nil
-	}
-	var pk []string
-	var pkType string
-	rows, err := c.QueryContext(ctx, `SELECT k.COLUMN_NAME, c.DATA_TYPE FROM information_schema.KEY_COLUMN_USAGE k
-		JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = k.TABLE_SCHEMA AND c.TABLE_NAME = k.TABLE_NAME AND c.COLUMN_NAME = k.COLUMN_NAME
-		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.CONSTRAINT_NAME = 'PRIMARY'`, src, t)
-	if err != nil {
-		return false, err
-	}
-	for rows.Next() {
-		var name, typ string
-		if err := rows.Scan(&name, &typ); err != nil {
-			rows.Close()
+	in := j.info
+	if in == nil {
+		if in, err = readTableInfo(ctx, c, src, t); err != nil {
 			return false, err
 		}
-		pk, pkType = append(pk, name), strings.ToLower(typ)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	if len(pk) != 1 || !intTypes[pkType] {
+	if in.rows < rowDiffMin || virtualColumn().MatchString(j.sdef) && m.purgeCrash() {
 		return false, nil
 	}
-	all, err := columns(ctx, c, src, t, true)
-	if err != nil {
-		return false, err
+	pk := in.pk
+	if len(pk) != 1 || !intTypes[in.pkType] {
+		return false, nil
+	}
+	all := in.all
+	if all == nil {
+		if all, err = columns(ctx, c, src, t, true); err != nil {
+			return false, err
+		}
 	}
 
 	// The pristine side is read on connections of its own, while this one
@@ -447,7 +505,7 @@ func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tab
 		}
 	}
 	for _, k := range diff {
-		if err := copyTable(ctx, c, src, dst, t, chunkRange(id, k)); err != nil {
+		if err := j.copyRows(ctx, c, src, dst, chunkRange(id, k)); err != nil {
 			return false, err
 		}
 	}
@@ -466,6 +524,42 @@ func (m *MySQL) rowDiff(ctx context.Context, c *sql.Conn, src, dst string, j tab
 		return false, errors.New("the chunk hashes missed a change")
 	}
 	return true, nil
+}
+
+// readTableInfo reads, as rowDiff always did, the estimated rows of src.t
+// and, when there are enough for rowDiff, its primary key; all is left nil
+// (read by rowDiff when it needs it).
+func readTableInfo(ctx context.Context, c *sql.Conn, src, t string) (*tableInfo, error) {
+	in := &tableInfo{}
+	if err := c.QueryRowContext(ctx, "SELECT COALESCE(TABLE_ROWS, 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", src, t).Scan(&in.rows); err != nil {
+		return nil, err
+	}
+	if in.rows < rowDiffMin {
+		return in, nil
+	}
+	rows, err := c.QueryContext(ctx, `SELECT k.COLUMN_NAME, c.DATA_TYPE FROM information_schema.KEY_COLUMN_USAGE k
+		JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = k.TABLE_SCHEMA AND c.TABLE_NAME = k.TABLE_NAME AND c.COLUMN_NAME = k.COLUMN_NAME
+		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.CONSTRAINT_NAME = 'PRIMARY'`, src, t)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return nil, err
+		}
+		in.pk, in.pkType = append(in.pk, name), strings.ToLower(typ)
+	}
+	return in, rows.Err()
+}
+
+// copyRows is copyTable with the columns of j.info, when it has them.
+func (j tableJob) copyRows(ctx context.Context, c *sql.Conn, src, dst, where string) error {
+	if j.info == nil {
+		return copyTable(ctx, c, src, dst, j.t, where)
+	}
+	return copyColumns(ctx, c, src, dst, j.t, where, j.info.stored)
 }
 
 // chunkHashes reads chunk → row count and hashes.
