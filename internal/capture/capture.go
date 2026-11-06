@@ -206,7 +206,10 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	var mutating, repeats []catalog.Request
 	for _, u := range units {
 		for _, r := range u.reqs {
-			if r.Mutating() || r.IsCommand() {
+			// A command step changes data unless it says mutates: false,
+			// which only a read-only capture takes at its word (it sends
+			// no other step).
+			if r.Mutating() || r.IsCommand() && !opt.ReadOnly {
 				mutating = append(mutating, r)
 			} else if r.Repeat > 1 {
 				repeats = append(repeats, r)

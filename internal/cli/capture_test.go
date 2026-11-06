@@ -422,7 +422,8 @@ func TestReadOnlyCapture(t *testing.T) {
 		{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"},
 		{"id":"seq-login","method":"POST","path":"/login","body":{},"mutates":true,"storage":"public"},
 		{"id":"seq-me","method":"GET","path":"/me","storage":"public"},
-		{"id":"cmd","command":["true"],"storage":"public"}],
+		{"id":"cmd","command":["true"],"storage":"public"},
+		{"id":"cmd-ro","command":["true"],"mutates":false,"storage":"public"}],
 		"sequences":[{"id":"s","requests":["seq-login","seq-me"]}]}`)
 	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nbody:\n  - request: post-user\n    path: $.token\n    format: '[a-z]+'\n    reason: new token\n")
 	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
@@ -448,7 +449,7 @@ func TestReadOnlyCapture(t *testing.T) {
 	for _, res := range r.Results {
 		got[res.ID] = res.Outcome + " " + res.Note
 	}
-	want := map[string]string{"news": "pass ", "search": "pass ", "post-user": "skipped " + report.NoteNotSent,
+	want := map[string]string{"news": "pass ", "search": "pass ", "cmd-ro": "pass ", "post-user": "skipped " + report.NoteNotSent,
 		"seq-login": "skipped " + report.NoteNotSent, "seq-me": "skipped " + report.NoteNotSent, "cmd": "skipped " + report.NoteNotSent}
 	if code != ExitClean || fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("exit %d: %v", code, got)
