@@ -810,6 +810,25 @@ that change data are never sent, so `--allow-remote-mutations` is not
 needed. Another developer's traffic on a shared server shows as drift in the data
 the responses hold; a side effect is not recorded without `state:`.
 
+**Requests that need a login.** A login usually writes (a last-login
+time, a session row), so do not let DriftGate log in on such a server:
+give each identity a token issued beforehand (an API or personal access
+token), from the environment or a password manager, under
+[`identities:`](configuration.md#identities-and-tokens):
+
+<!-- check: config-fragment -->
+```yaml
+identities:
+  admin: { env: DG_TOKEN_ADMIN }
+```
+
+**Requests the frontend sends itself.** A page that loads data with its
+own requests (a filter, a search, a panel's widgets) is checked only if
+those requests are in the catalog. Use the frontend once through
+[`driftgate record`](#record) on a copy where writes are allowed, and
+add what it proposes to the catalog: a green result says nothing about a
+request the catalog does not have.
+
 ## compare
 
 ```

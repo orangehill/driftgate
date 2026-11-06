@@ -404,6 +404,8 @@ func TestReadOnlyCapture(t *testing.T) {
 	var mu sync.Mutex
 	writes := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Date header: the captures compared may fall in two seconds.
+		w.Header()["Date"] = nil
 		if r.Method != http.MethodGet {
 			mu.Lock()
 			writes++

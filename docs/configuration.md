@@ -863,7 +863,13 @@ state:
 
 **Anything else** (Redis, files, a search index): `restore` (required) and
 optionally `fingerprint`, a command whose output must be the same after
-every restore ([recipes](guides/side-checks.md#files-on-disk-and-redis)). `dsn`, `working`, `pristine`, `exclude`, `restore_only`,
+every restore ([recipes](guides/side-checks.md#files-on-disk-and-redis)).
+A cache emptied on every restore (`FLUSHALL`) means every request runs
+on a cold cache: behaviour that only shows with a warm cache (a value
+read from the cache instead of the database) is never checked, and a
+server that answers from a warm cache may differ from the capture for
+that reason alone. Compare a live server's answer twice, or empty its
+cache first, before you take such a difference for a change. `dsn`, `working`, `pristine`, `exclude`, `restore_only`,
 `restore_empty` and `row_tracking` need a driver.
 
 <!-- check: config-fragment -->
