@@ -133,6 +133,8 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 		code, err = captureCmd(args[1:], stdout, stderr)
 	case "seed":
 		err = seedCmd(args[1:], stdout, stderr)
+	case "clean":
+		err = cleanCmd(args[1:], stdout, stderr)
 	case "run":
 		code, err = runCmd(args[1:], stdout, stderr)
 	case "discover":

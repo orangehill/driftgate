@@ -15,7 +15,7 @@ An unknown command or help topic names the table of
 [what to use for what](configuration.md#what-to-use-for-what).
 
 Contents: [common flags](#common-flags) · [exit codes](#exit-codes) ·
-[init](#init) · [setup](#setup) · [seed](#seed) · [run](#run) · [discover](#discover) ·
+[init](#init) · [setup](#setup) · [seed](#seed) · [clean](#clean) · [run](#run) · [discover](#discover) ·
 [generate](#generate) · [coverage](#coverage) · [har import](#har-import) ·
 [record](#record) · [capture](#capture) · [compare](#compare) · [report](#report) ·
 [allowlist check](#allowlist-check) · [review](#review) · [accept](#accept) · [expect](#expect) · [verify](#verify) ·
@@ -323,6 +323,42 @@ file.
 
 ```sh
 driftgate seed
+```
+
+## clean
+
+```
+driftgate clean [<component>…] [--yes]
+```
+
+Removes what `seed` made: the pristine copy of every database component
+under `state:` (or of the components named) and its record in the local
+store.
+
+| Flag | Meaning |
+|---|---|
+| `--yes` | remove without asking (needed without a terminal) |
+
+- It lists what it would remove (`state db: database shop_pristine
+  (mysql, tcp(127.0.0.1:3306))`, an SQLite pristine file) and asks; without
+  a terminal to ask on it stops (exit 2) unless `--yes`.
+- Only the pristine copies the configuration names, on the server its DSN
+  names now; never a working database. A name that is not a database
+  component under `state:` is refused (exit 2).
+- A copy is removed only when `seed` made it: MySQL and MariaDB by its
+  `driftgate_pristine` table, PostgreSQL by its comment, SQL Server by its
+  mark (and as the copy of this working database), SQLite by its
+  `driftgate_pristine` table. Any other database or file of that name is
+  left as it is (exit 3), with its record. A pristine copy an earlier
+  release made without the mark is refused too: remove it yourself.
+- SQL Server: the backup of the pristine copy in the server's backup folder
+  is not removed.
+- Commands of the project's own (test users, a cache) are not run; the
+  next capture needs `driftgate seed` again (`run` seeds by itself).
+
+```sh
+driftgate clean            # asks first
+driftgate clean db --yes
 ```
 
 ## run
