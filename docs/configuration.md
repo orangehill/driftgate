@@ -414,8 +414,11 @@ target:
 
 The requests keep `base_url`'s host name in the `Host` header, the TLS
 server name and the certificate check; only the connection goes to
-`connect_to` (without a port, to `base_url`'s port). A redirect to the
-same host name goes there too; one to another host is not changed.
+`connect_to` (without a port, to `base_url`'s port). Only connections to
+`base_url`'s host name and port are sent there, as `curl --connect-to
+HOST:PORT:…` does: a redirect to the same host and port goes there too;
+one to another host, or to another port of that host (`http` from
+`https`), goes where DNS says.
 `allow_hosts` applies to the address connected to, not to the host name:
 naming `shop.example` there does not allow `connect_to` to reach an
 address outside the list, and such a target needs `--allow-remote` (and

@@ -54,9 +54,9 @@ type Allow struct {
 	pin map[string]pinned
 }
 
-// pinned is where connections to a host name go: host, and port unless
-// empty (then the connection's own port).
-type pinned struct{ host, port string }
+// pinned is where connections to a host name and port (from) go: host,
+// and port unless empty (then the connection's own port).
+type pinned struct{ from, host, port string }
 
 // ParseConnectTo reads a connect_to setting: a host name or IP address
 // with an optional port (shop-new.internal, 203.0.113.10:8443,
@@ -77,9 +77,11 @@ func ParseConnectTo(s string) (host, port string, err error) {
 	return host, port, nil
 }
 
-// ConnectTo makes every connection to the host of baseURL go to addr (a
-// host name or IP address with an optional port; without one, the
-// connection's own), as curl --connect-to does: requests keep the URL's
+// ConnectTo makes every connection to the host and port of baseURL (its
+// scheme's port when it names none) go to addr (a host name or IP address
+// with an optional port; without one, the same port), as curl
+// --connect-to HOST:PORT:… does; another port of that host is not
+// changed: requests keep the URL's
 // host name in the Host header, TLS server name and certificate check.
 // The allow-list applies to addr, the address actually connected to, and
 // Check of the host name checks addr. Empty addr changes nothing.
@@ -95,13 +97,18 @@ func (a *Allow) ConnectTo(baseURL, addr string) error {
 	if err != nil {
 		return err
 	}
-	a.pin = map[string]pinned{strings.ToLower(u.Hostname()): {host, port}}
+	from := u.Port()
+	if from == "" {
+		from = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	a.pin = map[string]pinned{strings.ToLower(u.Hostname()): {from, host, port}}
 	return nil
 }
 
-// pinnedAddr is host and port as a connection to them goes (ConnectTo).
+// pinnedAddr is host and port as a connection to them goes (ConnectTo);
+// an empty port is the base URL's (Check of its host name).
 func (a *Allow) pinnedAddr(host, port string) (string, string) {
-	if to, ok := a.pin[strings.ToLower(host)]; ok {
+	if to, ok := a.pin[strings.ToLower(host)]; ok && (port == "" || port == to.from) {
 		host = to.host
 		if to.port != "" {
 			port = to.port

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -201,6 +202,24 @@ func TestConnectTo(t *testing.T) {
 	if err := a.Check(context.Background(), "shop.example"); err != nil {
 		t.Errorf("check of the name sent to an allowed address: %v", err)
 	}
+	// Only base_url's port is sent there, as curl --connect-to HOST:PORT:
+	// another port of the name goes where DNS says (here outside the
+	// allow-list).
+	a.LookupIP = func(_ context.Context, _, host string) ([]net.IP, error) {
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	if _, err := a.Dial(context.Background(), "tcp", "shop.example:1"); !errors.Is(err, ErrHostNotAllowed) {
+		t.Errorf("another port: %v", err)
+	}
+	if conn, err := a.Dial(context.Background(), "tcp", "shop.example:"+port); err != nil {
+		t.Errorf("base_url's port: %v", err)
+	} else {
+		conn.Close()
+	}
+	a.LookupIP = nil
 
 	// A port of its own replaces the URL's.
 	b, _ := NewAllow(nil, false)
