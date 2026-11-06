@@ -28,6 +28,9 @@ import (
 func TestRetriedPassNeverPlain(t *testing.T) {
 	var newsHits, postHits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Date header: the two captures of the baseline may fall in two
+		// seconds, and a flaky date is not what this test is about.
+		w.Header()["Date"] = nil
 		switch r.URL.Path {
 		case "/api/news":
 			// Every capture's first send fails: odd hits get 503.

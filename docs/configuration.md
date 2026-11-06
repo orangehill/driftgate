@@ -417,7 +417,9 @@ a baseline from such a response (and so does `accept`), and `compare` and
 `report` show a request that passed only after a retry as a class of its
 own in every format (see [compare](commands.md#compare)). It counts as
 passed: the exit code does not change. A request that failed in every
-send is never a pass after a retry: it shows as failed in all its sends.
+send is never counted as passed after a retry: it shows as failed in all
+its sends, and when it passes anyway (the baseline failed the same way,
+or an expected drift) every format names it as such.
 A request that is retried in every run fails now and then for a reason of
 its own; set `retry: 0` to see each failure as a drift.
 

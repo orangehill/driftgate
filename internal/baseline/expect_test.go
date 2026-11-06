@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
 func TestExpectationsLog(t *testing.T) {
@@ -227,5 +229,32 @@ func TestImportSealOnly(t *testing.T) {
 	}
 	if _, _, err := Expectations(dir); !errors.As(err, &problems) {
 		t.Fatalf("in the baseline: %v", err)
+	}
+}
+
+// TestExpectationsLeftover: a file a killed write left in the folder is
+// no ref's file: the expectations read without it, and the next write
+// removes it once it is older than a minute.
+func TestExpectationsLeftover(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "local")
+	if err := AppendExpectation(dir, ExpectLine{Op: OpExpect, Ref: "T-1", Reason: "r", Requests: []Expected{{ID: "a", Drifts: []string{"sha256:1"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	left := filepath.Join(ExpectDir(dir), snapshot.TempPrefix+"123")
+	if err := os.WriteFile(left, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if exps, _, err := Expectations(dir); err != nil || len(exps) != 1 {
+		t.Fatalf("with a leftover: %v %v", exps, err)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(left, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendExpectation(dir, ExpectLine{Op: OpExpect, Ref: "T-1", Reason: "r", Requests: []Expected{{ID: "b", Drifts: []string{"sha256:2"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(left); !os.IsNotExist(err) {
+		t.Errorf("leftover kept: %v", err)
 	}
 }

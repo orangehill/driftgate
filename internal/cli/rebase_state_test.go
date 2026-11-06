@@ -54,6 +54,9 @@ func TestRebaseAfterNewSeed(t *testing.T) {
 // (item) the application counts.
 func rebaseAfterNewSeed(t *testing.T, root string, db *sql.DB, component, item string) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Date header: the two captures of the baseline may fall in two
+		// seconds, and a flaky date is not what this test is about.
+		w.Header()["Date"] = nil
 		var n int
 		if err := db.QueryRow("SELECT COUNT(*) FROM items").Scan(&n); err != nil {
 			http.Error(w, err.Error(), 500)

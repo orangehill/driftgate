@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -169,6 +170,12 @@ func readRefs(dir string) (map[string]*refState, error) {
 	refs := map[string]*refState{}
 	for _, e := range entries {
 		if ignored(e.Name()) {
+			continue
+		}
+		// A file being written, or left by a write that was killed
+		// (snapshot.WriteFile): no ref's file yet. The next write of the
+		// folder removes what is left (removeLeftovers).
+		if strings.HasPrefix(e.Name(), snapshot.TempPrefix) {
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join(filepath.Base(folder), e.Name()))
@@ -418,7 +425,26 @@ func writeRef(path string, lines [][]byte, baselineName, ref string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	removeLeftovers(filepath.Dir(path))
 	return snapshot.WriteFile(path, all.Bytes(), 0o644)
+}
+
+// removeLeftovers removes the files a killed write left in folder
+// (snapshot.TempPrefix), those older than a minute: a write takes far
+// less, so none is another process's write in progress.
+func removeLeftovers(folder string) {
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), snapshot.TempPrefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Minute {
+			os.Remove(filepath.Join(folder, e.Name()))
+		}
+	}
 }
 
 // ImportExpectations takes the file of a ref from elsewhere (another

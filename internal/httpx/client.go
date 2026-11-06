@@ -265,6 +265,11 @@ func loadFailure(ctx context.Context, err error) string {
 	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return "connection reset"
 	}
+	for _, r := range resetErrors {
+		if errors.Is(err, r) {
+			return "connection reset"
+		}
+	}
 	return ""
 }
 
