@@ -108,7 +108,7 @@ var commands = []commandHelp{
 		{name: "restore", arg: "once|each", text: "restore the state once (default), or also before every sequence"},
 		{name: "repeat", arg: "N", text: "capture N times on the same state and propose allowlist entries for values that differ (default 1); the capture keeps the median response time of each request"},
 		{name: "baseline", arg: "<name>", text: "the state must match the one this baseline was captured from (default local)"},
-		{name: "allow-remote", text: "allow a target outside allow_hosts"},
+		{name: "allow-remote", text: "allow a service outside allow_hosts"},
 		{name: "allow-remote-mutations", text: "with --allow-remote, also send requests that change data or are repeated to it"},
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-fingerprint-check", text: "do not check the state fingerprint (diagnostics only; the capture is marked unreliable)"},
