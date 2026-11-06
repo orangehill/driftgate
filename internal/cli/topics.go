@@ -3,25 +3,38 @@ package cli
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
 // topic is the help of a file DriftGate reads: its fields, one line each,
-// and the section of the documentation to read (driftgate help <topic>).
+// and the section of the documentation to read, under docsBase (driftgate
+// help <topic>).
 type topic struct {
 	name, summary, doc string
 	fields             [][2]string // name, what it is
 }
 
-// docs is where the documentation is read: the release's own pages.
-const docs = "https://github.com/orangehill/driftgate/blob/main/docs/"
+// releaseTag is the Version of a release build.
+var releaseTag = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
-// tasksDoc is the table of what to use for a task.
-const tasksDoc = docs + "configuration.md#what-to-use-for-what"
+// docsBase is where the documentation is read: the pages of this build's
+// release tag, so that a link names a section the release has; main for a
+// build that is not a release.
+func docsBase() string {
+	ref := "main"
+	if releaseTag.MatchString(Version) {
+		ref = Version
+	}
+	return "https://github.com/orangehill/driftgate/blob/" + ref + "/docs/"
+}
+
+// tasksDoc is the table of what to use for a task, under docsBase.
+const tasksDoc = "configuration.md#what-to-use-for-what"
 
 var topics = []topic{
 	{name: "catalog", summary: "catalog.json (beside driftgate.yaml: .driftgate/catalog.json, or driftgate/catalog.json with baselines: git) lists the requests every capture sends; generate writes it, entries may be written by hand. Its keys:",
-		doc: docs + "configuration.md#catalogjson", fields: [][2]string{
+		doc: "configuration.md#catalogjson", fields: [][2]string{
 			{"version", "1"},
 			{"requests", "the requests, in order; each has the keys below"},
 			{"id", "the request's name, unique; reports, --only and globs use it"},
@@ -47,7 +60,7 @@ var topics = []topic{
 			{"sequences", "requests that run in order: id, requests (IDs), restore: before"},
 		}},
 	{name: "allowlist", summary: "allowlist.yaml (beside driftgate.yaml) names what may change between responses, each rule with a reason. Its keys:",
-		doc: docs + "configuration.md#allowlistyaml", fields: [][2]string{
+		doc: "configuration.md#allowlistyaml", fields: [][2]string{
 			{"version", "1"},
 			{"headers:", "a header's value may change: name, and format or ignore_case"},
 			{"body:", "a value in a body may change: path, format, parts; any_length for arrays"},
@@ -77,6 +90,6 @@ func writeTopic(w io.Writer, t *topic) {
 	for _, f := range t.fields {
 		b.WriteString(wrap(strings.Fields(f[1]), fmt.Sprintf("  %-*s  ", width, f[0]), strings.Repeat(" ", width+4), 80))
 	}
-	fmt.Fprintf(&b, "\nRead %s; what to use for a task: %s\n", t.doc, tasksDoc)
+	fmt.Fprintf(&b, "\nRead %s; what to use for a task: %s\n", docsBase()+t.doc, docsBase()+tasksDoc)
 	fmt.Fprint(w, b.String())
 }

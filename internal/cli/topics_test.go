@@ -44,9 +44,9 @@ func TestHelpTopics(t *testing.T) {
 		want  []string
 	}{
 		{"catalog", append(append(fields(catalog.Request{}, "json"), fields(catalog.Catalog{}, "json")...), fields(multipart, "json")...),
-			[]string{"(beside driftgate.yaml", docs + "configuration.md#catalogjson", tasksDoc}},
+			[]string{"(beside driftgate.yaml", docsBase() + "configuration.md#catalogjson", docsBase() + tasksDoc}},
 		{"allowlist", []string{"headers", "body", "arrays", "version", "request", "target", "reason"},
-			[]string{"(beside driftgate.yaml)", docs + "configuration.md#allowlistyaml", "usage: driftgate allowlist check"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "configuration.md#allowlistyaml", "usage: driftgate allowlist check"}},
 	} {
 		code, out, errOut := runCLI(t, "help", c.topic)
 		if code != ExitClean || errOut != "" {
@@ -72,7 +72,7 @@ func TestHelpTopics(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{{"help", "uploads"}, {"uploads"}} {
-		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, tasksDoc) {
+		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, docsBase()+tasksDoc) {
 			t.Errorf("%v: exit %d %s", args, code, errOut)
 		}
 	}
