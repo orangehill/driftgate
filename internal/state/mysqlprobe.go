@@ -56,9 +56,10 @@ var sqlSecurityInvoker = lazy.Regexp(`\bSQL SECURITY INVOKER\b`)
 // (no CREATE), or not a trigger on it (TRIGGER granted on some tables
 // only), gets the probe on one of tables, the tables of db: the trigger's
 // own table when db has it, else the first. Its body is empty, so it does
-// nothing while it exists. At seed, a working database without tables has
-// no trigger to copy, and nothing is probed; a restore into a database
-// without tables, where no probe can be made, is refused before any drop. A view's probe selects a
+// nothing while it exists. Without a table to put it on, nothing is
+// probed: the CREATE TRIGGER itself decides. Only when the login may not
+// create a table at all (and so not the trigger's table either) is a
+// restore into a database without tables refused before any drop. A view's probe selects a
 // constant, so that it needs no table. A seed probes in the working
 // database (db is not target), where the login may only read: a view it
 // may not create there is not probed, and the CREATE in the pristine copy
@@ -226,7 +227,8 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 		if e != nil && !probeDenied(e) {
 			return false, fmt.Errorf("trigger %s: a probe of its DEFINER: %w", it.name, e)
 		}
-		if e == nil {
+		tableMade := e == nil
+		if tableMade {
 			drops = append(drops, "DROP TABLE IF EXISTS "+q) // and its trigger
 			if e = create(q); e == nil {
 				return true, nil
@@ -242,12 +244,17 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 			on = it.table
 		case len(tables) > 0:
 			on = tables[0]
-		case db != target: // a seed: the working database has no trigger to copy
+		case tableMade || db != target:
+			// No table to put the probe on. TRIGGER granted on some tables
+			// only (the probe's table was made): the CREATE TRIGGER on the
+			// trigger's own table decides. A seed probing in the working
+			// database: it has no trigger to copy.
 			return false, nil
 		default:
-			// A restore into a database without tables: the trigger's table
-			// is copied first, which this login may not create either.
-			return false, fmt.Errorf("trigger %s cannot be tried before the restore: this login may not make a probe table in %s (%v), and %s has no table to try it on; give the login CREATE on %s", it.name, db, e, db, db)
+			// A restore into a database without tables, by a login that may
+			// create none: the trigger's table is copied first, which needs
+			// that CREATE too.
+			return false, fmt.Errorf("trigger %s cannot be tried before the restore: this login may not create a table in %s (%v), which the copy of the trigger's table needs too, and %s has no table to try it on; give the login CREATE on %s", it.name, db, e, db, db)
 		}
 		if e := create(qi(db) + "." + qi(on)); e != nil {
 			return false, createRefused(ctx, c, it.kind, it.name, target, it.stmt, e)

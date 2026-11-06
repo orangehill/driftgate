@@ -503,3 +503,48 @@ func TestMySQLProbeNoTables(t *testing.T) {
 		})
 	}
 }
+
+// TestMySQLProbeTableTriggerEmpty: a login with CREATE but TRIGGER on
+// items only seeds into a new pristine copy and restores into a working
+// database without tables: the probe's table is made, its trigger refused,
+// and with no table to put the probe on the CREATE TRIGGER on items itself
+// decides; nothing is refused for the probe.
+func TestMySQLProbeTableTriggerEmpty(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "probetblempty", nil,
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE DEFINER = 'dgt_probetblempty'@'%' TRIGGER items_ai AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)"})
+			mustExec(t, f.root, "CREATE DATABASE "+f.pristine, "CREATE TABLE "+f.pristine+".items (id INT PRIMARY KEY)")
+			for _, db := range []string{f.work, f.pristine} {
+				mustExec(t, f.root, "GRANT SELECT, CREATE, DROP, INSERT ON "+db+".* TO 'dgt_probetblempty'@'%'",
+					"GRANT TRIGGER ON "+db+".items TO 'dgt_probetblempty'@'%'")
+			}
+			mustExec(t, f.root, "DROP DATABASE "+f.pristine)
+			check := func(what string, err error) {
+				t.Helper()
+				switch {
+				case f.logBin:
+					if err == nil || !strings.Contains(err.Error(), "log_bin_trust_function_creators") {
+						t.Fatalf("%s: %v", what, err)
+					}
+				case err != nil:
+					t.Fatalf("%s: %v", what, err)
+				}
+			}
+			check("seed", f.open(t, f.app, Options{}).Seed(context.Background()))
+			if f.logBin {
+				return
+			}
+			if got := definerObjects(t, f.root, f.pristine); got != "trigger items_ai dgt_probetblempty@%" {
+				t.Fatalf("pristine: %s", got)
+			}
+			mustExec(t, f.rootWork, "DROP TABLE items", "DROP TABLE log")
+			check("restore", f.open(t, f.app, Options{}).Restore(context.Background(), []string{"table:items", "table:log"}))
+			if got := definerObjects(t, f.root, f.work); got != "trigger items_ai dgt_probetblempty@%" {
+				t.Fatalf("working: %s", got)
+			}
+		})
+	}
+}
