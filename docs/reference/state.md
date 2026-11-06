@@ -9,6 +9,16 @@ capture, and this page says how. Each driver has a page of its own:
 
 ## Database components
 
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { env: DG_DB_DSN }
+    working: shop
+    exclude: [sessions, cache]
+```
+
 Each entry under `state:` is a component, named by a simple name: a
 database with a built-in driver, or
 [anything else through commands](#restore-anything-else-with-commands).
@@ -105,6 +115,17 @@ keeps working while nothing it covers differs; what to do otherwise is in
 
 ## restore_only
 
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { dotenv: .env }
+    working: shop
+    exclude: [sessions, jobs, job_batches, failed_jobs]
+    restore_empty: [cache, cache_locks]
+```
+
 What the application writes on every request or outside requests (a
 session or cache table, a job queue) has two other choices. `exclude`
 never compares and never restores it: sessions and queued jobs carry
@@ -125,17 +146,6 @@ the others and never compares them.
 - Changing `restore_only` or `restore_empty` needs `driftgate seed`, and a capture says so. The pristine copy holds the rows of the tables restore_only names, not of excluded or restore_empty ones.
 - A table moved from tracking to them is no longer in the state a baseline was captured from. Make the baseline again; a capture says so.
 
-<!-- check: config-fragment -->
-```yaml
-state:
-  db:
-    driver: mysql
-    dsn: { dotenv: .env }
-    working: shop
-    exclude: [sessions, jobs, job_batches, failed_jobs]
-    restore_empty: [cache, cache_locks]
-```
-
 The check costs one read of those tables per restore. Restoring them all
 every time instead was measured slower: sessions of 200 rows, a cache of
 1,000 and jobs of 50, next to twenty tables of 100 rows.
@@ -150,6 +160,16 @@ On PostgreSQL a write to a restore_only table costs a copy of the whole
 database ([restore_only tables cost a full copy](databases/postgresql.md#restore_only-tables-cost-a-full-copy)).
 
 ### restore_empty
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { env: DG_DB_DSN }
+    working: shop
+    restore_empty: [cache, cache_locks]
+```
 
 `restore_empty` implies `restore_only`: everything above holds for its
 tables, whose pristine content is no rows, as for a cache.
@@ -196,13 +216,6 @@ three folders below it:
 
 ## Restore anything else with commands
 
-Anything else (Redis, files, a search index) is a component with
-`restore`, required, and optionally `fingerprint`: a command whose
-output must be the same after every restore
-([recipes](../guides/side-checks.md)). `dsn`, `working`, `pristine`,
-`exclude`, `restore_only`, `restore_empty` and `row_tracking` need a
-driver.
-
 <!-- check: config-fragment -->
 ```yaml
 state:
@@ -215,6 +228,13 @@ state:
     restore: ["rsync", "-a", "--delete", "storage-pristine/", "storage/app/"]
     fingerprint: ["sh", "-c", "find storage/app -type f | sort | xargs shasum"]
 ```
+
+Anything else (Redis, files, a search index) is a component with
+`restore`, required, and optionally `fingerprint`: a command whose
+output must be the same after every restore
+([recipes](../guides/side-checks.md)). `dsn`, `working`, `pristine`,
+`exclude`, `restore_only`, `restore_empty` and `row_tracking` need a
+driver.
 
 A cache emptied on every restore (`FLUSHALL`) means every request runs on
 a cold cache.

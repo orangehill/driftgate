@@ -58,10 +58,17 @@ restore and `prepare`, which may set up what they check.
 
 - They run before the first request, and again right before the first request that changes data when read-only requests ran in between.
 - A guard that fails stops the capture there (exit 3), in seconds rather than after the read-only requests.
-- Guards only check. A write of one becomes part of the state the read-only requests start from; a restore removes it before the requests that change data. It may be reported as a change `prepare` made.
+- Guards only check. A write of one becomes part of the state the read-only requests start from; a restore removes it before the requests that change data.
+- Such a write may be reported as a change `prepare` made. A later search for read-only requests that wrote may report `prepare` as not repeatable.
 
-When `prepare` changed the restored state, the capture warns and lists
-what it changed. The exit code stays.
+The capture fingerprints the state right after the restore and after
+`prepare`. When the two differ, it warns that the state changed between
+the restore and the end of `prepare`, and names the changed tables or
+components.
+
+- A `tokens.command` runs right after `prepare`. What it writes, such as the tokens of a login, is not taken for `prepare`'s.
+- With both configured, the first capture takes one more fingerprint between them. The later restores (before the requests that change data, `--restore each`) are checked only without a `tokens.command`.
+- Only components with a fingerprint are seen. The warning never changes the exit code.
 
 ## When the state does not match the baseline
 

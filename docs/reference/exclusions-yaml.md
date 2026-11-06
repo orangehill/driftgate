@@ -34,10 +34,6 @@ routes:
 
 ## Acknowledge a request that fails
 
-`known_failures:` acknowledges requests that fail in the baseline without
-dropping them, such as a 500 kept for years, or an upload broken until a
-later upgrade step.
-
 <!-- check: exclusions -->
 ```yaml
 version: 1
@@ -51,6 +47,10 @@ known_failures:
     reason: Uploads break until the storage driver is replaced.
     status: 5xx
 ```
+
+`known_failures:` acknowledges requests that fail in the baseline without
+dropping them, such as a 500 kept for years, or an upload broken until a
+later upgrade step.
 
 | Key | Meaning |
 |---|---|

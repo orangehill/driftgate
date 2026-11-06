@@ -47,6 +47,16 @@ The file is `.driftgate/catalog.json`, or `driftgate/catalog.json` with
 
 ## Request fields
 
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {"id": "get-api-me", "method": "GET", "path": "/api/me", "identity": "admin", "level": "types", "storage": "private"}
+ ]
+}
+```
+
 | Field | Meaning |
 |---|---|
 | `id` | the request's unique name ([Request IDs](#request-ids)) |
@@ -87,6 +97,20 @@ What `mutates` does:
 - Variants of one route are separate entries, each with its own ID.
 
 ## Sequences
+
+<!-- check: catalog -->
+```json
+{
+ "version": 1,
+ "requests": [
+  {"id": "post-api-auth-login", "method": "POST", "path": "/api/auth/login", "mutates": true, "storage": "private"},
+  {"id": "get-api-me", "method": "GET", "path": "/api/me", "storage": "private"}
+ ],
+ "sequences": [
+  {"id": "login", "restore": "before", "requests": ["post-api-auth-login", "get-api-me"]}
+ ]
+}
+```
 
 Sequences run their requests in order, together.
 
@@ -154,16 +178,6 @@ is the same bytes every time.
 
 ## repeat
 
-`"repeat": 61` sends the request 61 times in a row. It compares the last
-response together with the statuses of all, such as `200×60, 429×1`.
-
-- The sends skip `rate_limits`, and the request runs on a freshly restored state.
-- On a service outside its `allow_hosts` (`capture --allow-remote`), a repeated request needs `--allow-remote-mutations`, like one that changes data, and keeps `rate_limits`.
-
-A rate limit is not generated: write a repeated request by hand. Write it
-once more with an `accept` header, so the JSON body of a 429 is compared
-too:
-
 <!-- check: catalog -->
 ```json
 {
@@ -176,10 +190,17 @@ too:
 }
 ```
 
-## command steps
+`"repeat": 61` sends the request 61 times in a row. It compares the last
+response together with the statuses of all, such as `200×60, 429×1`.
 
-A command step runs a program instead of sending a request, such as a
-queue worker inside a sequence.
+- The sends skip `rate_limits`, and the request runs on a freshly restored state.
+- On a service outside its `allow_hosts` (`capture --allow-remote`), a repeated request needs `--allow-remote-mutations`, like one that changes data, and keeps `rate_limits`.
+
+A rate limit is not generated: write a repeated request by hand. Write it
+once more with an `accept` header, so the JSON body of a 429 is compared
+too.
+
+## command steps
 
 <!-- check: catalog -->
 ```json
@@ -198,6 +219,9 @@ queue worker inside a sequence.
  ]
 }
 ```
+
+A command step runs a program instead of sending a request, such as a
+queue worker inside a sequence.
 
 - A step has no `method`, `path`, body, headers, parameters or identity, and is not repeated.
 - Its exit code and side effects are compared like a request's.

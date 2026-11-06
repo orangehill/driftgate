@@ -6,8 +6,6 @@ top-level keys in the terminal. Paths are those of the local layout
 
 ## A complete example
 
-A Laravel API on MySQL with Redis:
-
 <!-- check: config -->
 ```yaml
 version: 1
@@ -64,13 +62,33 @@ observe:
     reason: Counts requests of the last minute.
 ```
 
+The example is a Laravel API on MySQL with Redis.
+
 ## Rules every file follows
+
+<!-- check: config-fragment -->
+```yaml
+version: 1
+project: shop
+target:
+  base_url: http://localhost:8000
+```
 
 - Every file has a `version` field, now `1`. A newer version is refused.
 - In the YAML files an unknown key is an error, not a warning.
 - A second document after `---` in `driftgate.yaml` or `exclusions.yaml` is an error too: it would be ignored.
 
 ## Top-level keys
+
+<!-- check: config-fragment -->
+```yaml
+version: 1
+project: shop
+mode: evolve
+level: values
+target:
+  base_url: http://localhost:8000
+```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -103,6 +121,13 @@ observe:
 
 ## How commands are written
 
+<!-- check: config-fragment -->
+```yaml
+prepare:
+  - ["php", "artisan", "cache:clear"]
+  - ["sh", "-c", "php artisan config:cache && php artisan route:cache"]
+```
+
 Commands are lists: the program and its arguments. This holds for
 `seed`, `prepare`, guards, restore and fingerprint, `tokens.command`,
 adapters and bisect hooks.
@@ -114,12 +139,22 @@ adapters and bisect hooks.
 
 ## mode
 
+<!-- check: config-fragment -->
+```yaml
+mode: evolve
+```
+
 `freeze` (the default) or `evolve`.
 
 - `freeze`: every drift fails unless a ticket expects exactly that drift ([`expect`](commands/review.md#driftgate-expect)), and `accept` is refused.
 - `evolve`: drifts may be accepted, with a reason ([`accept`](commands/review.md#driftgate-accept)).
 
 ## level
+
+<!-- check: config-fragment -->
+```yaml
+level: types
+```
 
 How far a comparison goes. Each level includes the ones before it.
 
@@ -135,6 +170,11 @@ How far a comparison goes. Each level includes the ones before it.
 - What each level compares in each part of a response is in [How responses are compared](comparison.md#comparison-levels).
 
 ## baselines
+
+<!-- check: config-fragment -->
+```yaml
+baselines: local
+```
 
 Where the project's files are: `local` or `git`.
 
@@ -209,6 +249,11 @@ takes what it needs from the main worktree.
 
 ## store
 
+<!-- check: config-fragment -->
+```yaml
+store: ~/Data/shop-store
+```
+
 The local store holds captures, encrypted private bodies and pristine
 metadata.
 
@@ -219,6 +264,12 @@ metadata.
 
 ## key
 
+<!-- check: config-fragment -->
+```yaml
+key:
+  op: "op://Shop/driftgate-key/password"
+```
+
 The project key (32 bytes, base64) encrypts private bodies (AES-256-GCM),
 and names them by a keyed hash (HMAC).
 
@@ -228,12 +279,6 @@ and names them by a keyed hash (HMAC).
 | no `key:`, `baselines: git` | `DRIFTGATE_KEY`, then the macOS Keychain (`driftgate key create`) |
 | `key: { env: NAME }` | the environment variable `NAME` |
 | `key: { op: "op://vault/item/field" }` | 1Password, through `op read` |
-
-<!-- check: config-fragment -->
-```yaml
-key:
-  op: "op://Shop/driftgate-key/password"
-```
 
 - The key file `.driftgate/key` holds the key in base64, and is open to its owner only (mode `600`). A file others can read is refused.
 - Windows has no such mode: there the check is not made, and the folder's access list protects the file.
@@ -257,6 +302,17 @@ The private bodies can be read only with the project key: give it as
 - Public bodies were scanned for personal data, but a scan is not a proof.
 
 ## target and targets
+
+<!-- check: config-fragment -->
+```yaml
+targets:
+  api:
+    base_url: http://localhost:8001
+    concurrency: 4
+  web:
+    base_url: http://localhost:3001
+    allow_hosts: [localhost, web.shop.example]
+```
 
 `target:` describes the application. With several services (an API, a
 frontend, microservices), use `targets:` instead, with one entry per
@@ -282,23 +338,7 @@ service name ([several services](../guides/multi-service.md)).
 - A redirect to another host or port keeps only `User-Agent`, `Accept`, `Accept-Encoding` and `Accept-Language`: not the identity's token, nor the catalog's headers.
 - How `aliases` and the origins are compared is in [Your own URLs on another port](comparison.md#your-own-urls-on-another-port).
 
-<!-- check: config-fragment -->
-```yaml
-targets:
-  api:
-    base_url: http://localhost:8001
-    concurrency: 4
-  web:
-    base_url: http://localhost:3001
-    allow_hosts: [localhost, web.shop.example]
-```
-
 ### connect_to
-
-`connect_to` sends every request to a fixed address, as
-`curl --connect-to` or `--resolve` does. Use it when DNS names another
-server for the service's host than the one under test, such as while the
-host name still points to the old production server.
 
 <!-- check: config-fragment -->
 ```yaml
@@ -307,6 +347,11 @@ target:
   connect_to: 203.0.113.10        # or 203.0.113.10:8443, [2001:db8::1]:443
   allow_hosts: [203.0.113.10]
 ```
+
+`connect_to` sends every request to a fixed address, as
+`curl --connect-to` or `--resolve` does. Use it when DNS names another
+server for the service's host than the one under test, such as while the
+host name still points to the old production server.
 
 - The requests keep `base_url`'s host name in the `Host` header, the TLS server name and the certificate check. Only the connection goes to `connect_to`.
 - The host name never goes where DNS says. Without a port in `connect_to`, every port of it goes to that host on the same port: a redirect from `http` to `https` of the name goes to `203.0.113.10:443`.
@@ -319,6 +364,13 @@ target:
 
 ### retry
 
+<!-- check: config-fragment -->
+```yaml
+target:
+  base_url: http://localhost:8000
+  retry: 0
+```
+
 `retry` (`0` to `3`, default `1`) is how many times a read-only `GET`,
 `HEAD` or `OPTIONS` request that failed under load is sent again. Load
 failures are a timeout, a reset connection, and a `502`, `503` or `504`
@@ -326,6 +378,16 @@ status. `0` means never. What is retried, and how a report shows it, is
 in [Retries of requests that failed under load](capture.md#retries-of-requests-that-failed-under-load).
 
 ## identities and tokens
+
+<!-- check: config-fragment -->
+```yaml
+tokens:
+  command: ["php", "artisan", "driftgate:tokens"]
+identities:
+  admin: {}
+  editor: {}
+  auditor: { env: DG_TOKEN_AUDITOR }
+```
 
 A request with `"identity": "admin"` is sent with
 `Authorization: Bearer <token>`. Tokens come from one of:
@@ -342,35 +404,22 @@ A request with `"identity": "admin"` is sent with
 - An identity's own `env` or `op` takes precedence over `tokens`.
 - A catalog request whose identity has no token stops the capture.
 
-<!-- check: config-fragment -->
-```yaml
-tokens:
-  command: ["php", "artisan", "driftgate:tokens"]
-identities:
-  admin: {}
-  editor: {}
-  auditor: { env: DG_TOKEN_AUDITOR }
-```
-
 ## state
 
-Every capture starts from the same data. Each entry under `state:` is a
-component, named by a simple name: a database with a built-in driver, or
-anything else through commands. Its keys, and how seed, restore and
-fingerprints work, are in [State: restoring the data](state.md).
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: postgres
+    dsn: { env: DG_DB_DSN }
+    working: shop
+```
+
+Every capture starts from the same data: the components under `state:`.
+Their keys, and how seed, restore and fingerprints work, are in
+[State: restoring the data](state.md).
 
 ## seed, prepare, guards
-
-| Key | Meaning |
-|---|---|
-| `seed` | commands that load the data into the working databases: migrations and seeders, a dump import |
-| `prepare` | commands run after every restore |
-| `guards` | `{name, command}`: checks that must succeed before requests that change data are sent |
-
-- `driftgate seed` runs the `seed` commands and keeps the pristine copy; `seed --skip-commands` takes the data already loaded.
-- Guards run when the capture has requests that change data, command steps or repeated requests ([when](capture.md#guards-and-prepare-during-a-capture)). A guard that fails stops the capture there, such as when mail would go to people instead of a log.
-- A guard only checks: it must not write to the databases under `state:`. A command that logs itself to a table writes.
-- If a guard writes, its write becomes part of the state the read-only requests start from; a restore removes it before the requests that change data. It may be reported as a change `prepare` made, and a later search for read-only requests that wrote may report `prepare` as not repeatable.
 
 <!-- check: config-fragment -->
 ```yaml
@@ -384,13 +433,18 @@ guards:
     command: ["sh", "-c", "grep -q '^QUEUE_CONNECTION=sync' .env"]
 ```
 
-### Commands with a folder or standard input
+| Key | Meaning |
+|---|---|
+| `seed` | commands that load the data into the working databases: migrations and seeders, a dump import |
+| `prepare` | commands run after every restore |
+| `guards` | `{name, command}`: checks that must succeed before requests that change data are sent |
 
-A command of `seed`, `prepare` or a guard may also be a mapping. `run`
-is the list, `dir` the folder it runs in (default the project folder),
-and `stdin` a file given as its standard input. It still runs without a
-shell. Restore, fingerprint, `tokens.command`, adapters and bisect hooks
-stay lists.
+- `driftgate seed` runs the `seed` commands and keeps the pristine copy; `seed --skip-commands` takes the data already loaded.
+- Guards run when the capture has requests that change data, command steps or repeated requests ([when](capture.md#guards-and-prepare-during-a-capture)). A guard that fails stops the capture there, such as when mail would go to people instead of a log.
+- A guard only checks: it must not write to the databases under `state:`. A command that logs itself to a table writes.
+- What happens when a guard writes anyway is under [Guards and prepare during a capture](capture.md#guards-and-prepare-during-a-capture).
+
+### Commands with a folder or standard input
 
 <!-- check: config-fragment -->
 ```yaml
@@ -403,6 +457,12 @@ guards:
   - name: mail goes to the log
     command: { run: ["grep", "-q", "^MAIL_MAILER=log"], stdin: api/.env }
 ```
+
+A command of `seed`, `prepare` or a guard may also be a mapping. `run`
+is the list, `dir` the folder it runs in (default the project folder),
+and `stdin` a file given as its standard input. It still runs without a
+shell. Restore, fingerprint, `tokens.command`, adapters and bisect hooks
+stay lists.
 
 - Both paths are relative to the project folder; `~` and `~/` are the home folder.
 - A folder or file that is missing stops the command before the first of its list runs (exit 3), so a seed never stops halfway for it.
@@ -434,13 +494,23 @@ A `prepare` that changes the restored state, such as a data migration
 that stamps `updated_at` on every row, does so before every capture. A
 value it writes anew each time then drifts in every run.
 
-- The capture fingerprints the state right after the restore and after `prepare`. When the two differ, it warns that the state changed between the restore and the end of `prepare`, and names the changed tables or components.
 - If the step does not depend on the restored data, move it to `seed`: the pristine copy then holds its result.
-- A `tokens.command` runs right after `prepare`. What it writes, such as the tokens of a login, is not taken for `prepare`'s.
-- With both configured, the first capture takes one more fingerprint between them. The later restores (before the requests that change data, `--restore each`) are checked only without a `tokens.command`.
-- Only components with a fingerprint are seen. The warning never changes the exit code.
+- The capture warns when `prepare` changed the restored state ([how](capture.md#guards-and-prepare-during-a-capture)).
 
 ## discover
+
+<!-- check: config-fragment -->
+```yaml
+discover:
+  - adapter: openapi
+    url: /v3/api-docs
+    identity: admin
+  - adapter: spring
+  - adapter: command
+    command: ["./scripts/routes.sh"]
+    dir: services/billing
+    base_path: /billing
+```
 
 Adapters that find the routes. `driftgate init` writes them; their
 order does not change the result.
@@ -474,25 +544,7 @@ rules of form request classes, and builds request bodies from them.
 Some applications describe only what the caller may use, hence
 `identity`.
 
-<!-- check: config-fragment -->
-```yaml
-discover:
-  - adapter: openapi
-    url: /v3/api-docs
-    identity: admin
-  - adapter: spring
-  - adapter: command
-    command: ["./scripts/routes.sh"]
-    dir: services/billing
-    base_path: /billing
-```
-
 ### Output of the command adapter
-
-The `command` adapter's output is a JSON list. Each entry has `path` and
-`method` (or `methods`), and optionally `name`, `auth` (needs an
-identity), `body` (a sample request body) and `file` (the source file of
-the handler):
 
 <!-- check: routes-json -->
 ```json
@@ -502,17 +554,39 @@ the handler):
 ]
 ```
 
+The `command` adapter's output is a JSON list. Each entry has `path` and
+`method` (or `methods`), and optionally `name`, `auth` (needs an
+identity), `body` (a sample request body) and `file` (the source file of
+the handler).
+
 Paths name parameters in braces: `{id}` is required, `{id?}` optional,
 `{slug*}` takes the rest of the path, and `{slug*?}` the rest or nothing.
 Every path must start with `/`.
 
 ## templates, generate, params
 
+<!-- check: config-fragment -->
+```yaml
+templates: [ok, not-found, json, json-errors]
+generate:
+  identity: admin
+identities:
+  admin: { env: DG_TOKEN_ADMIN }
+params:
+  - name: id
+    value: "12"
+```
+
 `templates:` lists the variants `generate` makes for every route method,
 `generate:` the identity it uses, and `params:` the values of route
 parameters.
 
 ### Templates
+
+<!-- check: config-fragment -->
+```yaml
+templates: [ok, not-found, invalid-param, anonymous, json]
+```
 
 The default is `[ok]`. `init` usually writes `[ok, not-found, json]`,
 and `[ok, not-found, json, json-errors]` for Laravel, Symfony, Rails and
@@ -534,6 +608,11 @@ A rate limit is not generated: write a
 
 ### json-errors
 
+<!-- check: config-fragment -->
+```yaml
+templates: [ok, not-found, json, json-errors]
+```
+
 `json-errors` sends each request of `not-found`, `invalid-param`,
 `anonymous` and `empty-body` once more with `Accept: application/json`.
 Its request IDs end in `-json`.
@@ -549,6 +628,17 @@ To adopt it in an existing project, see
 [keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses).
 
 ### Parameter values
+
+<!-- check: config-fragment -->
+```yaml
+params:
+  - name: slug
+    route: "/blog/*"
+    values: ["hello-world", "pricing"]
+    foreach: true
+  - name: id
+    value: "12"
+```
 
 `generate.identity` is the identity used for routes that need
 authentication. It must be under `identities:`, or come from `tokens:`.
@@ -570,23 +660,7 @@ that parameter), an optional `target`, and exactly one source:
 - The `sql` check is a guard against mistakes, not a security boundary: the DSN user's privileges are ([security](../security.md#what-a-pull-request-can-run-in-ci)).
 - With `from`, `generate` puts both requests in a sequence.
 
-<!-- check: config-fragment -->
-```yaml
-params:
-  - name: slug
-    route: "/blog/*"
-    values: ["hello-world", "pricing"]
-    foreach: true
-  - name: id
-    value: "12"
-```
-
 ## storage and pii
-
-Generated requests store their bodies as **private**: encrypted in the
-local store, never in the repository. `storage.public` names those that
-are public, by a glob over the request ID; `storage.default: public`
-makes all of them public.
 
 <!-- check: config-fragment -->
 ```yaml
@@ -597,18 +671,16 @@ pii:
   allow: ['[a-z.]+@shop\.example']
 ```
 
+Generated requests store their bodies as **private**: encrypted in the
+local store, never in the repository. `storage.public` names those that
+are public, by a glob over the request ID; `storage.default: public`
+makes all of them public.
+
 - Every public body is scanned by the [personal-data detector](../security.md#personal-data). When it finds something, the body is stored as private, the finding is reported with a masked value, and the capture exits 2.
 - `pii.allow` lists regular expressions of values that may appear in public bodies, such as a shared support address.
 - A catalog entry has its own `storage`.
 
 ## observe
-
-Generated requests whose outcome depends on timing or a cache. They are
-measured (status, time, size), but never fail the check.
-
-- `match` is a glob over `METHOD /route/path`, `/route/path` or the request ID.
-- `target` limits it to one service.
-- A catalog entry has its own `observe`.
 
 <!-- check: config-fragment -->
 ```yaml
@@ -617,13 +689,14 @@ observe:
     reason: Health check; reports the current time.
 ```
 
-## requests
+Generated requests whose outcome depends on timing or a cache. They are
+measured (status, time, size), but never fail the check.
 
-What `generate` writes into the requests it makes: whether they change
-data (`mutates`), and their JSON body (`body`, written as YAML, sent as
-`application/json`). `match` and `target` name requests as `observe`
-does. Where several entries name a request, the last one with the key
-wins.
+- `match` is a glob over `METHOD /route/path`, `/route/path` or the request ID.
+- `target` limits it to one service.
+- A catalog entry has its own `observe`.
+
+## requests
 
 <!-- check: config-fragment -->
 ```yaml
@@ -634,6 +707,12 @@ requests:
     mutates: false
     body: { q: news, page: 1 }
 ```
+
+What `generate` writes into the requests it makes: whether they change
+data (`mutates`), and their JSON body (`body`, written as YAML, sent as
+`application/json`). `match` and `target` name requests as `observe`
+does. Where several entries name a request, the last one with the key
+wins.
 
 - The catalog keeps no change by hand to a generated entry: the next `generate --write` makes it again, and `run` reports a catalog that differs from what it generates. Mark it here instead, then run `generate --write`.
 - For read-only requests that changed data, `capture` and `run` print the entries to add, by route. For entries written by hand, they print the catalog change: those say `mutates` and `body` in the catalog itself.
@@ -651,20 +730,29 @@ The body is JSON as the YAML is written:
 
 ## uploads
 
-A catalog request can upload a real file, named by its path in an
-uploads folder outside the repository
-([multipart](catalog-json.md#multipart)).
-
 <!-- check: config-fragment -->
 ```yaml
 uploads:
   dir: ~/Data/shop-uploads
 ```
 
+A catalog request can upload a real file, named by its path in an
+uploads folder outside the repository
+([multipart](catalog-json.md#multipart)).
+
 - `uploads.dir` or `DRIFTGATE_UPLOADS` names the folder. `~/` is the home folder; a relative path is relative to the folder of `driftgate.yaml`.
 - A folder anywhere inside the git repository of the project is refused, also through a symbolic link.
 
 ## bisect
+
+<!-- check: config-fragment -->
+```yaml
+bisect:
+  checkout: ["sh", "-c", "cd \"$DRIFTGATE_BISECT_DIR\" && make restart"]
+  ready: ["curl", "-sf", "http://localhost:8000/up"]
+  finish: ["make", "restart"]
+  timeout: 5m
+```
 
 The hooks of [`driftgate bisect`](commands/review.md#driftgate-bisect).
 They run without a shell, from the project folder, with
@@ -679,16 +767,18 @@ They run without a shell, from the project folder, with
 | `timeout` | the limit of `checkout` (default `10m`) |
 | `ready_timeout` | default `1m` |
 
+## data
+
 <!-- check: config-fragment -->
 ```yaml
-bisect:
-  checkout: ["sh", "-c", "cd \"$DRIFTGATE_BISECT_DIR\" && make restart"]
-  ready: ["curl", "-sf", "http://localhost:8000/up"]
-  finish: ["make", "restart"]
-  timeout: 5m
+data:
+  driver: mysql
+  source: { dsn: { env: DG_PROD_COPY_DSN }, database: shop_prod_copy }
+  target: { database: shop_anon }
+  files:
+    source: ~/Data/shop-storage
+    target: ~/Data/shop-storage-anon
 ```
-
-## data
 
 The data module ([`driftgate data …`](commands/data.md)) makes a copy of
 a database with personal values replaced
@@ -709,17 +799,6 @@ a database with personal values replaced
 - Those are copied without their `DEFINER`, with the SQL mode and collation they were made with. An event keeps its status, so with the event scheduler on it runs on the copy.
 - Reading a routine's definition needs `SHOW_ROUTINE` (MySQL), `SELECT` on `mysql.proc` (MariaDB), or being its definer. Without it, the run stops and names the routine.
 - A MySQL or MariaDB target's `max_allowed_packet` bounds every `INSERT`. A row that does not fit in one stops the run, naming its table and column.
-
-<!-- check: config-fragment -->
-```yaml
-data:
-  driver: mysql
-  source: { dsn: { env: DG_PROD_COPY_DSN }, database: shop_prod_copy }
-  target: { database: shop_anon }
-  files:
-    source: ~/Data/shop-storage
-    target: ~/Data/shop-storage-anon
-```
 
 ---
 **Related:** [State: restoring the data](state.md) · [catalog.json](catalog-json.md) · [allowlist.yaml](allowlist-yaml.md) · [Command line basics](cli.md)

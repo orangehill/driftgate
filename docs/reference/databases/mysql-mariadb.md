@@ -1,9 +1,7 @@
 # MySQL and MariaDB
 
-What DriftGate does with a MySQL or MariaDB database under `state:`.
-The keys and the rules every driver shares are in
-[State: restoring the data](../state.md); the DSN is in
-[Database connection settings](../database-settings.md).
+How DriftGate seeds, restores and fingerprints a MySQL or MariaDB
+database. What every driver shares is in [State](../state.md).
 
 ## How seed and restore work
 

@@ -33,7 +33,7 @@ name (`$.data[3].id`).
 - A byte order mark that came or went, and another encoding (UTF-8, UTF-16, UTF-32), are an `encoding` drift at `$`, whatever else changed.
 - A body in UTF-16 or UTF-32 is compared as its text.
 - Other bytes that change no value are a drift only when nothing else in the body changed. Examples are keys written with escapes, and `"\u0061"` for `"a"`.
-- A value a rule covers, written otherwise (`"a\/b"` for `"a/b"`), is no drift: the rule covers how it is written. The rest of the body is compared without it.
+- A value a rule covers, written differently (`"a\/b"` for `"a/b"`), is no drift: the rule covers how it is written. The rest of the body is compared without it.
 
 ### Rows in another order
 
@@ -50,7 +50,7 @@ most 20. Rows of an `ORDER BY` on a column with equal values, which
 another database server or version returns in another order, look like
 this.
 
-- The items are equal as the comparison sees them at its level, with the allowlist's rules. What still differs within a pair (a value written otherwise) is reported at the baseline item's path.
+- The items are equal as the comparison sees them at its level, with the allowlist's rules. What still differs within a pair (a value written differently) is reported at the baseline item's path.
 - When all items but one of each side are equal, those two are paired and compared too (`2 of 3 items the same`).
 - When more items changed, which went where is ambiguous, and the array is compared by position.
 - It stays a drift: the order of a list can matter to a client.
@@ -137,7 +137,7 @@ request.
 
 - A `side-effect` drift says that a request changed other items than in the baseline.
 - With [`row_tracking`](state.md#database-components), a capture also records which rows and columns each request changes, without values. Their changes are compared too.
-- Rows of a table the baseline did not track (`row_tracking` came after it) are not compared, and a note says to make the baseline again.
+- A table the baseline did not track is not compared ([why](state.md#database-components)).
 - Excluded and `restore_only` tables are no side effect ([restore_only](state.md#restore_only)).
 - Side effects are compared only when both captures took fingerprints of the state.
 - A side effect names what changed, not the values, so it cannot be expected.

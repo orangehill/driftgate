@@ -53,6 +53,15 @@ schema:
 
 ## Table rules
 
+<!-- check: classify -->
+```yaml
+version: 1
+tables:
+  sessions:
+    action: empty
+    reason: Sessions of real users; the application makes new ones.
+```
+
 | Key | Meaning |
 |---|---|
 | `action` | `copy` (default), `empty` or `skip` (below) |
@@ -65,6 +74,22 @@ schema:
 - `skip`: the table is left out.
 
 ## Column rules
+
+<!-- check: classify -->
+```yaml
+version: 1
+tables:
+  users:
+    columns:
+      id: keep
+      email: email
+      settings:
+        kind: personal
+        strategy: json
+        paths:
+          $.phone: universal
+        other: free-text
+```
 
 A column rule is one word for the plain cases, or a mapping. The word is
 `keep`, `file`, `serialized-php`, or a strategy name, which means
@@ -114,10 +139,6 @@ are.
 
 ## subset
 
-`data subset` copies a sample: the rows `subset:` chooses as roots, the
-rows that follow them, and every row they reference, transitively. So
-the copy has no dangling reference.
-
 <!-- check: classify -->
 ```yaml
 version: 1
@@ -144,6 +165,10 @@ subset:
     - from: orders(coupon_id)
       nullable: "null"
 ```
+
+`data subset` copies a sample: the rows `subset:` chooses as roots, the
+rows that follow them, and every row they reference, transitively. So
+the copy has no dangling reference.
 
 | Key | Meaning |
 |---|---|

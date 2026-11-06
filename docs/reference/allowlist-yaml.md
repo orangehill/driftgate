@@ -61,9 +61,18 @@ arrays:
 - A value equal to the baseline's is never a drift, also when it does not match the format. It is the accepted baseline, and the verdict must not depend on whether something else in the same response changed.
 - This holds for JSON values, texts and attributes of a page, cells and header values.
 - Nothing else is hidden: a difference in escaping or whitespace next to an allowed value is still reported.
-- A value a rule covers, written otherwise (`"a\/b"` for `"a/b"`), is no drift: the rule covers how it is written. The rest of the body is compared without it ([the bytes of a JSON body](comparison.md#the-bytes-of-a-json-body)).
+- A rule also covers how its value is written ([the bytes of a JSON body](comparison.md#the-bytes-of-a-json-body)).
 
 ## Header rules
+
+<!-- check: allowlist -->
+```yaml
+version: 1
+headers:
+  - name: date
+    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    reason: Time of the response; changes with every request.
+```
 
 | Key | Meaning |
 |---|---|
@@ -75,6 +84,15 @@ arrays:
 | `target` | only requests of this service |
 
 ## Body rules
+
+<!-- check: allowlist -->
+```yaml
+version: 1
+body:
+  - path: $.meta.generated_at
+    format: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z'
+    reason: Time the response was built.
+```
 
 | Key | Meaning |
 |---|---|
@@ -102,6 +120,16 @@ wildcard names no place, and is refused.
 
 ### The whole body
 
+<!-- check: allowlist -->
+```yaml
+version: 1
+body:
+  - request: post-login-invalid
+    path: $raw
+    format: '(?s)<!DOCTYPE html>.*</html>'
+    reason: The redirect page of the framework; status and Location are still compared.
+```
+
 A rule with the path `$raw` covers the whole body of a response that is
 not JSON, such as a framework's redirect page. `$raw` is taken
 literally, and never matched by a wildcard path.
@@ -116,6 +144,16 @@ literally, and never matched by a wildcard path.
 - A `$raw` rule needs a `format`, and takes neither `any_length` nor `parts`.
 
 ### Spreadsheet and CSV cells
+
+<!-- check: allowlist -->
+```yaml
+version: 1
+body:
+  - request: get-api-users-export
+    path: xlsx:Users!A1
+    format: 'Exported \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}'
+    reason: The export writes its own time in the header cell.
+```
 
 A body rule whose path starts with `xlsx:` or `csv!` applies to cells, as
 `format` applies to a JSON value. What is compared in a workbook is in
@@ -148,6 +186,16 @@ A path that no cell can have is refused when the allowlist is read.
 - A worksheet named by its bare part (`xlsx:sheet1!B2`) is refused, with the message to write the name from a report, usually `xlsx:Sheet1!B2`. A worksheet the workbook names `sheet1` is written `xlsx:'sheet1'!B2`.
 
 ## Array rules
+
+<!-- check: allowlist -->
+```yaml
+version: 1
+arrays:
+  - request: get-api-users
+    path: $.data
+    key: id
+    reason: Users are listed newest first; a new user is one new item.
+```
 
 An array rule pairs the items of the arrays its path reaches by a key,
 instead of by position. What that changes in a comparison is in

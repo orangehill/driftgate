@@ -60,10 +60,6 @@ connection string before anything else, also when its password holds
 
 ## Read the DSN from the project's own settings
 
-Instead of a copy of the DSN, `dsn:` can name the file where the
-application keeps its database settings. `driftgate init` and
-`driftgate setup` write it from what they find.
-
 <!-- check: config-fragment -->
 ```yaml
 state:
@@ -76,6 +72,10 @@ state:
     dsn: { appsettings: src/Shop.Api/Shop.Api.csproj, key: "ConnectionStrings:Reports" }
     working: reports
 ```
+
+Instead of a copy of the DSN, `dsn:` can name the file where the
+application keeps its database settings. `driftgate init` and
+`driftgate setup` write it from what they find.
 
 - DriftGate reads the file each time a command runs. The password stays where it is, and a change of the file is followed.
 - The file is relative to the project root and must be inside it; `\` is taken for `/`.
@@ -185,6 +185,15 @@ service name.
 - SQL Server: see [the application's settings](databases/sql-server.md#the-applications-settings).
 
 ## Set the host or a socket
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { dotenv: .env, host: "127.0.0.1:3307" }
+    working: shop
+```
 
 - `host: 127.0.0.1:3307` replaces the setting's host and port: the address of the database from this machine.
 - `host: /path/to/mysqld.sock`, or a PostgreSQL socket folder, takes a socket instead.
