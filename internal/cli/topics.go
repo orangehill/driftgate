@@ -107,7 +107,7 @@ var topics = []topic{
 		doc: "reference/classify-yaml.md", fields: [][2]string{
 			{"version", "1"},
 			{"tables:", "table name → its rule"},
-			{"action", "of a table: copy (default), empty or skip; of a serialized-php column: empty-table or null"},
+			{"action", "of a table: copy (default), empty or skip; of a serialized-php column: empty-table (default: the rows are left out) or null (the column is NULL)"},
 			{"columns", "of a table: column name → its rule, one word (keep, file, a strategy) or a mapping"},
 			{"kind", "of a column: keep, personal, serialized-php or file"},
 			{"strategy", "of a personal column: universal, email, password, token, free-text, html, json, null, empty"},

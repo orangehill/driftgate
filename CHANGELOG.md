@@ -60,6 +60,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `classify.yaml`: `action: null` written without quotes on a `serialized-php` column now sets the column to NULL. It was read as no action, the default `empty-table`, and the copy lost all rows of the table. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - `seed` records the fingerprint of the pristine copy itself (MySQL, MariaDB, PostgreSQL). A write during the seed no longer stops every later capture. ([#13](https://github.com/orangehill/driftgate/pull/13))
 - MySQL 8: tables with a collation that is not the charset's default restore correctly. ([#14](https://github.com/orangehill/driftgate/pull/14))
 - MySQL: no reconnect on every cycle, which was slow on servers without `skip-name-resolve`. ([#14](https://github.com/orangehill/driftgate/pull/14))

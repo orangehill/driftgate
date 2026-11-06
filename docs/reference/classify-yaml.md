@@ -101,8 +101,12 @@ A column rule is one word for the plain cases, or a mapping. The word is
 | `strategy` | for `personal`: one of the [strategies](#strategies) |
 | `paths` | for `json`: a JSON path glob (starting with `$`) → strategy or `keep` |
 | `other` | for `json`: strings under no path, `free-text` (default) or `keep` |
-| `action` | for `serialized-php`: `empty-table` (default) or `null` (the column) |
+| `action` | for `serialized-php`: `empty-table` (default) or `null` (below) |
 | `reason`, `proposed` | as for tables |
+
+- `action: empty-table`, or no `action`, leaves all rows of the table out of the copy.
+- `action: null` sets the column to NULL and keeps the rows. A bare `null` and `"null"` mean the same.
+- An empty `action: ""` is refused.
 
 The kinds:
 
