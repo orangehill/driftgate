@@ -132,9 +132,10 @@ type MySQL struct {
 	unlog         bool
 	// probed holds the DEFINERs definerProbe found the login may use;
 	// login is CURRENT_USER(), once read (dropFirstOthers).
-	probeMu sync.Mutex
-	probed  map[string]bool
-	login   string
+	probeMu    sync.Mutex
+	probed     map[string]bool
+	probeNoted map[string]bool // probes left behind already logged (noteProbe)
+	login      string
 }
 
 // checksumConns is how many connections share the CHECKSUM TABLE work.
@@ -305,7 +306,13 @@ type mysqlObjects struct {
 	restoreOnly              []string           // tables restored but not fingerprinted (Options.RestoreOnly)
 	kind                     map[string]string  // name → table, view or sequence
 	triggers                 []dbx.MySQLTrigger // by table, timing, event and firing order
-	probes                   map[string]string  // probe objects left behind (probeName): name → table or view
+	probes                   map[string]string  // probe objects left behind (probeName): name → table, view or trigger
+}
+
+// allTables lists every table of the database, also those restored only
+// or excluded: any of them may hold a trigger probe (definerProbe).
+func (o *mysqlObjects) allTables() []string {
+	return slices.Concat(o.tables, o.restoreOnly, o.excludedTables)
 }
 
 func (o *mysqlObjects) trigger(name string) (dbx.MySQLTrigger, bool) {
@@ -328,8 +335,9 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		switch {
 		case name == pristineTable && typ == "BASE TABLE":
 			continue // Seed's mark of a pristine database, not the application's
-		case probeName().MatchString(name):
+		case probeName(name):
 			// A probe left behind (definerProbe): never part of the state.
+			m.noteProbe(db, name)
 			if o.probes == nil {
 				o.probes = map[string]string{}
 			}
@@ -367,15 +375,16 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		return nil, err
 	}
 	for _, t := range trs {
-		if probeName().MatchString(t.Name) && !probeName().MatchString(t.Table) {
+		if probeName(t.Name) && !probeName(t.Table) {
 			// A probe on a table of the application (definerProbe).
+			m.noteProbe(db, t.Name)
 			if o.probes == nil {
 				o.probes = map[string]string{}
 			}
 			o.probes[t.Name] = "trigger"
 			continue
 		}
-		if !m.o.excluded(t.Table) && !probeName().MatchString(t.Table) {
+		if !m.o.excluded(t.Table) && !probeName(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
 	}
@@ -992,7 +1001,10 @@ func dropObject(ctx context.Context, c *sql.Conn, db, name, kind string) error {
 // created again afterwards, in their firing order and with their SQL mode, so
 // the copy does not fire them. The tables are copied by copyTables, whose
 // count of its other connections' statements is returned.
-func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, tables, views, sequences, triggers []string) (map[string]int64, error) {
+//
+// known holds definitions of src already read (Seed), which are not read
+// again.
+func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, tables, views, sequences, triggers []string, known map[showReq]map[string]string) (map[string]int64, error) {
 	if _, err := c.ExecContext(ctx, "USE "+qi(dst)); err != nil {
 		return nil, err
 	}
@@ -1033,17 +1045,23 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 	var trigs []dbx.MySQLTrigger // srcObjs.triggers is in firing order per table
+	var defReqs []showReq        // of trigs, then srcViews
 	for _, tr := range srcObjs.triggers {
 		if trigTables[tr.Table] || contains(triggers, tr.Name) {
 			trigs = append(trigs, tr)
-			reqs = append(reqs, showReq{"TRIGGER", src, tr.Name})
+			defReqs = append(defReqs, showReq{"TRIGGER", src, tr.Name})
 		}
 	}
 	var srcViews []string
 	for _, v := range views {
 		if srcObjs.kind[v] == "view" {
 			srcViews = append(srcViews, v)
-			reqs = append(reqs, showReq{"VIEW", src, v})
+			defReqs = append(defReqs, showReq{"VIEW", src, v})
+		}
+	}
+	for _, r := range defReqs {
+		if _, ok := known[r]; !ok {
+			reqs = append(reqs, r)
 		}
 	}
 	shown, err := m.showAll(ctx, c, reqs)
@@ -1073,11 +1091,19 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			jobs[i].ddef = ""
 		}
 	}
-	trigShown, viewShown := shown[:len(trigs)], shown[len(trigs):]
+	defShown := make([]map[string]string, len(defReqs))
+	for i, r := range defReqs {
+		if d, ok := known[r]; ok {
+			defShown[i] = d
+		} else {
+			defShown[i], shown = shown[0], shown[1:]
+		}
+	}
+	trigShown, viewShown := defShown[:len(trigs)], defShown[len(trigs):]
 	var trigDefs []map[string]string // in firing order per table
 	for i, tr := range trigs {
 		if r := trigShown[i]; r != nil {
-			r["name"] = tr.Name
+			r["name"], r["table"], r["timing"], r["event"] = tr.Name, tr.Table, tr.Timing, tr.Event
 			trigDefs = append(trigDefs, r)
 		}
 	}
@@ -1090,19 +1116,14 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 
 	// The login is first tried on each DEFINER of what is made again
 	// (definerProbe), so a refusal leaves dst as it was.
-	for name, kind := range dstObjs.probes {
-		if err := dropObject(ctx, c, dst, name, kind); err != nil {
-			return nil, err
-		}
-	}
 	var probes []probeItem
 	for _, r := range trigDefs {
-		probes = append(probes, probeItem{"trigger", r["name"], r["SQL Original Statement"]})
+		probes = append(probes, probeItem{"trigger", r["name"], r["SQL Original Statement"], r["table"]})
 	}
 	for name, v := range pending {
-		probes = append(probes, probeItem{"view", name, v.def})
+		probes = append(probes, probeItem{kind: "view", name: name, stmt: v.def})
 	}
-	if err := m.definerProbe(ctx, c, dst, dst, dstObjs.tables, probes); err != nil {
+	if err := m.definerProbe(ctx, c, dst, dst, dstObjs.allTables(), dstObjs.probes, probes); err != nil {
 		return nil, err
 	}
 
@@ -1411,7 +1432,7 @@ func (m *MySQL) Restore(ctx context.Context, items []string) error {
 		sess0, _ = sessionWrites(ctx, c)
 	}
 	tables, views, sequences, triggers := splitItems(items)
-	extra, err := m.copyObjects(ctx, c, m.o.Pristine, m.o.Working, tables, views, sequences, triggers)
+	extra, err := m.copyObjects(ctx, c, m.o.Pristine, m.o.Working, tables, views, sequences, triggers, nil)
 	if err != nil {
 		m.forget()
 		return err
@@ -1457,16 +1478,12 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	}
 	// The triggers and views are made again in the pristine copy: the
 	// login is tried on their DEFINERs before the old copy is dropped, in
-	// the working database (the privileges tried are global ones).
-	for name, kind := range objs.probes {
-		if err := dropObject(ctx, c, m.o.Working, name, kind); err != nil {
-			return err
-		}
-	}
+	// the working database (the privileges tried are global ones). Their
+	// definitions are read once, for the probe and the copy (known).
 	var defReqs []showReq
 	var items []probeItem
 	for _, tr := range objs.triggers {
-		defReqs, items = append(defReqs, showReq{"TRIGGER", m.o.Working, tr.Name}), append(items, probeItem{kind: "trigger", name: tr.Name})
+		defReqs, items = append(defReqs, showReq{"TRIGGER", m.o.Working, tr.Name}), append(items, probeItem{kind: "trigger", name: tr.Name, table: tr.Table})
 	}
 	for _, v := range objs.views {
 		defReqs, items = append(defReqs, showReq{"VIEW", m.o.Working, v}), append(items, probeItem{kind: "view", name: v})
@@ -1475,8 +1492,10 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	known := map[showReq]map[string]string{}
 	var probes []probeItem
 	for i, it := range items {
+		known[defReqs[i]] = defs[i]
 		if r := defs[i]; r != nil {
 			it.stmt = r["SQL Original Statement"]
 			if it.kind == "view" {
@@ -1485,7 +1504,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 			probes = append(probes, it)
 		}
 	}
-	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, objs.tables, probes); err != nil {
+	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, objs.allTables(), objs.probes, probes); err != nil {
 		return err
 	}
 	if m.o.Replacing != nil {
@@ -1541,7 +1560,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	for _, tr := range objs.triggers {
 		trigs = append(trigs, tr.Name)
 	}
-	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, copied, objs.views, objs.sequences, trigs)
+	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, copied, objs.views, objs.sequences, trigs, known)
 	return err
 }
 

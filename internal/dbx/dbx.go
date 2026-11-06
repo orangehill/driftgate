@@ -409,6 +409,17 @@ func MySQLObjects(ctx context.Context, q Querier, db string) ([]MySQLObject, err
 	return out, rows.Err()
 }
 
+// MySQLProbe reports a name of the short-lived objects the state module
+// makes to try whether a login may use a DEFINER: dgt_probe_ and 16
+// lower-case hexadecimal digits. Such an object is never the application's.
+func MySQLProbe(name string) bool {
+	const prefix = "dgt_probe_"
+	if len(name) != len(prefix)+16 || !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	return strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
+}
+
 // MySQLTrigger is a trigger and its place among the triggers of its table.
 type MySQLTrigger struct {
 	Name, Table, Timing, Event string
