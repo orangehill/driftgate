@@ -261,6 +261,27 @@ capturing or comparing private bodies stops with exit 3.
 Changing the key is not supported: bodies encrypted with the old key become
 unreadable.
 
+#### Handing a capture to another developer
+
+To let someone else compare a capture (or check a result) on their
+machine, copy, in the same project:
+
+- the capture's folder, `captures/<tag>/` of the local store, into theirs;
+- the baseline, `baselines/<name>/` (with `baselines: git` it is in the
+  repository already);
+- the store's `private/` folder, which holds the private bodies of the
+  captures and baselines, encrypted with the project key; without it their
+  requests are compared without the body (exit 3, or `--skip-private`).
+
+The private bodies can be read only with the project key: give it as
+`DRIFTGATE_KEY` (or `key:`) on the other machine. Send the key through a
+secure channel (a password manager's shared vault, `key: { op: … }`),
+never with the files and never in the same message, chat or archive.
+Private bodies hold personal data: copy them only to someone who may see
+that data, keep them out of shared drives and tickets, and remove the
+copy when it is no longer needed. Public bodies were scanned for personal
+data, but a scan is not a proof.
+
 ### target and targets
 
 `target:` describes the application. With several services (an API, a
@@ -569,6 +590,12 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   Every host the driver may connect to is checked (PostgreSQL `host=`,
   several hosts, `PG*` variables), and every connection on the address it
   goes to. Otherwise set `allow_remote: true`.
+- `seed` creates the pristine database, which an application's own login
+  often may not: MySQL/MariaDB need `CREATE` and `DROP` on the pristine
+  database (`GRANT ALL ON shop_pristine.* TO 'shop'@'%'`, or `CREATE` on
+  `*.*`), PostgreSQL `CREATEDB` (`ALTER ROLE shop CREATEDB`), SQL Server
+  the grants [below](#sql-server). Without them `seed` stops with the
+  server's refusal.
 - Give the DSN a user limited to the working and pristine databases (for
   PostgreSQL with `CREATEDB`), not a superuser and not one with MySQL's
   `FILE` privilege. The one exception is a disposable database in a local

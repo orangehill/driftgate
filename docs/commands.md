@@ -708,7 +708,9 @@ Restores the state, sends the catalog and stores the responses under a tag.
   [`params_from`](configuration.md#templates-generate-params) instead. The exit code stays.
 - A read-only request that changed data is recorded with its side
   effects, and the capture prints the `requests:` entries that mark it
-  `mutates: true`.
+  `mutates: true`. On a server that is not isolated (shared with other
+  developers, users or background jobs), such a side effect may be their
+  traffic, not the request's: check it before marking the request.
 - When the restored state differs from the state the baseline was captured
   from, the capture stops with exit 3 and lists the tables that differ: the
   pristine copy holds other data (a seed since, other seed data or
