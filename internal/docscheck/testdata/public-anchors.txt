@@ -1,5 +1,5 @@
-# Anchors that released binaries, code, other pages and other sites link to
-# (docs plan, section 4.1). TestPublicAnchors fails when one stops resolving.
+# Anchors that released binaries, code, other pages and other sites link to,
+# one path#anchor per line. TestPublicAnchors fails when one stops resolving.
 # A heading that moves keeps a stub with its old text; removing a line here
 # needs a reason in review.
 

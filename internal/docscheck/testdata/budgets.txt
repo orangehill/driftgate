@@ -1,6 +1,8 @@
-# The line budget of every page (docs plan, section 2.1): path and the most
-# lines. TestBudgets warns about a page over its budget, and fails in strict
-# mode (DRIFTGATE_DOCS_STRICT=1). A page not yet written is skipped.
+# The most lines each page may have, code included: a start page fits one
+# screen, a guide stays short, an index or a stub of old headings is a list
+# of links; reference pages have no limit. Each line is a path and its
+# budget. TestBudgets warns about a page over its budget, and fails in
+# strict mode (DRIFTGATE_DOCS_STRICT=1). A page not yet written is skipped.
 README.md 140
 docs/README.md 90
 docs/capabilities.md 160
