@@ -35,7 +35,7 @@ which is all the step-by-step checks before each pull request need. When
 a team or CI should compare against it too, `driftgate baselines git`
 moves it into the repository (`driftgate.yaml` and `driftgate/`); commit
 it then, and protect `driftgate/baselines/` with a CODEOWNERS entry
-([baselines](../commands.md#baselines)).
+([baselines](../reference/commands/project.md#driftgate-baselines)).
 
 ## 2. One step at a time
 
@@ -188,7 +188,7 @@ driftgate compare new --against old --skip-fingerprint-check
   and
   `driftgate baselines rebase local --from new --reason "Moved to MySQL
   8.4 and PHP 8.3" --ref <ticket> --allow-freeze`, which logs it as one
-  line of the acceptance log ([baselines rebase](../commands.md#baselines-rebase)).
+  line of the acceptance log ([baselines rebase](../reference/commands/review.md#driftgate-baselines-rebase)).
   Alternatively make a new baseline on the new stack with `driftgate run
   --baseline <name>`; every later command then needs `--baseline <name>`.
   Then go on with the code steps.

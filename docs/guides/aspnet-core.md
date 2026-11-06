@@ -69,7 +69,7 @@ driftgate setup
 
 It then asks before it makes the pristine copy (`Shop_pristine`, a
 read-only database on the same server), and goes on to the first
-baseline ([setup](../commands.md#setup)). The configuration it ends with
+baseline ([setup](../reference/commands/project.md#driftgate-setup)). The configuration it ends with
 looks like this:
 
 <!-- check: config-fragment -->
