@@ -770,7 +770,7 @@ parameters; any other stops with an error instead of being ignored:
 | `ssl-ca` | a PEM file of the certificate authorities to verify the server with; implies verification |
 | `timeout`, `readTimeout`, `writeTimeout` | durations such as `10s` |
 
-`mysql://app:secret@db.internal:3306/?tls=true` connects only over
+`mysql://app:secret@db.shop.example:3306/?tls=true` connects only over
 verified TLS. The driver's own form (`user:pass@tcp(host:3306)/?tls=true`)
 takes the driver's parameters. A `postgres://` URL takes PostgreSQL's
 (`sslmode`, `sslrootcert`, …), a `sqlserver://` URL go-mssqldb's TLS
@@ -1719,6 +1719,7 @@ The `command` adapter's output is a JSON list; each entry has `path` and
 `method` (or `methods`), and optionally `name`, `auth` (needs an identity),
 `body` (a sample request body) and `file` (source file of the handler):
 
+<!-- check: routes-json -->
 ```json
 [
   {"method": "GET", "path": "/api/news/{id}", "file": "src/news.go:42"},

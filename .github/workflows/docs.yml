@@ -1,0 +1,49 @@
+name: docs
+
+# The docs test: check markers loaded with DriftGate's own parsers, links and
+# anchors between the pages, the public anchors, the help's links and the
+# commands' sections. ci.yml ignores changes to documents alone; this
+# workflow runs on them, and needs no database. A code change runs the same
+# tests in ci.yml (go test ./...).
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "internal/cli/help.go"
+      - "internal/cli/topics.go"
+      - "internal/docscheck/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "internal/cli/help.go"
+      - "internal/cli/topics.go"
+      - "internal/docscheck/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Docs test
+        run: |
+          go test -count=1 ./internal/docscheck/
+          go test -count=1 -run 'Help|Docs|Parity|Topic' ./internal/cli/

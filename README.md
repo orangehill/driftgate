@@ -168,6 +168,7 @@ to reset its data. In `.driftgate/driftgate.yaml` set `base_url:
 http://127.0.0.1:8920` and `mode: evolve` (so that changes can be
 accepted), and add:
 
+<!-- check: config-fragment -->
 ```yaml
 state:
   api:                       # the demo keeps its data in memory; its reset is the restore
@@ -183,6 +184,7 @@ params:
 and `routes-src.json` in the project folder (`shop/`, where you run the
 commands; the `command` adapter runs there):
 
+<!-- check: routes-json -->
 ```json
 [
  {"method":"GET","path":"/api/news"},
@@ -260,6 +262,7 @@ The next run still reports one drift: v2 stamps a new FAQ entry with the
 current time (`$.entry.created_at`). A value that changes by itself goes on
 the allowlist, with its format and a reason, in `.driftgate/allowlist.yaml`:
 
+<!-- check: allowlist -->
 ```yaml
 body:
   - request: post-api-faq
@@ -286,6 +289,7 @@ result.
 
 ## GitHub Action
 
+<!-- check: yaml -->
 ```yaml
 on: pull_request            # never pull_request_target
 permissions:

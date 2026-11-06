@@ -41,6 +41,7 @@ the pristine copy and the first baseline ([setup](../commands.md#setup)).
 to `127.0.0.1`, which the default `allow_hosts` allows, so only `base_url`
 changes:
 
+<!-- check: config-fragment -->
 ```yaml
 target:
   base_url: http://shop.test
@@ -155,6 +156,7 @@ state:
 `DB_CONNECTION=sqlsrv` with `DB_HOST`, `DB_PORT`, `DB_DATABASE`,
 `DB_USERNAME` and `DB_PASSWORD`, here for SQL Server in a container:
 
+<!-- check: yaml -->
 ```yaml
 # compose.yaml
 services:

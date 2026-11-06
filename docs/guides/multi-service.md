@@ -12,7 +12,7 @@ report and one exit code.
 `packages/*`, and reads the ports from `docker-compose.yml`:
 
 ```
-$ driftgate init --project mono
+$ driftgate init --project shop
 created .driftgate/driftgate.yaml, .driftgate/catalog.json and .driftgate/allowlist.yaml
 found api (laravel, apps/api), web (nextjs, apps/web); routes come from discover: in .driftgate/driftgate.yaml
 every run checks all of them; init --service <name> (repeatable) keeps only the services you name

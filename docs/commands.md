@@ -2,7 +2,9 @@
 
 Every command and flag of `driftgate`. The descriptions are those of
 `driftgate help <command>` (the source is `internal/cli/help.go`); this page
-adds the exit codes, notes and an example for each command.
+adds the exit codes, notes and an example for each command. The help of a
+command ends with a `Docs:` line that links its section here, in the pages
+of the release you run.
 
 ```
 driftgate help                 # synopsis of every command
@@ -1519,8 +1521,15 @@ driftgate data subset [--dump <file>] [--no-target] [--replace]
 Data anonymize of a sample with closed references: the rows `subset:` in
 `classify.yaml` chooses, and every row they reference.
 
-Flags as for [data anonymize](#data-anonymize). Needs a `subset:` section in
-`classify.yaml`.
+| Flag | Meaning |
+|---|---|
+| `--dump <file>` | also write a dump to this file |
+| `--no-target` | write only the dump (needs `--dump`) |
+| `--replace` | drop an existing target database and write it again |
+| `--format text\|json` | output format (default text) |
+
+Needs a `subset:` section in `classify.yaml`. See
+[data anonymize](#data-anonymize) for when it stops.
 
 ```sh
 driftgate data subset --no-target --dump out/app-sample.sql
