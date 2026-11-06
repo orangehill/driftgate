@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -48,6 +49,13 @@ func unknownVariable(err error) bool {
 	return errors.As(err, &me) && me.Number == 1193
 }
 
+// privilegeError reports the server's refusal of a setting for want of a
+// privilege (1227: SESSION_VARIABLES_ADMIN, SUPER, BINLOG ADMIN …).
+func privilegeError(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && (me.Number == 1227)
+}
+
 func serverError(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me)
@@ -75,7 +83,7 @@ func (m *MySQL) initConn(ctx context.Context, ex driver.ExecerContext, conn driv
 			m.connMu.Lock()
 			m.noFreshStats = true
 			m.connMu.Unlock()
-		case unlog && serverError(err):
+		case unlog && privilegeError(err):
 			unlog = false
 			m.setLogBin(logBinOn)
 			m.binlog.Do(func() {
@@ -92,8 +100,9 @@ func (m *MySQL) initConn(ctx context.Context, ex driver.ExecerContext, conn driv
 
 // initMulti prepares a new connection of m.multi, which only reads SHOW
 // CREATE: the same session as the pool's (its output depends on sql_mode),
-// with nothing to keep out of the binary log.
-func (m *MySQL) initMulti(ctx context.Context, ex driver.ExecerContext, _ driver.Conn) error {
+// with nothing to keep out of the binary log. It refuses a connection
+// whose client character set is not one of multiCharsets (errMultiCharset).
+func (m *MySQL) initMulti(ctx context.Context, ex driver.ExecerContext, conn driver.Conn) error {
 	m.connMu.Lock()
 	fresh := !m.noFreshStats
 	m.connMu.Unlock()
@@ -104,7 +113,53 @@ func (m *MySQL) initMulti(ctx context.Context, ex driver.ExecerContext, _ driver
 		m.connMu.Unlock()
 		_, err = ex.ExecContext(ctx, sessionSet(false, false), nil)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	cs, err := clientCharset(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if !multiCharsets[strings.ToLower(cs)] {
+		return fmt.Errorf("%w (%s)", errMultiCharset, cs)
+	}
+	return nil
+}
+
+// multiCharsets are the client character sets in which no byte of a
+// multi-byte character is a backtick: QuoteMySQL, which doubles backticks
+// byte by byte, then quotes any name safely. In others (sjis, cp932, gbk,
+// big5, gb18030 …) 0x60 can end a character, so a crafted name could
+// close its quotes, and in a query of several statements run the rest as
+// statements of its own.
+var multiCharsets = map[string]bool{"utf8mb4": true, "utf8mb3": true, "utf8": true, "latin1": true, "ascii": true, "binary": true}
+
+// errMultiCharset refuses a query of several statements on a connection
+// whose character set is not in multiCharsets.
+var errMultiCharset = errors.New("the connection's character set does not quote every name safely in a query of several statements")
+
+// clientCharset reads @@character_set_client on a new connection.
+func clientCharset(ctx context.Context, conn driver.Conn) (string, error) {
+	q, ok := conn.(driver.QueryerContext)
+	if !ok {
+		return "", errors.New("the MySQL driver cannot run a query on a new connection")
+	}
+	rows, err := q.QueryContext(ctx, "SELECT @@character_set_client", nil)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	v := make([]driver.Value, 1)
+	if err := rows.Next(v); err != nil {
+		return "", err
+	}
+	switch cs := v[0].(type) {
+	case []byte:
+		return string(cs), nil
+	case string:
+		return cs, nil
+	}
+	return "", fmt.Errorf("@@character_set_client: %T", v[0])
 }
 
 // setLogBin records what new connections do with the binary log; the

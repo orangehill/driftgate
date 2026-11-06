@@ -3,9 +3,12 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/orangehill/driftgate/internal/dbx"
 )
@@ -17,12 +20,15 @@ import (
 // ones each statement returns on its own, so nothing that is hashed changes.
 //
 //   - A statement that fails stops the server from running the ones after
-//     it (an object dropped in the meantime: 1146 or 1360). That one and the
-//     rest are then read one by one, which treats a missing object as the
-//     single statement always has (dbx.ShowCreate, missingOK).
+//     it (an object dropped in the meantime: 1146 or 1360). That one is
+//     then read alone, which treats a missing object as the single
+//     statement always has (dbx.ShowCreate, missingOK), and the batches go
+//     on after it.
 //   - A server or proxy that refuses a query of several statements (the
-//     first one ever sent fails): the statements are then read one by one,
-//     spread over several connections (showSpread), from then on.
+//     first one ever sent fails with a syntax error), or a connection
+//     character set in which a quoted name is not safe in one (initMulti):
+//     the statements are then read one by one, spread over several
+//     connections (showSpread), from then on.
 
 // showReq is one SHOW CREATE kind db.name.
 type showReq struct{ kind, db, name string }
@@ -31,8 +37,8 @@ type showReq struct{ kind, db, name string }
 // one by one, as before, to compare with).
 var showBatch = true
 
-// showBatchMax is the most statements in one query.
-const showBatchMax = 500
+// showBatchMax is the most statements in one query (a variable for tests).
+var showBatchMax = 500
 
 // showAll runs SHOW CREATE for every request and returns the columns of
 // each by name, or nil for an object that does not exist (dbx.ShowCreate
@@ -47,25 +53,57 @@ func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map
 	}
 	for done := 0; done < len(reqs); {
 		end := min(done+showBatchMax, len(reqs))
-		n, err := m.showMany(ctx, reqs[done:end], out[done:end])
-		done += n
-		if err == nil {
+		n, err := showManyFunc(m, ctx, reqs[done:end], out[done:end])
+		switch {
+		case err == nil:
 			m.multiOK.Store(true)
+			done = end
 			continue
-		}
-		if ctx.Err() != nil {
+		case ctx.Err() != nil:
 			return nil, ctx.Err()
-		}
-		if n == 0 && !m.multiOK.Load() && !dbx.ShowCreateMissing(err) {
+		case n >= end-done:
+			// Every statement was read, but the query did not end as it
+			// should: none of its results is trusted, the chunk is read
+			// again one by one.
+			clear(out[done:end])
+			if err := showEach(ctx, c, reqs[done:end], out[done:end]); err != nil {
+				return nil, err
+			}
+			done = end
+			continue
+		case n == 0 && !m.multiOK.Load() && multiRefusal(err):
 			m.multiRefused.Store(true)
 			m.multiNote.Do(func() {
-				m.logf("state %s: SHOW CREATE is read one statement at a time (a query of several statements failed: %v)\n", m.o.Name, err)
+				m.logf("state %s: SHOW CREATE is read one statement at a time (a query of several statements was refused: %v)\n", m.o.Name, err)
 			})
 			return out, m.showSpread(ctx, c, reqs[done:], out[done:])
+		case n == 0 && !serverError(err):
+			// No batch could be sent (the connection): one by one.
+			return out, showEach(ctx, c, reqs[done:], out[done:])
 		}
-		return out, showEach(ctx, c, reqs[done:], out[done:])
+		// The statement after the n read failed: it is read alone, as it
+		// always was (a missing object is nil, another error fails as it
+		// does alone), and the batches go on after it.
+		k := done + n
+		r := reqs[k]
+		if out[k], err = show(ctx, c, r.kind, r.db, r.name); err != nil {
+			return nil, err
+		}
+		done = k + 1
 	}
 	return out, nil
+}
+
+// showManyFunc is showMany (tests: a batch that goes wrong).
+var showManyFunc = (*MySQL).showMany
+
+// multiRefusal reports whether err is a refusal of queries of several
+// statements: the server's syntax error at the first separator (the
+// client flag did not reach it), or initMulti's refusal of the
+// connection's character set.
+func multiRefusal(err error) bool {
+	var me *mysql.MySQLError
+	return errors.Is(err, errMultiCharset) || errors.As(err, &me) && me.Number == 1064
 }
 
 // showEach reads the requests one by one on c.

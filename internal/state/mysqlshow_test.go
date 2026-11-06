@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -58,12 +59,11 @@ func legacySession(t *testing.T, dsn string) *sql.Conn {
 }
 
 // oldFingerprint is the fingerprint as it was read before SHOW CREATE was
-// batched: one statement at a time, on a session prepared the old way.
+// batched: by the code of then (legacyFingerprintAs), one statement at a
+// time, on a session prepared the old way.
 func oldFingerprint(t *testing.T, m *MySQL, legacy *sql.Conn, db string, format int) Fingerprint {
 	t.Helper()
-	showBatch = false
-	defer func() { showBatch = true }()
-	f, err := m.fingerprintAs(context.Background(), legacy, db, nil, format)
+	f, err := m.legacyFingerprintAs(context.Background(), legacy, db, nil, format)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,8 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		if n, err := m.showMany(ctx, ok, part); n != len(ok) || err != nil {
 			t.Fatalf("batch after a failed one: %d, %v", n, err)
 		}
-		// A missing object first: the rest one by one, not refused.
+		// A missing object first: read alone, the rest batched, not
+		// refused.
 		m2, _, c2 := open(t)
 		first := append([]showReq{reqs[1]}, reqs...)
 		got, err = m2.showAll(ctx, c2, first)
@@ -288,19 +289,101 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		}
 	})
 
-	for _, refusal := range []string{"no multi-statements", "no connection"} {
+	t.Run("chunks", func(t *testing.T) {
+		// Batches of two: the offsets of the chunks, and a missing object
+		// in the second one, after which the batches go on.
+		defer func(n int) { showBatchMax = n }(showBatchMax)
+		showBatchMax = 2
+		var calls []string
+		defer func() { showManyFunc = (*MySQL).showMany }()
+		showManyFunc = func(m *MySQL, ctx context.Context, reqs []showReq, out []map[string]string) (int, error) {
+			n, err := m.showMany(ctx, reqs, out)
+			calls = append(calls, fmt.Sprintf("%s:%d/%d", reqs[0].name, n, len(reqs)))
+			return n, err
+		}
+		m, _, c := open(t)
+		got, err := m.showAll(ctx, c, reqs)
+		check(t, "chunks", got, err)
+		// [news gone] stops at gone (read alone); [news_titles
+		// gone_trigger] stops at the trigger; then [news_views odd],
+		// [plain].
+		if want := []string{"news:1/2", "news_titles:1/2", "news_views:2/2", "plain:1/1"}; !slices.Equal(calls, want) {
+			t.Fatalf("batches %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("misaligned", func(t *testing.T) {
+		// A batch that read every statement and then failed (more results
+		// than statements): its results are read again one by one.
+		defer func() { showManyFunc = (*MySQL).showMany }()
+		showManyFunc = func(m *MySQL, ctx context.Context, reqs []showReq, out []map[string]string) (int, error) {
+			for i := range out {
+				out[i] = map[string]string{"Create Table": "shifted"}
+			}
+			return len(reqs), fmt.Errorf("SHOW CREATE: more results than %d statements", len(reqs))
+		}
+		m, _, c := open(t)
+		got, err := m.showAll(ctx, c, reqs)
+		check(t, "misaligned", got, err)
+	})
+
+	t.Run("first statement fails", func(t *testing.T) {
+		// Not a refusal: the error is the statement's, as alone.
+		bad := []showReq{{"VIEW", work, "plain"}, reqs[0]}
+		_, alone := show(ctx, c, "VIEW", work, "plain")
+		m, log, c := open(t)
+		if _, err := m.showAll(ctx, c, bad); err == nil || err.Error() != alone.Error() {
+			t.Fatalf("%v, want %v", err, alone)
+		}
+		if m.multiRefused.Load() || log.Len() > 0 {
+			t.Fatalf("refused %v, log %q", m.multiRefused.Load(), log.String())
+		}
+	})
+
+	t.Run("no connection", func(t *testing.T) {
+		// No batch can be sent: one by one, not taken for a refusal.
+		m, log, c := open(t)
+		m.multi.Close()
+		got, err := m.showAll(ctx, c, reqs)
+		check(t, "no connection", got, err)
+		if m.multiRefused.Load() || log.Len() > 0 {
+			t.Fatalf("refused %v, log %q", m.multiRefused.Load(), log.String())
+		}
+	})
+
+	for _, refusal := range []string{"no multi-statements", "charset"} {
 		t.Run("refused: "+refusal, func(t *testing.T) {
 			m, log, c := open(t)
-			m.multi.Close()
-			if refusal == "no multi-statements" {
+			switch refusal {
+			case "no multi-statements":
 				// A connection that did not ask for several statements per
 				// query, as a proxy that does not pass the flag on: the
 				// server rejects the query (1064).
+				m.multi.Close()
 				multi, err := dbx.OpenMySQLWith(dsn, "", nil, dbx.MySQLOpen{Init: m.initMulti})
 				if err != nil {
 					t.Fatal(err)
 				}
 				m.multi = multi
+			case "charset":
+				// A client character set in which 0x60 can end a character
+				// (the driver's own DSN form takes charset=).
+				u, _ := url.Parse(dsn)
+				pass, _ := u.User.Password()
+				sjis := fmt.Sprintf("%s:%s@tcp(%s)/?charset=sjis", u.User.Username(), pass, u.Host)
+				m.multi.Close()
+				multi, err := dbx.OpenMySQLWith(sjis, "", nil, dbx.MySQLOpen{MultiStatements: true, Init: m.initMulti})
+				if err != nil {
+					t.Fatal(err)
+				}
+				m.multi = multi
+				conn, err := multi.Conn(ctx)
+				if conn != nil {
+					conn.Close()
+				}
+				if !errors.Is(err, errMultiCharset) {
+					t.Fatalf("connection with sjis: %v", err)
+				}
 			}
 			got, err := m.showAll(ctx, c, reqs)
 			check(t, "refused", got, err)
@@ -382,9 +465,27 @@ func TestMySQLSessionPreparedOnce(t *testing.T) {
 				}
 				return n
 			}
-			before := sets(c)
-			c.Close()
+			// The early connection is taken as a session once, and gets
+			// sql_log_bin then; from there on neither is prepared again.
 			early.Close()
+			e2, err := m.session(ctx) // the only free connection: early
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := func(c *sql.Conn) int64 {
+				t.Helper()
+				var n int64
+				if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			before := map[int64]int{id(c): sets(c), id(e2): sets(e2)}
+			if got := settings(e2); got != want {
+				t.Fatalf("early session: %s, want %s", got, want)
+			}
+			c.Close()
+			e2.Close()
 			// Both connections are in the pool now: two sessions take them.
 			c1, err := m.session(ctx)
 			if err != nil {
@@ -400,10 +501,13 @@ func TestMySQLSessionPreparedOnce(t *testing.T) {
 				if got := settings(c); got != want {
 					t.Fatalf("pooled session: %s, want %s", got, want)
 				}
-			}
-			n1, n2 := sets(c1), sets(c2)
-			if n1 != before && n2 != before {
-				t.Fatalf("the pooled session was prepared again: %d SETs before, %d and %d after", before, n1, n2)
+				n, ok := before[id(c)]
+				if !ok {
+					t.Fatalf("a new connection instead of a pooled one")
+				}
+				if got := sets(c); got != n {
+					t.Fatalf("the pooled session was prepared again: %d SETs before, %d after", n, got)
+				}
 			}
 			if len(m.early) != 0 {
 				t.Fatalf("connections left to decide: %d", len(m.early))
@@ -473,6 +577,43 @@ func TestMySQLTableInfos(t *testing.T) {
 			}
 			if len(infos["plain"].pk) != 0 || infos["big"].pkType != "bigint" || len(infos["pair"].pk) != 2 {
 				t.Fatalf("keys: %+v %+v %+v", infos["plain"], infos["big"], infos["pair"])
+			}
+		})
+	}
+}
+
+// TestMySQLQueryNotPooled: the connection a user's query ran on is closed,
+// not put back into the pool, where its session could carry what the query
+// changed.
+func TestMySQLQueryNotPooled(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			pristine := "dgt_query_pool"
+			root := mysqlAdmin(t, dsn, "")
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+pristine)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: "dgt_query_pool_work", Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			got, err := m.Query(ctx, "SELECT CONNECTION_ID()")
+			if err != nil || len(got) != 1 {
+				t.Fatalf("%v, %v", got, err)
+			}
+			if idle := m.db.Stats().Idle; idle != 0 {
+				t.Fatalf("%d connections back in the pool", idle)
+			}
+			c, err := m.session(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			var id string
+			if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id); err != nil || id == got[0] {
+				t.Fatalf("the query's connection %s was used again (%s, %v)", got[0], id, err)
 			}
 		})
 	}

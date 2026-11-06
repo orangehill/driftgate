@@ -975,23 +975,6 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err != nil {
 		return nil, err
 	}
-	// Views first: they are created last, once their tables exist. An object
-	// that changed kind (a view that became a table) is dropped as what it is.
-	for _, name := range append(append([]string{}, views...), sequences...) {
-		if k := dstObjs.kind[name]; k != "" {
-			if err := dropObject(ctx, c, dst, name, k); err != nil {
-				return nil, err
-			}
-		}
-	}
-	for _, t := range tables {
-		if k := dstObjs.kind[t]; k != "" && k != "table" {
-			if err := dropObject(ctx, c, dst, t, k); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	trigTables := map[string]bool{}
 	for _, t := range tables {
 		trigTables[t] = true
@@ -1004,27 +987,15 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			trigTables[tr.Table] = true
 		}
 	}
-	for _, tr := range dstObjs.triggers {
-		if trigTables[tr.Table] || contains(triggers, tr.Name) {
-			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+qi(dst)+"."+qi(tr.Name)); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	var copied []string
 	for _, t := range tables {
 		if srcObjs.kind[t] == "table" {
 			copied = append(copied, t)
-		} else if dstObjs.kind[t] == "table" {
-			if err := dropObject(ctx, c, dst, t, "table"); err != nil {
-				return nil, err
-			}
 		}
 	}
-	// Every SHOW CREATE the copy needs is read here, at once (showAll):
-	// the tables in both databases, and the triggers and views of src,
-	// which the copy does not change.
+	// Every SHOW CREATE the copy needs is read here, at once (showAll),
+	// before dst is changed: the tables in both databases, and the
+	// triggers and views of src, which the copy does not change.
 	var reqs []showReq
 	for _, t := range copied {
 		reqs = append(reqs, showReq{"TABLE", src, t})
@@ -1065,6 +1036,37 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			shown = shown[1:]
 		}
 		jobs = append(jobs, tableJob{t: t, sdef: sdef, ddef: ddef})
+	}
+
+	// Views first: they are created last, once their tables exist. An object
+	// that changed kind (a view that became a table) is dropped as what it is.
+	for _, name := range append(append([]string{}, views...), sequences...) {
+		if k := dstObjs.kind[name]; k != "" {
+			if err := dropObject(ctx, c, dst, name, k); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, t := range tables {
+		if k := dstObjs.kind[t]; k != "" && k != "table" {
+			if err := dropObject(ctx, c, dst, t, k); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, tr := range dstObjs.triggers {
+		if trigTables[tr.Table] || contains(triggers, tr.Name) {
+			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+qi(dst)+"."+qi(tr.Name)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, t := range tables {
+		if srcObjs.kind[t] != "table" && dstObjs.kind[t] == "table" {
+			if err := dropObject(ctx, c, dst, t, "table"); err != nil {
+				return nil, err
+			}
+		}
 	}
 	trigShown, viewShown := shown[:len(trigs)], shown[len(trigs):]
 	extra, err := m.copyTables(ctx, c, src, dst, jobs)
@@ -1453,19 +1455,18 @@ func (m *MySQL) Query(ctx context.Context, query string) ([]string, error) {
 		return nil, err
 	}
 	defer c.Close()
+	// The user's query may change the session (a function that sets a
+	// variable, the time zone): sessions are prepared once (initConn), so
+	// this one is closed, never put back into the pool.
+	defer discardConn(c)
 	if _, err := c.ExecContext(ctx, "USE "+qi(m.o.Pristine)); err != nil {
 		return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", m.o.Pristine, err)
 	}
 	// The session stays read-only too, should the transaction end early
-	// (an implicit commit); the connection goes back to the pool writable.
+	// (an implicit commit).
 	if _, err := c.ExecContext(ctx, "SET SESSION TRANSACTION READ ONLY"); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if _, err := c.ExecContext(context.Background(), "SET SESSION TRANSACTION READ WRITE"); err != nil {
-			discardConn(c) // sessions are prepared once (initConn): never back read-only
-		}
-	}()
 	if _, err := c.ExecContext(ctx, "START TRANSACTION READ ONLY"); err != nil {
 		return nil, err
 	}
