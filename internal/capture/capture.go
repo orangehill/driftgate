@@ -435,10 +435,12 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	if len(units) > 0 {
 		// Again right before the requests that change data, which they
-		// guard: the read-only phase may take long, and the environment
-		// may change during it.
-		if err := checkGuards(ctx, p, opt, false); err != nil {
-			return nil, err
+		// guard, when read-only requests ran since the first check: that
+		// phase may take long, and the environment may change during it.
+		if len(readonly) > 0 {
+			if err := checkGuards(ctx, p, opt, false); err != nil {
+				return nil, err
+			}
 		}
 		prev, err := r.reset(ctx)
 		if err != nil {

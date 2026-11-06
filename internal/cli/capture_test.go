@@ -642,3 +642,26 @@ func TestGuardThatWrites(t *testing.T) {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
 }
+
+// TestGuardsChecked: the guards run before the first request, and again
+// before the first request that changes data only when read-only requests
+// ran in between.
+func TestGuardsChecked(t *testing.T) {
+	for _, c := range []struct {
+		requests string
+		runs     int
+	}{
+		{`{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`, 1},
+		{`{"id":"news","method":"GET","path":"/news","storage":"public"},{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`, 2},
+	} {
+		count := filepath.Join(t.TempDir(), "count")
+		cfg, _ := guardProject(t, `["sh", "-c", "echo x >> '`+count+`'"]`, c.requests)
+		if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg); code != ExitClean {
+			t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+		}
+		raw, _ := os.ReadFile(count)
+		if n := strings.Count(string(raw), "x"); n != c.runs {
+			t.Errorf("%s: the guard ran %d times, want %d", c.requests, n, c.runs)
+		}
+	}
+}

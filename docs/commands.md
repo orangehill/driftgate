@@ -732,8 +732,9 @@ Restores the state, sends the catalog and stores the responses under a tag.
 - The [guards](configuration.md#seed-prepare-guards) are checked (when
   requests change data) after the restore and `prepare`, which may set up
   what they check, before the first request, and again right before the
-  first request that changes data: one that fails stops the capture there
-  (exit 3), in seconds rather than after the read-only requests. A guard that writes to the tracked state
+  first request that changes data when read-only requests ran in between:
+  one that fails stops the capture there (exit 3), in seconds rather than
+  after the read-only requests. A guard that writes to the tracked state
   stops it too (exit 2): guards only check.
 - When `prepare` changed the restored state, the capture warns and lists
   what it changed ([seed, prepare,
