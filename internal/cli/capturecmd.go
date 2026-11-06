@@ -143,6 +143,10 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 	}
 
 	if o.readOnly {
+		// Once per command, however many runs it makes (--repeat).
+		if len(p.Tokens.Command) > 0 {
+			fmt.Fprintln(errOut, "warning: --read-only covers the requests only: tokens.command runs as configured and may write (a login), and connect_to does not apply to it")
+		}
 		readOnlyNote(out, cat, o.only)
 	} else {
 		byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)

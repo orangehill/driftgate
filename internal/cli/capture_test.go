@@ -561,7 +561,7 @@ func TestReadOnlyProjectCommands(t *testing.T) {
 		t.Fatalf("prepare: exit %d\n%s\n%s", code, out, errOut)
 	}
 	write(t, cfg, base+"tokens:\n  command: [\"echo\", \"{}\"]\n")
-	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg, "--read-only"); code != ExitClean || strings.Count(errOut, "tokens.command runs as configured") != 1 {
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg, "--read-only", "--repeat", "2"); code != ExitClean || strings.Count(errOut, "tokens.command runs as configured") != 1 {
 		t.Fatalf("tokens: exit %d\n%s\n%s", code, out, errOut)
 	}
 }

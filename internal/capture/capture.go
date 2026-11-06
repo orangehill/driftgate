@@ -191,9 +191,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		if len(p.Prepare) > 0 {
 			return nil, configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
 		}
-		if len(p.Tokens.Command) > 0 {
-			fmt.Fprintln(opt.Log, "warning: --read-only covers the requests only: tokens.command runs as configured and may write (a login), and connect_to does not apply to it")
-		}
 		skip = cat.ReadOnlySkips()
 	}
 	readonly, units := plan(cat, opt.Only, skip)
