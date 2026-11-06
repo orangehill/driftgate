@@ -798,7 +798,9 @@ failure): a rule whose requests are all gone or renamed (`no request`),
 or one whose values did not change this time (`no change`). A rule listed
 comparison after comparison is probably stale: the value it names was
 renamed or removed. With `--only` or `--target`, rules of the requests
-not compared are not listed. A rule `init` wrote for the framework (a
+not compared are not listed, and neither is a rule its requests were
+not compared far enough for: below `--level values` a header or
+value rule never applies, so it is not called stale. A rule `init` wrote for the framework (a
 throttle's `x-ratelimit-*`) is not listed, in the text nor in the JSON
 (`unused_rules`), while it is as `init` wrote it: the same header or
 path, request, format and its options, and reason; one you changed is.
