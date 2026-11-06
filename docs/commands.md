@@ -356,6 +356,10 @@ store.
   yourself, or run `seed` once to mark it.
 - SQL Server: the backup of the pristine copy in the server's backup folder
   is not removed.
+- SQLite: the working file need not be there (a worktree git did not give
+  it): the copy is found by its record in the local store. Without the
+  file and without a record, clean stops (exit 2) and names the folder of
+  the store's copies.
 - Commands of the project's own (test users, a cache) are not run; the
   next capture needs `driftgate seed` again (`run` seeds by itself).
 

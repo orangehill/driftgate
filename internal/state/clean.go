@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -119,9 +120,20 @@ func (s *SQLServer) DropPristine(ctx context.Context) (bool, error) {
 }
 
 func (s *SQLite) DropPristine(ctx context.Context) (bool, error) {
-	if err := sameAsWorking(s.o); err != nil {
+	return DropSQLitePristine(ctx, s.o)
+}
+
+// DropSQLitePristine is SQLite's DropPristine without opening the working
+// file, which need not exist: o names the component and its absolute
+// working and pristine paths.
+func DropSQLitePristine(ctx context.Context, o Options) (bool, error) {
+	if err := sameAsWorking(o); err != nil {
 		return false, err
 	}
+	if err := sqliteSeparate(filepath.Clean(o.Working), filepath.Clean(o.Pristine)); err != nil {
+		return false, fmt.Errorf("state %s: %v", o.Name, err)
+	}
+	s := &SQLite{o: o}
 	fi, err := os.Stat(s.o.Pristine)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

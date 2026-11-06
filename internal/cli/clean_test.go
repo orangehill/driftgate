@@ -77,6 +77,26 @@ func TestClean(t *testing.T) {
 		t.Fatalf("again: %d\n%s", code, out)
 	}
 
+	// Without the working file (a worktree git did not give it) the copy
+	// in the store is still found by its record and removed; without the
+	// record either, clean cannot tell and says so.
+	if code, out, errOut := runCLI(t, "seed", "--config", cfg); code != ExitClean {
+		t.Fatalf("seed again: %d\n%s\n%s", code, out, errOut)
+	}
+	moved := working + ".away"
+	if err := os.Rename(working, moved); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := runCLI(t, "clean", "--config", cfg, "--yes"); code != ExitClean || !strings.Contains(out, "removed state db") || len(made()) != 0 {
+		t.Fatalf("without the working file: %d\n%s\n%s\n%v", code, out, errOut, made())
+	}
+	if code, _, errOut := runCLI(t, "clean", "--config", cfg, "--yes"); code != ExitConfig || !strings.Contains(errOut, "no record of a pristine copy") {
+		t.Fatalf("without the working file nor a record: %d %s", code, errOut)
+	}
+	if err := os.Rename(moved, working); err != nil {
+		t.Fatal(err)
+	}
+
 	// A file named as the pristine copy that seed did not make is kept.
 	other := filepath.Join(root, "database", "other.sqlite")
 	sqliteDB(t, other, "CREATE TABLE orders (id INTEGER PRIMARY KEY)")
