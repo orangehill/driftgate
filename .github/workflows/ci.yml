@@ -1,9 +1,10 @@
 name: ci
 
-# Changes to documents alone run nothing. Branches are checked with the local
-# tests; CI runs on main and development, on pull requests and by hand. The
-# release workflow runs these same jobs (workflow_call), so a release passes
-# exactly the checks of CI. The CI badge in README.md shows this workflow on main.
+# Changes to documents alone run only docs.yml (the docs test, no database).
+# Branches are checked with the local tests; CI runs on main and development,
+# on pull requests and by hand. The release workflow runs these same jobs
+# (workflow_call), so a release passes exactly the checks of CI. The CI badge
+# in README.md shows this workflow on main.
 on:
   push:
     branches: [main, development]

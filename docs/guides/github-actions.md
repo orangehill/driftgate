@@ -25,6 +25,7 @@ and every input is described in
 
 ## The job
 
+<!-- check: skip: a GitHub Actions workflow -->
 ```yaml
 on:
   pull_request:
@@ -110,6 +111,7 @@ every job, because a CI database starts empty. With `pristine-cache-files`
 the action keeps a dump of the seeded databases in the Actions cache, keyed
 on the hash of the files the seed reads and on `pristine-cache-key`:
 
+<!-- check: skip: part of a GitHub Actions workflow -->
 ```yaml
       - uses: orangehill/driftgate@v1.0.2
         with:
@@ -144,6 +146,7 @@ on the hash of the files the seed reads and on `pristine-cache-key`:
 An SQLite database needs no service: the file is in the checkout (or made
 by the seed). The pristine cache is a copy of the file:
 
+<!-- check: skip: part of a GitHub Actions workflow -->
 ```yaml
       - uses: orangehill/driftgate@v1.0.2
         with:
@@ -166,6 +169,7 @@ The service as DriftGate's own CI starts it; `sqlcmd` is in
 `/opt/mssql-tools18` (`/opt/mssql-tools` on 2017), and `-C` trusts the
 image's own certificate:
 
+<!-- check: skip: part of a GitHub Actions workflow -->
 ```yaml
     services:
       mssql:
@@ -185,6 +189,7 @@ image's own certificate:
 The pristine cache is a backup of the working database, made in the
 container and copied out, and restored over it on a hit:
 
+<!-- check: skip: part of a GitHub Actions workflow -->
 ```yaml
           pristine-cache-key: mssql-2022
           pristine-dump: >-

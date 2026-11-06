@@ -42,6 +42,9 @@ quick start). This documentation describes DriftGate 1.0.
 - [Side checks in the same gate](guides/side-checks.md): a schema dump and a compiler
   output, the settings of the stack, files and Redis, mail, the production install
 
-The configuration examples marked `<!-- check: … -->` in the source of
-these pages were loaded with DriftGate's own parsers when the pages were
-written.
+Every `yaml` and `json` example in these pages carries a
+`<!-- check: … -->` marker in its source, and the docs test
+(`go test ./internal/docscheck/`) loads each one with DriftGate's own
+parsers on every change; the examples in another tool's format (a GitHub
+workflow, a compose file, an OpenAPI description) are marked as skipped.
+The same test checks every link and anchor between the pages.
