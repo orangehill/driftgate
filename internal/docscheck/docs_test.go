@@ -366,8 +366,8 @@ func TestSentenceLength(t *testing.T) {
 		}
 		code := map[int]bool{}
 		for _, b := range d.Blocks {
-			for i := range strings.Count(b.Body, "\n") + 3 {
-				code[b.Line+i] = true
+			for n := b.Line; n <= b.End; n++ {
+				code[n] = true
 			}
 		}
 		var para []string

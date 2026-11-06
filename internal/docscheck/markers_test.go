@@ -37,6 +37,8 @@ func TestCheckMarkers(t *testing.T) {
 			switch {
 			case b.Marker == "" && isData:
 				t.Errorf("%s:%d: %s block without a <!-- check: … --> marker on the line before", f, b.Line, b.Lang)
+			case b.Marker != "" && !isData:
+				t.Errorf("%s:%d: check marker %q on a %q block; markers are for yaml and json", f, b.Line, b.Marker, b.Lang)
 			case b.Marker != "":
 				if err := checkBlock(t.TempDir(), b.Marker, b.Body); err != nil {
 					t.Errorf("%s:%d: check: %s: %v", f, b.Line, b.Marker, err)
@@ -173,5 +175,17 @@ func TestCheckBlockFails(t *testing.T) {
 		if err := checkBlock(t.TempDir(), c.mark, c.body); err == nil {
 			t.Errorf("%s accepts %q", c.mark, c.body)
 		}
+	}
+}
+
+// TestIndentedBlock: a block in a list item is checked without the
+// indentation of its fence.
+func TestIndentedBlock(t *testing.T) {
+	d, err := ParseText("x.md", "- item\n\n  <!-- check: config-fragment -->\n  ```yaml\n  mode: evolve\n  level: values\n  ```\n")
+	if err != nil || len(d.Blocks) != 1 {
+		t.Fatalf("%v %+v", err, d)
+	}
+	if err := checkBlock(t.TempDir(), d.Blocks[0].Marker, d.Blocks[0].Body); err != nil {
+		t.Error(err)
 	}
 }

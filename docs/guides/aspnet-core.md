@@ -12,7 +12,7 @@ create the pristine copy, and when DriftGate reads the compose service it
 trusts the container's self-signed certificate on a loopback address
 only.
 
-<!-- check: skip: a Docker Compose file -->
+<!-- check: yaml -->
 ```yaml
 # compose.yaml
 services:
@@ -29,7 +29,7 @@ The application's connection string, in `appsettings.Development.json` or,
 better, in its user secrets
 (`dotnet user-secrets set "ConnectionStrings:Default" "…"`):
 
-<!-- check: skip: ASP.NET Core settings -->
+<!-- check: json -->
 ```json
 {
   "ConnectionStrings": {

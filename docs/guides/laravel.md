@@ -156,7 +156,7 @@ state:
 `DB_CONNECTION=sqlsrv` with `DB_HOST`, `DB_PORT`, `DB_DATABASE`,
 `DB_USERNAME` and `DB_PASSWORD`, here for SQL Server in a container:
 
-<!-- check: skip: a Docker Compose file -->
+<!-- check: yaml -->
 ```yaml
 # compose.yaml
 services:

@@ -289,7 +289,7 @@ result.
 
 ## GitHub Action
 
-<!-- check: skip: a GitHub Actions workflow -->
+<!-- check: yaml -->
 ```yaml
 on: pull_request            # never pull_request_target
 permissions:

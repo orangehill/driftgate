@@ -46,5 +46,6 @@ Every `yaml` and `json` example in these pages carries a
 `<!-- check: … -->` marker in its source, and the docs test
 (`go test ./internal/docscheck/`) loads each one with DriftGate's own
 parsers on every change; the examples in another tool's format (a GitHub
-workflow, a compose file, an OpenAPI description) are marked as skipped.
+workflow, a compose file, an OpenAPI description) are checked as plain YAML
+or JSON.
 The same test checks every link and anchor between the pages.

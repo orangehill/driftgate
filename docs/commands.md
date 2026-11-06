@@ -1526,7 +1526,8 @@ Data anonymize of a sample with closed references: the rows `subset:` in
 | `--replace` | drop an existing target database and write it again |
 | `--format text\|json` | output format (default text) |
 
-Needs a `subset:` section in `classify.yaml`.
+Needs a `subset:` section in `classify.yaml`. See
+[data anonymize](#data-anonymize) for when it stops.
 
 ```sh
 driftgate data subset --no-target --dump out/app-sample.sql
