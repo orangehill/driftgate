@@ -5,7 +5,7 @@ keeps the old headings, so older links still work.
 
 | File | Reference |
 |---|---|
-| `driftgate.yaml` | [driftgate.yaml](reference/driftgate-yaml.md), [state](reference/state.md), [database settings](reference/database-settings.md), [databases](reference/databases/mysql-mariadb.md) |
+| `driftgate.yaml` | [driftgate.yaml](reference/driftgate-yaml.md), [state](reference/state.md), [database settings](reference/database-settings.md), [databases](reference/README.md#databases) |
 | `allowlist.yaml` | [allowlist.yaml](reference/allowlist-yaml.md) |
 | `exclusions.yaml` | [exclusions.yaml](reference/exclusions-yaml.md) |
 | `catalog.json` | [catalog.json](reference/catalog-json.md) |

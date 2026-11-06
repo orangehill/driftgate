@@ -3,8 +3,13 @@ package docscheck
 import (
 	"bufio"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -76,19 +81,7 @@ func TestLinks(t *testing.T) {
 // outside; our own pages link the new home. A link to the index page
 // itself, and a link within it, are fine.
 func TestNoLinksIntoIndexes(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "index-pages.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	index := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-			index[line] = true
-		}
-	}
-	if len(index) == 0 {
-		t.Fatal("testdata/index-pages.txt lists no page")
-	}
+	index := indexPages(t)
 	_, all := docs(t)
 	for _, d := range all {
 		for _, l := range d.Links {
@@ -97,6 +90,61 @@ func TestNoLinksIntoIndexes(t *testing.T) {
 				t.Errorf("%s:%d: %s links a section of the index page %s; link its new home", d.Path, l.Line, l.Target, rel)
 			}
 		}
+	}
+}
+
+// TestNoCodeLinksIntoIndexes: no string of the program's code (help texts,
+// messages) names a section of an index page; it names the new home. The
+// one exception is the table of what to use for a task, which stays on the
+// configuration index until capabilities.md takes it.
+func TestNoCodeLinksIntoIndexes(t *testing.T) {
+	root, err := Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for page := range indexPages(t) {
+		names = append(names, path.Base(page)+"#")
+	}
+	allowed := map[string]bool{"configuration.md#what-to-use-for-what": true}
+	fset := token.NewFileSet()
+	err = filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if e.IsDir() {
+			if n := e.Name(); p != root && (n == "testdata" || n == "node_modules" || strings.HasPrefix(n, ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil || allowed[v] {
+				return true
+			}
+			for _, name := range names {
+				if strings.Contains(v, name) {
+					t.Errorf("%s: %q links a section of an index page; name its new home", fset.Position(lit.Pos()), v)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -551,4 +599,23 @@ func TestBudgets(t *testing.T) {
 			warn(t, "%s: %d lines (budget %d)", f[0], n, budget)
 		}
 	}
+}
+
+// indexPages are the pages of testdata/index-pages.txt.
+func indexPages(t *testing.T) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "index-pages.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			index[line] = true
+		}
+	}
+	if len(index) == 0 {
+		t.Fatal("testdata/index-pages.txt lists no page")
+	}
+	return index
 }

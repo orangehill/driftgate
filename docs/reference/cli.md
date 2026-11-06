@@ -10,6 +10,9 @@ driftgate help                 # synopsis of every command
 driftgate help <command>       # one command with its flags (also: <command> --help)
 driftgate help catalog         # the fields of catalog.json
 driftgate help allowlist       # the rules of allowlist.yaml, then allowlist check
+driftgate help exclusions      # the keys of exclusions.yaml
+driftgate help classify        # the rules of classify.yaml
+driftgate help config          # the top-level keys of driftgate.yaml
 driftgate help kinds           # every kind of drift, one line each
 ```
 
@@ -28,7 +31,7 @@ topic names the table of
 | `--config <path>` | the configuration file; every command except `version` takes it |
 | `--target <service>` | with several services, work on the named ones only (repeatable or comma-separated) |
 
-- Without `--config`, a command uses `.driftgate/driftgate.yaml` or `driftgate.yaml` in this folder. Otherwise it takes the nearest folder above that has one, up to the top of the git work tree ([baselines](driftgate-yaml.md#baselines)).
+- Without `--config`, a command finds the project from the folder it runs in ([how](#where-the-projects-files-are)).
 - Without `--target`, every command works on all services. `run` reports a check limited by `--target` as partial.
 - Flags go before or after the positional arguments: `driftgate compare before --only 'get-*'` works.
 

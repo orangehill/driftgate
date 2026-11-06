@@ -11,6 +11,8 @@ What each release adds and changes is in the
 
 ## Reference
 
+- [Reference](reference/README.md): every reference page, one line each: commands, files,
+  how it works in detail, databases
 - [Commands](commands.md): every command and flag, exit codes, environment
   variables, interrupts and the store lock; among them
   [`allowlist check`](reference/commands/review.md#driftgate-allowlist-check) and

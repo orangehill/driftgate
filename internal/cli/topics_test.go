@@ -52,7 +52,7 @@ func TestHelpTopics(t *testing.T) {
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/allowlist-yaml.md", "usage: driftgate allowlist check"}},
 		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/exclusions-yaml.md"}},
-		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), fields(data.ColumnRule{}, "yaml")...), fields(data.SchemaRule{}, "yaml")...),
+		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), withoutKey(fields(data.ColumnRule{}, "yaml"), "options")...), fields(data.SchemaRule{}, "yaml")...),
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/classify-yaml.md"}},
 		{"config", fields(config.Config{}, "yaml"),
 			[]string{"driftgate.yaml", docsBase() + "reference/driftgate-yaml.md#top-level-keys"}},
@@ -83,6 +83,30 @@ func TestHelpTopics(t *testing.T) {
 	for _, args := range [][]string{{"help", "uploads"}, {"uploads"}} {
 		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, docsBase()+tasksDoc) {
 			t.Errorf("%v: exit %d %s", args, code, errOut)
+		}
+	}
+}
+
+// withoutKey is keys without key. ColumnRule's options is refused for every
+// column kind (data.ColumnRule.validate), so help classify does not offer it.
+func withoutKey(keys []string, key string) []string {
+	var out []string
+	for _, k := range keys {
+		if k != key {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// TestHelpNamesTopics: driftgate help names every help topic.
+func TestHelpNamesTopics(t *testing.T) {
+	_, out, _ := runCLI(t, "help")
+	line := out[strings.Index(out, "driftgate help <topic>"):]
+	line = strings.Join(strings.Fields(line[:strings.Index(line, ".\n")]), " ")
+	for _, tp := range topics {
+		if !strings.Contains(line, " "+tp.name+",") && !strings.HasSuffix(line, " "+tp.name) {
+			t.Errorf("driftgate help does not name the topic %s: %s", tp.name, line)
 		}
 	}
 }

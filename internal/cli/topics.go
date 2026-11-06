@@ -112,7 +112,6 @@ var topics = []topic{
 			{"kind", "of a column: keep, personal, serialized-php or file"},
 			{"strategy", "of a personal column: universal, email, password, token, free-text, html, json, null, empty"},
 			{"paths, other", "of a json column: path glob → strategy or keep; strings under no path"},
-			{"options", "of a file column: passed to its placeholder"},
 			{"kinds", "of a schema entry: the kinds of personal data confirmed there"},
 			{"schema:", "schema object → the personal data confirmed in it"},
 			{"subset:", "the rows data subset takes: nullable, tables, references"},
