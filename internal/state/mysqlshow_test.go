@@ -340,16 +340,39 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		}
 	})
 
-	t.Run("no connection", func(t *testing.T) {
-		// No batch can be sent: one by one, not taken for a refusal.
-		m, log, c := open(t)
-		m.multi.Close()
-		got, err := m.showAll(ctx, c, reqs)
-		check(t, "no connection", got, err)
-		if m.multiRefused.Load() || log.Len() > 0 {
-			t.Fatalf("refused %v, log %q", m.multiRefused.Load(), log.String())
-		}
-	})
+	for _, how := range []string{"closed", "refused login"} {
+		t.Run("no connection: "+how, func(t *testing.T) {
+			// No batch can be sent: one by one, with one note, without a
+			// connection tried again for each object; not a refusal.
+			m, log, c := open(t)
+			m.multi.Close()
+			if how == "refused login" {
+				// A server error as the connection is made, as 1040 (too
+				// many connections) or 1226 (max_user_connections) are.
+				u, _ := url.Parse(dsn)
+				u.User = url.UserPassword(u.User.Username(), "not the password")
+				multi, err := dbx.OpenMySQLWith(u.String(), "", nil, dbx.MySQLOpen{MultiStatements: true, Init: m.initMulti})
+				if err != nil {
+					t.Fatal(err)
+				}
+				m.multi = multi
+			}
+			calls := 0
+			defer func() { showManyFunc = (*MySQL).showMany }()
+			showManyFunc = func(m *MySQL, ctx context.Context, reqs []showReq, out []map[string]string) (int, error) {
+				calls++
+				return m.showMany(ctx, reqs, out)
+			}
+			got, err := m.showAll(ctx, c, reqs)
+			check(t, "no connection", got, err)
+			if _, err := m.showAll(ctx, c, reqs); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || m.multiRefused.Load() || strings.Count(log.String(), "SHOW CREATE is read one statement at a time") != 1 {
+				t.Fatalf("%d batches, refused %v, log %q", calls, m.multiRefused.Load(), log.String())
+			}
+		})
+	}
 
 	for _, refusal := range []string{"no multi-statements", "charset"} {
 		t.Run("refused: "+refusal, func(t *testing.T) {
@@ -614,6 +637,39 @@ func TestMySQLQueryNotPooled(t *testing.T) {
 			var id string
 			if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id); err != nil || id == got[0] {
 				t.Fatalf("the query's connection %s was used again (%s, %v)", got[0], id, err)
+			}
+		})
+	}
+}
+
+// TestMySQLRestoreViewAndTableItem: items that name one table both as a
+// table and as a view: the table, dropped as the view's name, is created
+// again, not taken for the one it was.
+func TestMySQLRestoreViewAndTableItem(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			work, pristine := "dgt_view_table", "dgt_view_table_pristine"
+			root := mysqlAdmin(t, dsn, "")
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db, "CREATE TABLE x (id INT PRIMARY KEY, v INT)", "INSERT INTO x VALUES (1, 1), (2, 2)")
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, db, "UPDATE x SET v = 9", "INSERT INTO x VALUES (3, 3)")
+			if err := m.Restore(ctx, []string{"table:x", "view:x"}); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(newFingerprint(t, m, work, FingerprintFormat), newFingerprint(t, m, pristine, FingerprintFormat)); len(d) > 0 {
+				t.Fatalf("restore left %v", d)
 			}
 		})
 	}

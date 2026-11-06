@@ -101,6 +101,8 @@ type MySQL struct {
 	multiOK      atomic.Bool
 	multiRefused atomic.Bool
 	multiNote    sync.Once
+	// multiConnNote: the one note that a batch could not be sent.
+	multiConnNote sync.Once
 	// The state of new connections (see initConn): connMu guards it.
 	connMu       sync.Mutex
 	noFreshStats bool                 // the server has no information_schema_stats_expiry (MariaDB)
@@ -1036,6 +1038,13 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			shown = shown[1:]
 		}
 		jobs = append(jobs, tableJob{t: t, sdef: sdef, ddef: ddef})
+	}
+	// A name among the views and sequences is dropped below whatever dst
+	// holds under it, a table too: its job then starts from no table.
+	for i, j := range jobs {
+		if contains(views, j.t) || contains(sequences, j.t) {
+			jobs[i].ddef = ""
+		}
 	}
 
 	// Views first: they are created last, once their tables exist. An object

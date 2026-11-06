@@ -33,10 +33,6 @@ import (
 // showReq is one SHOW CREATE kind db.name.
 type showReq struct{ kind, db, name string }
 
-// showBatch turns the query of several statements off (tests: the reads
-// one by one, as before, to compare with).
-var showBatch = true
-
 // showBatchMax is the most statements in one query (a variable for tests).
 var showBatchMax = 500
 
@@ -45,7 +41,7 @@ var showBatchMax = 500
 // with missingOK). c is a session; it reads what is read one by one.
 func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map[string]string, error) {
 	out := make([]map[string]string, len(reqs))
-	if !showBatch || len(reqs) < 2 {
+	if len(reqs) < 2 {
 		return out, showEach(ctx, c, reqs, out)
 	}
 	if m.multiRefused.Load() {
@@ -77,8 +73,12 @@ func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map
 				m.logf("state %s: SHOW CREATE is read one statement at a time (a query of several statements was refused: %v)\n", m.o.Name, err)
 			})
 			return out, m.showSpread(ctx, c, reqs[done:], out[done:])
-		case n == 0 && !serverError(err):
-			// No batch could be sent (the connection): one by one.
+		case n == 0 && (errors.Is(err, errMultiConn) || !serverError(err)):
+			// No batch could be sent (no connection for it, or it was
+			// lost): the rest one by one on c, with one note.
+			m.multiConnNote.Do(func() {
+				m.logf("state %s: SHOW CREATE is read one statement at a time (%v)\n", m.o.Name, err)
+			})
 			return out, showEach(ctx, c, reqs[done:], out[done:])
 		}
 		// The statement after the n read failed: it is read alone, as it
@@ -93,6 +93,11 @@ func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map
 	}
 	return out, nil
 }
+
+// errMultiConn marks showMany's failure to get a connection for the query
+// (max_connections, max_user_connections, the network): not an error of
+// any statement.
+var errMultiConn = errors.New("no connection for a query of several statements")
 
 // showManyFunc is showMany (tests: a batch that goes wrong).
 var showManyFunc = (*MySQL).showMany
@@ -123,7 +128,7 @@ func showEach(ctx context.Context, c *sql.Conn, reqs []showReq, out []map[string
 func (m *MySQL) showMany(ctx context.Context, reqs []showReq, out []map[string]string) (n int, err error) {
 	conn, err := m.multi.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errMultiConn, err)
 	}
 	defer func() {
 		if err != nil {
