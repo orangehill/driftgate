@@ -48,6 +48,15 @@ func TestSQLiteAndSQLServerValidation(t *testing.T) {
 		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"sales.*"}, RowTracking: []string{"Sales.Orders"}}, err: "is excluded"},
 		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"sales.*"}, RowTracking: []string{"orders"}}, driver: SQLServer, pristine: "Shop_pristine"},
 		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"sessions", "job_batches", "cache_*"}}, driver: SQLite}, // tables the file may not have
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", RestoreOnly: []string{"Sess*"}, RowTracking: []string{"sessions"}}, err: "row_tracking table sessions is restore_only"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"cache*"}, RestoreOnly: []string{"Cache"}}, err: "restore_only table Cache is excluded"},
+		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop", Exclude: []string{"dbo.sessions"}, RestoreOnly: []string{"Sess*"}}, err: "excluded table dbo.sessions is restore_only"},
+		{comp: Component{Driver: "postgres", DSN: Secret{Env: "X"}, Working: "shop", Exclude: []string{"jobs"}, RestoreOnly: []string{"public.jobs"}}, err: "restore_only table public.jobs is excluded"},
+		{comp: Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "shop", Exclude: []string{"Sessions"}, RestoreOnly: []string{"sessions"}}, driver: MySQL, pristine: "shop_pristine"}, // names differ in letter case
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", Exclude: []string{"telescope_*"}, RestoreOnly: []string{"sessions", "cache*", "solid_queue_*"}, RowTracking: []string{"users"}}, driver: SQLite},
+		{comp: Component{Driver: "", Restore: []string{"x"}, RestoreOnly: []string{"sessions"}}, err: "need a driver"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", RestoreOnly: []string{"cache*"}, RestoreEmpty: []string{"Cache"}}, err: "restore_empty table Cache is restore_only too"},
+		{comp: Component{Driver: "sqlite", Working: "db.sqlite", RestoreEmpty: []string{"cache"}, RowTracking: []string{"cache"}}, err: "row_tracking table cache is restore_empty"},
 		{comp: Component{Driver: "sqlserver", DSN: Secret{Env: "X"}, Working: "Shop"}, driver: SQLServer, pristine: "Shop_pristine"},
 		{comp: Component{Driver: "mssql", DSN: Secret{Env: "X"}, Working: "Shop", Pristine: "ShopClean"}, driver: SQLServer, pristine: "ShopClean"},
 		{comp: Component{Driver: "sqlserver", Working: "Shop"}, err: "needs dsn"},

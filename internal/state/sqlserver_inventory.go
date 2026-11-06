@@ -46,6 +46,8 @@ type ssTable struct {
 	Rows         int64 // sys.partitions (an estimate under load)
 	Heap         bool
 	Excluded     bool // Options.Exclude: not fingerprinted or restored
+	RestoreOnly  bool // Options.RestoreOnly: restored, but not fingerprinted
+	RestoreEmpty bool // Options.RestoreEmpty: restore_only, without rows in the pristine copy
 
 	MemoryOptimized bool
 	Durability      string // SCHEMA_AND_DATA, SCHEMA_ONLY (memory-optimized)
@@ -500,7 +502,10 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			if err := claim(t.Item, "table "+t.qname()); err != nil {
 				return err
 			}
-			t.Excluded = s.excluded(t.Schema, t.Name)
+			t.Excluded, t.RestoreOnly, t.RestoreEmpty = s.excluded(t.Schema, t.Name), s.restoreOnly(t.Schema, t.Name), s.restoreEmpty(t.Schema, t.Name)
+			if t.Excluded && t.RestoreOnly {
+				return s.o.bothErr(t.Schema + "." + t.Name)
+			}
 			inv.Tables = append(inv.Tables, t)
 			inv.byID[t.ID] = t
 			inv.ByItem[t.Item] = t

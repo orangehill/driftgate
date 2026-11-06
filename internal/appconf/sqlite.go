@@ -907,41 +907,8 @@ func (f *finder) composeMount(file string) string {
 	return ""
 }
 
-// SQLiteExclude proposes the tables of an SQLite database to exclude from
-// state: (never fingerprinted or restored): those the framework of the
-// setting d keeps its own state in, in the same file, as its settings
-// say. Laravel (laravelExclude): sessions, cache and cache_locks, jobs,
-// job_batches, failed_jobs, and Telescope's and Pulse's tables. Django:
-// django_session with database sessions. why says what the proposal comes
-// from; nil for none.
-func SQLiteExclude(root string, d Database, env Lookup) (tables []string, why string) {
-	if d.Driver != SQLite {
-		return nil, ""
-	}
-	switch d.Ref.Source {
-	case Dotenv:
-		return laravelExclude(root, d, env)
-	case Python:
-		raw, err := readFile(root, d.Ref.File)
-		if err != nil {
-			return nil, ""
-		}
-		s := string(raw)
-		if !strings.Contains(s, "django.contrib.sessions") {
-			return nil, ""
-		}
-		for _, line := range strings.Split(s, "\n") {
-			if strings.HasPrefix(line, "SESSION_ENGINE") && !strings.Contains(line, "db") {
-				return nil, ""
-			}
-		}
-		return []string{"django_session"}, "Django keeps its sessions in the database (" + d.Ref.File + ")"
-	}
-	return nil, ""
-}
-
-// laravelExclude is SQLiteExclude of a Laravel .env setting of the default
-// connection. A store is proposed when its driver is database on that
+// laravelTables is FrameworkTables of a Laravel .env setting of the
+// default connection. A store is proposed when its driver is database on that
 // connection: the .env's SESSION_DRIVER, CACHE_STORE (CACHE_DRIVER before
 // Laravel 11) and QUEUE_CONNECTION, else the default of config/session.php,
 // cache.php and queue.php (env('X', 'database')), else, without that file
@@ -949,21 +916,21 @@ func SQLiteExclude(root string, d Database, env Lookup) (tables []string, why st
 // job_batches and failed_jobs are on the default connection whatever the
 // queue (failed_jobs unless QUEUE_FAILED_DRIVER is null, file or
 // dynamodb); Telescope's and Pulse's tables when composer.json requires
-// them.
-func laravelExclude(root string, d Database, env Lookup) ([]string, string) {
+// them. The cache and its locks are restore_only, the others excluded.
+func laravelTables(root string, d Database, env Lookup) Tables {
 	if _, err := localPath(root, "artisan"); err != nil {
-		return nil, ""
+		return Tables{}
 	}
 	if d.Ref.Key != "" && !slices.Contains(laravelURLs, d.Ref.Key) {
-		return nil, "" // not the default connection
+		return Tables{} // not the default connection
 	}
 	raw, err := readFile(root, d.Ref.File)
 	if err != nil {
-		return nil, ""
+		return Tables{}
 	}
 	vals, err := parseDotenv(raw, env)
 	if err != nil {
-		return nil, ""
+		return Tables{}
 	}
 	table := func(key, def string) string {
 		if t := vals[key]; t != "" && printableName(t) == t {
@@ -971,7 +938,7 @@ func laravelExclude(root string, d Database, env Lookup) ([]string, string) {
 		}
 		return def
 	}
-	var tables, why []string
+	var tables, cache, why []string
 	// uses reports a store whose driver is database on the default
 	// connection, and says where that comes from.
 	uses := func(config, connKey string, keys ...string) bool {
@@ -1008,9 +975,9 @@ func laravelExclude(root string, d Database, env Lookup) ([]string, string) {
 		tables = append(tables, table("SESSION_TABLE", "sessions"))
 	}
 	if uses("cache", "DB_CACHE_CONNECTION", "CACHE_STORE", "CACHE_DRIVER") {
-		tables = append(tables, table("DB_CACHE_TABLE", "cache"), table("DB_CACHE_LOCK_TABLE", "cache_locks"))
+		cache = append(cache, table("DB_CACHE_TABLE", "cache"), table("DB_CACHE_LOCK_TABLE", "cache_locks"))
 	}
-	if uses("queue", "DB_QUEUE_CONNECTION", "QUEUE_CONNECTION") {
+	if uses("queue", "DB_QUEUE_CONNECTION", "QUEUE_CONNECTION", "QUEUE_DRIVER") { // QUEUE_DRIVER: Laravel 5.5 to 5.6
 		tables = append(tables, table("DB_QUEUE_TABLE", "jobs"))
 	}
 	tables = append(tables, "job_batches")
@@ -1030,7 +997,7 @@ func laravelExclude(root string, d Database, env Lookup) ([]string, string) {
 			why = append(why, "Pulse")
 		}
 	}
-	return tables, strings.Join(why, ", ")
+	return Tables{Exclude: tables, RestoreEmpty: cache, Why: strings.Join(why, ", ")}
 }
 
 // phpEnvDefault reads the default of env('KEY', 'default') in a PHP

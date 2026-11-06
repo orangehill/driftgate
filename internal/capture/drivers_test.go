@@ -60,7 +60,7 @@ func TestSQLiteServer(t *testing.T) {
 	}
 
 	missing := sqliteProject(t, config.Component{Working: "database/missing.sqlite"})
-	if _, err := serverOf(missing, missing.State["db"], ""); err == nil || !strings.Contains(err.Error(), "working: database/missing.sqlite: not found") {
+	if _, err := serverOf(missing, missing.State["db"], ""); err == nil || !strings.Contains(err.Error(), "working: database/missing.sqlite: not found; the application's migrations make it") {
 		t.Errorf("missing working file: %v", err)
 	}
 	if _, err := Seeded(context.Background(), missing); err == nil {

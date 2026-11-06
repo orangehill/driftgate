@@ -271,7 +271,7 @@ func (s *SQLServer) checkSeedable(ctx context.Context) error {
 	return nil
 }
 
-// leaveOutExcluded deletes the rows of excluded tables in db (a new copy
+// leaveOutExcluded deletes the rows of excluded and restore_empty tables in db (a new copy
 // of the working database) without firing a trigger or running a cascade.
 // A trusted foreign key of a table that is not excluded must still hold,
 // or the pristine copy's definition would differ from the working
@@ -295,7 +295,7 @@ func (s *SQLServer) leaveOutExcluded(ctx context.Context, db string) error {
 	}
 	set := map[int64]bool{}
 	for _, t := range inv.Tables {
-		if t.Excluded && !t.External {
+		if (t.Excluded || t.RestoreEmpty) && !t.External {
 			set[t.ID] = true
 		}
 	}

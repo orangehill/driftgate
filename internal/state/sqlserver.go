@@ -141,6 +141,30 @@ func (s *SQLServer) excluded(schema, name string) bool {
 	return false
 }
 
+// restoreOnly is excluded for restore_only (Options.RestoreOnly).
+func (s *SQLServer) restoreOnly(schema, name string) bool {
+	full, bare := strings.ToLower(schema+"."+name), strings.ToLower(name)
+	for _, g := range s.o.restoreOnlyGlobs() {
+		g = strings.ToLower(g)
+		if glob.Match(g, full) || glob.Match(g, bare) {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreEmpty is restoreOnly for Options.RestoreEmpty.
+func (s *SQLServer) restoreEmpty(schema, name string) bool {
+	full, bare := strings.ToLower(schema+"."+name), strings.ToLower(name)
+	for _, g := range s.o.RestoreEmpty {
+		g = strings.ToLower(g)
+		if glob.Match(g, full) || glob.Match(g, bare) {
+			return true
+		}
+	}
+	return false
+}
+
 // tracked reports whether a table (schema.name) tracks its rows: listed
 // with its schema, or without it when it is in dbo.
 func (s *SQLServer) tracked(schema, name string) bool {

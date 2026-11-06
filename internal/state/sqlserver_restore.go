@@ -252,6 +252,51 @@ func (s *SQLServer) seededFingerprint(ctx context.Context) (Fingerprint, error) 
 	return maps.Clone(p), nil
 }
 
+// RestoreOnlyFingerprint hashes the restore_only tables of the working
+// database, or of the pristine copy (RestoreOnly), read anew: the last
+// fingerprint and its signals stay as they were. A working database that
+// is not online has none of them, so the restore brings them all back.
+func (s *SQLServer) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+	err = s.retryOthers(ctx, func() error {
+		f, err = s.restoreOnlyFingerprint(ctx, pristine)
+		return err
+	})
+	return f, err
+}
+
+func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	db := s.o.Working
+	var inv *ssInventory
+	if pristine {
+		mark, err := s.pristineMark(ctx)
+		if err != nil {
+			return nil, s.denied(err)
+		}
+		if inv, err = s.pristineCatalog(ctx, mark); err != nil {
+			return nil, s.denied(err)
+		}
+		db = s.o.Pristine
+	} else {
+		d, err := s.database(ctx, db)
+		if err != nil {
+			return nil, err
+		}
+		if d == nil || d.State != "ONLINE" {
+			return Fingerprint{}, nil
+		}
+	}
+	c, err := s.conn(ctx, db)
+	if err != nil {
+		return nil, s.denied(err)
+	}
+	defer c.Close()
+	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	return fp.f, nil
+}
+
 // PristineID names the pristine copy: the backup set GUID in its mark,
 // new with every seed. A record of the copy's fingerprint kept with it
 // shows whether the copy is still the one recorded.
@@ -281,7 +326,7 @@ func (s *SQLServer) pristineFingerprint(ctx context.Context, mark *sqlServerMark
 		return nil, err
 	}
 	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil)
+	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil, false)
 	if err != nil {
 		return nil, err
 	}

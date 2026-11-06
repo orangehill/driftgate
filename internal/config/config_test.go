@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -219,6 +220,10 @@ func TestLoadRefuses(t *testing.T) {
 		base + "---\nstore: /tmp/elsewhere\n":          "only one YAML document",
 		base + "---\n":                                 "",
 		base + "target:\n  timeout: 0s\n":              "",
+		base + "requests:\n  - match: get-news\n":      "requests 1: needs mutates or body",
+		base + "requests:\n  - mutates: true\n":        "requests 1: needs match",
+		base + "requests:\n  - match: \"GET /news\"\n    target: web\n    mutates: true\n":                         "requests 1: ",
+		base + "requests:\n  - match: \"POST /search\"\n    mutates: false\n    body: { q: news, tags: [a, b] }\n": "",
 	} {
 		path := filepath.Join(t.TempDir(), FileName)
 		if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
@@ -251,5 +256,64 @@ func TestHomeRelative(t *testing.T) {
 	t.Setenv(EnvUploads, "")
 	if dir, err := p.UploadsDir(); err != nil || !strings.HasPrefix(dir, home) {
 		t.Errorf("uploads ~\\: %s %v", dir, err)
+	}
+}
+
+// TestRequestBody: a body is written as JSON from the YAML as written:
+// numbers keep their digits, a date stays its text, null is JSON's null;
+// what JSON would read as another value, and keys that are no strings,
+// are refused.
+func TestRequestBody(t *testing.T) {
+	base := "version: 1\nproject: p\nrequests:\n  - match: post-x\n    body: "
+	for body, want := range map[string]string{
+		`{n: 12345678901234567890, f: 1.0, d: 2024-01-02, s: "007", b: true, l: [a, ~]}`: `{"n":12345678901234567890,"f":1.0,"d":"2024-01-02","s":"007","b":true,"l":["a",null]}`,
+		"null":                   "null",
+		"007":                    "error: 007 is no JSON number",
+		"0x1F":                   "error: 0x1F is no JSON number",
+		"{a: {1: x}}":            `error: the key "1" is not a string`,
+		"{a: !!binary aGk=}":     "error: a value tagged !!binary has no JSON form",
+		"{n: 1e400, s: '1e400'}": `{"n":1e400,"s":"1e400"}`,
+		"{<<: {a: 1}, b: 2}":     "error: merge keys (<<) are not supported in a body",
+		"~":                      "null",
+	} {
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(path, []byte(base+body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(path)
+		if e, ok := strings.CutPrefix(want, "error: "); ok {
+			if err == nil || !strings.Contains(err.Error(), e) {
+				t.Errorf("%s: %v, want %q", body, err, e)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		if got, err := p.Requests[0].JSONBody(); err != nil || string(got) != want {
+			t.Errorf("%s: %s %v, want %s", body, got, err, want)
+		}
+	}
+	// body: with nothing after it is no body.
+	path := filepath.Join(t.TempDir(), FileName)
+	os.WriteFile(path, []byte("version: 1\nproject: p\nrequests:\n  - match: x\n    mutates: true\n    body:\n"), 0o644)
+	if p, err := Load(path); err != nil || p.Requests[0].Body != nil {
+		t.Errorf("an empty body: %v", err)
+	}
+	// Aliases that repeat a value into gigabytes are refused.
+	bomb := "version: 1\nproject: p\nrequests:\n  - match: x\n    body:\n      a: &a [\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]\n"
+	prev := "a"
+	for _, k := range []string{"b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s"} {
+		bomb += fmt.Sprintf("      %s: &%s [*%s, *%s, *%s, *%s]\n", k, k, prev, prev, prev, prev)
+		prev = k
+	}
+	os.WriteFile(path, []byte(bomb), 0o644)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "larger than 10 MB") {
+		t.Errorf("aliases repeated into a large body: %v", err)
+	}
+	os.WriteFile(path, []byte("version: 1\nproject: p\nrequests:\n  - match: x\n    mutate: true\n"), 0o644)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "field mutate not found") {
+		t.Errorf("an unknown key of an entry: %v", err)
 	}
 }

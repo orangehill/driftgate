@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -476,8 +477,34 @@ func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) e
 				return err
 			}
 		}
-		return nil
+		return addRoots(work, cur)
 	})
+}
+
+// addRoots adds the project folders cur was captured in to the baseline's
+// (meta.json roots): an accepted body of another checkout names that
+// checkout's folder, which a later comparison must take as the project's
+// too.
+func addRoots(work, cur *snapshot.Set) error {
+	bm, err := work.Meta()
+	if err != nil || bm == nil {
+		return err
+	}
+	cm, err := cur.Meta()
+	if err != nil || cm == nil {
+		return err
+	}
+	roots := append([]string{}, bm.Roots...)
+	for _, r := range cm.Roots {
+		if !slices.Contains(roots, r) {
+			roots = append(roots, r)
+		}
+	}
+	if len(roots) == len(bm.Roots) {
+		return nil
+	}
+	bm.Roots = roots
+	return work.WriteMeta(*bm)
 }
 
 // acceptedBy names the person accepting, from git config; the system user

@@ -383,6 +383,9 @@ type sqliteTable struct {
 	shadow    bool   // a table a virtual table keeps its rows in
 	owner     string // of a shadow table: its virtual table
 	noRowid   bool   // WITHOUT ROWID
+	// restoreOnly: restored, but not fingerprinted (Options.RestoreOnly);
+	// a shadow table is when its virtual table is.
+	restoreOnly bool
 }
 
 // def is the definition a restore compares: the table and its indexes.
@@ -417,6 +420,33 @@ type sqliteObjects struct {
 // shadow table of an excluded virtual table.
 func (o Options) excludedTable(name string, owner string) bool {
 	return o.sqliteExcluded(name) || owner != "" && o.sqliteExcluded(owner)
+}
+
+// restoreOnlyTable reports whether a table is restore_only: by name, or a
+// shadow table as its virtual table is. A shadow table of a virtual table
+// that is fingerprinted is too, whatever its own name: its rows are the
+// virtual table's.
+func (o Options) restoreOnlyTable(name, owner string) bool {
+	if owner != "" {
+		name = owner
+	}
+	for _, g := range o.restoreOnlyGlobs() {
+		if glob.Match(asciiLower(g), asciiLower(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreEmptyTable reports whether a table is restored to no rows
+// (Options.RestoreEmpty), without letter case.
+func (o Options) restoreEmptyTable(name string) bool {
+	for _, g := range o.RestoreEmpty {
+		if glob.Match(asciiLower(g), asciiLower(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // sqliteExcluded is excluded for SQLite, whose names are ASCII-case-
@@ -526,7 +556,11 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 		if shadow {
 			own = owner(e.name)
 		}
+		ro := s.o.restoreOnlyTable(e.name, own)
 		if s.o.excludedTable(e.name, own) {
+			if ro {
+				return nil, s.o.bothErr(e.name)
+			}
 			switch {
 			case shadow:
 				o.exshadow = append(o.exshadow, e.name)
@@ -538,7 +572,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 			}
 			continue
 		}
-		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, owner: own, noRowid: noRowid[e.name]}
+		o.tables[e.name] = &sqliteTable{name: e.name, sql: e.sql, root: e.root, virtual: virtual[e.name], shadow: shadow, owner: own, noRowid: noRowid[e.name], restoreOnly: ro}
 		o.order = append(o.order, e.name)
 	}
 	for _, e := range all {

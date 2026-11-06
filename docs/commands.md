@@ -123,9 +123,11 @@ folder, from the frameworks it finds.
   a `run` would otherwise create the pristine database unasked.
   `driftgate setup` turns it on after asking, or uncomment it. With
   several settings it takes the one `setup --yes` would and lists the
-  others above `state:`. For an SQLite file it also writes the tables
-  the framework keeps its sessions, cache and jobs in as `exclude:`
-  ([SQLite](configuration.md#sqlite)).
+  others above `state:`. It also writes the tables the framework keeps
+  its own state in (sessions, cache, jobs; Hangfire, Solid) as
+  `exclude:` and `restore_empty:` ([the framework's own
+  tables](configuration.md#the-frameworks-own-tables)), for every
+  driver.
 
 ```sh
 driftgate init --project shop
@@ -152,8 +154,11 @@ Sets up a new project from zero to its first baseline, in this order:
    `generate` write the routes and the catalog, two captures make the
    baseline `local`;
 7. prints a summary: the framework, the database (driver, database, host,
-   port, user and where it was found; never the password), the address,
-   the routes covered, and what to check by hand.
+   port, user and where it was found; never the password), that the data
+   as it was became the pristine copy (or that the one made before is
+   kept), the mode (`freeze`: every drift fails and `accept` is refused;
+   `evolve`: a drift may be accepted with a reason), the address, the
+   routes covered, and what to check by hand.
 
 | Flag | Meaning |
 |---|---|
@@ -188,13 +193,20 @@ Sets up a new project from zero to its first baseline, in this order:
 - **An SQLite file** (Laravel 11 and later by default, Django, Rails,
   Prisma, ASP.NET; see [SQLite](configuration.md#sqlite)): `working:` is
   the file, the pristine copy a file of DriftGate's store, and nothing is
-  granted. Setup proposes to exclude the framework's own tables in the
-  same file (sessions, cache, jobs; default yes, `--yes` says yes), and
+  granted. As for every driver, setup proposes the framework's own tables
+  for `exclude` and `restore_empty` ([which](configuration.md#the-frameworks-own-tables);
+  default yes, `--yes` says yes), and
   says to run the application's migrations first when the file does not
   exist yet (exit 2). `--driver sqlite` for a setting that names a
   database server, or another driver for one that names an SQLite file,
   stops it (exit 2). In a worktree, the worktree's settings must name a
-  file of its own, which must exist there (git does not carry it).
+  file of its own. Git does not carry it: when it is not there and the
+  main worktree has a pristine copy of the database (its seed), setup
+  offers to make the file a copy of that, the data the main worktree's
+  baseline was captured from, without the copy's mark (`--yes`: does);
+  else it stops and says to copy the main worktree's file or run the
+  migrations (exit 2). A command that finds the file missing in a
+  worktree says so.
 - **A user that may not create a database.** Before the pristine copy it
   says what to grant, as an administrator: `GRANT ALL PRIVILEGES ON
   \`shop_pristine\`.* TO 'shop'@'%';` (MySQL, MariaDB), `ALTER ROLE
@@ -283,7 +295,7 @@ Runs the `seed:` commands and keeps a pristine copy of every state database.
 | `--skip-commands` | take the data already loaded as pristine, without the `seed:` commands (a database cache in CI) |
 
 `run` seeds by itself when a pristine copy is missing; run `seed` by hand
-after changing the seed data. Run it while the application does not write
+after changing the seed data, `restore_only` or `restore_empty`. Run it while the application does not write
 (no queue workers, schedulers or requests): MySQL/MariaDB copy the tables
 one by one, so a write during the copy can leave a pristine copy that
 mixes data from before and after it (a PostgreSQL, SQLite or SQL Server
@@ -332,7 +344,11 @@ baseline from two equal captures.
   gives the whole picture.
 - Without the baseline, `run` captures twice on the same state and makes the
   baseline only when both captures agree. Otherwise it proposes allowlist
-  entries with a format; you add the reason.
+  entries with a format; you add the reason. The second capture runs its
+  `prepare:` commands and requests at least a second after the first one
+  ended (it waits for what its restore did not take): a timestamp the
+  application writes, such as `updated_at`, then differs between the two
+  and is found, also when both are shorter than a second.
 - Its capture is named `run-<id>`, where `<id>` is fixed for the folder of
   the project: with `baselines: git` checkouts of the project (git
   worktrees) share the local store but never each other's capture, as each
@@ -532,7 +548,7 @@ Restores the state, sends the catalog and stores the responses under a tag.
 | `--only <glob>` | only requests whose ID matches |
 | `--force` | replace an existing capture with this tag |
 | `--restore once\|each` | `once` (default): restore before the read-only requests and once more before the requests that change data, which then run one after another, each on the data the ones before it left (a sequence with `restore: before` and a repeated request get their own restore); `each`: restore before every sequence and every request that changes data |
-| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1) |
+| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1); each run writes at least a second after the one before ended, as `run` does |
 | `--baseline <name>` | the state must match the one this baseline was captured from (default `local`) |
 | `--allow-remote` | allow a target outside `allow_hosts` |
 | `--allow-remote-mutations` | with `--allow-remote`, also send requests that change data or are repeated to it |
@@ -564,10 +580,22 @@ Restores the state, sends the catalog and stores the responses under a tag.
 - Requests that change data only because of their method (no `mutates` in
   the catalog, as in a catalog of an earlier release) are listed before the
   capture: a search sent as `POST` among them runs after the writes and sees
-  their data. Write `"mutates": false` on those that only read, and
-  `"mutates": true` on the others.
+  their data. Say `mutates: false` for those that only read, and
+  `mutates: true` for the others: for generated entries under
+  [`requests`](configuration.md#requests) in `driftgate.yaml`, then
+  `driftgate generate --write` (a later `generate` would write the catalog
+  entry again); for entries written by hand in the catalog.
+- A read-only request that changed data is recorded with its side
+  effects, and the capture prints the `requests:` entries that mark it
+  `mutates: true`.
 - When the restored state differs from the state the baseline was captured
-  from, the capture stops with exit 3 and lists the tables that differ.
+  from, the capture stops with exit 3 and lists the tables that differ: the
+  pristine copy holds other data (a seed since, other seed data or
+  migrations). Seed the data the baseline was captured from, or make a new
+  baseline of this data: move the baseline's folder away, and the next
+  `driftgate run` (`--baseline <name>` for another than `local`) makes
+  it. When the items that differ are tables made `restore_only` since,
+  it says that the configuration changed: make the baseline again.
 - A public response in which the personal-data detector finds something is
   stored encrypted as private, reported with a masked value, and the capture
   exits 2.

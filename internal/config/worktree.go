@@ -43,6 +43,31 @@ func MainWorktreeProject(dir string) (here, main string) {
 	}
 }
 
+// MainCheckout is, for a project folder (root) of a worktree added with
+// git worktree add, the same folder in the main worktree, when that holds
+// a configuration; "" otherwise (the main worktree itself, another
+// checkout, a bare repository).
+func MainCheckout(root string) string {
+	start, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	top := repository(start)
+	common, linked := commonDir(top)
+	if !linked || filepath.Base(common) != ".git" {
+		return ""
+	}
+	r, err := filepath.Rel(top, start)
+	if err != nil {
+		return ""
+	}
+	m := filepath.Join(filepath.Dir(common), r)
+	if exists(filepath.Join(m, FileName)) || exists(filepath.Join(m, LocalDir, FileName)) {
+		return m
+	}
+	return ""
+}
+
 // Adopt makes the project of the main worktree (main, as
 // MainWorktreeProject finds it) this worktree's (here): its configuration,
 // catalog, allowlist, routes, exclusions, classify rules, baselines with

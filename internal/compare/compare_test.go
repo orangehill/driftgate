@@ -223,6 +223,51 @@ func TestSideEffects(t *testing.T) {
 	}
 }
 
+// TestRowTrackingAfterBaseline: rows of a table the baseline did not
+// track (row_tracking came after it) are not compared, and a note says
+// so once; rows both sides tracked are compared, and a baseline that does
+// not say what it tracked has its rows compared as before.
+func TestRowTrackingAfterBaseline(t *testing.T) {
+	rec := func(se *snapshot.SideEffects) *snapshot.Record {
+		return &snapshot.Record{Version: 1, ID: "x", Status: 200, Headers: [][2]string{}, Body: snapshot.Body{SHA256: "a"}, SideEffects: se}
+	}
+	base := &snapshot.SideEffects{Items: []string{"db/table:orders", "db/table:users"}, Rows: []snapshot.RowChange{{Item: "db/table:users", Key: "id=1", Change: "updated", Columns: []string{"name"}}}}
+	cur := &snapshot.SideEffects{Items: []string{"db/table:orders", "db/table:users"}, Rows: []snapshot.RowChange{
+		{Item: "db/table:orders", Key: "id=7", Change: "inserted"}, {Item: "db/table:orders", Key: "id=8", Change: "inserted"},
+		{Item: "db/table:users", Key: "id=1", Change: "updated", Columns: []string{"email"}}}}
+	b := Side{Record: rec(base), RowTables: []string{"db/table:users"}}
+	c := Side{Record: rec(cur), RowTables: []string{"db/table:orders", "db/table:users"}}
+	drifts, notes := OneNotes("x", b, c, allowlist.Empty(), LevelValues)
+	if len(drifts) != 1 || drifts[0].Where != "side-effects:db/table:users[id=1]" {
+		t.Errorf("drifts %+v", drifts)
+	}
+	if len(notes) != 1 || notes[0] != "side-effects:db/table:orders: rows not compared: not tracked in the baseline (row_tracking came after it); make the baseline again to compare them (accept keeps the baseline's tracking)" {
+		t.Errorf("notes %q", notes)
+	}
+	// Turned off since: the baseline's rows of it are not compared.
+	if drifts, notes := OneNotes("x", Side{Record: rec(cur), RowTables: c.RowTables}, Side{Record: rec(base), RowTables: b.RowTables}, allowlist.Empty(), LevelValues); len(drifts) != 1 ||
+		len(notes) != 1 || !strings.Contains(notes[0], "row_tracking no longer covers the table") {
+		t.Errorf("row_tracking removed: %+v %q", drifts, notes)
+	}
+	b.RowTables = nil
+	if drifts, notes := OneNotes("x", b, c, allowlist.Empty(), LevelValues); len(drifts) != 3 || len(notes) != 0 {
+		t.Errorf("a baseline that does not say: %+v %q", drifts, notes)
+	}
+	// The driver names the table in another letter case or schema than
+	// the configuration (SQL Server dbo.Users for users, PostgreSQL
+	// app.users for users): it is tracked on both sides, and its rows are
+	// compared.
+	for _, item := range []string{"db/table:dbo.Users", "db/table:app.users"} {
+		cfg := []string{"db/table:dbo.users", "db/table:public.users"}
+		bb := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=1", Change: "updated", Columns: []string{"name"}}}}
+		cc := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=2", Change: "updated", Columns: []string{"name"}}}}
+		drifts, notes := OneNotes("x", Side{Record: rec(bb), RowTables: cfg}, Side{Record: rec(cc), RowTables: cfg}, allowlist.Empty(), LevelValues)
+		if len(drifts) != 2 || len(notes) != 0 {
+			t.Errorf("%s: drifts %+v, notes %q", item, drifts, notes)
+		}
+	}
+}
+
 func TestContentLengthFollowsBody(t *testing.T) {
 	side := func(body string) Side {
 		return Side{Record: &snapshot.Record{Version: 1, ID: "x", Status: 200, Headers: [][2]string{{"content-length", fmt.Sprint(len(body))}},

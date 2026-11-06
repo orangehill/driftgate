@@ -134,6 +134,7 @@ observe:
 | [`storage`](#storage-and-pii) | `{default, public}` | private | whether generated requests store bodies as public or private |
 | [`pii`](#storage-and-pii) | `{allow}` | | values the personal-data detector lets through in public bodies |
 | [`observe`](#observe) | list | | generated requests that are measured but never compared |
+| [`requests`](#requests) | list | | whether generated requests change data, and their bodies |
 | [`uploads`](#uploads) | `{dir}` | | folder of real files that catalog requests upload |
 | [`bisect`](#bisect) | mapping | | hooks of `driftgate bisect` |
 | [`data`](#data) | mapping | | the data module (`driftgate data …`) |
@@ -306,6 +307,52 @@ target:
   aliases: [http://app.test]
 ```
 
+**The project's folder.** A capture also records the folder of the project
+it was made in (and its real path, when a symbolic link leads there) in
+`meta.json`; with `baselines: git` it goes into the repository. A folder
+of two names or more in a home folder of one of the forms
+`/Users/<name>`, `/home/<name>`, `/root`, `/var/root`,
+`/mnt/<drive>/Users/<name>` (WSL, also when `$HOME` is elsewhere) and
+`C:\Users\<name>` (a name without spaces; `Users` and `home` in any
+letter case, as macOS and Windows open them) is recorded as `~/…`, which
+names no user, and stands for that path in any home folder of those
+forms: a baseline made on one machine compares with another user's
+capture or CI's (`/home/runner/work/…` is in the runner's home). The home
+folder itself and one name in it are not recorded (their path names the
+user, and a record of them would take any path of any home folder, or a
+URL's, for the project's): their traces are compared as they are. The
+home folder of the machine that captures (`$HOME`) is a person's when it
+is outside the system's folders, or in their `home` folder, and of two
+names or more (`/nfs/home/<name>`, `/data/home/<name>`, `/var/home/<name>`),
+and so is the real path of a home of those forms linked elsewhere
+(`/home/<name>` to `/nfs/home/<name>`): a folder there is recorded as
+`~/…` too, and `compare` on that machine takes that home for one (on
+another machine its traces may then differ, never hide a difference). A
+home whose name has a space is left out: its folders are not recorded. A
+folder elsewhere (a container's `/srv/…` or a home of one name such as
+`/app`, a service account's home under `/var`, `/srv`, `/opt` or `/usr`,
+such as `/var/lib/jenkins/…`) is
+recorded as it is, absolute, and compares on any machine. A debug
+error page or JSON writes the application's folder into its stack trace
+(Laravel with `APP_DEBUG`): two checkouts of the project (the main
+worktree and a git worktree, a developer's machine and CI) are in
+different folders. When the two sides were captured in different folders,
+or either recorded one as `~/…` (two homes may hold it), `compare`
+replaces each side's own folders (a baseline's include those `accept`
+added) by one neutral folder (`/driftgate-project`), in bodies and
+headers, in memory only: as written, with its `/` escaped as `\/`
+(PHP's `json_encode`) and with its `\` doubled (a Windows path in JSON);
+a `Content-Length` that differs only by them is no drift. Only where a
+path starts (after a quote, white space, a bracket, `=`, `,` or `>`) and
+a name ends: a folder whose name starts with the project's (`shop2` for
+`shop`), the folder inside another path or URL, another file or line
+still differ. A folder of one name (`/app`, as in a container) is not
+replaced: it is also a URL's path. Limits: a relative URL path of the
+form `/home/<name>/` followed by the project's names, and a body that
+holds `/driftgate-project` itself, are taken for the project's folder. A set made by an earlier release
+records no folder and is compared as it is. `accept` adds the folders of
+the capture it takes bodies from to the baseline's.
+
 A target outside `allow_hosts` needs `capture --allow-remote`; requests that
 change data need `--allow-remote-mutations` as well.
 
@@ -352,7 +399,9 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
 | `working` | string, required | the database the application uses |
 | `pristine` | string | its pristine copy; default `<working>_pristine`; must differ from `working` (MySQL/MariaDB and SQL Server: also in letter case) |
 | `exclude` | list of globs | tables never fingerprinted or restored (sessions, caches, logs) |
-| `row_tracking` | list of tables | also record which rows and columns each request changes (without values); not an excluded table |
+| `restore_only` | list of globs | tables restored to the pristine copy's rows, but never fingerprinted: no side effect, no part of the state a baseline is checked against ([below](#restore_only)); not an excluded table |
+| `restore_empty` | list of globs | `restore_only` tables restored to no rows: the pristine copy leaves their rows out, as an excluded table's (a cache; [below](#restore_only)) |
+| `row_tracking` | list of tables | also record which rows and columns each request changes (without values); not an excluded or restore_only table. A capture records which tables it tracked: rows of a table the baseline did not track (row_tracking came after it) are not compared, and a note says to make the baseline again |
 | `allow_remote` | bool | allow a database host that is neither local nor named in some target's `allow_hosts` |
 
 - `driftgate seed` (or the first `run`) copies `working` to `pristine` and
@@ -478,6 +527,98 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   connect again (3 components: 36, against the default `max_connections`
   of 151, MariaDB 10.3: 100).
 
+#### restore_only
+
+What the application writes on every request or outside requests (a
+session or cache table, a job queue) has two other choices: `exclude`
+(never compared, never restored: sessions and queued jobs carry over from
+one capture to the next) or tracking (restored, but a side effect of
+every request). `restore_only` restores such tables like the others and
+compares them never:
+
+- `driftgate seed` keeps their rows in the pristine copy (an excluded
+  table's are left out) and records their fingerprint apart from the
+  others'.
+- A restore reads them every time and restores those that differ from
+  the pristine copy's record, with the items that changed. They are no
+  item of a fingerprint, so a write to them is no side effect and no
+  difference from the baseline's state, and the check after the restore
+  leaves them out (the application may write them at any moment). A
+  write to them never hides a change to another table: the other tables
+  are fingerprinted as without them.
+- A table is excluded or restore_only, not both, and not under
+  `row_tracking`; names follow `exclude` (globs; SQLite and SQL Server
+  without letter case, PostgreSQL and SQL Server with or without the
+  schema). PostgreSQL: the sequences of their `serial` and identity
+  columns are restore_only too. SQLite: the shadow tables of a
+  restore_only virtual table are; those of a fingerprinted one never are,
+  whatever their names. A trigger of a restore_only table stays an item.
+- SQL Server: a restore of the whole database takes them from the
+  pristine copy's backup; they are not saved and copied back as excluded
+  tables are.
+- `restore_empty` implies `restore_only`: everything above holds for its
+  tables, whose pristine content is no rows (a cache). The seed leaves their rows out of the pristine
+  copy, as an excluded table's (the cache the developer's application
+  filled, entries that never expire, do not become the data every
+  capture starts from); every restore empties them when they have rows.
+  A table that refers to their rows by a foreign key stops the seed on
+  SQL Server and PostgreSQL.
+- Changing `restore_only` or `restore_empty` needs `driftgate seed` (a
+  capture says so): the pristine copy holds the rows of the tables
+  restore_only names, not of excluded or restore_empty ones. A table
+  moved from tracking to them is no longer in the state a baseline was
+  captured from: make the baseline again (a capture says so).
+
+The check costs one read of those tables per restore; restoring them all
+every time instead was measured slower (sessions of 200 rows, a cache of
+1,000 and jobs of 50, next to twenty tables of 100 rows; check and
+restore of all three: SQLite 0.58 ms and 0.88 ms, MySQL 5.1 ms and 73 ms,
+PostgreSQL 17 ms and 53 ms).
+
+**PostgreSQL** restores by copying the whole database, so a write to a
+`restore_only` table alone makes the next restore copy it all, where an
+excluded table is left as it is: about 53 ms for a small database, 0.2 s
+for 20 MB, seconds for gigabytes, at every restore after such a write
+(with `--restore each`, before every unit). `restore_empty` tables alone
+are emptied in place instead (`TRUNCATE … RESTART IDENTITY`, waiting at
+most 2 s for a lock, then checked against the pristine copy). The whole
+database is copied instead when a session holds a lock on them longer
+(a transaction left open after it read the cache; the copy ends it), a
+table has a `TRUNCATE` trigger, or the check fails. A seed refuses a
+restore_empty table with a `TRUNCATE` trigger, and one that a table
+which is neither restore_empty nor excluded inherits from: 54 ms against
+244 ms for 22 MB, independent of the database's size. Use `restore_only`
+there for tables that change rarely.
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: mysql
+    dsn: { dotenv: .env }
+    working: shop
+    exclude: [sessions, jobs, job_batches, failed_jobs]
+    restore_empty: [cache, cache_locks]
+```
+
+#### The framework's own tables
+
+`init` and `setup` propose, for every driver, the tables the framework
+keeps its own state in, from the project's settings. `setup` asks
+(default yes; without a terminal it needs `--yes`, or stops). Excluded:
+what a reset would disturb while DriftGate runs and no response depends
+on (the developer's own session in the browser, a running queue worker,
+monitoring). `restore_empty`: a cache, whose entries (the counters of a
+rate limit too) would otherwise carry over from one capture to the next
+and change its responses.
+
+| Framework | `exclude` | `restore_empty` |
+|---|---|---|
+| Laravel (`artisan`), the setting of the default connection | `sessions` and `jobs` when `SESSION_DRIVER` and `QUEUE_CONNECTION` (`QUEUE_DRIVER` before Laravel 5.7) are `database` on that connection, or unset with `database` as the default (`config/session.php`, `queue.php`, else the framework's since Laravel 11), or the tables `SESSION_TABLE` and `DB_QUEUE_TABLE` name; `job_batches`, and `failed_jobs` unless `QUEUE_FAILED_DRIVER` is `null`, `file` or `dynamodb`; Telescope's (`telescope_entries`, `telescope_entries_tags`, `telescope_monitoring`) and Pulse's (`pulse_values`, `pulse_entries`, `pulse_aggregates`) when `composer.json` requires them | `cache` and `cache_locks` when `CACHE_STORE` (`CACHE_DRIVER` before Laravel 11) is `database` in the same way, or the tables `DB_CACHE_TABLE` and `DB_CACHE_LOCK_TABLE` name |
+| Django | `django_session`, with database sessions | the `LOCATION` of a `DatabaseCache` |
+| Rails, Solid tables in the primary database (`db/schema.rb` or `db/structure.sql`; a new Rails 8 application keeps them in databases of their own in production) | `solid_queue_*`, `solid_cable_messages`; `sessions` with `activerecord-session_store` in the `Gemfile` | `solid_cache_entries` |
+| ASP.NET (every `.csproj` of the solution, in the root and up to three folders below it) | Hangfire's schema (`HangFire.*` on SQL Server with `Hangfire` or `Hangfire.SqlServer`, `hangfire.*` on PostgreSQL with `Hangfire.PostgreSql`); `DataProtectionKeys` with `Microsoft.AspNetCore.DataProtection.EntityFrameworkCore` | |
+
 #### Database DSNs
 
 The DSNs of `state:` and `data:` hold the password, so they come from the
@@ -528,7 +669,7 @@ restore a database the application no longer runs on.
 
 | Source | Reads | `key` |
 |---|---|---|
-| `dotenv: .env` | a `.env` file: without `key`, Laravel's `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_SOCKET` (MySQL only; 5.5 and later), with `DB_URL` (11 and later) or `DATABASE_URL` (5.8 to 10) over them when set, as Laravel merges them; with `key`, the URL in that variable (`DATABASE_URL`, `DB_URL`, Prisma's). `MYSQL_ATTR_SSL_CA` turns on TLS verified with that CA, as Laravel's `PDO::MYSQL_ATTR_SSL_CA` does. A key it reads that the file sets twice to different values is an error naming the lines: Laravel 5.5 to 5.7 take the first, later versions the last. `init` and `setup` offer the files the framework reads: Laravel (`artisan`) only `.env`, or `.env.<APP_ENV>` when `APP_ENV` is set in the environment; Symfony (`bin/console`) `.env.<APP_ENV>.local`, `.env.<APP_ENV>`, `.env.local` (not for `test`) and `.env` (`APP_ENV` from the environment, else the files, else `dev`); others `.env.development.local`, `.env.local`, `.env.development` and `.env`. Files that name different databases stop `setup --yes` | optional |
+| `dotenv: .env` | a `.env` file: without `key`, Laravel's `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_SOCKET` (MySQL only; 5.5 and later), with `DB_URL` (11 and later) or `DATABASE_URL` (5.8 to 10) over them when set, as Laravel merges them; with `key`, the URL in that variable (`DATABASE_URL`, `DB_URL`, Prisma's). `MYSQL_ATTR_SSL_CA` turns on TLS verified with that CA, as Laravel's `PDO::MYSQL_ATTR_SSL_CA` does. Without `DB_CONNECTION`, a NestJS setting (TypeORM, MikroORM, Sequelize): `DB_TYPE` with `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD` and `DB_DATABASE` or `DB_NAME`; `TYPEORM_CONNECTION` with `TYPEORM_HOST`, `TYPEORM_PORT`, `TYPEORM_USERNAME`, `TYPEORM_PASSWORD`, `TYPEORM_DATABASE`; `DATABASE_TYPE` with `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USERNAME`, `DATABASE_PASSWORD`, `DATABASE_NAME`. The type names the driver (`mysql`, `mariadb`, `postgres`, `sqlite`, `better-sqlite3` with the file in the database key, `mssql` as tedious, which encrypts and verifies: for a self-signed certificate give `state:` a DSN of its own with `TrustServerCertificate=true`); a type that names no database makes no Node setting. A key it reads that the file sets twice to different values is an error naming the lines: Laravel 5.5 to 5.7 take the first, later versions the last. `init` and `setup` offer the files the framework reads: Laravel (`artisan`) only `.env`, or `.env.<APP_ENV>` when `APP_ENV` is set in the environment; Symfony (`bin/console`) `.env.<APP_ENV>.local`, `.env.<APP_ENV>`, `.env.local` (not for `test`) and `.env` (`APP_ENV` from the environment, else the files, else `dev`); others `.env.development.local`, `.env.local`, `.env.development` and `.env`. Files that name different databases stop `setup --yes` | optional |
 | `appsettings: src/Api/Api.csproj` | ASP.NET: for a `.csproj`, `appsettings.json`, then `appsettings.<environment>.json` (`ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`, default `Development`) and, in Development, the project's user secrets (`UserSecretsId`; `~/.microsoft/usersecrets/…`, on Windows `%APPDATA%\Microsoft\UserSecrets\…`); for `appsettings.Development.json`, that file over `appsettings.json`. For a `.csproj`, the launch profile `dotnet run` takes (`Properties/launchSettings.json`, the first with `commandName: Project`) sets the environment and its `ConnectionStrings__*` over the files. Comments and trailing commas are allowed | required: `ConnectionStrings:Default` (case does not matter) |
 | `properties: src/main/resources/application.properties` | Spring (`spring.datasource.url`, `username`, `password`), Quarkus (`quarkus.datasource.jdbc.url`, …; `%dev.` keys win) and Micronaut (`datasources.default.*`), `.properties` or `.yml`, as Spring Boot reads them: `application.*` in the file's folder, then `application-<profile>.*` for each active profile (`SPRING_PROFILES_ACTIVE`, else `spring.profiles.active`) with the profile of the named file last; `.properties` wins over `.yml`; a document with `spring.config.activate.on-profile` (YAML, or a `.properties` part after a `#---` or `!---` line) counts when its profile is active; `init` and `setup` offer only `application.*` and the files of the active profiles. `${NAME}` and `${NAME:default}` take the properties, then the environment | optional: the prefix, default the first of `spring.datasource`, `quarkus.datasource`, `datasources.default`, `spring.r2dbc` the files set |
 | `yaml: config/database.yml` | Rails' `database.yml` (with `<<: *default`; `DATABASE_URL` of the environment over it, as Rails merges it; in ERB only `ENV['X']`, `ENV.fetch('X')`, `ENV.fetch('X', default)`, `ENV.fetch('X') { default }` and `ENV['X'] \|\| default`), or a Go service's `config.yaml`: a URL, or `adapter`/`driver`, `host`, `port`, `database`/`name`/`dbname`, `username`/`user`, `password`, `socket` | default `development` for `database.yml`, else the first of `database`, `db`, `datasource`, `mysql`, `postgres`, `postgresql`; dots separate levels (`development.primary`) |
@@ -588,8 +729,8 @@ state:
 
 **Anything else** (Redis, files, a search index): `restore` (required) and
 optionally `fingerprint`, a command whose output must be the same after
-every restore. `dsn`, `working`, `pristine`, `exclude` and `row_tracking`
-need a driver.
+every restore. `dsn`, `working`, `pristine`, `exclude`, `restore_only`,
+`restore_empty` and `row_tracking` need a driver.
 
 <!-- check: config-fragment -->
 ```yaml
@@ -624,7 +765,7 @@ process.
 | `working` | path, required | the database file the application opens, relative to the project root; it must exist when a command runs (the application's migrations make it) |
 | `pristine` | path | its pristine copy; default a file of the local store (`pristine/<name>-<hash>.sqlite`, next to the record of its fingerprint), so every checkout and working file has its own. When set, another file inside the project (seed creates it, and its folder when that does not exist yet): not `working` and not one of its `-wal`, `-shm` and `-journal` files, also in letter case |
 | `dsn` | a file of the project \| `{env}` \| `{op}` | optional: the setting the application reads (`{ dotenv: .env }`, see [database DSNs](#database-dsns)); the file it names must be `working`, so a changed `DB_DATABASE` stops a command (exit 2) instead of restoring a file the application no longer uses. An `env` or `op` value is a path, a `file:` URI or an `sqlite:` URL |
-| `exclude`, `row_tracking` | | as above; a row without a primary key is named by its rowid (`rowid=7`) |
+| `exclude`, `restore_only`, `restore_empty`, `row_tracking` | | as above; a row without a primary key is named by its rowid (`rowid=7`) |
 
 `allow_remote` is refused: there is no server.
 
@@ -669,7 +810,7 @@ runs in, `init` and `setup` add a note to check it:
   of `development` is a component of its own; `init` and `setup` write
   the primary and list the others. The cache, queue and cable databases (Solid Cache, Solid Queue, Solid Cable) change without a
   request changing data: leave them out of `state:`, or exclude their
-  tables.
+  tables (the cache's may be `restore_empty`).
 - **The same machine.** SQLite's locks keep a restore and the
   application's writes apart, so the file must be on a local disk of the
   machine DriftGate runs on, opened by an application on that machine.
@@ -766,25 +907,11 @@ mode or locking mode or checkpoint its WAL.
   it, and its readers see the data before or after it.
 
 **Exclude** what the framework writes on every request or outside
-requests, in the same file: sessions, cache, jobs. Restoring them would
-log users out and drop queued jobs, and their writes would make every
-fingerprint read them. `init` and `setup` propose them from the settings
-(`setup` asks, default yes):
-
-- Laravel: `sessions`, `cache` and `cache_locks`, `jobs` when
-  `SESSION_DRIVER`, `CACHE_STORE` (`CACHE_DRIVER` before Laravel 11) and
-  `QUEUE_CONNECTION` are `database` on the default connection, or unset
-  with `database` as the default (the framework's since Laravel 11), or
-  the tables `SESSION_TABLE`, `DB_CACHE_TABLE`, `DB_CACHE_LOCK_TABLE` and
-  `DB_QUEUE_TABLE` name; `job_batches`, and `failed_jobs` unless
-  `QUEUE_FAILED_DRIVER` is `null`, `file` or `dynamodb`; Telescope's
-  (`telescope_entries`, `telescope_entries_tags`, `telescope_monitoring`)
-  and Pulse's (`pulse_values`, `pulse_entries`, `pulse_aggregates`) when
-  `composer.json` requires them;
-- Django: `django_session`, with database sessions.
-
-An excluded table keeps its definition in the pristine copy, without
-rows. `exclude` may name tables the file does not have.
+requests, in the same file: sessions, jobs; a cache is `restore_empty`.
+`init` and `setup` propose them ([the framework's own
+tables](#the-frameworks-own-tables)). An excluded table keeps its
+definition in the pristine copy, without rows. `exclude` and
+`restore_only` and `restore_empty` may name tables the file does not have.
 
 **Queries** (`params` `sql:`) run on the pristine file, opened read-only
 (`mode=ro`, `query_only`, defensive mode), on a connection that lets only
@@ -822,6 +949,7 @@ it, and an `x509negativeserial` you set in `GODEBUG` yourself is kept.
 | `working` | string, required | the database the application uses; names are compared without letter case, as SQL Server does |
 | `pristine` | string | its pristine copy, a database on the same server; default `<working>_pristine`; not `working` in any letter case, at most 122 characters (DriftGate makes `<pristine>_dgnew` and `<pristine>_dgx` next to it) |
 | `exclude` | list of globs | as above; a glob matches `schema.name` or `name`, without letter case. It also leaves out views and sequences of those names |
+| `restore_only`, `restore_empty` | list of globs | as above; matched as `exclude` matches tables (views and sequences are not restore_only) |
 | `row_tracking` | list of tables | as above; `schema.name`, or `name` in `dbo`; the table needs a primary key |
 | `allow_remote` | bool | as above |
 
@@ -1263,9 +1391,11 @@ commits during it is not noticed. A restore holds its locks until it
 commits; the application's queries on the tables it writes wait for it.
 
 **Exclude** what the application writes on every request or outside
-requests: session and cache tables (ASP.NET's SQL Server distributed
-cache, `dotnet sql-cache create`), job tables (Hangfire's `HangFire.*`),
-logs. An excluded table keeps its definition in the pristine copy,
+requests: session tables, job tables (Hangfire's `HangFire.*`), logs; a
+cache (ASP.NET's SQL Server distributed cache, `dotnet sql-cache
+create`) may be `restore_empty`. `init` and `setup` propose Hangfire's
+tables and the Data Protection keys ([the framework's own
+tables](#the-frameworks-own-tables)). An excluded table keeps its definition in the pristine copy,
 without rows; a restore item by item does not touch it, and a restore of
 the whole database saves its rows and copies them back. A table that is
 not excluded and whose rows refer to an excluded table's rows stops the
@@ -1495,6 +1625,45 @@ limits it to one service.
 observe:
   - match: "GET /up"
     reason: Health check; reports the current time.
+```
+
+### requests
+
+What `generate` writes into the requests it makes: whether they change
+data (`mutates`) and their JSON body (`body`, written as YAML, sent as
+`application/json`). `match` and `target` name requests as `observe`
+does; where several entries name a request, the last one with the key
+wins. The catalog keeps no change by hand to a generated entry: the next
+`generate --write` makes it again, and `run` reports a catalog that
+differs from what it generates. Mark it here instead, then `generate
+--write`; for read-only requests that changed data, `capture` and `run`
+print the entries to add (by route), and the catalog change for entries
+written by hand, which say `mutates` and `body` in the catalog itself.
+`generate` notes an entry that names no generated request.
+
+- `mutates: false` is for one route that only reads, such as a search
+  sent as `POST`: it runs with the read-only requests, at the same time,
+  without a restore before it. An entry that says it of a request whose
+  method changes data other than `POST` (`DELETE`, `PUT`, `PATCH`, any
+  other verb), or of requests of more than one route (`match: "POST
+  *"`), stops `generate` (exit 2).
+- The body is JSON as the YAML is written: a number keeps its digits
+  (`1.0`, a large integer), a date stays its text, `null` is JSON's
+  `null` (`body:` with nothing after it is no body). A value JSON would
+  read otherwise (`0x1F`, `007`, `.inf`), a tagged value (`!!binary`), a
+  key that is not a string and merge keys (`<<`) are refused: quote them,
+  or write the keys out. A body is at most 10 MB, aliases included. It replaces the route's sample body, for every template
+  but `empty-body`, which keeps its `{}`; for a route that uploads files,
+  its fields are the form's fields.
+
+<!-- check: config-fragment -->
+```yaml
+requests:
+  - match: "GET /api/news/*"          # counts views: changes data
+    mutates: true
+  - match: post-api-search            # a search sent as POST only reads
+    mutates: false
+    body: { q: news, page: 1 }
 ```
 
 ### uploads
@@ -1863,7 +2032,7 @@ with their own ID.
 | `headers` | list of `[name, value]` pairs, sent in this order; the first of a name replaces DriftGate's own (`User-Agent`, `Accept-Encoding: identity`), more of that name are sent too |
 | `body` | a JSON body |
 | `identity` | send with this identity's token |
-| `mutates` | the request changes data: it runs after the read-only ones, one at a time, and needs a state with a restore command. With `capture --restore once` (the default, and `run`) the state is restored once before these requests, so each runs on the data the ones before it left; `--restore each` restores before every one. Without `mutates`, every method other than `GET`, `HEAD` and `OPTIONS` changes data, and capture lists such requests; write `"mutates": false` for one that only reads (a search sent as `POST`), so it runs with the read-only requests on the restored data |
+| `mutates` | the request changes data: it runs after the read-only ones, one at a time, and needs a state with a restore command. With `capture --restore once` (the default, and `run`) the state is restored once before these requests, so each runs on the data the ones before it left; `--restore each` restores before every one. Without `mutates`, every method other than `GET`, `HEAD` and `OPTIONS` changes data, and capture lists such requests; write `"mutates": false` for one that only reads (a search sent as `POST`), so it runs with the read-only requests on the restored data. For a generated entry, say it under [`requests`](#requests) in `driftgate.yaml` |
 | `storage` | `public` or `private`, required |
 | `level` | comparison level of this request |
 | `observe` | measured, never compared |

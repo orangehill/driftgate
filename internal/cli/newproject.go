@@ -27,13 +27,13 @@ type draft struct {
 
 	db      *appconf.Database // state: db; nil for none
 	dbIndex int               // the setting of dbs it was made from
-	// exclude are the tables state: excludes (SQLite: the framework's own,
-	// setup's question); excludeAsked says the question was asked.
-	exclude      []string
-	excludeAsked bool
-	enable       bool   // state: is written on, not commented out (setup)
-	url          string // target.base_url; empty: the framework's default
-	urlFrom      string // where url comes from, for the messages
+	// tables are the framework's own tables state: excludes or restores
+	// only (setup's question); tablesAsked says the question was asked.
+	tables      appconf.Tables
+	tablesAsked bool
+	enable      bool   // state: is written on, not commented out (setup)
+	url         string // target.base_url; empty: the framework's default
+	urlFrom     string // where url comes from, for the messages
 }
 
 // newDraft locates a new project (config.Locate) and reads its folder. A
@@ -319,7 +319,7 @@ func seedExample(d appconf.Database, laravel bool) string {
 // (only in this shell's environment) takes the DSN from dsnEnv. The block
 // is commented out unless on, and when the setting gives no driver or
 // database name, with what to do.
-func stateBlock(d appconf.Database, on bool, exclude ...string) string {
+func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 	dsn := flow(config.SecretFor(d.Ref))
 	comment := "from " + where(d) + ", read when a command runs; the password stays there"
 	if d.Driver == appconf.SQLite {
@@ -351,9 +351,13 @@ func stateBlock(d appconf.Database, on bool, exclude ...string) string {
 	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
-	if len(exclude) > 0 {
-		lines = append(lines, "    exclude: "+flow(exclude)+"   # the framework's own tables in the same file: never compared or restored")
-	} else {
+	if len(t.Exclude) > 0 {
+		lines = append(lines, "    exclude: "+flow(t.Exclude)+"   # the framework's own tables: never compared or restored")
+	}
+	if len(t.RestoreEmpty) > 0 {
+		lines = append(lines, "    restore_empty: "+flow(t.RestoreEmpty)+"   # a cache: emptied at every restore, never compared")
+	}
+	if len(t.Exclude)+len(t.RestoreEmpty) == 0 {
 		lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
 	}
 	var missing []string
@@ -437,7 +441,7 @@ func (dr *draft) configText() string {
 				others.WriteString("# also found: " + describe(o) + "\n")
 			}
 		}
-		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.excludeTables()...) + "\n" + text[end:]
+		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.frameworkTables()) + "\n" + text[end:]
 		text = strings.Replace(text, mysqlSeed, seedExample(*dr.db, slices.Contains(d.kinds, "laravel")), 1)
 	} else if slices.Contains(d.kinds, "laravel") {
 		text = strings.Replace(text, mysqlSeed, seedExample(appconf.Database{}, true), 1)

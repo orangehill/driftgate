@@ -54,8 +54,9 @@ type ssFingerprint struct {
 // that need not be read again (the per-table counters). A table's item
 // hashes its definition and its rows; every other item its definition. In
 // the working database a table with a rowversion column notes when its
-// values moved (rowversionMoved).
-func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string, inv *ssInventory, vals *ssValues, reuse func(t *ssTable, def string) (string, bool)) (*ssFingerprint, error) {
+// values moved (rowversionMoved). The restore_only tables are left out;
+// with restoreOnly they are all it hashes.
+func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string, inv *ssInventory, vals *ssValues, reuse func(t *ssTable, def string) (string, bool), restoreOnly bool) (*ssFingerprint, error) {
 	var err error
 	if vals == nil {
 		if vals, err = values(ctx, c); err != nil {
@@ -75,7 +76,7 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 	out := &ssFingerprint{f: Fingerprint{}, inv: inv, content: map[int64]string{}}
 	var tasks []ssTask
 	for _, t := range inv.Tables {
-		if t.Excluded || !want(t.Item) {
+		if t.Excluded || t.RestoreOnly != restoreOnly || !want(t.Item) {
 			continue
 		}
 		if reuse != nil {
@@ -123,10 +124,11 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 		out.content[id] = content
 	}
 	for item, def := range inv.Defs {
-		if !want(item) {
+		t := inv.ByItem[item]
+		if !want(item) || (t != nil && t.RestoreOnly) != restoreOnly {
 			continue
 		}
-		if t := inv.ByItem[item]; t != nil {
+		if t != nil {
 			out.f[item] = hash([]byte(def + "\x00" + out.content[t.ID]))
 		} else {
 			out.f[item] = hash([]byte(def))

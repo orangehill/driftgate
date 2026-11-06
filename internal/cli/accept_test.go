@@ -678,3 +678,24 @@ func TestReviewShowPrivateCaptures(t *testing.T) {
 		t.Errorf("review --show-private after a set changed:\n%s", out)
 	}
 }
+
+// TestAcceptAddsRoots: a body accepted from another checkout names its
+// folder: the baseline's roots gain it, once.
+func TestAcceptAddsRoots(t *testing.T) {
+	base, cur := &snapshot.Set{Dir: t.TempDir()}, &snapshot.Set{Dir: t.TempDir()}
+	if err := base.WriteMeta(snapshot.Meta{Tag: "local", Roots: []string{"~/Sites/shop"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cur.WriteMeta(snapshot.Meta{Tag: "run", Roots: []string{"/tmp/wt/shop", "/private/tmp/wt/shop"}}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := addRoots(base, cur); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := base.Meta()
+	if err != nil || strings.Join(m.Roots, ",") != "~/Sites/shop,/tmp/wt/shop,/private/tmp/wt/shop" || m.Tag != "local" {
+		t.Fatalf("baseline meta after accept: %+v %v", m, err)
+	}
+}

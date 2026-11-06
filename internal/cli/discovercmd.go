@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -267,6 +268,9 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		}
 	}
 	res, err := generate.Run(ctx, opts)
+	if errors.Is(err, generate.ErrSetting) {
+		return 0, configErr("%s: %v", rel(p.Root, p.Layout.Config), err)
+	}
 	if err != nil {
 		return 0, envErr(err)
 	}
@@ -290,6 +294,9 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	list("changed", changed)
 	if len(res.Skipped) > 0 {
 		printSkipped(out, res.Skipped, rel(p.Root, p.Layout.Config))
+	}
+	for _, u := range res.Unused {
+		fmt.Fprintf(out, "note: %s in %s names no generated request (an entry written by hand says mutates and body in the catalog)\n", u, rel(p.Root, p.Layout.Config))
 	}
 	differs := len(added)+len(removed)+len(changed) > 0
 	switch {

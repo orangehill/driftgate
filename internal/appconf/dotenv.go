@@ -224,14 +224,86 @@ const (
 	dbSocket     = "DB_SOCKET"
 )
 
-// laravel reports whether a .env sets Laravel's DB_* keys.
+// laravel reports whether a .env sets Laravel's DB_* keys, or the type
+// key of a Node setting (nodeEnvs).
 func laravel(env map[string]string) bool {
 	for _, k := range []string{dbConnection, dbHost, dbDatabase, dbUsername} {
 		if _, ok := env[k]; ok {
 			return true
 		}
 	}
-	return false
+	return nodeEnvOf(env) != nil
+}
+
+// nodeEnv names the keys of a Node application's database setting in a
+// .env: the type of database (TypeORM's type, MikroORM's and Sequelize's
+// dialect, as the application passes it on), the server and the
+// credentials.
+type nodeEnv struct {
+	typ, host, port, user, password string
+	names                           []string // the database, the first one set
+}
+
+// nodeEnvs are the settings of NestJS projects with TypeORM, MikroORM or
+// Sequelize: DB_TYPE with the DB_* keys of Laravel (the template most
+// follow), TypeORM's own TYPEORM_* (ormconfig from the environment,
+// before 0.3), and DATABASE_* (DATABASE_TYPE, as boilerplates name it).
+var nodeEnvs = []nodeEnv{
+	{typ: "DB_TYPE", host: dbHost, port: dbPort, user: dbUsername, password: dbPassword, names: []string{dbDatabase, "DB_NAME"}},
+	{typ: "TYPEORM_CONNECTION", host: "TYPEORM_HOST", port: "TYPEORM_PORT", user: "TYPEORM_USERNAME", password: "TYPEORM_PASSWORD", names: []string{"TYPEORM_DATABASE"}},
+	{typ: "DATABASE_TYPE", host: "DATABASE_HOST", port: "DATABASE_PORT", user: "DATABASE_USERNAME", password: "DATABASE_PASSWORD", names: []string{"DATABASE_NAME"}},
+}
+
+// nodeEnvOf is the Node setting of a .env without DB_CONNECTION (which
+// makes it Laravel's): the first of nodeEnvs whose type names a database
+// (a DATABASE_TYPE of something else is no database setting), or nil.
+func nodeEnvOf(env map[string]string) *nodeEnv {
+	if strings.TrimSpace(env[dbConnection]) != "" {
+		return nil
+	}
+	for i, n := range nodeEnvs {
+		if d, o := driverName(env[n.typ]); d != "" || o != "" {
+			return &nodeEnvs[i]
+		}
+	}
+	return nil
+}
+
+// keys lists the keys of the setting.
+func (n *nodeEnv) keys() []string {
+	return append([]string{n.typ, n.host, n.port, n.user, n.password}, n.names...)
+}
+
+// read reads the setting of a .env: its type names the driver (an SQLite
+// file is the database key, relative to the project root, where a Node
+// application usually runs), and SQL Server is tedious's, which encrypts
+// and verifies unless the application's code says otherwise.
+func (n *nodeEnv) read(file string, env map[string]string) (parts, error) {
+	p := parts{host: env[n.host], port: env[n.port], user: env[n.user], password: env[n.password]}
+	for _, k := range n.names {
+		if v := strings.TrimSpace(env[k]); v != "" {
+			p.name = v
+			break
+		}
+	}
+	p.setDriver(env[n.typ])
+	switch {
+	case p.driver == SQLite:
+		if p.name == "" {
+			return parts{}, fmt.Errorf("%s: %s is sqlite, and no %s names the file", file, n.typ, strings.Join(n.names, " or "))
+		}
+		if p.name == ":memory:" {
+			return parts{}, fmt.Errorf("%s: %s: %w", file, n.names[0], errMemory)
+		}
+		return parts{driver: SQLite, name: p.name}, nil
+	case p.driver == SQLServer:
+		p.mssql.read, p.mssql.client = true, "true"
+		p.mssql.note = "tedious encrypts and verifies the server's certificate unless the application's code says otherwise, which DriftGate does not read; for a local server with a self-signed certificate, give state: a DSN of its own: dsn: { env: NAME } with sqlserver://…?encrypt=true&TrustServerCertificate=true"
+	}
+	if err := p.splitHost(); err != nil {
+		return parts{}, fmt.Errorf("%s: %s: %w", file, n.port, err)
+	}
+	return p, nil
 }
 
 // laravelURLs are the keys Laravel takes a database URL from: DB_URL (11
@@ -254,12 +326,18 @@ func readDotenv(root, file, key string, lookup Lookup) (parts, error) {
 	if err != nil {
 		return parts{}, fmt.Errorf("%s: %w", file, err)
 	}
+	node := nodeEnvOf(env)
 	used := []string{key}
-	if key == "" {
+	switch {
+	case key == "" && node != nil:
+		used = node.keys()
+	case key == "":
 		used = append([]string{dbConnection, dbHost, dbPort, dbDatabase, dbUsername, dbPassword, dbSocket}, laravelURLs...)
 	}
 	for _, k := range used {
-		if l, ok := twice[k]; ok {
+		if l, ok := twice[k]; ok && node != nil && key == "" {
+			return parts{}, fmt.Errorf("%s: %s is set twice to different values (lines %d and %d): keep one", file, k, l[0], l[1])
+		} else if ok {
 			return parts{}, fmt.Errorf("%s: %s is set twice to different values (lines %d and %d); Laravel 5.5 to 5.7 take the first, later versions the last: keep one", file, k, l[0], l[1])
 		}
 	}
@@ -269,6 +347,9 @@ func readDotenv(root, file, key string, lookup Lookup) (parts, error) {
 			return parts{}, fmt.Errorf("%s: %s is not set", file, key)
 		}
 		return fromValue(v)
+	}
+	if node != nil {
+		return node.read(file, env)
 	}
 	if d, _ := driverName(env[dbConnection]); d == SQLite {
 		return laravelSQLite(file, env)

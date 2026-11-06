@@ -85,7 +85,8 @@ state:
     driver: mysql                    # MariaDB too; postgres for PostgreSQL; sqlite below
     dsn: { env: DG_DB_DSN }          # export DG_DB_DSN=mysql://root:secret@127.0.0.1:3306/
     working: shop                    # DB_DATABASE of the application
-    exclude: [sessions, cache, cache_locks, jobs, failed_jobs]
+    exclude: [sessions, jobs, job_batches, failed_jobs]
+    restore_empty: [cache, cache_locks]
 seed:
   - ["php", "artisan", "migrate:fresh", "--seed", "--force"]
 guards:
@@ -97,8 +98,14 @@ guards:
   `shop_pristine`. To start from a dump instead:
   `["sh", "-c", "gunzip -c ~/Data/shop.sql.gz | mysql shop"]` followed by
   `["php", "artisan", "migrate", "--force"]`.
-- Exclude tables that only hold logs or caches. A large `failed_jobs` table
-  makes fingerprints slow; empty it in a seed command, or exclude it.
+- Exclude tables that only hold logs, sessions or queued jobs; `setup`
+  proposes Laravel's own. The cache is `restore_empty`: emptied at every
+  restore, never compared, so a cached value or a rate limit's counter
+  does not carry over from one capture to the next, and the cache the
+  application had when the pristine copy was made is not kept
+  ([restore_only](../configuration.md#restore_only)). A large
+  `failed_jobs` table makes fingerprints slow; empty it in a seed
+  command, or exclude it.
 - With a Redis cache or session store, add it as a component:
   `redis: { restore: ["redis-cli", "FLUSHALL"] }`. A view counter in Redis
   that is not restored makes the second capture differ.
@@ -111,8 +118,9 @@ Laravel 11 and later start on SQLite: `DB_CONNECTION=sqlite` with
 `DB_DATABASE` unset is `database/database.sqlite`, and the sessions,
 cache and queue (`SESSION_DRIVER`, `CACHE_STORE`, `QUEUE_CONNECTION` =
 `database`) are tables of the same file. `setup` finds the file, proposes
-to exclude those tables (default yes), grants nothing, and makes the
-pristine copy as a file of DriftGate's store:
+to exclude those tables and to restore the cache only (default yes),
+grants nothing, and makes the pristine copy as a file of DriftGate's
+store:
 
 <!-- check: config-fragment -->
 ```yaml
@@ -121,7 +129,8 @@ state:
     driver: sqlite
     dsn: { dotenv: .env }               # it must name working
     working: database/database.sqlite
-    exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]
+    exclude: [sessions, jobs, job_batches, failed_jobs]
+    restore_empty: [cache, cache_locks]
 ```
 
 - Restores write inside the file while `php artisan serve` (or Herd) keeps
@@ -185,8 +194,9 @@ DB_TRUST_SERVER_CERTIFICATE=true
   and the application keeps a login that is only a user of `shop`
   ([why](../configuration.md#sql-server)).
 - `seed: [["php", "artisan", "migrate:fresh", "--seed", "--force"]]` as
-  above; exclude `sessions`, `cache`, `cache_locks`, `jobs`,
-  `job_batches` and `failed_jobs` when they are tables of the database.
+  above; exclude `sessions`, `jobs`, `job_batches` and `failed_jobs` and
+  restore only `cache` and `cache_locks` when they are tables of the
+  database (`setup` proposes them).
 
 ## 4. Authenticated routes
 
