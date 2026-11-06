@@ -51,6 +51,26 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // application. A dial function other than nil makes every connection
 // (AllowDial).
 func OpenMySQL(dsn, db string, dial DialFunc) (*sql.DB, error) {
+	return OpenMySQLWith(dsn, db, dial, MySQLOpen{})
+}
+
+// MySQLOpen are the options of OpenMySQLWith.
+type MySQLOpen struct {
+	// MultiStatements lets one query hold several statements, and turns
+	// the client-side interpolation of parameters off: a query on such a
+	// connection takes no parameters, so nothing is ever interpolated into
+	// a text the server splits into statements, and none is prepared on
+	// the server. Only quoted names (QuoteMySQL) go into its queries.
+	MultiStatements bool
+	// Init runs once on every new connection, before the pool hands it
+	// out: it sets the session up for good, so that is not done again each
+	// time the connection is taken from the pool. Its error closes the
+	// connection.
+	Init func(ctx context.Context, c driver.ExecerContext, conn driver.Conn) error
+}
+
+// OpenMySQLWith is OpenMySQL with options.
+func OpenMySQLWith(dsn, db string, dial DialFunc, o MySQLOpen) (*sql.DB, error) {
 	cfg, err := dbdsn.MySQLConfig(dsn)
 	if err != nil {
 		return nil, err
@@ -59,20 +79,25 @@ func OpenMySQL(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	if dial != nil {
 		cfg.DialFunc = dial
 	}
+	if o.MultiStatements {
+		cfg.MultiStatements = true
+		cfg.InterpolateParams = false
+	}
 	conn, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return sql.OpenDB(mysqlConnector{conn, cfg.Addr}), nil
+	return sql.OpenDB(mysqlConnector{conn, cfg.Addr, o.Init}), nil
 }
 
 // mysqlConnector turns a panic of the MySQL driver while it connects into
 // an error: the driver reads the server's first packet without checking
 // its length, and a server that is not MySQL (its X protocol, on port
-// 33060) makes it slice past the end.
+// 33060) makes it slice past the end. It runs init on every new connection.
 type mysqlConnector struct {
 	driver.Connector
 	addr string
+	init func(ctx context.Context, c driver.ExecerContext, conn driver.Conn) error
 }
 
 func (c mysqlConnector) Connect(ctx context.Context) (conn driver.Conn, err error) {
@@ -81,7 +106,20 @@ func (c mysqlConnector) Connect(ctx context.Context) (conn driver.Conn, err erro
 			conn, err = nil, fmt.Errorf("the server at %s did not answer as MySQL; is it the X protocol port (33060) instead of the classic one (3306)?", c.addr)
 		}
 	}()
-	return c.Connector.Connect(ctx)
+	conn, err = c.Connector.Connect(ctx)
+	if err != nil || c.init == nil {
+		return conn, err
+	}
+	ex, ok := conn.(driver.ExecerContext)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("the MySQL driver cannot run a statement on a new connection")
+	}
+	if err := c.init(ctx, ex, conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // PostgresDSN is the connection string for the pgx driver: the postgres://
@@ -209,11 +247,21 @@ func (s MySQLSession) Statements() []string {
 	if s.UTF8UTC {
 		out = append(out, "SET NAMES utf8mb4", "SET time_zone = '+00:00'")
 	}
-	return append(out,
-		"SET foreign_key_checks = 0",
-		"SET unique_checks = 0",
-		"SET sql_mode = '"+strings.ReplaceAll(s.SQLMode, "'", "''")+"'",
-	)
+	for _, a := range s.Assignments() {
+		out = append(out, "SET "+a)
+	}
+	return out
+}
+
+// Assignments are the session's settings other than UTF8UTC's (SET NAMES
+// cannot share a SET statement) and FreshStats, as one SET statement takes
+// them, separated by commas.
+func (s MySQLSession) Assignments() []string {
+	return []string{
+		"foreign_key_checks = 0",
+		"unique_checks = 0",
+		"sql_mode = '" + strings.ReplaceAll(s.SQLMode, "'", "''") + "'",
+	}
 }
 
 // Apply runs the session's statements on c.
@@ -240,24 +288,75 @@ func (s MySQLSession) Apply(ctx context.Context, c *sql.Conn) error {
 // listed, and one that is gone means the source changed under the read,
 // which must not end in a copy without it.
 func ShowCreate(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (map[string]string, error) {
-	rows, err := q.QueryContext(ctx, "SHOW CREATE "+kind+" "+QuoteMySQL(db)+"."+QuoteMySQL(name))
+	rows, err := q.QueryContext(ctx, ShowCreateQuery(kind, db, name))
 	if err != nil {
-		var me *mysql.MySQLError
-		if missingOK && errors.As(err, &me) && (me.Number == 1146 || me.Number == 1360) { // no such table, no such trigger
+		if missingOK && ShowCreateMissing(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("SHOW CREATE %s %s: %w", kind, name, err)
 	}
 	defer rows.Close()
+	out, err := ShowCreateRow(rows)
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		if missingOK {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("SHOW CREATE %s %s: no row", kind, name)
+	}
+	return out, rows.Err()
+}
+
+// showCreateColumn is the column of SHOW CREATE that holds the statement.
+var showCreateColumn = map[string]string{"TABLE": "Create Table", "VIEW": "Create View", "SEQUENCE": "Create Table"}
+
+// ShowCreateSQL returns the CREATE statement of a table, view or sequence;
+// "" for one that does not exist with missingOK (see ShowCreate).
+func ShowCreateSQL(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (string, error) {
+	r, err := ShowCreate(ctx, q, kind, db, name, missingOK)
+	if err != nil {
+		return "", err
+	}
+	return ShowCreateStatement(kind, name, r)
+}
+
+// ShowCreateStatement is the CREATE statement in a row of SHOW CREATE kind
+// (ShowCreate's columns by name): "" for nil, an object that does not exist.
+func ShowCreateStatement(kind, name string, r map[string]string) (string, error) {
+	if r == nil {
+		return "", nil
+	}
+	col := showCreateColumn[kind]
+	def, ok := r[col]
+	if !ok {
+		return "", fmt.Errorf("SHOW CREATE %s %s: no column %q", kind, name, col)
+	}
+	return def, nil
+}
+
+// ShowCreateQuery is the statement ShowCreate runs.
+func ShowCreateQuery(kind, db, name string) string {
+	return "SHOW CREATE " + kind + " " + QuoteMySQL(db) + "." + QuoteMySQL(name)
+}
+
+// ShowCreateMissing reports whether err is SHOW CREATE's error for an
+// object that does not exist (no such table or view, no such trigger).
+func ShowCreateMissing(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && (me.Number == 1146 || me.Number == 1360)
+}
+
+// ShowCreateRow reads the current result set of SHOW CREATE as ShowCreate
+// returns it: its columns by name, or nil when it has no row.
+func ShowCreateRow(rows *sql.Rows) (map[string]string, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
 	if !rows.Next() {
-		if err := rows.Err(); err != nil || missingOK {
-			return nil, err
-		}
-		return nil, fmt.Errorf("SHOW CREATE %s %s: no row", kind, name)
+		return nil, rows.Err()
 	}
 	vals := make([]sql.NullString, len(cols))
 	ptrs := make([]any, len(cols))
@@ -271,25 +370,7 @@ func ShowCreate(ctx context.Context, q Querier, kind, db, name string, missingOK
 	for i, col := range cols {
 		out[col] = vals[i].String
 	}
-	return out, rows.Err()
-}
-
-// showCreateColumn is the column of SHOW CREATE that holds the statement.
-var showCreateColumn = map[string]string{"TABLE": "Create Table", "VIEW": "Create View", "SEQUENCE": "Create Table"}
-
-// ShowCreateSQL returns the CREATE statement of a table, view or sequence;
-// "" for one that does not exist with missingOK (see ShowCreate).
-func ShowCreateSQL(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (string, error) {
-	r, err := ShowCreate(ctx, q, kind, db, name, missingOK)
-	if err != nil || r == nil {
-		return "", err
-	}
-	col := showCreateColumn[kind]
-	def, ok := r[col]
-	if !ok {
-		return "", fmt.Errorf("SHOW CREATE %s %s: no column %q", kind, name, col)
-	}
-	return def, nil
+	return out, nil
 }
 
 // MySQLDatabaseExists tells whether the server has the database.
