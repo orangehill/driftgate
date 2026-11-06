@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/orangehill/driftgate/internal/dbx"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
@@ -75,12 +77,7 @@ func (m *MySQL) tableCounters(ctx context.Context, c *sql.Conn, db string) (*tab
 		}
 		query = "SELECT TABLE_NAME, CONCAT(ROWS_CHANGED, '/', ROWS_CHANGED_X_INDEXES) FROM information_schema.TABLE_STATISTICS WHERE TABLE_SCHEMA = ?"
 	} else {
-		// UPDATE_TIME from the statistics cache can be a day old.
-		var expiry sql.NullInt64
-		if err := c.QueryRowContext(ctx, "SELECT @@session.information_schema_stats_expiry").Scan(&expiry); err != nil || !expiry.Valid || expiry.Int64 != 0 {
-			return nil, "information_schema_stats_expiry cannot be 0 for this session", nil
-		}
-		if why, err := performanceSchemaOff(ctx, c, db); why != "" || err != nil {
+		if why, err := mysqlCountersOff(ctx, c, db); why != "" || err != nil {
 			return nil, why, err
 		}
 		query = "SELECT OBJECT_NAME, CONCAT(COUNT_INSERT, '/', COUNT_UPDATE, '/', COUNT_DELETE) FROM performance_schema.table_io_waits_summary_by_table WHERE OBJECT_SCHEMA = ? AND OBJECT_TYPE = 'TABLE'"
@@ -121,6 +118,60 @@ func (m *MySQL) tableCounters(ctx context.Context, c *sql.Conn, db string) (*tab
 	return st, "", rows.Err()
 }
 
+// mysqlCountersOff returns why MySQL's per-table signals cannot be trusted
+// (statsExpiryOff, performanceSchemaOff), or "" when they can. One query
+// reads all that the two read one query at a time; when it fails, they are
+// asked in turn, for the reason they give.
+func mysqlCountersOff(ctx context.Context, c *sql.Conn, db string) (string, error) {
+	cols := []string{"@@session.information_schema_stats_expiry", "@@performance_schema"}
+	var args []any
+	for _, ch := range performanceSchemaChecks {
+		cols = append(cols, "("+ch.query+")")
+		if strings.Contains(ch.query, "?") {
+			args = append(args, db)
+		}
+	}
+	var expiry, on sql.NullInt64
+	offs := make([]sql.NullBool, len(performanceSchemaChecks))
+	dest := []any{&expiry, &on}
+	for i := range offs {
+		dest = append(dest, &offs[i])
+	}
+	if err := c.QueryRowContext(ctx, "SELECT "+strings.Join(cols, ", "), args...).Scan(dest...); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if why := statsExpiryOff(ctx, c); why != "" {
+			return why, nil
+		}
+		return performanceSchemaOff(ctx, c, db)
+	}
+	switch {
+	case !expiry.Valid || expiry.Int64 != 0:
+		return statsExpiryWhy, nil
+	case on.Int64 != 1:
+		return "performance_schema is OFF", nil
+	}
+	for i, ch := range performanceSchemaChecks {
+		if offs[i].Valid && offs[i].Bool {
+			return ch.why, nil
+		}
+	}
+	return "", nil
+}
+
+const statsExpiryWhy = "information_schema_stats_expiry cannot be 0 for this session"
+
+// statsExpiryOff returns why UPDATE_TIME may be stale, or "": from the
+// statistics cache it can be a day old.
+func statsExpiryOff(ctx context.Context, c *sql.Conn) string {
+	var expiry sql.NullInt64
+	if err := c.QueryRowContext(ctx, "SELECT @@session.information_schema_stats_expiry").Scan(&expiry); err != nil || !expiry.Valid || expiry.Int64 != 0 {
+		return statsExpiryWhy
+	}
+	return ""
+}
+
 // performanceSchemaOff returns why MySQL's table I/O counters may miss a
 // write, or "" when every write to the database is counted.
 func performanceSchemaOff(ctx context.Context, c *sql.Conn, db string) (string, error) {
@@ -128,32 +179,35 @@ func performanceSchemaOff(ctx context.Context, c *sql.Conn, db string) (string, 
 	if err := c.QueryRowContext(ctx, "SELECT @@performance_schema").Scan(&on); err != nil || on.Int64 != 1 {
 		return "performance_schema is OFF", nil
 	}
-	checks := []struct{ why, query string }{
-		{"the instrument wait/io/table/sql/handler is disabled", "SELECT COUNT(*) = 0 FROM performance_schema.setup_instruments WHERE NAME = 'wait/io/table/sql/handler' AND ENABLED = 'YES'"},
-		{"the consumer global_instrumentation is disabled", "SELECT COUNT(*) = 0 FROM performance_schema.setup_consumers WHERE NAME = 'global_instrumentation' AND ENABLED = 'YES'"},
-		{"setup_objects does not instrument every table of the database",
-			"SELECT SUM(ENABLED = 'NO') > 0 OR SUM(ENABLED = 'YES' AND OBJECT_NAME = '%') = 0 OR COUNT(*) = 0 FROM performance_schema.setup_objects WHERE OBJECT_TYPE = 'TABLE' AND OBJECT_SCHEMA IN (?, '%')"},
-		{"setup_actors does not instrument every connection",
-			"SELECT SUM(ENABLED = 'NO') > 0 OR SUM(ENABLED = 'YES' AND HOST = '%' AND USER = '%' AND ROLE = '%') = 0 OR COUNT(*) = 0 FROM performance_schema.setup_actors"},
-		{"setup_threads does not instrument connections", "SELECT COUNT(*) > 0 FROM performance_schema.setup_threads WHERE NAME = 'thread/sql/one_connection' AND ENABLED = 'NO'"},
-		{"a connection is not instrumented", "SELECT COUNT(*) > 0 FROM performance_schema.threads WHERE TYPE = 'FOREGROUND' AND INSTRUMENTED = 'NO'"},
-		{"performance_schema lost tables (performance_schema_max_table_instances or _handles is too small)",
-			"SELECT COALESCE(SUM(VARIABLE_VALUE), 0) > 0 FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('Performance_schema_table_instances_lost', 'Performance_schema_table_handles_lost')"},
-	}
-	for _, ch := range checks {
+	for _, ch := range performanceSchemaChecks {
 		var args []any
 		if strings.Contains(ch.query, "?") {
 			args = append(args, db)
 		}
 		var off sql.NullBool
 		if err := c.QueryRowContext(ctx, ch.query, args...).Scan(&off); err != nil {
-			return "performance_schema is not readable: " + err.Error(), nil
+			return "performance_schema is not readable (it needs SELECT on performance_schema.*): " + err.Error(), nil
 		}
 		if off.Valid && off.Bool {
 			return ch.why, nil
 		}
 	}
 	return "", nil
+}
+
+// performanceSchemaChecks are the settings under which MySQL's table I/O
+// counters may miss a write: each query returns true when they may.
+var performanceSchemaChecks = []struct{ why, query string }{
+	{"the instrument wait/io/table/sql/handler is disabled", "SELECT COUNT(*) = 0 FROM performance_schema.setup_instruments WHERE NAME = 'wait/io/table/sql/handler' AND ENABLED = 'YES'"},
+	{"the consumer global_instrumentation is disabled", "SELECT COUNT(*) = 0 FROM performance_schema.setup_consumers WHERE NAME = 'global_instrumentation' AND ENABLED = 'YES'"},
+	{"setup_objects does not instrument every table of the database",
+		"SELECT SUM(ENABLED = 'NO') > 0 OR SUM(ENABLED = 'YES' AND OBJECT_NAME = '%') = 0 OR COUNT(*) = 0 FROM performance_schema.setup_objects WHERE OBJECT_TYPE = 'TABLE' AND OBJECT_SCHEMA IN (?, '%')"},
+	{"setup_actors does not instrument every connection",
+		"SELECT SUM(ENABLED = 'NO') > 0 OR SUM(ENABLED = 'YES' AND HOST = '%' AND USER = '%' AND ROLE = '%') = 0 OR COUNT(*) = 0 FROM performance_schema.setup_actors"},
+	{"setup_threads does not instrument connections", "SELECT COUNT(*) > 0 FROM performance_schema.setup_threads WHERE NAME = 'thread/sql/one_connection' AND ENABLED = 'NO'"},
+	{"a connection is not instrumented", "SELECT COUNT(*) > 0 FROM performance_schema.threads WHERE TYPE = 'FOREGROUND' AND INSTRUMENTED = 'NO'"},
+	{"performance_schema lost tables (performance_schema_max_table_instances or _handles is too small)",
+		"SELECT COALESCE(SUM(VARIABLE_VALUE), 0) > 0 FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('Performance_schema_table_instances_lost', 'Performance_schema_table_handles_lost')"},
 }
 
 func scanPairs(ctx context.Context, c *sql.Conn, out map[string]string, query string, args ...any) error {
@@ -349,20 +403,34 @@ func (m *MySQL) forget() { m.last, m.writes, m.tables, m.dirty = nil, nil, nil, 
 
 // keep makes f, without the dirty items, the fingerprint the next one starts
 // from, when no other connection holds uncommitted changes. Without
-// per-table counters the write check alone decides, as it always has.
-func (m *MySQL) keep(ctx context.Context, c *sql.Conn, f Fingerprint, writes map[string]int64, tables *tableState, dirty []string) {
+// per-table counters the write check alone decides, as it always has. When
+// the open transactions cannot be read, the per-table counters are not
+// kept either: why says so ("" when they are, or there were none).
+func (m *MySQL) keep(ctx context.Context, c *sql.Conn, f Fingerprint, writes map[string]int64, tables *tableState, dirty []string) (why string) {
 	m.forget()
 	if writes == nil {
-		return
+		return ""
 	}
 	open, err := openWrites(ctx, c)
 	switch {
 	case err == nil && open:
-		return
-	case err != nil:
+		return ""
+	case err != nil && tables != nil:
 		tables = nil // the per-table path needs to know
+		why = openWritesWhy(err)
 	}
 	m.last, m.writes, m.tables, m.dirty = maps.Clone(f), writes, tables, dirty
+	return why
+}
+
+// openWritesWhy says why the per-table counters are off when openWrites
+// failed with err.
+func openWritesWhy(err error) string {
+	why := "uncommitted writes cannot be told apart, SHOW ENGINE INNODB STATUS failed: " + err.Error()
+	if me := (*mysql.MySQLError)(nil); errors.As(err, &me) && me.Number == 1227 {
+		why += "; it needs the PROCESS privilege"
+	}
+	return why
 }
 
 // refresh reads the per-table signals again when nothing was written since
