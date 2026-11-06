@@ -44,7 +44,7 @@ func TestHelpDocLinks(t *testing.T) {
 		}
 	}
 	_, out, _ := runCLI(t, "help", "run")
-	if !strings.Contains(out, "\nDocs: "+docsBase()+"commands.md#run\n") {
+	if !strings.Contains(out, "\nDocs: "+docsBase()+"reference/commands/check.md#driftgate-run\n") {
 		t.Errorf("help run has no Docs line:\n%s", out)
 	}
 }
@@ -65,7 +65,7 @@ func TestDocsBase(t *testing.T) {
 		}
 	}
 	Version = "v9.9.9"
-	if _, out, _ := runCLI(t, "help", "run"); !strings.Contains(out, "/blob/v9.9.9/docs/commands.md#run") {
+	if _, out, _ := runCLI(t, "help", "run"); !strings.Contains(out, "/blob/v9.9.9/docs/reference/commands/check.md#driftgate-run") {
 		t.Errorf("help run of v9.9.9:\n%s", out)
 	}
 }

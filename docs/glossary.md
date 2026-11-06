@@ -6,10 +6,10 @@ sentences; "More" links the full description.
 ## The check
 
 ### Baseline
-The stored responses that each capture is compared with. Baselines have names; the default name is `local`. More: [baseline names](commands.md#common-flags).
+The stored responses that each capture is compared with. Baselines have names; the default name is `local`. More: [baseline names](reference/cli.md#which-baseline-a-command-uses).
 
 ### Capture
-One run of the catalog against the application, stored under a tag in the local store. More: [driftgate capture](commands.md#capture).
+One run of the catalog against the application, stored under a tag in the local store. More: [driftgate capture](reference/commands/check.md#driftgate-capture).
 
 ### Catalog
 The list of requests that every capture sends, in `catalog.json`. More: [catalog.json](configuration.md#catalogjson).
@@ -18,13 +18,13 @@ The list of requests that every capture sends, in `catalog.json`. More: [catalog
 One entry of the catalog, named by its unique request ID, which reports, `--only` and globs use. More: [catalog.json](configuration.md#catalogjson).
 
 ### Route
-A method and path the application serves, such as `GET /api/orders/{id}`. More: [driftgate discover](commands.md#discover).
+A method and path the application serves, such as `GET /api/orders/{id}`. More: [driftgate discover](reference/commands/catalog.md#driftgate-discover).
 
 ### Route inventory
-The routes of the application, in `routes.json`, written by `discover --write`. More: [driftgate discover](commands.md#discover).
+The routes of the application, in `routes.json`, written by `discover --write`. More: [driftgate discover](reference/commands/catalog.md#driftgate-discover).
 
 ### Coverage
-Which routes have a request meant to succeed. `driftgate coverage` lists the routes that have none. More: [driftgate coverage](commands.md#coverage).
+Which routes have a request meant to succeed. `driftgate coverage` lists the routes that have none. More: [driftgate coverage](reference/commands/catalog.md#driftgate-coverage).
 
 ### Drift
 One difference between a capture and the baseline. More: [drift kinds](reference/drift-kinds.md).
@@ -33,22 +33,22 @@ One difference between a capture and the baseline. More: [drift kinds](reference
 The class of a drift, such as `status` or `item-order`. More: [drift kinds](reference/drift-kinds.md).
 
 ### Drift group
-Drifts of the same kind at the same place, across requests, numbered `[1]`, `[2]` and so on. `accept`, `expect` and `bisect` take a group by its number. More: [driftgate review](commands.md#review).
+Drifts of the same kind at the same place, across requests, numbered `[1]`, `[2]` and so on. `accept`, `expect` and `bisect` take a group by its number. More: [driftgate review](reference/commands/review.md#driftgate-review).
 
 ### Side effect
 A change a request made to the data. A capture finds it by comparing fingerprints before and after the request. More: [state](configuration.md#state).
 
 ### Last comparison
-The result of the latest `compare` or `run`. `report`, `review`, `accept`, `expect` and `bisect` read it. More: [driftgate compare](commands.md#compare).
+The result of the latest `compare` or `run`. `report`, `review`, `accept`, `expect` and `bisect` read it. More: [driftgate compare](reference/commands/check.md#the-last-comparison).
 
 ### Pass
-A comparison with no drift other than expected ones. It exits with code 0. More: [exit codes](commands.md#exit-codes).
+A comparison with no drift other than expected ones. It exits with code 0. More: [exit codes](reference/cli.md#exit-codes).
 
 ### Verdict
-The outcome of a comparison: a pass, drift, or an incomplete result. It sets the exit code: 0, 1 or 3. More: [exit codes](commands.md#exit-codes).
+The outcome of a comparison: a pass, drift, or an incomplete result. It sets the exit code: 0, 1 or 3. More: [exit codes](reference/cli.md#exit-codes).
 
 ### Incomplete result
-A result that cannot be trusted, such as a comparison that compared nothing. It exits with code 3 and is never a pass. More: [exit codes](commands.md#exit-codes).
+A result that cannot be trusted, such as a comparison that compared nothing. It exits with code 3 and is never a pass. More: [exit codes](reference/cli.md#exit-codes).
 
 ### Mode
 `freeze` or `evolve`. In `freeze`, every drift fails unless a ticket expects it; in `evolve`, a drift may be accepted. More: [top-level keys](configuration.md#top-level-keys).
@@ -71,7 +71,7 @@ The database the application uses, named by `working:`. A capture restores it fr
 A copy of the working database made by `driftgate seed`. Every restore copies the data back from it. More: [state](configuration.md#state).
 
 ### Seed
-The `seed:` commands load the data; `driftgate seed` runs them and keeps the pristine copy. More: [driftgate seed](commands.md#seed).
+The `seed:` commands load the data; `driftgate seed` runs them and keeps the pristine copy. More: [driftgate seed](reference/commands/state.md#driftgate-seed).
 
 ### Restore
 Put the state back to how the seed left it: databases from the pristine copy, other components by their `restore` command. Every capture starts from the same data. More: [state](configuration.md#state).
@@ -106,22 +106,22 @@ A request that fails in the baseline, acknowledged in `exclusions.yaml`. It is s
 Measure a request (status, time, size) without comparing it: `"observe": true` in the catalog, or `observe:` in `driftgate.yaml` for generated requests. More: [observe](configuration.md#observe).
 
 ### Accept
-Take the drifts of the last comparison into the baseline, with a reason. Only in mode `evolve`. More: [driftgate accept](commands.md#accept).
+Take the drifts of the last comparison into the baseline, with a reason. Only in mode `evolve`. More: [driftgate accept](reference/commands/review.md#driftgate-accept).
 
 ### Acceptance log
-The file `acceptances.jsonl` of a baseline: one line for each change, each line chained to the one before. More: [driftgate accept](commands.md#accept).
+The file `acceptances.jsonl` of a baseline: one line for each change, each line chained to the one before. More: [driftgate accept](reference/commands/review.md#driftgate-accept).
 
 ### Expectation
-A drift recorded for a ticket with `driftgate expect`. A comparison passes the exact drift and fails on any other; the baseline does not change. More: [driftgate expect](commands.md#expect).
+A drift recorded for a ticket with `driftgate expect`. A comparison passes the exact drift and fails on any other; the baseline does not change. More: [driftgate expect](reference/commands/review.md#driftgate-expect).
 
 ### Ref
-The ticket or link given with `--ref` to `expect`, `accept` and `baselines rebase`. More: [driftgate expect](commands.md#expect).
+The ticket or link given with `--ref` to `expect`, `accept` and `baselines rebase`. More: [driftgate expect](reference/commands/review.md#driftgate-expect).
 
 ### Rebase
-Make a capture the new content of a baseline, such as after a merge. More: [driftgate baselines rebase](commands.md#baselines-rebase).
+Make a capture the new content of a baseline, such as after a merge. More: [driftgate baselines rebase](reference/commands/review.md#driftgate-baselines-rebase).
 
 ### Manifest
-The file `manifest.json` of a baseline: the SHA-256 of each of its files. `driftgate verify` checks the baseline against it. More: [driftgate verify](commands.md#verify).
+The file `manifest.json` of a baseline: the SHA-256 of each of its files. `driftgate verify` checks the baseline against it. More: [driftgate verify](reference/commands/review.md#driftgate-verify).
 
 ## Files and storage
 
