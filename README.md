@@ -330,6 +330,10 @@ pull-request comment, in the job summary and as a JUnit file. Full guide:
   [Bisect](docs/guides/bisect.md) ·
   [Recording through a proxy](docs/guides/record.md)
 
+## Contributing
+
+Bug reports and fixes are welcome; new features only by exception. See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as [SECURITY.md](SECURITY.md) says.
+
 ## Author
 
 DriftGate is written and maintained by Slavenko Božić ([@slavenkobozic-ohd](https://github.com/slavenkobozic-ohd)) at [Orange Hill](https://github.com/orangehill).
