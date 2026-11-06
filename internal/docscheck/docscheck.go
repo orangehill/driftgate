@@ -90,7 +90,8 @@ func ParseText(rel, text string) (*Doc, error) {
 		body      []string
 		para      []string // the lines of a paragraph, whose links may wrap
 		paraStart int
-		comment   bool // in an HTML comment of several lines
+		comment   bool     // in an HTML comment of several lines
+		anchors   []string // <a name> and <a id> outside code and comments
 	)
 	flush := func() {
 		// Code spans are dropped, their line breaks kept.
@@ -123,35 +124,33 @@ func ParseText(rel, text string) (*Doc, error) {
 			body = append(body, line)
 			continue
 		}
-		if comment {
-			comment = !strings.Contains(line, "-->")
-			continue
-		}
-		if m := fence.FindStringSubmatch(line); m != nil {
-			flush()
-			open, closer, prefix = &Block{Line: n, Lang: strings.ToLower(m[3])}, m[2], m[1]
-			if i > 0 {
-				if mm := marker.FindStringSubmatch(d.Lines[i-1]); mm != nil {
-					open.Marker = mm[1]
+		if !comment {
+			if m := fence.FindStringSubmatch(line); m != nil {
+				flush()
+				open, closer, prefix = &Block{Line: n, Lang: strings.ToLower(m[3])}, m[2], m[1]
+				if i > 0 {
+					if mm := marker.FindStringSubmatch(d.Lines[i-1]); mm != nil {
+						open.Marker = mm[1]
+					}
 				}
+				continue
 			}
-			continue
-		}
-		if mm := marker.FindStringSubmatch(line); mm != nil {
-			flush()
-			if i+1 >= len(d.Lines) || !fence.MatchString(d.Lines[i+1]) {
-				d.Markers = append(d.Markers, Marker{Line: n, Text: mm[1]})
+			if mm := marker.FindStringSubmatch(line); mm != nil {
+				flush()
+				if i+1 >= len(d.Lines) || !fence.MatchString(d.Lines[i+1]) {
+					d.Markers = append(d.Markers, Marker{Line: n, Text: mm[1]})
+				}
+				continue
 			}
-			continue
 		}
-		if at := strings.LastIndex(line, "<!--"); at >= 0 && !strings.Contains(line[at:], "-->") {
-			flush()
-			comment = true
-			continue
-		}
+		// Only what is outside HTML comments is read.
+		line, comment = uncomment(line, comment)
 		if strings.TrimSpace(line) == "" {
 			flush()
 			continue
+		}
+		for _, m := range htmlID.FindAllStringSubmatch(line, -1) {
+			anchors = append(anchors, m[1])
 		}
 		heading := atx.FindStringSubmatch(line)
 		if heading != nil {
@@ -184,12 +183,33 @@ func ParseText(rel, text string) (*Doc, error) {
 		}
 		seen[s]++
 	}
-	for _, line := range d.Lines {
-		for _, m := range htmlID.FindAllStringSubmatch(line, -1) {
-			d.anchors[m[1]] = true
-		}
+	for _, a := range anchors {
+		d.anchors[a] = true
 	}
 	return d, nil
+}
+
+// uncomment is the part of a line outside HTML comments; in says whether
+// the line starts inside one, and the result whether the next line does.
+func uncomment(line string, in bool) (string, bool) {
+	var out strings.Builder
+	for {
+		if in {
+			end := strings.Index(line, "-->")
+			if end < 0 {
+				return out.String(), true
+			}
+			line, in = line[end+3:], false
+			continue
+		}
+		start := strings.Index(line, "<!--")
+		if start < 0 {
+			out.WriteString(line)
+			return out.String(), false
+		}
+		out.WriteString(line[:start])
+		line, in = line[start+4:], true
+	}
 }
 
 // HasAnchor reports whether #anchor exists in the page.

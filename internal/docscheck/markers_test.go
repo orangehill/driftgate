@@ -1,9 +1,11 @@
 package docscheck
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +18,7 @@ import (
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/data"
+	"github.com/orangehill/driftgate/internal/discover"
 	"github.com/orangehill/driftgate/internal/routes"
 )
 
@@ -111,22 +114,19 @@ func checkBlock(dir, mark, body string) error {
 		_, err := data.ParseRules(raw)
 		return err
 	case "routes-json":
-		var list []map[string]any
-		if err := json.Unmarshal(raw, &list); err != nil {
-			return err
-		}
-		for i, r := range list {
-			path, _ := r["path"].(string)
-			_, method := r["method"]
-			_, methods := r["methods"]
-			if !strings.HasPrefix(path, "/") || !method && !methods {
-				return fmt.Errorf("route %d needs a path starting with / and method or methods", i+1)
+		_, err := discover.ParseCommandOutput(raw)
+		return err
+	case "yaml":
+		// Every document of the block, not only the first.
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		for {
+			var v any
+			if err := dec.Decode(&v); errors.Is(err, io.EOF) {
+				return nil
+			} else if err != nil {
+				return err
 			}
 		}
-		return nil
-	case "yaml":
-		var v any
-		return yaml.Unmarshal(raw, &v)
 	case "json":
 		var v any
 		return json.Unmarshal(raw, &v)
@@ -165,7 +165,9 @@ func TestCheckBlockFails(t *testing.T) {
 		{"allowlist", "version: 1\nheaders:\n  - name: Date"},
 		{"exclusions", "version: 1\nroutes:\n  - route: GET /x"},
 		{"classify", "version: 1\ntabels: {}"},
-		{"routes-json", `[{"path": "x", "method": "GET"}]`},
+		{"routes-json", `[{"path": "/x"}]`},
+		{"routes-json", `{"path": "/x", "method": "GET"}`},
+		{"yaml", "a: 1\n---\nb: [1"},
 		{"yaml", "a: [1"},
 		{"json", "{"},
 		{"skip:", "x"},

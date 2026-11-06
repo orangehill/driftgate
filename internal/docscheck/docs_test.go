@@ -115,10 +115,10 @@ func TestNoDuplicateHeadings(t *testing.T) {
 }
 
 var (
-	urlHost  = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://(?:[^@/\s` + "`" + `]*@)?([^/\s:?#)\]>'"` + "`" + `;,]+)`)
+	urlHost  = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://(?:[^@/\s` + "`" + `]*@)?(\[[0-9a-f:.]+\]|[^/\s:?#)\]>'"` + "`" + `;,\[]+)`)
 	mailHost = regexp.MustCompile(`(?i)[a-z0-9._%+-]+@((?:[a-z0-9-]+\.)+[a-z]{2,})\b`)
-	bareHost = regexp.MustCompile(`(?i)(?:^|\*\.|[>}]\.|[^.\w/@$-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?:$|[^.\w-])`)
-	bareIP   = regexp.MustCompile(`(?:^|[^.\d])(\d{1,3}(?:\.\d{1,3}){3})(?:$|[^.\d])`)
+	bareHost = regexp.MustCompile(`(?i)(?:^|\*\.|[>}]\.|[^.\w/@$-])((?:[a-z0-9-]+\.)+[a-z]{2,})`)
+	bareIP   = regexp.MustCompile(`(?:^|[^.\d])(\d{1,3}(?:\.\d{1,3}){3})`)
 	yamlProj = regexp.MustCompile(`^\s*project:\s*["']?([^\s"']+)`)
 	flagProj = regexp.MustCompile(`--project[ =]+["']?([^\s"'` + "`" + `)\]]+)`)
 	flagRef  = regexp.MustCompile(`(?:--ref|--drop)[ =]+["']?([^\s"'` + "`" + `)\]]+)`)
@@ -165,7 +165,7 @@ func init() {
 		xyz eu asia mobi pro tv me us local lan internal corp home intranet agency studio digital group
 		solutions software systems network company live club page ltd gmbh global consulting media design
 		team works world website space top one inc services partners center today email host hosting tools
-		technology marketing`) {
+		technology marketing edu gov`) {
 		genericTLDs[d] = true
 	}
 }
@@ -230,9 +230,17 @@ func nameFindings(line string, yaml bool) []string {
 	seen := map[string]bool{}
 	hosts := ghaExpr.ReplaceAllString(line, "")
 	for _, re := range []*regexp.Regexp{urlHost, mailHost, bareHost, bareIP} {
-		for _, m := range re.FindAllStringSubmatch(hosts, -1) {
-			h := m[1]
-			if re == bareHost && (!hostTLD(h) || notHosts[h]) {
+		for _, m := range re.FindAllStringSubmatchIndex(hosts, -1) {
+			h := hosts[m[2]:m[3]]
+			// A bare name or address ends where no name character follows;
+			// the pattern cannot look ahead without taking that character.
+			next := byte(' ')
+			if m[3] < len(hosts) {
+				next = hosts[m[3]]
+			}
+			switch {
+			case re == bareHost && (next == '.' || next == '-' || next == '_' || isAlnum(next) || !hostTLD(h) || notHosts[h]),
+				re == bareIP && (next == '.' || next >= '0' && next <= '9'):
 				continue
 			}
 			if name := hostName(h); !seen[name] && !exampleHost(h) {
@@ -265,6 +273,10 @@ func nameFindings(line string, yaml bool) []string {
 		}
 	}
 	return out
+}
+
+func isAlnum(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // TestExampleNames: host names, e-mail domains, project names and ticket
@@ -308,6 +320,13 @@ func TestNameFindings(t *testing.T) {
 		"connect to 10.1.2.3 or 192.168.1.5":             2,
 		"mail admin@acme.de":                             1,
 		"driftgate expect --ref JIRA-1":                  1,
+		"a.acme.rs b.acme.de":                            2,
+		"[a.acme.rs,b.acme.de]":                          2,
+		"10.1.2.3 192.168.1.5":                           2,
+		"10.1.2.3,192.168.1.5":                           2,
+		"http://[2606:4700::1]/":                         1,
+		"http://[::1]:8080/":                             0,
+		"see acme.edu or acme.gov":                       2,
 		"REDIS_HOST=cache.acme.agency":                   1,
 		`{"host": "db.acme.agency"}`:                     1,
 		"tcp(db.acme.agency:3306)/":                      1,

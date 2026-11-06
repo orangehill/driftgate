@@ -101,3 +101,20 @@ func TestParseQuote(t *testing.T) {
 		t.Errorf("links %v, want %v", d.Links, want)
 	}
 }
+
+// TestParseComments: only what is outside code and HTML comments is read.
+func TestParseComments(t *testing.T) {
+	d, err := ParseText("x.md", "See <!-- [x](gone.md) --> [a](a.md) <!--\n[b](b.md)\n--> [c](c.md)\n\n"+
+		"```html\n<a name=\"in-code\"></a>\n```\n<!-- <a name=\"in-comment\"></a> -->\n<a name=\"out\"></a>\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []Link{{1, "a.md"}, {3, "c.md"}}; !reflect.DeepEqual(d.Links, want) {
+		t.Errorf("links %v, want %v", d.Links, want)
+	}
+	for anchor, want := range map[string]bool{"in-code": false, "in-comment": false, "out": true} {
+		if d.HasAnchor(anchor) != want {
+			t.Errorf("HasAnchor(%q) = %v", anchor, !want)
+		}
+	}
+}

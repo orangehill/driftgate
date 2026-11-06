@@ -2,7 +2,9 @@
 
 Every command and flag of `driftgate`. The descriptions are those of
 `driftgate help <command>` (the source is `internal/cli/help.go`); this page
-adds the exit codes, notes and an example for each command.
+adds the exit codes, notes and an example for each command. The help of a
+command ends with a `Docs:` line that links its section here, in the pages
+of the release you run.
 
 ```
 driftgate help                 # synopsis of every command
