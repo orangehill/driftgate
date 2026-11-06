@@ -24,8 +24,9 @@ import (
 //     then read alone, which treats a missing object as the single
 //     statement always has (dbx.ShowCreate, missingOK), and the batches go
 //     on after it.
-//   - A server or proxy that refuses a query of several statements (the
-//     first one ever sent fails with a syntax error), or a connection
+//   - A server or proxy that refuses a query of several statements (a
+//     batch fails with a syntax error at its first statement, also after
+//     batches that worked), or a connection
 //     character set in which a quoted name is not safe in one (initMulti):
 //     the statements are then read one by one, spread over several
 //     connections (showSpread), from then on.
@@ -52,7 +53,6 @@ func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map
 		n, err := showManyFunc(m, ctx, reqs[done:end], out[done:end])
 		switch {
 		case err == nil:
-			m.multiOK.Store(true)
 			done = end
 			continue
 		case ctx.Err() != nil:

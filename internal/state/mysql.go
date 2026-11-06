@@ -95,10 +95,9 @@ type MySQL struct {
 	o  Options
 	db *sql.DB
 	// multi takes queries of several statements: SHOW CREATE for many
-	// objects in one round trip (see showAll). multiOK is set once such a
-	// query worked, multiRefused once one was refused.
+	// objects in one round trip (see showAll). multiRefused is set once
+	// one was refused.
 	multi        *sql.DB
-	multiOK      atomic.Bool
 	multiRefused atomic.Bool
 	multiNote    sync.Once
 	// multiConnNote: the one note that a batch could not be sent.

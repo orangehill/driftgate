@@ -151,8 +151,18 @@ func testMySQLShowBatchSameFingerprint(t *testing.T, dsn string) {
 			}
 		}
 	}
+	batches := 0
+	defer func() { showManyFunc = (*MySQL).showMany }()
+	showManyFunc = func(m *MySQL, ctx context.Context, reqs []showReq, out []map[string]string) (int, error) {
+		n, err := m.showMany(ctx, reqs, out)
+		if err == nil {
+			batches++
+		}
+		return n, err
+	}
 	same("before a seed")
-	if !m.multiOK.Load() {
+	showManyFunc = (*MySQL).showMany
+	if batches == 0 {
 		t.Fatal("no query of several statements was used")
 	}
 	if err := m.Seed(ctx); err != nil {
@@ -331,8 +341,8 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		}
 		m, log, c := open(t)
 		ok := []showReq{reqs[0], reqs[2]}
-		if _, err := m.showAll(ctx, c, ok); err != nil || !m.multiOK.Load() {
-			t.Fatalf("first batch: %v", err)
+		if _, err := m.showAll(ctx, c, ok); err != nil || calls != 1 || m.multiRefused.Load() {
+			t.Fatalf("first batch: %d batches, %v", calls, err)
 		}
 		got, err := m.showAll(ctx, c, reqs)
 		check(t, "refused later", got, err)
