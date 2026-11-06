@@ -371,6 +371,31 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := r.reloadTokens(ctx); err != nil {
 		return nil, err
 	}
+	// The guards are checked once restore and prepare have set up the
+	// environment they check, before the first request, so one that fails
+	// stops the capture in seconds, not after the read-only requests. They
+	// only check: one that writes to the tracked state is refused here,
+	// rather than taken for a read-only request that wrote.
+	if len(units) > 0 && len(p.Guards) > 0 {
+		var guarded states
+		if r.sum.Tracked {
+			if guarded, err = tr.fingerprint(ctx, nil); err != nil {
+				return nil, err
+			}
+		}
+		if err := checkGuards(ctx, p, opt, true); err != nil {
+			return nil, err
+		}
+		if r.sum.Tracked {
+			now, err := tr.fingerprint(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
+			if d := flatten(diffStates(guarded, now)); len(d) > 0 {
+				return nil, configErr("the guards changed the tracked state (%v): a guard must only check, never write to the databases under state: (a command that logs itself to a table writes); change it so it does not", limit(d, 10))
+			}
+		}
+	}
 	before, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -386,18 +411,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
 	}
-	// The guards are checked once restore and prepare have set up the
-	// environment they check, before the first request, so one that fails
-	// stops the capture in seconds, not after the read-only requests; and
-	// again right before the requests that change data, which they guard:
-	// the read-only phase may take long, and the environment may change
-	// during it.
-	if len(units) > 0 {
-		if err := checkGuards(ctx, p, opt, true); err != nil {
-			return nil, err
-		}
-	}
-
 	r.base = opt.Baseline
 	r.retry = newRetrying(readonly)
 	if err := r.byService(ctx, readonly, true); err != nil {
@@ -421,6 +434,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	if len(units) > 0 {
+		// Again right before the requests that change data, which they
+		// guard: the read-only phase may take long, and the environment
+		// may change during it.
 		if err := checkGuards(ctx, p, opt, false); err != nil {
 			return nil, err
 		}

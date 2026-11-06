@@ -1610,7 +1610,7 @@ or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
 |---|---|
 | `seed` | commands that load the data into the working databases (migrations and seeders, a dump import). `driftgate seed` runs them and keeps the pristine copy; `seed --skip-commands` takes the data already loaded |
 | `prepare` | commands run after every restore |
-| `guards` | `{name, command}`: when the capture has requests that change data (or command steps, repeated requests), each must succeed after the restore and `prepare`, before the first request (so one that fails stops the capture in seconds), and again right before the first request that changes data (the read-only requests may take long); a guard that fails stops the capture there (e.g. mail goes to a log, not to people) |
+| `guards` | `{name, command}`: when the capture has requests that change data (or command steps, repeated requests), each must succeed after the restore and `prepare`, before the first request (so one that fails stops the capture in seconds), and again right before the first request that changes data (the read-only requests may take long); a guard that fails stops the capture there (e.g. mail goes to a log, not to people). A guard only checks: it must not write to the databases under `state:` (a command that logs itself to a table writes). With tracked state the capture fingerprints it before and after the guards and stops (exit 2) when they changed it |
 
 <!-- check: config-fragment -->
 ```yaml

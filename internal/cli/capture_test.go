@@ -609,3 +609,36 @@ func TestRunReadOnlyRefusesPrepareFirst(t *testing.T) {
 		t.Fatal("the seed ran before the refusal")
 	}
 }
+
+// guardProject is a project whose state is a file (data) with restore and
+// fingerprint commands, a guard command and a catalog of requests.
+func guardProject(t *testing.T, guard, requests string) (cfg, root string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root = t.TempDir()
+	write(t, filepath.Join(root, "data"), "")
+	cfg = filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n"+
+		"state:\n  db:\n    restore: [\"sh\", \"-c\", \": > data\"]\n    fingerprint: [\"cat\", \"data\"]\n"+
+		"guards:\n  - name: g\n    command: %s\n", srv.URL, guard))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[`+requests+`]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	return cfg, root
+}
+
+// TestGuardThatWrites: a guard that writes to the tracked state is
+// refused as such before any request, not taken for a read-only request
+// that wrote.
+func TestGuardThatWrites(t *testing.T) {
+	cfg, _ := guardProject(t, `["sh", "-c", "echo row >> data"]`,
+		`{"id":"news","method":"GET","path":"/news","storage":"public"},{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`)
+	code, out, errOut := runCLI(t, "capture", "c", "--config", cfg)
+	if code != ExitConfig || !strings.Contains(errOut, "the guards changed the tracked state") || strings.Contains(out, "read-only requests changed") ||
+		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+}
