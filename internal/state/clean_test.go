@@ -138,3 +138,55 @@ func TestPostgresDropPristine(t *testing.T) {
 		t.Fatalf("a database seed did not make: %v", err)
 	}
 }
+
+// TestSQLServerDropPristine: the copy seed made of this working database
+// is dropped and the working database stays; a copy of another working
+// database, one that is not ONLINE and a database without the mark are
+// refused and kept.
+func TestSQLServerDropPristine(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE news (id INT PRIMARY KEY)")
+	master := sqlServerTestDB(t, sqlServerTestDSN(t), "")
+	exists := func(db string) bool {
+		var n int
+		if err := master.QueryRow("SELECT COUNT(*) FROM sys.databases WHERE name = @p1", db).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	}
+
+	// Another working database with the same pristine name.
+	otherWork := sqlServerTestName()
+	sqlServerExec(t, master, "CREATE DATABASE "+qms(otherWork))
+	t.Cleanup(func() { dropSQLServerDatabase(master, otherWork) })
+	other, err := NewSQLServer(Options{Name: "db", DSN: s.o.DSN, Working: otherWork, Pristine: s.o.Pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "not removed") || !exists(s.o.Pristine) {
+		t.Fatalf("another working database's copy: %v", err)
+	}
+
+	// Not ONLINE: DriftGate cannot see whether it made it.
+	s.closePool(s.o.Pristine)
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Pristine)+" SET OFFLINE WITH ROLLBACK IMMEDIATE")
+	if _, err := s.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "OFFLINE") || !exists(s.o.Pristine) {
+		t.Fatalf("an OFFLINE copy: %v", err)
+	}
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Pristine)+" SET ONLINE")
+
+	if was, err := s.DropPristine(ctx); !was || err != nil || exists(s.o.Pristine) || !exists(s.o.Working) {
+		t.Fatalf("drop: %v %v", was, err)
+	}
+	if was, err := s.DropPristine(ctx); was || err != nil {
+		t.Fatalf("no copy: %v %v", was, err)
+	}
+
+	// A database of the pristine name seed did not make.
+	sqlServerExec(t, master, "CREATE DATABASE "+qms(s.o.Pristine))
+	sqlServerExec(t, sqlServerTestDB(t, s.o.DSN, s.o.Pristine), "CREATE TABLE orders (id INT PRIMARY KEY)")
+	if _, err := s.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "no mark") || !exists(s.o.Pristine) {
+		t.Fatalf("a database seed did not make: %v", err)
+	}
+}
