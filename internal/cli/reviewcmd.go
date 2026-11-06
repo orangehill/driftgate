@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -60,7 +61,7 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	case why != "":
 		fmt.Fprintf(out, "it is out of date: %s; run driftgate compare (or driftgate run) again before accepting\n", why)
 	case p.Mode == config.Freeze:
-		fmt.Fprintln(out, "mode is freeze: drifts are not accepted; every one is a change to fix")
+		fmt.Fprintln(out, "mode is freeze: drifts are not accepted; every one is a change to fix, or one a ticket intends (driftgate expect)")
 	}
 	acceptArgs := " --comparison " + comparisonID(r)
 	if *cfg != "" {
@@ -69,10 +70,22 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	acceptLine := func(sel []string) string {
 		return fmt.Sprintf(`driftgate accept %s --reason "<why this change is intended>"%s`, strings.Join(sel, " "), acceptArgs)
 	}
+	// In mode freeze a drift a ticket intends is expected instead.
+	canExpect := why == "" && p.Mode == config.Freeze && r.Baseline != ""
+	expectLine := func(sel []string) string {
+		return fmt.Sprintf(`driftgate expect %s --ref <ticket> --reason "<why the ticket changes this>"%s`, strings.Join(sel, " "), acceptArgs)
+	}
 
 	done := map[string]bool{}
 	for _, id := range r.Accepted {
 		done[id] = true
+	}
+	// Expected drifts are reviewed already: they are listed by ref.
+	expected := map[string]bool{}
+	for _, res := range r.Results {
+		if len(res.Expected) > 0 && !done[res.ID] {
+			expected[res.ID], done[res.ID] = true, true
+		}
 	}
 	// Drifts still open, by group.
 	open := map[int][]compare.Drift{}
@@ -85,6 +98,9 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 			continue
 		}
 		for _, d := range res.Drifts {
+			if d.Expected != "" {
+				continue // expected already, by a ticket
+			}
 			n := groupOf[d.Signature()]
 			open[n] = append(open[n], d)
 		}
@@ -95,7 +111,13 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 		g := r.Groups[*group-1]
 		fmt.Fprintf(out, "\n[%d] %s\n", g.N, g.Signature)
 		if len(open[g.N]) == 0 {
-			fmt.Fprintln(out, "    accepted")
+			what := "accepted"
+			for _, res := range r.Results {
+				if expected[res.ID] && slices.Contains(driftGroups(r, res.Drifts), g.N) {
+					what = "expected"
+				}
+			}
+			fmt.Fprintln(out, "    "+what)
 			return ExitClean, nil
 		}
 		for _, d := range open[g.N] {
@@ -104,7 +126,28 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 		if canAccept {
 			fmt.Fprintf(out, "\naccept: %s\n", acceptLine(groupSelectors(linked[g.N])))
 		}
+		if canExpect {
+			fmt.Fprintf(out, "\nexpect: %s\n", expectLine([]string{fmt.Sprintf("group:%d", g.N)}))
+		}
 		return ExitClean, nil
+	}
+
+	if len(r.ExpectedRefs) > 0 {
+		fmt.Fprintln(out, "\nexpected (driftgate expect), by ref:")
+		for _, e := range r.ExpectedRefs {
+			var ids []string
+			for _, id := range e.Requests {
+				if expected[id] {
+					ids = append(ids, id)
+				}
+			}
+			if len(ids) > 0 {
+				fmt.Fprintf(out, "  %s  %s\n    requests: %s\n", report.Printable(e.Ref), report.Printable(e.Reason), strings.Join(ids, ", "))
+			}
+		}
+	}
+	if note := r.UnmetNote(); note != "" {
+		fmt.Fprintln(out, "\n"+report.Printable(note))
 	}
 
 	shown := 0
@@ -130,6 +173,10 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 			list = fmt.Sprintf("%s … and %d more", strings.Join(ids[:maxIDs], ", "), len(ids)-maxIDs)
 		}
 		fmt.Fprintf(out, "    requests: %s\n", list)
+		if canExpect {
+			// A ticket expects the drifts it makes, group by group.
+			fmt.Fprintf(out, "    expect:   %s\n", expectLine([]string{fmt.Sprintf("group:%d", g.N)}))
+		}
 		if !canAccept {
 			continue
 		}
@@ -159,7 +206,12 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	if len(r.Accepted) > 0 {
 		fmt.Fprintf(out, "\naccepted since the comparison: %s\n", strings.Join(r.Accepted, ", "))
 	}
+	reviewRetries(out, r)
 	if shown == 0 && len(fresh) == 0 {
+		if len(expected) > 0 {
+			fmt.Fprintln(out, "\nnothing else to review: every drift is expected")
+			return ExitClean, nil
+		}
 		fmt.Fprintln(out, "\nnothing to review")
 		return ExitClean, nil
 	}

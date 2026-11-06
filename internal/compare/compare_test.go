@@ -22,7 +22,8 @@ func run(t *testing.T, allow *allowlist.List, level Level, base, cur Side) []Dri
 	if allow == nil {
 		allow = allowlist.Empty()
 	}
-	return One("req", base, cur, allow, level)
+	ds, _ := OneWitnessed("req", base, cur, allow, level)
+	return ds
 }
 
 func has(ds []Drift, kind, where string) bool {

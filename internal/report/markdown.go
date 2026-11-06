@@ -23,14 +23,18 @@ const markdownRoutes = 3
 func (r *Report) Markdown(maxDrifts int) string {
 	var b strings.Builder
 	switch {
-	case r.Drifted > 0:
+	case r.Unexpected() > 0 && r.Expected > 0:
+		fmt.Fprintf(&b, "### DriftGate: ✗ %d of %d compared requests drifted unexpectedly (%d more as expected)\n\n", r.Unexpected(), r.Compared, r.Expected)
+	case r.Drifted > r.Expected:
 		fmt.Fprintf(&b, "### DriftGate: ✗ %d of %d compared requests drifted\n\n", r.Drifted, r.Compared)
 	case r.Compared == 0:
 		fmt.Fprintf(&b, "### DriftGate: ✗ incomplete, nothing compared\n\n")
 	case r.Incomplete():
 		fmt.Fprintf(&b, "### DriftGate: ✗ incomplete, %s not compared here\n\n", plural(len(r.PrivateMissing), "private request"))
+	case r.Expected > 0:
+		fmt.Fprintf(&b, "### DriftGate: ✓ no unexpected drift in %d requests (%d drifted as expected)%s\n\n", r.Compared, r.Expected, r.retryVerdict())
 	default:
-		fmt.Fprintf(&b, "### DriftGate: ✓ no drift in %d requests\n\n", r.Compared)
+		fmt.Fprintf(&b, "### DriftGate: ✓ no drift in %d requests%s\n\n", r.Compared, r.retryVerdict())
 	}
 	meta := []string{code(r.Tag) + " against " + code(r.Against)}
 	if r.Level != "" {
@@ -46,11 +50,24 @@ func (r *Report) Markdown(maxDrifts int) string {
 		meta = append(meta, "origins "+mdText(o))
 	}
 	b.WriteString(strings.Join(meta, " · ") + "\n\n")
-	b.WriteString("| Compared | Passed | Drifted | Skipped | Observed |\n|---:|---:|---:|---:|---:|\n")
-	fmt.Fprintf(&b, "| %d | %d | %d | %d | %d |\n", r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote()} {
+	if r.Expected > 0 || len(r.ExpectedRefs) > 0 {
+		b.WriteString("| Compared | Passed | Drifted | Expected | Skipped | Observed |\n|---:|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&b, "| %d | %d | %d | %d | %d | %d |\n", r.Compared, r.Passed, r.Drifted, r.Expected, r.Skipped, r.Observed)
+	} else {
+		b.WriteString("| Compared | Passed | Drifted | Skipped | Observed |\n|---:|---:|---:|---:|---:|\n")
+		fmt.Fprintf(&b, "| %d | %d | %d | %d | %d |\n", r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
+	}
+	// The expectations not met are named before what may be cut (ten at
+	// most): an expectation that held only in part is never left out.
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.UnmetNote(), r.DominantNote(), r.NotCovered.CatalogLine()} {
 		if note != "" {
 			fmt.Fprintf(&b, "\n> %s\n", mdText(note))
+		}
+	}
+	if lines := r.NotCovered.NotCoveredLines(); len(lines) > 0 {
+		fmt.Fprintf(&b, "\n> %s\n", mdText(notCoveredTitle))
+		for _, l := range lines {
+			fmt.Fprintf(&b, "> - %s\n", mdText(l))
 		}
 	}
 
@@ -58,7 +75,8 @@ func (r *Report) Markdown(maxDrifts int) string {
 	// that says what was left out.
 	budget := MarkdownLimit - 1024
 	fits := func(chunk string) bool { return b.Len()+len(chunk) <= budget }
-	cutGroups, cutRequests, cutOther := 0, 0, false
+	cutGroups, cutRequests, cutOther, cutExpected := 0, 0, false, false
+	expectedGroups := r.expectedGroups()
 
 	if len(r.Groups) > 0 && fits("\n#### What changed\n\n") {
 		b.WriteString("\n#### What changed\n\n")
@@ -76,6 +94,9 @@ func (r *Report) Markdown(maxDrifts int) string {
 			continue
 		}
 		chunk := r.groupMarkdown(g, len(hidden) > 0, summary)
+		if expectedGroups[g.N] {
+			chunk = strings.Replace(chunk, "\n", " _(expected)_\n", 1)
+		}
 		if !fits(chunk) {
 			cutGroups = len(r.Groups) - i
 			break
@@ -89,9 +110,11 @@ func (r *Report) Markdown(maxDrifts int) string {
 		}
 	}
 
+	// The requests that fail come first; the expected ones, collapsed,
+	// only in the room they leave.
 	var drifted []Result
 	for _, res := range r.Results {
-		if res.Outcome == Drift {
+		if failing(res) {
 			drifted = append(drifted, res)
 		}
 	}
@@ -104,18 +127,30 @@ func (r *Report) Markdown(maxDrifts int) string {
 			what += ", status " + html.EscapeString(res.StatusChange.text())
 		}
 		chunk := fmt.Sprintf("<details><summary><code>%s</code> — %s</summary>\n\n%s\n</details>\n\n",
-			html.EscapeString(res.ID), what, fence(strings.Join(driftLines(res, maxDrifts, 0), "\n")))
+			html.EscapeString(res.ID), what, fence(strings.Join(failingLines(res, maxDrifts, 0), "\n")))
 		if !fits(chunk) {
 			cutRequests = len(drifted) - i
 			break
 		}
 		b.WriteString(chunk)
 	}
+	if lines := r.ExpectedLines(); len(lines) > 0 {
+		var list strings.Builder
+		for _, l := range lines {
+			list.WriteString("- " + mdText(l) + "\n")
+		}
+		chunk := fmt.Sprintf("<details><summary>%s</summary>\n\n%s\n</details>\n\n", mdText(r.expectedSummary()), list.String())
+		if cutRequests == 0 && fits(chunk) {
+			b.WriteString(chunk)
+		} else {
+			cutExpected = true
+		}
+	}
 
 	var other []string
 	for _, res := range r.Results {
 		if res.Outcome == Skipped || res.Outcome == Observed {
-			other = append(other, fmt.Sprintf("%-8s %s (%s)", res.Outcome, res.ID, res.Note))
+			other = append(other, fmt.Sprintf("%-8s %s (%s%s)", res.Outcome, res.ID, res.Note, res.observedRetry()))
 		}
 	}
 	if len(other) > 0 {
@@ -133,6 +168,9 @@ func (r *Report) Markdown(maxDrifts int) string {
 	}
 	if cutRequests > 0 {
 		cut = append(cut, plural(cutRequests, "drifted request"))
+	}
+	if cutExpected {
+		cut = append(cut, "the requests that drifted as expected")
 	}
 	if cutOther {
 		cut = append(cut, "the skipped and observed requests")

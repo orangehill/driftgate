@@ -77,7 +77,12 @@ func crashAt(spec string) func(string) {
 			}
 		default:
 			syscall.Kill(os.Getpid(), syscall.SIGKILL)
-			select {} // the signal arrives
+			// The signal arrives. Not select {}: with no other goroutine
+			// the runtime reports a deadlock (exit 2) when the signal is
+			// late on a loaded machine; a sleeping goroutine is not one.
+			for {
+				time.Sleep(time.Hour)
+			}
 		}
 	}
 }

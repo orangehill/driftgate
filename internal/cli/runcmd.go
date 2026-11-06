@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/orangehill/driftgate/internal/baseline"
 	"github.com/orangehill/driftgate/internal/capture"
@@ -17,6 +19,7 @@ import (
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/routes"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
@@ -117,8 +120,9 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	// report a changed inventory or catalog as drift, but still capture with
 	// the catalog as it is and compare: one run gives the whole picture, and
 	// the requests stay the ones the baseline was made with.
+	var checked routeCheck
 	if len(p.Discover) > 0 {
-		if code, reasons, err = runRoutes(ctx, p, sel, first, step, out, errOut); err != nil {
+		if code, reasons, checked, err = runRoutes(ctx, p, sel, first, *baseline, step, out, errOut); err != nil {
 			return 0, err
 		}
 	}
@@ -136,7 +140,9 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	cat = sel.requests(cat)
 
 	step("capture")
-	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore}
+	var retried []string // of the capture a first run makes the baseline from
+	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore,
+		first: func(sum *capture.Summary) { retried = retriedIDs(sum) }}
 	if first {
 		// Two sequential captures that agree, then concurrency: auto is
 		// decided against the first one.
@@ -167,12 +173,18 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 		}
 		fmt.Fprintf(out, "baseline %s made from two equal captures: %s\n%s", *baseline, base.Dir,
 			commitNote(p, fmt.Sprintf("commit %s/ (catalog, routes, allowlist and the baseline)\n", rel(p.Root, p.Layout.Dir))))
+		// A bug the baseline now holds is said; the baseline stays.
+		c, why := baselineHealth(p, checked.inv, checked.excl, cat, *baseline, nil, out)
+		code, reasons = max(code, c), append(reasons, why...)
+		retriedBaselineNote(out, *baseline, retried)
+		leftOver(p, base, *baseline, out)
 		failReasons(out, reasons)
 		return code, nil
 	}
 
 	step("compare")
-	c, err = compareSets(p, cat, allow, runTag(p), "baseline:"+*baseline, compareOptions{format: "text", maxDrifts: report.DefaultDrifts, skipPrivate: *skipPrivate}, out)
+	c, err = compareSets(p, cat, allow, runTag(p), "baseline:"+*baseline, compareOptions{format: "text", maxDrifts: report.DefaultDrifts, skipPrivate: *skipPrivate,
+		sel: sel, coverage: checked.coverage}, out)
 	if err != nil {
 		return 0, err
 	}
@@ -184,13 +196,14 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 // runRoutes is the routes part of run: discover, generate and coverage. On
 // the first run discover and generate write what they find; later runs
 // only check. It returns the exit code and why the run fails.
-func runRoutes(ctx context.Context, p *config.Project, sel selection, first bool, step func(string), out, errOut io.Writer) (int, []string, error) {
+func runRoutes(ctx context.Context, p *config.Project, sel selection, first bool, baseName string, step func(string), out, errOut io.Writer) (int, []string, routeCheck, error) {
+	var none routeCheck
 	code := ExitClean
 	var reasons []string
 	step("discover")
 	c, found, err := discoverRoutes(ctx, p, sel, first, out, errOut)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, none, err
 	}
 	if c != ExitClean {
 		reasons = append(reasons, "the routes changed (driftgate discover --write adopts them)")
@@ -200,10 +213,10 @@ func runRoutes(ctx context.Context, p *config.Project, sel selection, first bool
 	step("generate")
 	whole, _, err := loadFiles(p)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, none, err
 	}
 	if c, err = generateCatalog(ctx, p, sel, whole, generateOptions{write: first, check: !first}, out, errOut); err != nil {
-		return 0, nil, err
+		return 0, nil, none, err
 	}
 	if c != ExitClean {
 		fmt.Fprintln(out, "the catalog differs from what generate proposes; it is used as it is — review with driftgate generate, adopt with generate --write")
@@ -215,19 +228,36 @@ func runRoutes(ctx context.Context, p *config.Project, sel selection, first bool
 	step("coverage")
 	cat, _, err := loadFiles(p)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, none, err
 	}
 	inv, excl, err := withExclusions(p, found, "the inventory discover found")
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, none, err
 	}
-	if c, err = checkCoverage(sel, cat, inv, excl, "text", out); err != nil {
-		return 0, nil, err
+	// A baseline there already says which requests succeed; one that
+	// cannot be read for it leaves the catalog alone to decide (compare
+	// then reports what is wrong with it).
+	answers, err := readAnswers(p, baseName, nil)
+	if err != nil {
+		fmt.Fprintf(out, "warning: baseline %s was not checked for errors kept in it: %v\n", baseName, err)
+		answers = nil
+	}
+	cov, c, err := checkCoverage(sel, cat, inv, excl, answers, "text", out)
+	if err != nil {
+		return 0, nil, none, err
 	}
 	if c != ExitClean {
 		reasons = append(reasons, "routes are not covered (see coverage above)")
 	}
-	return max(code, c), reasons, nil
+	return max(code, c), reasons, routeCheck{inv, excl, cov}, nil
+}
+
+// routeCheck is the inventory and exclusions run checked coverage with,
+// and the coverage it found.
+type routeCheck struct {
+	inv      *routes.Inventory
+	excl     *routes.Exclusions
+	coverage *routes.Coverage
 }
 
 // copyTree copies a capture into a new baseline folder, with its manifest:
@@ -334,5 +364,18 @@ func failReasons(out io.Writer, reasons []string) {
 	fmt.Fprintln(out, "\nthe run fails because:")
 	for _, r := range reasons {
 		fmt.Fprintln(out, "  - "+r)
+	}
+}
+
+// leftOver warns when a new baseline has the expectations of an earlier
+// one of its name: they name drifts against that one.
+func leftOver(p *config.Project, base *snapshot.Set, name string, out io.Writer) {
+	dir := baseline.ExpectDir(base.Dir)
+	left, _ := os.ReadDir(dir)
+	// A file a killed write left is no expectation (baseline.readRefs).
+	left = slices.DeleteFunc(left, func(e os.DirEntry) bool { return strings.HasPrefix(e.Name(), snapshot.TempPrefix) })
+	if len(left) > 0 {
+		fmt.Fprintf(out, "warning: %s/ holds expectations of an earlier baseline %s; they name drifts against that one, so check them (driftgate expect --drop <ref> --reason …, or remove the folder)\n",
+			rel(p.Root, dir), name)
 	}
 }

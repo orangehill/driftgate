@@ -258,8 +258,17 @@ func TestSeedExample(t *testing.T) {
 		{appconf.Database{Driver: appconf.SQLite, File: "db/app.sqlite"}, false, `"sqlite3"`},
 		{appconf.Database{Driver: appconf.SQLServer, Name: "shop"}, true, `["php", "artisan", "migrate:fresh", "--seed", "--force"]`},
 	} {
-		if got := seedExample(c.d, c.laravel); !strings.Contains(got, c.want) || !strings.HasPrefix(got, "#   - [") {
+		got := seedExample(c.d, c.laravel)
+		if !strings.Contains(got, c.want) || !strings.HasPrefix(got, "#   - [") {
 			t.Errorf("%+v %t: %s, want %s", c.d, c.laravel, got, c.want)
+		}
+		// Uncommented, it is a command of seed: as the configuration reads
+		// one, and its line hides no part of it (it holds no secret).
+		path := filepath.Join(t.TempDir(), config.FileName)
+		os.WriteFile(path, []byte("version: 1\nproject: p\nseed:\n"+strings.TrimPrefix(got, "#")+"\n"), 0o644)
+		p, err := config.Load(path)
+		if err != nil || len(p.Seed) != 1 || len(p.Seed[0].Run) < 2 || p.Seed[0].Dir != "" || p.Seed[0].Stdin != "" || strings.Contains(p.Seed[0].String(), "***") {
+			t.Errorf("%+v %t: %s: %+v %v", c.d, c.laravel, got, p, err)
 		}
 	}
 }

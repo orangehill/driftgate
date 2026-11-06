@@ -32,7 +32,7 @@ type junitSuite struct {
 	Timestamp  string          `xml:"timestamp,attr,omitempty"`
 	Properties []junitProperty `xml:"properties>property,omitempty"`
 	Cases      []junitCase     `xml:"testcase"`
-	SystemOut  string          `xml:"system-out,omitempty"` // the report's notes that count
+	SystemOut  string          `xml:"system-out,omitempty"` // the report's notes: information, never a failure
 }
 
 type junitProperty struct {
@@ -46,7 +46,10 @@ type junitCase struct {
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
 	Skipped   *junitSkipped `xml:"skipped,omitempty"`
-	SystemOut string        `xml:"system-out,omitempty"` // the result's notes
+	// SystemOut is the result's notes and, for a request that passed only
+	// after a retry, that: JUnit has no outcome for it, and every reader
+	// shows the output of a test case.
+	SystemOut string `xml:"system-out,omitempty"`
 }
 
 type junitFailure struct {
@@ -64,30 +67,67 @@ type junitSkipped struct {
 func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 	name := "driftgate " + r.Tag + " against " + r.Against
 	suite := junitSuite{Name: name, Time: "0", Timestamp: strings.TrimSuffix(r.Created, "Z")}
-	for _, p := range [][2]string{{"tag", r.Tag}, {"against", r.Against}, {"level", r.Level}, {"mode", r.Mode}} {
+	expected := ""
+	if r.Expected > 0 {
+		expected = r.expectedSummary() + ": " + strings.Join(r.ExpectedLines(), "; ")
+	}
+	for _, p := range [][2]string{{"tag", r.Tag}, {"against", r.Against}, {"level", r.Level}, {"mode", r.Mode}, {"expected", expected}, {"unmet", r.UnmetNote()}} {
 		if p[1] != "" {
 			suite.Properties = append(suite.Properties, junitProperty{Name: p[0], Value: p[1]})
 		}
 	}
+	var notes []string
 	if n := len(r.Resent); n > 0 {
 		suite.Properties = append(suite.Properties, junitProperty{Name: "resent", Value: fmt.Sprint(n)})
-		suite.SystemOut = r.ResentNote()
+		notes = append(notes, r.ResentNote())
+	}
+	// Response times are information: properties and the suite's output,
+	// never a failed case.
+	if t := r.Timings; t != nil {
+		suite.Properties = append(suite.Properties,
+			junitProperty{Name: "p50_ms", Value: fmt.Sprintf("%d → %d", t.Baseline.P50, t.Current.P50)},
+			junitProperty{Name: "p95_ms", Value: fmt.Sprintf("%d → %d", t.Baseline.P95, t.Current.P95)})
+		for _, x := range t.Slower {
+			suite.Properties = append(suite.Properties, junitProperty{Name: "slower:" + x.ID, Value: fmt.Sprintf("%d → %d ms", x.Baseline, x.Current)})
+		}
+		notes = append(notes, r.TimingsNote())
+	}
+	for _, note := range []string{r.RetryNote(), r.DominantNote(), r.NotCovered.CatalogLine(), r.NotCovered.NotCoveredNote()} {
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	suite.SystemOut = strings.Join(notes, "\n")
+	// An expectation of a request not met (or met in part) is also in the
+	// output of its test case, where a reader of the case looks.
+	unmet := map[string][]string{}
+	for _, u := range r.Unmet {
+		unmet[u.Request] = append(unmet[u.Request], fmt.Sprintf("expectation %s not met: %s", u.Ref, u.Why))
 	}
 	for _, res := range r.Results {
-		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0", SystemOut: strings.Join(res.Notes, "\n")}
-		switch res.Outcome {
-		case Drift:
+		c := junitCase{Name: res.ID, Classname: "driftgate", Time: "0"}
+		var out []string // the case's system-out, its notes last
+		switch {
+		case res.Outcome == Drift && len(res.Expected) > 0:
+			// It passes: its drifts are exactly the ones expected.
 			lines := driftLines(res, maxDrifts, 0)
+			out = append(out, fmt.Sprintf("expected drift (%s), %s:\n%s", expectedNames(res), plural(len(res.Drifts), "drift"), strings.Join(lines, "\n")))
+		case res.Outcome == Drift:
+			lines := failingLines(res, maxDrifts, 0)
 			c.Failure = &junitFailure{
 				Message: fmt.Sprintf("%s: %s", plural(len(res.Drifts), "drift"), strings.Join(lines, "; ")),
 				Type:    "drift",
 				Text:    strings.Join(lines, "\n"),
 			}
 			suite.Failures++
-		case Skipped, Observed:
-			c.Skipped = &junitSkipped{Message: res.Outcome + ": " + res.Note}
+		case res.Outcome == Skipped || res.Outcome == Observed:
+			c.Skipped = &junitSkipped{Message: res.Outcome + ": " + res.Note + res.observedRetry()}
 			suite.Skipped++
+		case res.Outcome == Pass && res.Retry != nil:
+			out = append(out, res.passedRetryLine())
 		}
+		out = append(append(out, unmet[res.ID]...), res.Notes...)
+		c.SystemOut = strings.Join(out, "\n")
 		suite.Tests++
 		suite.Cases = append(suite.Cases, c)
 	}

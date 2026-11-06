@@ -48,13 +48,18 @@ func setOrigins(p *config.Project, base, cur *snapshot.Set) (s *sides, notes []s
 		t := p.Services()[name]
 		name = p.Canonical(name)
 		o := [2]string{recorded[0][name], recorded[1][name]}
-		if o[0] == "" || o[1] == "" || o[0] == o[1] {
+		if o[0] == "" || o[1] == "" {
 			continue
 		}
 		if origins == nil {
 			origins = map[string][2][]string{}
 		}
+		// The same origins too: the comparison replaces nothing then, and
+		// what expectations digest is written without them.
 		origins[name] = [2][]string{t.Origins(o[0]), t.Origins(o[1])}
+		if o[0] == o[1] {
+			continue
+		}
 		note := o[0] + " ≙ " + o[1]
 		if len(p.Targets) > 1 {
 			note = name + ": " + note

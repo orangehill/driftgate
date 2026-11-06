@@ -403,6 +403,14 @@ func swapBaseline(base *snapshot.Set, change func(work *snapshot.Set) error) err
 	if err := baseline.Write(tmp); err != nil {
 		return err
 	}
+	return installBaseline(base, tmp)
+}
+
+// installBaseline puts the baseline written in tmp (a folder next to it)
+// in the place of base, keeping the old one aside until the new one is
+// there.
+func installBaseline(base *snapshot.Set, tmp string) error {
+	parent := filepath.Dir(base.Dir)
 	oldDir, err := os.MkdirTemp(parent, ".tmp-old-")
 	if err != nil {
 		return err

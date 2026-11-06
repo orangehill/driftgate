@@ -36,6 +36,7 @@ func TestValidateSteps(t *testing.T) {
 		"output_ignore needs output":     {Command: []string{"true"}, OutputIgnore: []string{"x"}, Storage: "public"},
 		"output_ignore: error":           {Command: []string{"true"}, Output: true, OutputIgnore: []string{"("}, Storage: "public"},
 		"belong to command steps":        {Method: "GET", Path: "/", Output: true, Storage: "public"},
+		"stdin belong to command steps":  {Method: "GET", Path: "/", Dir: "sub", Stdin: "in.txt", Storage: "public"},
 		"a command step is not repeated": {Command: []string{"true"}, Repeat: 2, Storage: "public"},
 	} {
 		r.ID = "x"

@@ -7,17 +7,22 @@ adds the exit codes, notes and an example for each command.
 ```
 driftgate help                 # synopsis of every command
 driftgate help <command>       # one command with its flags (also: <command> --help)
+driftgate help catalog         # the fields of catalog.json, and where to read more
+driftgate help allowlist       # the rules of allowlist.yaml, then allowlist check
 ```
+
+An unknown command or help topic names the table of
+[what to use for what](configuration.md#what-to-use-for-what).
 
 Contents: [common flags](#common-flags) · [exit codes](#exit-codes) ·
 [init](#init) · [setup](#setup) · [seed](#seed) · [run](#run) · [discover](#discover) ·
 [generate](#generate) · [coverage](#coverage) · [har import](#har-import) ·
 [record](#record) · [capture](#capture) · [compare](#compare) · [report](#report) ·
-[allowlist check](#allowlist-check) · [review](#review) · [accept](#accept) · [verify](#verify) ·
+[allowlist check](#allowlist-check) · [review](#review) · [accept](#accept) · [expect](#expect) · [verify](#verify) ·
 [bisect](#bisect) · [data classify](#data-classify) ·
 [data anonymize](#data-anonymize) · [data subset](#data-subset) ·
 [data verify](#data-verify) ·
-[baselines](#baselines) · [key create](#key-create) · [version](#version) ·
+[baselines](#baselines) · [baselines rebase](#baselines-rebase) · [key create](#key-create) · [version](#version) ·
 [environment variables](#environment-variables)
 
 Paths are those of a new project (`baselines: local`): everything in
@@ -63,7 +68,7 @@ the baseline, the old baseline is whole in `.tmp-old-*/baseline`; every
 command stops (exit 3) until it is put back (or restored from git).
 
 The commands that write the local store (`run`, `capture`, `seed`,
-`accept`, `bisect`) take a lock on it
+`accept`, `expect`, `baselines rebase`, `bisect`) take a lock on it
 (`<store>/.lock`). With `baselines: git` the worktrees of one project
 share the store (with `baselines: local` each has its own), so a second
 such command waits, saying which process it waits for, until the first one
@@ -77,7 +82,7 @@ started), before it ends.
 | Code | Meaning |
 |---|---|
 | `0` | clean |
-| `1` | drift: responses, side effects, changed routes (`discover`), uncovered routes (`coverage`), a stale catalog (`generate --check`), findings of `allowlist check`, a baseline that disagrees with its manifest or holds personal data or credentials in git (`verify`), personal data in an output (`data verify`), columns without a rule (`data classify` without `--write`) |
+| `1` | drift: responses and side effects (other than [expected](#expect) ones), changed routes (`discover`), uncovered routes (`coverage`, also routes whose requests failed in the baseline), a stale catalog (`generate --check`), findings of `allowlist check`, a baseline that disagrees with its manifest or holds personal data or credentials in git (`verify`), personal data in an output (`data verify`), columns without a rule (`data classify` without `--write`) |
 | `2` | configuration error: the configuration, catalog, allowlist or baseline is not usable, a usage error, a missing `--reason`, a public body with personal data |
 | `3` | environment error or an incomplete result: the application or the database cannot be reached, a file or the local store cannot be read or written (a full disk, permissions), the state fingerprint does not match the baseline, a guard failed, no encryption key, a baseline changed outside `accept`, an interrupted capture, private requests whose body is not on this machine (without `--skip-private`), or a comparison that compared nothing (`--only` matched no request, the baseline has none of the requests). The result cannot be trusted; it is not a regression. |
 
@@ -274,7 +279,8 @@ Sets up a new project from zero to its first baseline, in this order:
   copy or baseline: it uses them and skips their steps. The flags that shape a new project are then ignored
   (edit the configuration instead).
 - Exit `0` once the baseline is there, also when routes are left uncovered
-  (the summary lists them; `run` and `coverage` then fail on them); `1`
+  or requests meant to succeed failed in it (the summary lists them; `run`
+  and `coverage` then fail on the routes); `1`
   when the two captures differ and no baseline was made (the proposed
   allowlist entries are printed).
 
@@ -348,7 +354,15 @@ baseline from two equal captures.
   `prepare:` commands and requests at least a second after the first one
   ended (it waits for what its restore did not take): a timestamp the
   application writes, such as `updated_at`, then differs between the two
-  and is found, also when both are shorter than a second.
+  and is found, also when both are shorter than a second. A baseline
+  response that came only after a [retry](configuration.md#retries) is
+  named in a warning and keeps the mark in its record.
+- A baseline it makes is checked as [coverage](#coverage) checks one: requests
+  that failed in it are listed, and routes they leave uncovered make the run
+  exit 1 (the baseline is kept; a baseline that cannot be read for the check
+  is a warning). Later runs check the baseline in their coverage step; a
+  baseline that cannot be read for it is a warning there, and the catalog
+  alone decides coverage.
 - Its capture is named `run-<id>`, where `<id>` is fixed for the folder of
   the project: with `baselines: git` checkouts of the project (git
   worktrees) share the local store but never each other's capture, as each
@@ -413,6 +427,13 @@ not cover.
 - Parameter values come from `params:`. For routes it cannot make, it names
   every missing parameter, grouped by reason, with an example.
 - The same input always gives a byte-identical catalog.
+- The summary says how many generated requests `json-errors` made. A
+  project whose `discover:` uses the `laravel`, `symfony`, `rails` or
+  `spring` adapter and whose `templates:` lack `json-errors` gets a one-line
+  `note:` to add it (JSON variants of the error variants, see
+  [templates](configuration.md#templates-generate-params)), once per local
+  store (`generate` or `run`; `generate --check` without a store says
+  nothing).
 
 ```sh
 driftgate generate --check     # CI: is the committed catalog current?
@@ -421,15 +442,16 @@ driftgate generate --check     # CI: is the committed catalog current?
 ## coverage
 
 ```
-driftgate coverage [--format text|json] [--target <service>]
+driftgate coverage [--format text|json] [--baseline <name>] [--target <service>]
 ```
 
-Routes of the inventory without a catalog request (exit 1 when there are
-any).
+Routes of the inventory without a catalog request that succeeds (exit 1
+when there are any).
 
 | Flag | Meaning |
 |---|---|
 | `--format text\|json` | output format (default text) |
+| `--baseline <name>` | baseline whose answers decide which requests succeed (default `local`, checked when it exists; a baseline named must exist, exit 2; `none`: the catalog alone) |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
 Each method of a route counts separately (`PUT` and `PATCH` of one route
@@ -441,6 +463,53 @@ sample body. An exclusion `init` wrote for the framework (Debugbar,
 Telescope, Horizon …) is not reported stale while it keeps `init`'s
 route and reason: the project need not have that part. The JSON output
 (`stale_exclusions`) leaves it out too.
+
+With a baseline, a request covers its route only when it did not fail
+there, or when the baseline has no answer for it yet. A comparison checks
+that answers stay equal, so an error already in the baseline (an endpoint
+that answers 500) would otherwise pass on every run. A request fails when:
+
+- it got no answer (a timeout, a connection error, repeated sends cut short);
+- it answered a server error (5xx), or one of its repeated sends (`repeat`)
+  did;
+- it is meant to succeed and answered a client error (4xx) or a redirect to
+  a sign-in page (a location whose last path segment is `login`, `signin`,
+  `sign-in`, `sign_in`, `log-in` or `logon`). Meant to succeed are the
+  requests the `ok` and `json` templates generate, except those for a route
+  that takes a body without a sample (they are listed as routes without a
+  sample body).
+
+Error variants and command steps never fail here. A request written by hand
+or imported may mean a client error (a wrong password, a rate limit): its
+4xx covers the route, which is then listed as reached only by requests that
+answered an error (never a failure). A validation error that Laravel answers
+with a redirect back (to `/` for a request without a `Referer`) cannot be
+told from a redirect the route means; the `json` template sends the same
+request as an API client, which gets the 422.
+
+The lists:
+
+- routes whose requests meant to succeed all failed in the baseline, with
+  those requests and their statuses: not covered (exit 1). Fix the route
+  and `accept` the new answer, or acknowledge it as a known failure;
+- requests that failed in the baseline, also on routes another request
+  covers (a warning);
+- known failures (`known_failures:` in
+  [exclusions.yaml](configuration.md#exclusionsyaml)): the request stays in
+  the catalog and is compared as usual; its route is neither covered nor
+  failed (`… with known failures` in the summary). A known failure whose
+  requests succeed now, or that matches no request of any service, is
+  listed as stale; one whose `status` no longer is the failure leaves the
+  request failed, with a note; one that acknowledges failures on more than
+  5 routes is listed as broad.
+
+`coverage` reads the answers from the baseline's folder; it needs neither
+the local store nor the key. JSON: `baseline_checked`, `failed_in_baseline`
+(`route`, `requests` with `id`, `status` and `detail`),
+`requests_failed_in_baseline` (`known_status` when a known failure no
+longer matches), `known_failures` (with `reason` and `ref`),
+`known_failure_routes`, `stale_known_failures`, `broad_known_failures` and
+`only_error_answers`.
 
 ```
 $ driftgate coverage
@@ -548,7 +617,7 @@ Restores the state, sends the catalog and stores the responses under a tag.
 | `--only <glob>` | only requests whose ID matches |
 | `--force` | replace an existing capture with this tag |
 | `--restore once\|each` | `once` (default): restore before the read-only requests and once more before the requests that change data, which then run one after another, each on the data the ones before it left (a sequence with `restore: before` and a repeated request get their own restore); `each`: restore before every sequence and every request that changes data |
-| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1); each run writes at least a second after the one before ended, as `run` does |
+| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1); each run writes at least a second after the one before ended, as `run` does; the capture keeps the median response time of each request |
 | `--baseline <name>` | the state must match the one this baseline was captured from (default `local`) |
 | `--allow-remote` | allow a target outside `allow_hosts` |
 | `--allow-remote-mutations` | with `--allow-remote`, also send requests that change data or are repeated to it |
@@ -564,6 +633,13 @@ Restores the state, sends the catalog and stores the responses under a tag.
 - Read-only requests run first (in parallel up to `concurrency`); requests
   that change data, sequences, command steps and repeated requests run after
   them, one at a time, after a restore (see `--restore`).
+- A read-only `GET`, `HEAD` or `OPTIONS` request whose send times out,
+  loses its connection or gets a `502`, `503` or `504` is sent again, once
+  by default, after the other read-only requests and one at a time
+  ([`retry`](configuration.md#retries)); its record keeps the first send's
+  outcome, and the capture lists such requests after its summary. A
+  capture at a measured `concurrency: auto` that needed a retry the
+  sequential capture did not counts as different from it.
 - A service with `concurrency: auto` captures with the setting its baseline
   recorded, and one request at a time while none is recorded. `run` decides
   it when it makes the baseline; `--calibrate` decides it for an existing
@@ -594,8 +670,14 @@ Restores the state, sends the catalog and stores the responses under a tag.
   migrations). Seed the data the baseline was captured from, or make a new
   baseline of this data: move the baseline's folder away, and the next
   `driftgate run` (`--baseline <name>` for another than `local`) makes
-  it. When the items that differ are tables made `restore_only` since,
-  it says that the configuration changed: make the baseline again.
+  it; when the data changed on purpose, you can also capture with
+  `--skip-fingerprint-check` and make that capture the baseline's content
+  with [`driftgate baselines rebase`](#baselines-rebase). When the items that
+  differ are tables made `restore_only` since, it says that the
+  configuration changed: make the baseline again.
+- When `prepare` changed the restored state, the capture warns and lists
+  what it changed ([seed, prepare,
+  guards](configuration.md#seed-prepare-guards)); the exit code stays.
 - A public response in which the personal-data detector finds something is
   stored encrypted as private, reported with a masked value, and the capture
   exits 2.
@@ -636,7 +718,25 @@ baseline or capture is named `run`).
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
 The comparison is kept as the last comparison, which `report`, `review`,
-`accept` and `bisect` read.
+`accept`, `expect` and `bisect` read.
+
+Against a baseline with [expectations](#expect), a drift an expectation
+names exactly is expected, and a request every drift of which is expected
+does not fail the comparison. The requests that fail come first, each
+with the drifts that are not expected and one line for those that are;
+the expected requests follow as one line per ref (text), a collapsed
+block after the failing requests that is the first thing left out when
+the comment would grow too long (markdown, with an `Expected` column in
+the table), or passing test cases with their drifts in `system-out`
+(JUnit). Groups all of whose drifts are expected are marked
+`(expected)`, and the summary counts `N drifted (M expected)`. JSON has
+`expected`, `expected_refs`, the refs per result (`expected`) and per
+drift (`expected`, with each drift's `digest`). Expectations whose drifts
+the comparison did not have are listed as a warning
+(`unmet_expectations`): the request did not drift, drifted otherwise,
+drifted in part of what was expected (`partly met`), or is not in the
+catalog; in JUnit also in the `system-out` of the request's test case.
+The exit code is `1` only while a drift is not expected.
 
 A comparison that compared nothing is incomplete (exit 3), never green: a
 typo in `--only`, renamed request IDs or a baseline made for another
@@ -664,8 +764,33 @@ that became much slower: at least twice as slow and at least 200 ms slower
 slow requests). JSON: `timings` with `requests`, `baseline` and `current`
 (`p50_ms`, `p95_ms`) and `slower` (`id`, `baseline_ms`, `current_ms`, the
 most added time first); text and markdown: one line with up to ten slower
-requests. Nothing is shown when a side has no times. The exit code never depends on it: one measurement per request
-is too noisy for a gate.
+requests; JUnit: suite properties (`p50_ms`, `p95_ms`, `slower:<id>`) and
+the line in the suite's `system-out`, never a failed test case. Nothing is
+shown when a side has no times. The exit code never depends on it: one
+measurement per request is too noisy for a gate. A capture with
+`--repeat N` (and the two captures `run` makes a baseline from) keeps the
+median time of each request over its runs (of an even number of runs the
+mean of the two middle times).
+
+A request whose response came only after a retry (its first send failed
+under load, see [retries](configuration.md#retries)) and that passed, also
+as an [expected](#expect) drift, is never shown as a plain pass: text has
+a `RETRY` line with the first outcome and the verdict says
+`No drift ✓ (1 passed only after a retry)`; markdown says it in the
+headline and in a note; JSON has `retry` on the request and
+`passed_after_retry` on the report; JUnit gives the test case a
+`system-out` line (an observed or skipped one its `skipped` message) and
+the suite's `system-out` the note. A drift that came after a retry says so
+among its drifts; one that failed in every send says `failed in all 2
+sends` and is never counted as passed after a retry; when it passes
+anyway (the baseline failed the same way, or an expected drift), text
+has a `RETRY` line (`passed; failed in all 2 sends: …`), the note names
+it, and JUnit gives its test case that line. A request that
+needed a retry in the baseline and again now is not load, and every
+format says so louder (`it needed a retry in the baseline too: not load,
+check it`; JSON `retried_in_both`). Requests whose baseline response came
+after a retry are listed too (`baseline_retry`, `baseline_retried`). It
+counts as passed: the exit code does not change.
 
 Allowlist rules that applied to no change in the comparison are listed
 (`unused_rules` in JSON, a warning in text and markdown; never a
@@ -678,6 +803,68 @@ throttle's `x-ratelimit-*`) is not listed, in the text nor in the JSON
 (`unused_rules`), while it is as `init` wrote it: the same header or
 path, request, format and its options, and reason; one you changed is.
 
+After the verdict, the report says what the result does not cover
+(information; the exit code never depends on it):
+
+- one line counting the compared requests by what they do (all of the
+  catalog, or `compared (--only)`): `catalog: 622 requests: 572 reads, 50
+  mutating, 0 command steps; 0 of them multipart`. A zero is what the gate
+  never sends: no `multipart` request, no upload is checked. The line is
+  said with gaps, and when the catalog sends no upload or no command step;
+- under `Not covered by this result (driftgate coverage lists the
+  routes):`, a count and up to five names (`and N more`) for each gap:
+  route methods without a request meant to succeed (with a route
+  inventory, `routes.json`, and without `--only`); requests meant to
+  succeed whose answer in the set compared against is an error, which the
+  comparison keeps green (`failed in baseline:local`, or the capture
+  compared against); requests observed (measured, not compared);
+  requests that change data (and command steps) that were skipped; and
+  known failures (`known_failures:` in `exclusions.yaml`). Nothing when
+  there is no gap.
+
+`run` uses the coverage its coverage step found; `compare` takes it once
+from `routes.json` and the records it read already. JSON: `not_covered`
+with `catalog` (`requests`, `reads`, `mutating`, `commands`, and
+`multipart` among them), `only`, `against`, `routes_checked`, and
+`no_request`, `failed_in_baseline`, `observed`, `mutating_skipped`,
+`known_failures` (each `count` and up to ten `names`: request IDs or
+routes; left out when empty); markdown: a short list; JUnit: the lines in
+the suite's `system-out`.
+
+When one change is in nine of ten requests with an unexpected drift or
+more (at least five; expected drifts do not count), a line says so and how
+many drift in something else once it is set aside: `one change in 622 of
+622 drifted requests: header server changed value (…); set aside, 6 of
+622 drift in something else`. Only for a header that names the server
+stack (`server`, `x-powered-by`, `via`) whose new value is one value on
+every request does it add the rule that allows exactly that value, to
+paste under `headers:` in `allowlist.yaml`: `- {name: 'server', format:
+'nginx/1\.25', reason: '…'}`. Any other change gets no rule: a change
+between builds is fixed, accepted (`driftgate accept group:N`, mode
+evolve) or expected (`driftgate expect group:N --ref <ticket>`, mode
+freeze); one that changes from run to run is found with `capture
+--repeat 2`, which proposes rules for it. Where `accept` and `expect`
+refuse the comparison, the line names neither: for a comparison that is
+not of a capture against a baseline (two captures, or one baseline
+against another) it says to fix the change or name it in the pull request
+(`baselines rebase` records a switch of the server stack), and for a
+capture made with `--skip-fingerprint-check` to capture again without the
+flag first. JSON: `dominant` (`group`, `signature`, `explanation`,
+`requests`, `drifted`, `elsewhere`, `rule`, and `captures` or
+`unreliable` in those cases).
+
+**What a green result does not prove.** DriftGate compares the responses
+of the requests in the catalog, and nothing else. It does not exercise
+file uploads unless the catalog has [`multipart`](configuration.md#multipart)
+requests with fixtures, nor admin paths that change the schema, nor code
+that only background jobs, queue workers or commands reach. The
+not-covered summary above and `driftgate coverage` show the gaps;
+[command steps](configuration.md#command-steps) with `"output": true` and
+state fingerprints bring the rest into the gate
+([side checks](guides/side-checks.md)); the table of
+[what to use for what](configuration.md#what-to-use-for-what) names the
+feature for each.
+
 Groups are numbered by size, the ones the default view leaves out (only
 in requests whose status changed) after the ones it lists, so the listed
 groups start at [1]; `review --group N` and `accept group:N` use the same
@@ -688,6 +875,7 @@ $ driftgate compare before --only 'get-*'
 
 capture:before against baseline:local: 2 compared, 2 passed, 0 drifted, 0 skipped, 0 observed
 No drift ✓
+compared (--only): 2 requests: 2 reads, 0 mutating, 0 command steps; 0 of them multipart
 ```
 
 When a request's status changes, what follows from it (the body, headers
@@ -851,7 +1039,11 @@ Drift groups of the last comparison, with the accept command for each.
 
 It asks nothing (it works in CI). A request is accepted whole, so when its
 drifts fall into several groups, `review` names them together in one
-`accept` command.
+`accept` command. In mode freeze it gives the `expect` command instead.
+Expected drifts are listed by ref, apart from the groups to review. It also
+lists the requests sent again after a load failure, as `compare` shows them
+(passed after a retry, or failed in all their sends); they are not drifts
+and have nothing to accept.
 
 ```
 $ driftgate review
@@ -882,11 +1074,18 @@ reason in the acceptance log.
 
 - Refused with exit 2: `mode: freeze`, a missing `--reason`, a selection
   that takes only some of a request's drifts, a comparison that is stale.
+- An accepted answer that is a failure (see [coverage](#coverage)) is
+  listed after the acceptance, with the routes of the accepted requests it
+  leaves uncovered (exit 0: the reason may explain it, and the acceptance is
+  written); `coverage` and `run` then fail on such a route until it is fixed
+  or acknowledged as a known failure.
 - Each acceptance is a line in `.driftgate/baselines/<name>/acceptances.jsonl`
   (`driftgate/baselines/…` with `baselines: git`; who, when, why, the
   requests, the drift signatures), chained by the hash of the previous
   line, and `manifest.json` is written again. With `baselines: git`,
   commit both; the message then says so.
+- [Expectations](#expect) of the accepted requests whose drifts the
+  baseline now holds are closed, with a line in the ref's file.
 
 ```
 $ driftgate accept 'get-api-*' post-api-faq --reason "v2 returns numeric ids and a meta object" --ref DEMO-1
@@ -894,6 +1093,138 @@ accepted 3 requests into baseline local: get-api-news, get-api-news-id, post-api
   header-extra header:x-powered-by
   ...
 logged in .driftgate/baselines/local/acceptances.jsonl
+```
+
+## expect
+
+```
+driftgate expect <request|glob|group:N>... --ref <ticket> --reason "…"
+    [--comparison <id>]
+driftgate expect --drop <ref> --reason "…" [--baseline <name>]
+driftgate expect --import <file> [--baseline <name>]
+```
+
+Records drifts of the last comparison that a change intends, by ticket,
+without changing the baseline (also in mode freeze): compare then passes a
+request every drift of which is exactly a recorded one, and fails on any
+other drift.
+
+| Flag | Meaning |
+|---|---|
+| `--ref <ticket>` | ticket or link of the change that intends the drifts (required) |
+| `--reason "…"` | why the change makes these drifts, or why they are dropped (required) |
+| `--comparison <id>` | the comparison `review` showed; `expect` refuses a newer one |
+| `--drop <ref>` | remove the expectations of this ref instead (no requests) |
+| `--import <file>` | take a ref's expectations file from another checkout (a worktree) instead, after checking it |
+| `--baseline <name>` | with `--drop` or `--import`: the baseline (default: the last comparison's, else `local`) |
+
+- For a team in mode freeze whose pull requests carry intended changes:
+  each ticket's drifts are recorded once, and the gate stays red for
+  everything else. The baseline (its files, manifest and acceptance log)
+  does not change.
+- Each drift is recorded as a digest of its kind, place and both values.
+  Where a drift's description leaves content out (the new key's value,
+  the items an array gained, a body that differs only in its bytes, the
+  lines after the first changed one, a new element or worksheet and, when
+  worksheets come, go or move, the rest of the workbook), the digest
+  covers that content too, as the comparison sees it: a value an
+  allowlist rule lets change (a `created_at` in a new item) is written as
+  the rule, so the expectation holds on the next capture, and a value no
+  rule names is exact, with its JSON type. How the body is written
+  counts too, wherever the drift is (a header, the status, another part
+  of a page): each JSON or CSV document of the response whose bytes
+  differ is read for what it writes beyond its values (its layout and
+  the whitespace the layout does not say, how its keys and strings are
+  escaped, `\/` or `/`, a CSV file's quotes, line ends, blank lines and
+  empty fields), and where that changed, it is in the digest of every
+  drift of the response: an expectation holds only for a response
+  written the same way. A rule covers how the values it lets change are
+  written, and an encoder writes the rest the same way for other values
+  and lengths, so values a rule lets change and lists that grow keep an
+  expectation. Two cases do not: a list an `any_length` rule lets grow
+  in a layout the comparison does not predict (Jackson's default
+  `[ 1, 2 ]` and `"a" : 1`, Python 2's `", "` before a line end), and a
+  CSV cell a rule lets change whose value needs quotes only now and
+  then; there an expectation fails when the length or the quoting
+  changes. Below the values level only what that level compares
+  counts (types, structure, names). A new key, item or element is
+  expected with where it stands: when two tickets add keys to one
+  object, expect them where both are in. The origins of both sides (and their aliases) are
+  written as one neutral origin, so an expectation recorded in a worktree
+  that runs on another port holds in the others. A drift is expected only when an
+  expectation in force names exactly that drift: never one with another
+  value (a header that changes again, a date in another format). A
+  request is expected only when every one of its drifts is, by one ref
+  or several; a request with one drift that is not expected fails, and
+  only that drift is listed as failing.
+- Requests named by their ID or a glob are expected with all of their
+  drifts; `group:N` takes the drifts of a group, so two tickets that
+  change one request in different ways each expect their own drifts. A
+  request that was not captured is taken only by its ID.
+- A side effect names what a request changed, not the values: it cannot
+  be expected. Nor can a request whose private body is not on this
+  machine (it was not compared whole). The values of a private response,
+  or of a request built from one, are named by a keyed hash (with the
+  project key, as private bodies are), so nothing in the file reveals
+  them. A value that changes on every capture and no allowlist rule
+  covers makes an expectation that the next capture does not meet: allow
+  it by format first.
+- A drift another ref expects already is left out, and the output says
+  so: one ticket does not take another's drifts. Expecting a request
+  with the same ref again adds the drifts selected now to that ref's
+  expectation of it (a second group of the ticket's drifts); of its
+  earlier drifts only those that no longer occur are dropped.
+- Refused with exit 2: a missing `--ref` or `--reason`, a comparison
+  against a capture, a stale comparison, a selection whose drifts are all
+  expected (by another ref) or accepted already.
+- Each ref has a file of its own,
+  `<baseline>.expectations/<ref>.jsonl` next to the baseline's folder
+  (`.driftgate/baselines/local.expectations/API-7.jsonl`; a ref that is
+  not a plain file name of at most 60 characters is written with `_` for
+  other characters, cut to 60 characters, with 8 bytes of its SHA-256
+  after a `~`; a name another ref's file has is refused, never written
+  over). Two pull
+  requests with different tickets change different files and do not
+  conflict. A line is added for each `expect` and `--drop`, and for each
+  expectation that [`accept`](#accept) or a
+  [rebase](#baselines-rebase) closes because the baseline now holds its
+  drifts (who, when, the ref, the reason, the requests with their drift
+  digests and signatures). Lines are chained by the hash of the line
+  before, a last line seals the file, and every line names the baseline
+  and the ref: a file edited by hand, copied from another baseline or
+  renamed is refused (exit 3) by `compare`, `run` and `expect`, and fails
+  `verify`; restore it, or remove it, which removes the expectations of
+  its ref. This shows accidents and hand edits, as the acceptance log's
+  chain does; it is not a signature.
+- `--drop <ref>` ends every expectation of a ref, for example when the
+  ticket is merged and its change is in the baseline, or its expectation
+  stays unmet; the line stays in the ref's file. The last comparison is
+  marked again after `expect`, `--drop` and `--import`, so `report` and
+  `review` show the result at once.
+- What a reviewer sees: with `baselines: git` the ref's file is part of
+  the pull request (`driftgate/baselines/<name>.expectations/`), with
+  each expected drift's signature, the ticket and the reason, next to
+  the code that makes the drift; commit it with the change. With
+  `baselines: local` the expectations stay on the developer's machine,
+  like the baseline: the pull request carries what the report says
+  (`report --format markdown`), and the gate is that developer's run.
+- Worktrees (`baselines: local`): each worktree has its own
+  `.driftgate/`. To carry a ticket's expectations from one to another,
+  `driftgate expect --import
+  ../shop-api-7/.driftgate/baselines/local.expectations/API-7.jsonl`
+  takes the file after checking its chain, seal and baseline; a ref the
+  baseline has already is replaced only by a file that continues it.
+  When the two files of a ref went apart, delete this baseline's file of
+  the ref to take the other (a `--drop` would add a line, and they would
+  still differ).
+
+```
+$ driftgate expect news me --ref API-7 --reason "IDs are numbers in v2"
+expected 9 drifts in 2 requests of baseline local for API-7: me, news
+  header-extra header:x-powered-by
+  type $.entries[*].id string→int
+  ...
+recorded in .driftgate/baselines/local.expectations/API-7.jsonl (exactly these drifts, with their values; the baseline is unchanged)
 ```
 
 ## verify
@@ -912,7 +1243,8 @@ disagree).
 | `--migrate-private` | keep the personal data of an older baseline out of git (once, with the key; below) |
 | `--migrate-state` | record the state fingerprint of a baseline made by an earlier release in the current format, after checking the data is the baseline's (once, after `driftgate seed`; below) |
 
-`verify` finds hand edits, deleted or extra files and edited log lines.
+`verify` finds hand edits, deleted or extra files and edited log lines,
+also in a baseline's [expectations](#expect) file.
 `capture`, `compare` and `run` refuse such a baseline with exit 3. For private bodies it
 reports how many the baseline refers to and how many are on this machine.
 A file that differs only in its line endings (CRLF where the manifest has
@@ -955,7 +1287,7 @@ OK     baseline local: 5 files, 1 acceptances
 
 ```
 driftgate bisect <good> <bad> [--group N] [--only <glob>] [--baseline <name>]
-    [--format text|json]
+    [--format text|json] [--expected]
 ```
 
 First commit of each drift group of the last comparison (`bisect:` in
@@ -967,6 +1299,7 @@ First commit of each drift group of the last comparison (`bisect:` in
 | `--only <glob>` | chase these requests; without a comparison yet, the requests to chase |
 | `--baseline <name>` | baseline to compare with when there is no comparison yet (default `local`) |
 | `--format text\|json` | output format (default text) |
+| `--expected` | chase the drifts expectations name too ([`expect`](#expect)); without it they are left out, as accepted ones are |
 
 Needs `bisect.checkout` in `driftgate.yaml`. See the
 [bisect guide](guides/bisect.md).
@@ -1070,6 +1403,8 @@ driftgate data verify --dump out/app-sample.sql
 driftgate baselines local|git
 ```
 
+(For `driftgate baselines rebase`, see [baselines rebase](#baselines-rebase).)
+
 Moves the project to the other [`baselines`](configuration.md#baselines)
 mode: the configuration (its comments kept; `baselines: local` set, or for
 `git` the key taken out, which keeps the file readable by an earlier release), the
@@ -1115,6 +1450,85 @@ instead of writing into the old place.
 
 ```sh
 driftgate baselines git
+```
+
+## baselines rebase
+
+```
+driftgate baselines rebase <name> --from <tag> --reason "…" [--ref <ticket>]
+    [--allow-freeze]
+```
+
+Makes a capture the content of a baseline (after a merge), with the checks
+of a baseline made by run and one line in the acceptance log; closes the
+expectations the new baseline holds.
+
+| Flag | Meaning |
+|---|---|
+| `--from <tag>` | the capture that becomes the baseline's content (all of the catalog; required) |
+| `--reason "…"` | why the baseline takes the capture (required) |
+| `--ref <ticket>` | ticket or link kept with the log line |
+| `--allow-freeze` | rebase in mode freeze too (for changes reviewed elsewhere, such as a merge) |
+
+- A baseline goes stale when changes reviewed in other pull requests are
+  merged: every later comparison shows their drift. Capture the merged
+  code (`driftgate capture main`), then `driftgate baselines rebase local
+  --from main --reason "…"`. The responses, bodies, `timings.json` and
+  the state fingerprint become the capture's; the acceptance log is kept
+  and gets one line (`"kind": "rebase"`, the capture, the requests that
+  changed, new or are no longer in the catalog, and the drift
+  signatures), and the manifest is written again. `concurrency: auto`
+  keeps the setting the baseline recorded.
+- The capture must be whole and fit for a baseline, as `run` checks one:
+  not interrupted; every request of the catalog that the baseline has
+  (a capture with `--only` or `--target` is refused); a state fingerprint
+  when the baseline has one; private bodies named by a keyed hash and on
+  this machine, readable with the key; and nothing in public bodies and
+  headers that [`verify`](#verify) would refuse in a baseline (personal
+  data, credentials). The new baseline is written next to the old one and
+  put in its place as `accept` does; its manifest holds the SHA-256 of the
+  bytes as they were copied.
+- The new baseline is then checked as `run` checks one: requests meant to
+  succeed that failed in it (and the routes they leave uncovered) are
+  listed, and responses that came only after a
+  [retry](configuration.md#retries) are named in a warning. As with
+  `accept`, these are said and never change the exit code: the rebase is
+  written.
+- When the data changed since the baseline (a new seed or migration), a
+  capture checked against the baseline stops (exit 3); capture with
+  `--skip-fingerprint-check` instead: it records the fingerprint of the
+  data it ran on, which becomes the baseline's. The output says how many
+  state items differ from the old baseline's.
+- `run` makes a baseline only from two equal captures. A rebase takes
+  one capture; when it was made once (not `capture --repeat 2`, which
+  records that its runs agreed), the rebase warns: a value that changes
+  by itself then shows as a drift on the next run. It is not refused, as
+  that shows at once and never passes a drift; capture with `--repeat 2`
+  to check first.
+- The baseline keeps its name: one named for a date or a release
+  (`release-2026-10`) still has that name after a rebase on other code.
+  Make a new baseline with `run --baseline <name>` when the name should
+  say what it holds.
+- Mode freeze means the baseline changes only with intent: a rebase there
+  needs `--allow-freeze`, which says that the capture's changes were
+  reviewed where they were made. `accept` stays refused.
+- [Expectations](#expect) whose drifts the rebase took into the baseline
+  (every drift an expectation names is among the request's drifts from
+  the old baseline to the capture), and those of requests no longer in
+  the catalog, are closed, with a line in the ref's file; the others
+  stay, and those of requests that changed otherwise are reported.
+- Exit `0`; `2` for a refused rebase (above, or a missing `--reason`);
+  `3` for an interrupted capture, when the baseline or its expectations
+  changed outside driftgate, or private bodies are not on this machine.
+
+```
+$ driftgate baselines rebase local --from main --reason "main merged API-7 and API-9" --allow-freeze
+rebased baseline local on capture main: 7 requests changed
+  header-extra header:x-powered-by
+  ...
+logged in .driftgate/baselines/local/acceptances.jsonl
+closed the expectations of API-9 the baseline now holds: faq-create, news-item (.driftgate/baselines/local.expectations/API-9.jsonl)
+1 expectation kept: their drifts are not all in the baseline (driftgate expect --drop <ref> --reason "…" removes one)
 ```
 
 ## key create

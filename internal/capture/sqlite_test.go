@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -501,6 +502,67 @@ func TestSeedWarnsWhenWorkingUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "pristine copy of db: ") {
 		t.Errorf("no record of the copy:\n%s", out.String())
+	}
+}
+
+// TestPrepareThatWritesSQLite: on an SQLite database, a prepare that writes
+// through the application (a row in users) is named with the table; one
+// that writes only to an excluded table (its sessions) or touches the file
+// without changing it is not, and neither takes a fingerprint more.
+func TestPrepareThatWritesSQLite(t *testing.T) {
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl not found")
+	}
+	root := t.TempDir()
+	file := filepath.Join(root, "database", "app.sqlite")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(newSQLiteApp(t, file, "wal"))
+	t.Cleanup(srv.Close)
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	ctx := context.Background()
+	run := func(prepare ...string) *Summary {
+		t.Helper()
+		p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+			Target: config.Target{BaseURL: srv.URL},
+			State: map[string]config.Component{"db": {Driver: config.SQLite, Working: "database/app.sqlite",
+				Exclude: []string{"sessions"}}},
+			Prepare: []config.Command{{Run: prepare}}}, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Seed(ctx, p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{
+			{ID: "list", Method: "GET", Path: "/users", Storage: snapshot.Public},
+			{ID: "add", Method: "POST", Path: "/users", Body: json.RawMessage(`{"email":"c@x"}`), Headers: [][2]string{{"Content-Type", "application/json"}}, Storage: snapshot.Public},
+		}}
+		sum, err := Run(ctx, p, cat, Options{Tag: "c", Force: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	clean := run("true")
+	for _, c := range []struct {
+		name    string
+		prepare []string
+		want    string
+	}{
+		{"touch", []string{"touch", "database/app.sqlite"}, ""},
+		{"sessions only", []string{curl, "-sf", srv.URL + "/users"}, ""},
+		{"a user", []string{curl, "-sf", "-X", "POST", "-H", "Content-Type: application/json", "-d", `{"email":"p@x"}`, srv.URL + "/users"}, "db/table:users"},
+	} {
+		sum := run(c.prepare...)
+		if got := strings.Join(sum.Prepared, ","); got != c.want || sum.Time.Fingerprints != clean.Time.Fingerprints {
+			t.Errorf("%s: prepared %q, want %q; %d fingerprints, %d with a prepare that writes nothing", c.name, got, c.want, sum.Time.Fingerprints, clean.Time.Fingerprints)
+		}
+	}
+	if len(clean.Prepared) != 0 {
+		t.Errorf("a prepare that writes nothing: %v", clean.Prepared)
 	}
 }
 

@@ -256,7 +256,11 @@ func detect(root, project string, only []string) (detected, error) {
 	}
 	d.targets = targets.String()
 	d.found = found
-	d.block = disc.String() + "\ntemplates: [ok, not-found, json]\n"
+	var kinds []string
+	for _, s := range services {
+		kinds = append(kinds, s.d.kinds...)
+	}
+	d.block = disc.String() + "\ntemplates: " + templatesFor(kinds) + "\n"
 	if observe.Len() > 0 {
 		d.block += "\nobserve:\n" + observe.String()
 	}

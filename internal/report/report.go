@@ -56,6 +56,14 @@ type Result struct {
 	// Resent: the baseline or the capture sent the request again after a
 	// restore (a note says which and the first answer).
 	Resent bool `json:"resent,omitempty"`
+	// Retry is set when the response came only after a retry (the first
+	// send failed under load), BaselineRetry when the baseline's did.
+	Retry         *snapshot.Retry `json:"retry,omitempty"`
+	BaselineRetry *snapshot.Retry `json:"baseline_retry,omitempty"`
+	// Expected are the refs of the expectations (driftgate expect) that
+	// name every drift of the request exactly, which keeps it from
+	// failing; empty when one drift or more is not expected.
+	Expected []string `json:"expected,omitempty"`
 }
 
 // Group is a set of drifts with the same signature: one cause. Explanation
@@ -122,6 +130,24 @@ type Report struct {
 	// different origins, each taken as the other ("http://localhost:8080 ≙
 	// http://localhost:8081").
 	Origins []string `json:"origins,omitempty"`
+	// Requests that passed only after a retry, those of them that needed
+	// one in the baseline too, and compared requests whose baseline
+	// response came after one (retry.go).
+	PassedAfterRetry []string `json:"passed_after_retry,omitempty"`
+	RetriedInBoth    []string `json:"retried_in_both,omitempty"`
+	BaselineRetried  []string `json:"baseline_retried,omitempty"`
+	// Drifted requests that an expectation matched exactly (driftgate
+	// expect), by ref; and the expectations whose drift did not appear.
+	// Expected drifts do not fail the comparison (Unexpected).
+	Expected     int                `json:"expected,omitempty"`
+	ExpectedRefs []ExpectedRef      `json:"expected_refs,omitempty"`
+	Unmet        []UnmetExpectation `json:"unmet_expectations,omitempty"`
+	// What the result does not cover (routes without a request, errors
+	// the baseline holds, requests that change data not compared), and
+	// the one change almost every drifted request has: information that
+	// never changes the exit code.
+	NotCovered *NotCovered `json:"not_covered,omitempty"`
+	Dominant   *Dominant   `json:"dominant,omitempty"`
 }
 
 // Incomplete reports whether the comparison checked less than it should:
@@ -348,6 +374,7 @@ func Build(tag, against string, results []Result) *Report {
 			r.Groups[i].N = i + 1
 		}
 	}
+	r.retried()
 	return r
 }
 
@@ -460,12 +487,19 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		fmt.Fprintln(w, "origins: "+Printable(o)+" (own URLs compared as the same)")
 	}
 	for _, res := range r.Results {
-		if res.Outcome != Drift {
+		if !failing(res) {
 			continue
 		}
 		fmt.Fprintf(w, "DRIFT  %s\n", res.ID)
-		for _, l := range driftLines(res, maxDrifts, 15) {
+		for _, l := range failingLines(res, maxDrifts, 15) {
 			fmt.Fprintln(w, "         "+l)
+		}
+	}
+	if lines := r.ExpectedLines(); len(lines) > 0 {
+		// Expected requests do not fail: one line per ref.
+		fmt.Fprintln(w, "\nExpected (driftgate expect), not failing:")
+		for _, l := range lines {
+			fmt.Fprintln(w, "  "+Printable(l))
 		}
 	}
 	if len(r.Groups) > 0 {
@@ -476,12 +510,17 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		if summary {
 			hidden = r.hiddenGroups()
 		}
+		expected := r.expectedGroups()
 		fmt.Fprintln(w, "\nGroups:")
 		for _, g := range r.Groups {
 			if hidden[g.N] {
 				continue
 			}
-			fmt.Fprintf(w, "  [%d] %s\n", g.N, Printable(g.text()))
+			mark := ""
+			if expected[g.N] {
+				mark = "  (expected)"
+			}
+			fmt.Fprintf(w, "  [%d] %s%s\n", g.N, Printable(g.text()), mark)
 			if len(g.Routes) > 0 {
 				line := "      " + Printable(g.Routes[0].describe("  "))
 				if g.RouteCount > 1 {
@@ -502,18 +541,40 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 	for _, res := range r.Results {
 		switch res.Outcome {
 		case Skipped:
-			fmt.Fprintf(w, "SKIP   %s (%s)\n", res.ID, Printable(res.Note))
+			fmt.Fprintf(w, "SKIP   %s (%s%s)\n", res.ID, Printable(res.Note), res.observedRetry())
 		case Observed:
-			fmt.Fprintf(w, "OBSERVE %s (%s)\n", res.ID, Printable(res.Note))
+			fmt.Fprintf(w, "OBSERVE %s (%s%s)\n", res.ID, Printable(res.Note), res.observedRetry())
+		case Pass, Drift:
+			if line := res.passedRetryLine(); line != "" {
+				fmt.Fprintf(w, "RETRY  %s (%s)\n", res.ID, line)
+			}
 		}
 	}
-	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %d drifted, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote()} {
+	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %s, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.driftedText(), r.Skipped, r.Observed)
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.DominantNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}
 	}
-	if r.Drifted == 0 && r.Compared > 0 && !r.Incomplete() {
-		fmt.Fprintln(w, "No drift ✓")
+	if note := r.UnmetNote(); note != "" {
+		fmt.Fprintln(w, Printable(note))
+	}
+	switch {
+	case r.Compared == 0 || r.Incomplete() || r.Unexpected() > 0:
+	case r.Expected > 0:
+		fmt.Fprintln(w, "No unexpected drift ✓"+r.retryVerdict())
+	case r.Drifted == 0:
+		fmt.Fprintln(w, "No drift ✓"+r.retryVerdict())
+	}
+	if n := r.NotCovered; n != nil {
+		if line := n.CatalogLine(); line != "" {
+			fmt.Fprintln(w, Printable(line))
+		}
+		if lines := n.NotCoveredLines(); len(lines) > 0 {
+			fmt.Fprintln(w, notCoveredTitle)
+			for _, l := range lines {
+				fmt.Fprintln(w, "  "+l)
+			}
+		}
 	}
 }

@@ -126,12 +126,14 @@ func (g *cellGlob) match(path string) bool {
 // position: an item inserted at the front is one new item, not a change of
 // every item after it. Items that are new or gone are drifts (unless an
 // any_length rule lets the array change length), and so is a changed order
-// of the items both sides have, unless AnyOrder.
+// of the items both sides have, unless AnyOrder. A rule without a key
+// (AnyOrder only) keeps the items by position and lets the same items come
+// in another order.
 type ArrayRule struct {
 	Target   string `yaml:"target,omitempty"`
 	Request  string `yaml:"request,omitempty"`
-	Path     string `yaml:"path"` // glob over JSON paths of arrays
-	Key      string `yaml:"key"`  // a member of every item, or a path into it (user.id)
+	Path     string `yaml:"path"`          // glob over JSON paths of arrays
+	Key      string `yaml:"key,omitempty"` // a member of every item, or a path into it (user.id); empty with AnyOrder
 	AnyOrder bool   `yaml:"any_order,omitempty"`
 	Reason   string `yaml:"reason"`
 
@@ -152,8 +154,9 @@ type List struct {
 	// kind: values (JSON, page texts and attributes), cells, the whole body.
 	indexed       bool
 	values, cells []*BodyRule
-	raw           bool   // the list has a whole-body rule
-	usage         *Usage // set by Track
+	raw           bool        // the list has a whole-body rule
+	usage         *Usage      // set by Track
+	fresh         []*BodyRule // the rules used, in the order of their first use (Uses)
 }
 
 // Empty returns a list with no rules.
@@ -242,8 +245,8 @@ func (l *List) Validate() error {
 	}
 	for i := range l.Arrays {
 		r := &l.Arrays[i]
-		if r.Path == "" || r.Key == "" || strings.TrimSpace(r.Reason) == "" {
-			return fmt.Errorf("allowlist: array rule %d needs path, key and reason", i+1)
+		if r.Path == "" || r.Key == "" && !r.AnyOrder || strings.TrimSpace(r.Reason) == "" {
+			return fmt.Errorf("allowlist: array rule %d needs path, reason and key or any_order", i+1)
 		}
 		if err := checkPath(r.Path); err != nil {
 			return fmt.Errorf("allowlist: array rule %d: %w", i+1, err)
@@ -251,11 +254,14 @@ func (l *List) Validate() error {
 		if r.Path == RawPath || IsCellPath(r.Path) || strings.HasPrefix(r.Path, "html") && !reachesJSON(r.Path) {
 			return fmt.Errorf("allowlist: array rule %s: the path names no JSON array", r.Path)
 		}
+		r.prefix, r.suffix = glob.Literal(r.Path)
+		if r.Key == "" {
+			continue // the items by position, in any order
+		}
 		r.steps = strings.Split(r.Key, ".")
 		if slices.Contains(r.steps, "") {
 			return fmt.Errorf("allowlist: array rule %s: key %q: a member name, or names joined by dots (user.id)", r.Path, r.Key)
 		}
-		r.prefix, r.suffix = glob.Literal(r.Path)
 	}
 	return nil
 }
@@ -527,6 +533,10 @@ func (l *List) rules(cells bool) []*BodyRule {
 // a body rule whose path starts with xlsx: or csv! (IsCellPath).
 func (l *List) HasCellRules() bool { return len(l.rules(true)) > 0 }
 
+// HasValueRules reports whether any rule names values of a body (not
+// cells).
+func (l *List) HasValueRules() bool { return len(l.rules(false)) > 0 }
+
 // RawRule returns the first whole-body rule (path RawPath) that applies to
 // the request, or nil. The caller asks only when the rule would apply (no
 // body is JSON): in a list for one request it then counts as used.
@@ -594,6 +604,17 @@ func (l *List) match(rules []*BodyRule, request, path string) (*BodyRule, []*Bod
 	return nil, parts
 }
 
+// CoversValue reports whether a rule judges the value at a body path of a
+// request (what ValueRules returns), without counting it as used.
+func (l *List) CoversValue(request, path string) bool {
+	for _, r := range l.rules(false) {
+		if r.re != nil && r.Reaches(path) && l.applies(r, request) {
+			return true
+		}
+	}
+	return false
+}
+
 // Reaches reports whether the rule's path matches a body path; the start
 // and end of its glob rule most paths out before the glob is matched. A
 // cell rule matches the worksheet, the column and the row apart
@@ -610,9 +631,45 @@ func (r *BodyRule) Reaches(path string) bool {
 
 // use counts a rule of a list for one request as used.
 func (l *List) use(r *BodyRule) {
-	if l.indexed {
+	if l.indexed && !r.used {
 		r.used = true
+		l.fresh = append(l.fresh, r)
 	}
+}
+
+// Uses marks how many body rules of a list for one request were used so
+// far, for Forget.
+func (l *List) Uses() int { return len(l.fresh) }
+
+// Forget counts the body rules first used after mark (Uses) as unused
+// again: the comparison undid what used them.
+func (l *List) Forget(mark int) {
+	for _, r := range l.fresh[mark:] {
+		r.used = false
+	}
+	l.fresh = l.fresh[:mark]
+}
+
+// RulesUnder reports whether a rule that applies to a request can reach a
+// place inside the JSON value at a path: a body rule with a format (with
+// values) or any body rule and array rule (without), judged by the
+// literal start of its glob, which every path it matches starts with.
+func (l *List) RulesUnder(request, path string, values bool) bool {
+	under := func(prefix string) bool { return strings.HasPrefix(path, prefix) || strings.HasPrefix(prefix, path) }
+	for _, r := range l.rules(false) {
+		if (r.re != nil || !values) && l.applies(r, request) && under(r.prefix) {
+			return true
+		}
+	}
+	if values {
+		return false
+	}
+	for i := range l.Arrays {
+		if r := &l.Arrays[i]; (r.Request == "" || (l.request != "" && l.request == request) || glob.Match(r.Request, request)) && under(r.prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // AnyLength reports whether a rule with any_length lets the JSON array at a
@@ -786,6 +843,49 @@ func (l *List) Unused(selected bool) []Unused {
 		add(Unused{RuleRef: bodyRef(i, &r)}, &l.usage.body[i])
 	}
 	return out
+}
+
+// Normal is a value as the rules see it, for a fingerprint of content
+// only one side has (a new key or item): the whole-value rule that accepts
+// it (Rule, Format), or the pieces rules with parts leave of it.
+type Normal struct {
+	Rule, Format string
+	Pieces       []Piece // with rules with parts; nil for a whole-value rule
+}
+
+// Piece is a literal text of a value, or a part a rule matched (Part).
+type Piece struct {
+	Text string
+	Part bool
+}
+
+// Normal reports how the rules see a value at a path: false when no rule
+// applies, or the first whole-value rule that reaches it does not accept
+// it (the value is then compared as it is). cells chooses the rules of
+// spreadsheet cells. Rules are not counted as used.
+func (l *List) Normal(request, path, value string, cells bool) (Normal, bool) {
+	var parts []*BodyRule
+	for _, r := range l.rules(cells) {
+		if r.re == nil || !r.Reaches(path) || !l.applies(r, request) {
+			continue
+		}
+		if !r.Parts {
+			if r.Matches(value) {
+				return Normal{Rule: r.Path, Format: r.Format}, true
+			}
+			return Normal{}, false
+		}
+		parts = append(parts, r)
+	}
+	if len(parts) == 0 {
+		return Normal{}, false
+	}
+	ps := pieces(parts, value)
+	out := Normal{Pieces: make([]Piece, len(ps))}
+	for i, p := range ps {
+		out.Pieces[i] = Piece{Text: p.text, Part: p.part}
+	}
+	return out, true
 }
 
 // SameParts reports whether two values are the same once every part a rule

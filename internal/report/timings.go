@@ -103,3 +103,28 @@ func (r *Report) TimingsNote() string {
 	}
 	return s
 }
+
+// MedianTimings is the time of each request over several captures of the
+// same state (--repeat): the median, of an even count the mean of the two
+// middle times. Of three runs or more, one slow run (a cold cache, a busy
+// machine) does not make a request look slower. A request timed in only
+// some runs takes the median of those.
+func MedianTimings(runs []map[string]int64) map[string]int64 {
+	all := map[string][]int64{}
+	for _, run := range runs {
+		for id, ms := range run {
+			all[id] = append(all[id], ms)
+		}
+	}
+	out := make(map[string]int64, len(all))
+	for id, ms := range all {
+		slices.Sort(ms)
+		mid := len(ms) / 2
+		if len(ms)%2 == 1 {
+			out[id] = ms[mid]
+		} else {
+			out[id] = (ms[mid-1] + ms[mid]) / 2
+		}
+	}
+	return out
+}

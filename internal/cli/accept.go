@@ -13,15 +13,14 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/orangehill/driftgate/internal/baseline"
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
-	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/report"
 	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
@@ -72,8 +71,57 @@ func checkBaseline(p *config.Project, set *snapshot.Set, name string) error {
 	return nil
 }
 
+// checkBaselineReading is checkBaseline for a comparison that reads the
+// baseline's records and bodies: they are hashed as they are read (the
+// set's HashReads; a public body is checked against its name), so their
+// files are not read a second time to verify them. finish checks them, and
+// hashes those the comparison did not read; it must succeed before any
+// result of the comparison is used.
+func checkBaselineReading(p *config.Project, set *snapshot.Set, name string) (finish func() error, err error) {
+	done := func() error { return nil }
+	stamp, err := baseline.Stamp(set.Dir)
+	if err == nil {
+		verified.Lock()
+		ok := verified.stamps[set.Dir] == stamp
+		verified.Unlock()
+		if ok {
+			return done, nil
+		}
+	}
+	set.HashReads = true
+	res, deferred, err := baseline.VerifyDeferred(set.Dir)
+	if err := baselineProblems(p, set, name, res, err); err != nil {
+		return nil, err
+	}
+	return func() error {
+		bad, err := baseline.CheckDeferred(set.Dir, deferred, set.Known)
+		if err != nil {
+			return envErr(err)
+		}
+		if len(bad) > 0 {
+			more := ""
+			if n := len(bad) - 1; n > 0 {
+				more = fmt.Sprintf(" and %d more", n)
+			}
+			return envErr(fmt.Errorf("baseline %s changed outside driftgate accept (%s: changed%s); run driftgate verify", name, bad[0], more))
+		}
+		if stamp != "" {
+			verified.Lock()
+			verified.stamps[set.Dir] = stamp
+			verified.Unlock()
+		}
+		return nil
+	}, nil
+}
+
 func verifyBaseline(p *config.Project, set *snapshot.Set, name string) error {
 	res, err := baseline.Verify(set.Dir)
+	return baselineProblems(p, set, name, res, err)
+}
+
+// baselineProblems turns what a verification of a baseline found into the
+// error that stops a command.
+func baselineProblems(p *config.Project, set *snapshot.Set, name string, res *baseline.Result, err error) error {
 	if errors.Is(err, baseline.ErrNoManifest) {
 		return envErr(fmt.Errorf("baseline %s has no %s (made before manifests, or the file was removed); check it, then driftgate verify --baseline %s --adopt writes one", name, baseline.ManifestFile, name))
 	}
@@ -110,7 +158,8 @@ func digests(base *snapshot.Set, baseName string, cur *snapshot.Set, curName str
 		}
 	}
 	if strings.HasPrefix(curName, "capture:") {
-		if c, err = baseline.SetDigest(cur.Dir); err != nil {
+		// From the records the comparison read and hashed, when it did.
+		if c, err = baseline.SetDigestKnown(cur.Dir, cur.Known); err != nil {
 			return "", "", envErr(err)
 		}
 	}
@@ -142,7 +191,7 @@ func readLastCompare(p *config.Project) (*report.Report, string, error) {
 func staleComparison(p *config.Project, r *report.Report) (string, error) {
 	tag, ok := strings.CutPrefix(r.Tag, "capture:")
 	if r.Baseline == "" || !ok {
-		return fmt.Sprintf("the last comparison is %s against %s; accept takes drifts of a capture compared against a baseline", r.Tag, r.Against), nil
+		return fmt.Sprintf("the last comparison is %s against %s; only drifts of a capture compared against a baseline are accepted or expected", r.Tag, r.Against), nil
 	}
 	base, err := p.Baseline(r.Baseline)
 	if err != nil {
@@ -165,7 +214,7 @@ func staleComparison(p *config.Project, r *report.Report) (string, error) {
 		return fmt.Sprintf("capture %s changed since the comparison (captured again?)", tag), nil
 	}
 	if meta, err := cur.Meta(); err != nil || meta == nil || meta.Unreliable {
-		return fmt.Sprintf("capture %s was made with --skip-fingerprint-check, on data that may differ from the baseline's; it is for diagnosis only and cannot be accepted", tag), nil
+		return fmt.Sprintf("capture %s was made with --skip-fingerprint-check, on data that may differ from the baseline's; it is for diagnosis only, and its drifts are not accepted or expected", tag), nil
 	}
 	return "", nil
 }
@@ -203,118 +252,42 @@ func chooseAccepted(r *report.Report, args []string) (*acceptPick, error) {
 	for _, id := range r.Accepted {
 		done[id] = true
 	}
+	sel, err := pick(r, args, pickRules{
+		verb: "accept",
+		open: func(res report.Result) bool { return acceptable(res) && !done[res.ID] },
+		refuse: func(res report.Result) string {
+			switch {
+			case done[res.ID]:
+				return "was already accepted from the last comparison"
+			case !acceptable(res):
+				return fmt.Sprintf("has nothing to accept (%s)", res.Outcome)
+			}
+			return ""
+		},
+		none: "with drift (or without a baseline record)",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if partial := sel.partial(r); len(partial) > 0 {
+		return nil, configErr("%s takes only part of the drifts of %d requests; a request is accepted with all of its drifts or not at all:\n%s\nselect those groups too, or name the requests (driftgate review shows the command that covers them)",
+			strings.Join(sel.groupArgs, " "), len(partial), strings.Join(partial, "\n"))
+	}
+	if len(sel.drifts) == 0 {
+		return nil, configErr("nothing to accept: the selected drifts were already accepted")
+	}
 	byID := map[string]report.Result{}
 	for _, res := range r.Results {
 		byID[res.ID] = res
 	}
-	groupOf := map[string]int{}
-	for _, g := range r.Groups {
-		groupOf[g.Signature] = g.N
-	}
-	whole := map[string]bool{}
-	named := map[string]bool{}  // requests named by their ID
-	groups := map[string]bool{} // selected signatures
-	var groupArgs []string
-	for _, a := range args {
-		if n, ok := strings.CutPrefix(a, "group:"); ok {
-			num, err := strconv.Atoi(n)
-			if err != nil || num < 1 || num > len(r.Groups) {
-				return nil, configErr("%s: the last comparison has groups 1 to %d", a, len(r.Groups))
-			}
-			groups[r.Groups[num-1].Signature] = true
-			groupArgs = append(groupArgs, a)
-			continue
-		}
-		if strings.ContainsAny(a, "*?") {
-			matched := 0
-			for _, res := range r.Results {
-				if glob.Match(a, res.ID) && acceptable(res) && !done[res.ID] {
-					whole[res.ID] = true
-					matched++
-				}
-			}
-			if matched == 0 {
-				return nil, configErr("%s matches no request with drift (or without a baseline record) in the last comparison", a)
-			}
-			continue
-		}
-		res, ok := byID[a]
-		switch {
-		case !ok:
-			return nil, configErr("%s is not in the last comparison", a)
-		case done[a]:
-			return nil, configErr("%s was already accepted from the last comparison", a)
-		case !acceptable(res):
-			return nil, configErr("%s has nothing to accept (%s)", a, res.Outcome)
-		}
-		whole[a], named[a] = true, true
-	}
-
-	var partial []string
-	for _, res := range r.Results {
-		if res.Outcome != report.Drift || done[res.ID] || whole[res.ID] {
-			continue
-		}
-		in := false
-		missing := map[int]int{} // group → drifts not selected
-		for _, d := range res.Drifts {
-			if groups[d.Signature()] {
-				in = true
-			} else {
-				missing[groupOf[d.Signature()]]++
-			}
-		}
-		if !in {
-			continue
-		}
-		if len(missing) == 0 {
-			whole[res.ID] = true
-			continue
-		}
-		n, list := 0, make([]string, 0, len(missing))
-		for g, c := range missing {
-			n += c
-			list = append(list, fmt.Sprintf("group:%d (%d)", g, c))
-		}
-		sort.Strings(list)
-		partial = append(partial, fmt.Sprintf("  %s: %d of %d drifts not selected, in %s", res.ID, n, len(res.Drifts), strings.Join(list, ", ")))
-	}
-	if len(partial) > 0 {
-		return nil, configErr("%s takes only part of the drifts of %d requests; a request is accepted with all of its drifts or not at all:\n%s\nselect those groups too, or name the requests (driftgate review shows the command that covers them)",
-			strings.Join(groupArgs, " "), len(partial), strings.Join(partial, "\n"))
-	}
-	if len(whole) == 0 {
-		return nil, configErr("nothing to accept: the selected drifts were already accepted")
-	}
-	// Accepting a request that was not captured removes it from the
-	// baseline; a capture of part of the catalog must not do that through
-	// a glob or a group.
-	var gone []string
-	for id := range whole {
-		for _, d := range byID[id].Drifts {
-			if d.Kind == compare.KindNotCaptured && !named[id] {
-				gone = append(gone, id)
-				break
-			}
-		}
-	}
-	if len(gone) > 0 {
-		sort.Strings(gone)
-		return nil, configErr("%s were not captured this time; accepting them removes them from the baseline, so name each by its ID to do that", strings.Join(gone, ", "))
-	}
-	p := &acceptPick{}
+	p := &acceptPick{ids: sel.ids()}
 	sigs := map[string]bool{}
-	for id := range whole {
-		p.ids = append(p.ids, id)
+	for _, id := range p.ids {
 		for _, d := range byID[id].Drifts {
 			sigs[d.Signature()] = true
 		}
 	}
-	for s := range sigs {
-		p.sigs = append(p.sigs, s)
-	}
-	sort.Strings(p.ids)
-	sort.Strings(p.sigs)
+	p.sigs = sortedKeys(sigs)
 	return p, nil
 }
 
@@ -397,6 +370,10 @@ func acceptCmd(args []string, out io.Writer) (int, error) {
 		Capture:    tag,
 		Commit:     gitOutput(p.Root, "rev-parse", "--short", "HEAD"),
 	}
+	exps, _, err := baseline.Expectations(base.Dir)
+	if err != nil {
+		return 0, expectErr(p, r.Baseline, err)
+	}
 	if err := applyAccept(base, cur, sel.ids, a); err != nil {
 		return 0, err
 	}
@@ -419,7 +396,34 @@ func acceptCmd(args []string, out io.Writer) (int, error) {
 		rel = filepath.Join(base.Dir, baseline.LogFile)
 	}
 	fmt.Fprintf(out, "logged in %s%s\n", rel, commitNote(p, "; commit the baseline"))
-	return ExitClean, nil
+	// An accepted error of a request meant to succeed is said, not refused
+	// (the reason may explain it); coverage and run then report it. Only
+	// the route methods the accepted requests reach are checked.
+	if cat, err := catalog.Load(p.Layout.Catalog); err == nil {
+		inv, excl, err := loadInventory(p)
+		if err != nil {
+			inv, excl = nil, nil // no inventory: the requests alone
+		}
+		baselineHealth(p, inv, excl, cat, r.Baseline, sel.ids, out)
+	}
+	// The acceptance is written: the note is best effort, never a failure.
+	if retried, err := retriedRecords(base, sel.ids); err != nil {
+		fmt.Fprintf(out, "could not check the accepted responses for retries: %v\n", err)
+	} else {
+		retriedBaselineNote(out, r.Baseline, retried)
+	}
+	// The expectations whose drifts the baseline now holds are closed.
+	drifted := map[string]map[string]bool{}
+	for _, res := range r.Results {
+		if slices.Contains(sel.ids, res.ID) {
+			drifted[res.ID] = map[string]bool{}
+			for _, d := range res.Drifts {
+				drifted[res.ID][d.Digest] = true
+			}
+		}
+	}
+	closing := "accepted into baseline " + r.Baseline + ": " + a.Reason
+	return ExitClean, closeSatisfied(p, base, r.Baseline, closing, tag, exps, drifted, func(string) bool { return false }, out)
 }
 
 // interrupted handles what an interrupted accept or first run left next to

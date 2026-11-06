@@ -980,10 +980,14 @@ func (s *setup) coverage(p *config.Project) string {
 	if err != nil {
 		return err.Error()
 	}
-	c := routes.Check(inv, cat, excl)
+	answers, _ := readAnswers(p, "local", nil) // without it, the catalog alone
+	c := routes.CheckWith(inv, cat, excl, answers)
 	line := fmt.Sprintf("%d found: %d covered, %d excluded, %d uncovered", len(inv.Routes), len(c.Covered), len(c.Excluded), len(c.Uncovered))
 	if len(c.Uncovered) > 0 {
 		s.check = append(s.check, fmt.Sprintf("uncovered routes (%d): driftgate coverage lists them; give their parameters under params: or exclude them with a reason", len(c.Uncovered)))
+	}
+	if n := len(c.Health.Failed); n > 0 {
+		s.check = append(s.check, fmt.Sprintf("requests meant to succeed that failed in the baseline (%d): driftgate coverage lists them; an error the baseline keeps passes every comparison", n))
 	}
 	return line
 }

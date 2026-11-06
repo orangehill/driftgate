@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\xc3TC\x9c$<\u0086ÌäČÜ+\xb4\xc6A")

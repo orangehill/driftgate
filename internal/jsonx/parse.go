@@ -25,21 +25,29 @@ func (e *SyntaxError) Error() string { return fmt.Sprintf("json: %s at offset %d
 // with its defaults (strict strings, NaN/Infinity accepted, encoding detected
 // from the first bytes), because that is the reference implementation.
 func Parse(raw []byte) (*Value, error) {
+	v, _, err := ParseKeys(raw)
+	return v, err
+}
+
+// ParseKeys is Parse that also returns the keys written with an escape
+// ("\u0061" for "a"), as they are written, in the order they stand: the
+// same keys to every reader, and so in no Value.
+func ParseKeys(raw []byte) (*Value, []string, error) {
 	text, err := decodeText(raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	p := &parser{s: text}
 	p.skipSpace()
 	v, err := p.value(0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	p.skipSpace()
 	if p.i != len(p.s) {
-		return nil, p.fail("extra data")
+		return nil, nil, p.fail("extra data")
 	}
-	return v, nil
+	return v, p.escapedKeys, nil
 }
 
 var (
@@ -53,36 +61,58 @@ var (
 // decodeText returns the document as UTF-8, detecting the encoding the way
 // Python's json.detect_encoding does.
 func decodeText(b []byte) ([]byte, error) {
+	_, text, err := Decode(b)
+	return text, err
+}
+
+// Decode returns a document as UTF-8 and the encoding it was written in
+// (utf-8, utf-8-bom, utf-16le, utf-16be-bom, …), detected the way Python's
+// json.detect_encoding does. The decoding is strict: the encoding and the
+// text give the bytes back.
+func Decode(b []byte) (encoding string, text []byte, err error) {
 	switch {
 	case bytes.HasPrefix(b, bomUTF32BE):
-		return fromUTF32(b[4:], binary.BigEndian)
+		text, err = fromUTF32(b[4:], binary.BigEndian)
+		return "utf-32be-bom", text, err
 	case bytes.HasPrefix(b, bomUTF32LE):
-		return fromUTF32(b[4:], binary.LittleEndian)
+		text, err = fromUTF32(b[4:], binary.LittleEndian)
+		return "utf-32le-bom", text, err
 	case bytes.HasPrefix(b, bomUTF16BE):
-		return fromUTF16(b[2:], binary.BigEndian)
+		text, err = fromUTF16(b[2:], binary.BigEndian)
+		return "utf-16be-bom", text, err
 	case bytes.HasPrefix(b, bomUTF16LE):
-		return fromUTF16(b[2:], binary.LittleEndian)
+		text, err = fromUTF16(b[2:], binary.LittleEndian)
+		return "utf-16le-bom", text, err
 	case bytes.HasPrefix(b, bomUTF8):
 		b = b[3:]
+		encoding = "utf-8-bom"
 	case len(b) >= 4 && b[0] == 0:
 		if b[1] != 0 {
-			return fromUTF16If(b, b[1], binary.BigEndian)
+			text, err = fromUTF16If(b, b[1], binary.BigEndian)
+			return "utf-16be", text, err
 		}
-		return fromUTF32If(b, b[3], binary.BigEndian)
+		text, err = fromUTF32If(b, b[3], binary.BigEndian)
+		return "utf-32be", text, err
 	case len(b) >= 4 && b[1] == 0:
 		if b[2] != 0 || b[3] != 0 {
-			return fromUTF16If(b, b[0], binary.LittleEndian)
+			text, err = fromUTF16If(b, b[0], binary.LittleEndian)
+			return "utf-16le", text, err
 		}
-		return fromUTF32If(b, b[0], binary.LittleEndian)
+		text, err = fromUTF32If(b, b[0], binary.LittleEndian)
+		return "utf-32le", text, err
 	case len(b) == 2 && b[0] == 0:
-		return fromUTF16If(b, b[1], binary.BigEndian)
+		text, err = fromUTF16If(b, b[1], binary.BigEndian)
+		return "utf-16be", text, err
 	case len(b) == 2 && b[1] == 0:
-		return fromUTF16If(b, b[0], binary.LittleEndian)
+		text, err = fromUTF16If(b, b[0], binary.LittleEndian)
+		return "utf-16le", text, err
+	default:
+		encoding = "utf-8"
 	}
 	if !utf8.Valid(b) {
-		return nil, &SyntaxError{0, "invalid UTF-8"}
+		return encoding, nil, &SyntaxError{0, "invalid UTF-8"}
 	}
-	return b, nil
+	return encoding, b, nil
 }
 
 // jsonStart reports a character a document may start with: white space or
@@ -164,6 +194,10 @@ type parser struct {
 	items   []*Value
 	buf     []byte
 	view    bool // texts share s (Walk) instead of being copied out of it
+	// escaped: the last string read had an escape; escapedKeys are the
+	// keys that had one, as written.
+	escaped     bool
+	escapedKeys []string
 }
 
 // text is s[i:j] as a string: a view of s for Walk, else a copy.
@@ -325,8 +359,10 @@ func (p *parser) str() (string, error) {
 	if end := p.plainEnd(); end >= 0 {
 		s := p.text(p.i+1, end)
 		p.i = end + 1
+		p.escaped = false
 		return s, nil
 	}
+	p.escaped = true
 	p.i++ // opening quote
 	out := p.buf[:0]
 	for {
@@ -429,9 +465,13 @@ func (p *parser) object(depth int) (*Value, error) {
 		if p.i >= len(p.s) || p.s[p.i] != '"' {
 			return nil, p.fail("expecting property name enclosed in double quotes")
 		}
+		start := p.i
 		key, err := p.str()
 		if err != nil {
 			return nil, err
+		}
+		if p.escaped {
+			p.escapedKeys = append(p.escapedKeys, string(p.s[start:p.i]))
 		}
 		p.skipSpace()
 		if p.i >= len(p.s) || p.s[p.i] != ':' {

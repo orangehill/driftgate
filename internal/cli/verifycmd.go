@@ -110,7 +110,7 @@ func baselineNames(p *config.Project) ([]string, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if (e.IsDir() || e.Type()&os.ModeSymlink != 0) && !strings.HasPrefix(e.Name(), ".") {
+		if (e.IsDir() || e.Type()&os.ModeSymlink != 0) && !strings.HasPrefix(e.Name(), ".") && !strings.HasSuffix(e.Name(), baseline.ExpectSuffix) {
 			names = append(names, e.Name())
 		}
 	}
@@ -198,7 +198,24 @@ func verifyBaselines(p *config.Project, names []string, out io.Writer) (int, err
 			code = ExitDrift
 			continue
 		}
+		exps, refs, err := baseline.Expectations(set.Dir)
+		if err != nil {
+			var bad *baseline.ExpectProblems
+			if !errors.As(err, &bad) {
+				return 0, envErr(err)
+			}
+			fmt.Fprintf(out, "FAIL   baseline %s: %s changed outside driftgate expect:\n", n, bad.File)
+			for _, pr := range bad.Problems {
+				fmt.Fprintf(out, "         %s\n", pr)
+			}
+			code = ExitDrift
+			changed = true
+			continue
+		}
 		fmt.Fprintf(out, "OK     baseline %s: %d files, %d acceptances\n", n, res.Files, res.Acceptances)
+		if len(refs) > 0 {
+			fmt.Fprintf(out, "         %s in force (driftgate expect), of %s in %s/\n", count(len(exps), "expectation", "expectations"), count(len(refs), "ref", "refs"), filepath.Base(baseline.ExpectDir(set.Dir)))
+		}
 		if referenced > 0 {
 			fmt.Fprintf(out, "         %d private bodies are outside the repository (encrypted in the local store, checked against their ref when read); %d of them are on this machine\n", referenced, here)
 		}

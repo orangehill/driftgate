@@ -57,8 +57,8 @@ type Config struct {
 	Identities map[string]Identity  `yaml:"identities,omitempty"`
 	Tokens     Tokens               `yaml:"tokens,omitempty"`
 	State      map[string]Component `yaml:"state,omitempty"`
-	Seed       [][]string           `yaml:"seed,omitempty"`    // load the data into the working state; driftgate seed then copies it to the pristine one
-	Prepare    [][]string           `yaml:"prepare,omitempty"` // run after every restore (migrations and the like)
+	Seed       []Command            `yaml:"seed,omitempty"`    // load the data into the working state; driftgate seed then copies it to the pristine one
+	Prepare    []Command            `yaml:"prepare,omitempty"` // run after every restore (migrations and the like)
 	Guards     []Guard              `yaml:"guards,omitempty"`
 	PII        PII                  `yaml:"pii,omitempty"`
 	Discover   []discover.Adapter   `yaml:"discover,omitempty"`
@@ -381,7 +381,7 @@ type Generate struct {
 }
 
 // Templates of generated requests.
-var Templates = []string{"ok", "not-found", "invalid-param", "anonymous", "identities", "json", "empty-body"}
+var Templates = []string{"ok", "not-found", "invalid-param", "anonymous", "identities", "json", "empty-body", "json-errors"}
 
 // Param says where the value of a route parameter comes from: a fixed value,
 // a list, a read-only query on the pristine database, or another response
@@ -450,6 +450,28 @@ type Target struct {
 	// own URLs. A comparison of sets captured from different origins takes
 	// every side's own origin and these as the same.
 	Aliases []string `yaml:"aliases,omitempty"`
+	// Retry is how many times a read-only request that failed under load
+	// (a timeout, a reset connection, a 5xx status) is sent again; unset
+	// is DefaultRetry, 0 none (Retries).
+	Retry *int `yaml:"retry,omitempty"`
+}
+
+// DefaultRetry is the retry of a target that sets none: once. A response
+// that came only after a retry is marked in its record and shown in every
+// report, so the retry never makes a failure pass unseen.
+const DefaultRetry = 1
+
+// MaxRetry bounds retry: more sends would hide an endpoint that fails
+// most of the time.
+const MaxRetry = 3
+
+// Retries is how many times a read-only request that failed under load is
+// sent again.
+func (t Target) Retries() int {
+	if t.Retry == nil {
+		return DefaultRetry
+	}
+	return *t.Retry
 }
 
 // Origins returns the origins of a set captured from origin: it and the
@@ -684,8 +706,8 @@ func (c Component) validateServer() error {
 
 // Guard is a command that must succeed before any request that changes data.
 type Guard struct {
-	Name    string   `yaml:"name"`
-	Command []string `yaml:"command"`
+	Name    string  `yaml:"name"`
+	Command Command `yaml:"command"`
 }
 
 // PII configures the detector of personal data in public bodies.
@@ -866,9 +888,9 @@ func newProject(c Config, root, mode string) (*Project, error) {
 			c.Data.Driver = MySQL
 		}
 	}
-	for _, list := range [][][]string{c.Seed, c.Prepare} {
+	for _, list := range [][]Command{c.Seed, c.Prepare} {
 		for _, cmd := range list {
-			if len(cmd) == 0 {
+			if cmd.validate() != nil {
 				return nil, fmt.Errorf("%s: seed and prepare commands must not be empty", FileName)
 			}
 		}
@@ -880,7 +902,7 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		return nil, fmt.Errorf("%s: bisect timeouts must not be negative", FileName)
 	}
 	for i, g := range c.Guards {
-		if g.Name == "" || len(g.Command) == 0 {
+		if g.Name == "" || g.Command.validate() != nil {
 			return nil, fmt.Errorf("%s: guard %d needs name and command", FileName, i+1)
 		}
 	}
@@ -907,6 +929,9 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		}
 		if t.Concurrency < 0 && !t.Concurrency.Auto() {
 			return nil, fmt.Errorf("%s: %s.concurrency must not be negative", FileName, where)
+		}
+		if t.Retry != nil && (*t.Retry < 0 || *t.Retry > MaxRetry) {
+			return nil, fmt.Errorf("%s: %s.retry must be from 0 (no retry) to %d", FileName, where, MaxRetry)
 		}
 		for _, a := range t.Aliases {
 			if err := checkOrigin(a); err != nil {
@@ -1209,6 +1234,10 @@ func (p *Project) Capture(tag string) (*snapshot.Set, error) {
 func (p *Project) Baseline(name string) (*snapshot.Set, error) {
 	if !projectName.MatchString(name) {
 		return nil, invalid{fmt.Errorf("invalid baseline name %q (letters, digits, . _ -; not a name Windows reserves such as con or nul)", name)}
+	}
+	if strings.HasSuffix(name, ".expectations") {
+		// <baseline>.expectations is the folder of a baseline's expectations.
+		return nil, invalid{fmt.Errorf("invalid baseline name %q: a name ending with .expectations is the folder of a baseline's expectations", name)}
 	}
 	priv, err := p.Private()
 	if err != nil {

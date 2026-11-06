@@ -178,3 +178,65 @@ func TestEndedCarriedOver(t *testing.T) {
 		t.Fatalf("not capped: %d", tr.resends.Load())
 	}
 }
+
+// TestResentThenRetried: a request sent again after a restore that ended
+// the application's sessions keeps that second answer, unless it is a
+// load failure (a 503): then it is put aside for a retry as any other, and
+// its record will keep both. A 500 that stays after the resend is the
+// application's and is not retried.
+func TestResentThenRetried(t *testing.T) {
+	var mu sync.Mutex
+	calls := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls[r.URL.Path]++
+		n := calls[r.URL.Path]
+		mu.Unlock()
+		switch {
+		case n == 1 && r.URL.Path == "/a": // a pooled connection the restore ended
+			w.WriteHeader(500)
+		case n <= 2: // then the server is busy
+			w.WriteHeader(503)
+		default:
+			w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p := &config.Project{Config: config.Config{Targets: map[string]config.Target{"app": {BaseURL: srv.URL}}}}
+	ctx := context.Background()
+	reqs := []catalog.Request{{ID: "a", Method: "GET", Path: "/a", Target: "app"}, {ID: "b", Method: "GET", Path: "/b", Target: "app"}}
+	r := &runner{p: p, services: map[string]*service{}, log: io.Discard, tr: &tracker{}, retry: newRetrying(reqs)}
+	s, err := newService(ctx, p, reqs[0], false)
+	if err != nil || s.retries != 1 {
+		t.Fatalf("%v, retries %d", err, s.retries)
+	}
+	r.services["app"] = s
+	r.tr.resends.Store(1)
+	r.tr.resentAfter = "the restore of db ended 1 database session of the application"
+
+	_, ok := r.sendRead(ctx, reqs[0])
+	if ok || len(r.retry.deferred) != 1 {
+		t.Fatalf("resent, then a 503: %v, deferred %d", ok, len(r.retry.deferred))
+	}
+	if d := r.retry.deferred[0]; d.first.Record.Resent == nil || d.first.Record.Resent.First != 500 || d.retry.Status != 503 {
+		t.Fatalf("deferred: %+v %+v", d.first.Record, d.retry)
+	}
+	// The retry recovers; the record keeps the resend too.
+	d := r.retry.deferred[0]
+	r.retry.deferred = nil
+	res := r.resend(ctx, d.req, d.first, d.retry)
+	if rec := res.Record; rec.Status != 200 || rec.Resent == nil || rec.Resent.First != 500 || !rec.Retry.Passed() || rec.Retry.Status != 503 {
+		t.Fatalf("retried: %+v, resent %+v, retry %+v", rec, rec.Resent, rec.Retry)
+	}
+	res.Release()
+	// The budget is spent: b's 503 is a load failure, put aside.
+	if _, ok := r.sendRead(ctx, reqs[1]); ok || len(r.retry.deferred) != 1 {
+		t.Fatalf("b: %v, deferred %d", ok, len(r.retry.deferred))
+	}
+	r.retry.release()
+	mu.Lock()
+	defer mu.Unlock()
+	if calls["/a"] != 3 || calls["/b"] != 1 {
+		t.Errorf("sent %v", calls)
+	}
+}

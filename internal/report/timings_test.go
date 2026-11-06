@@ -45,3 +45,41 @@ func TestCompareTimings(t *testing.T) {
 		t.Error("note without timings")
 	}
 }
+
+func TestMedianTimings(t *testing.T) {
+	got := MedianTimings([]map[string]int64{
+		{"a": 100, "b": 50, "c": 7},
+		{"a": 900, "b": 40},
+		{"a": 120, "b": 60},
+	})
+	if got["a"] != 120 || got["b"] != 50 || got["c"] != 7 || len(got) != 3 {
+		t.Errorf("median of three %v", got)
+	}
+	// An even count: the mean of the two middle times.
+	if got := MedianTimings([]map[string]int64{{"a": 100}, {"a": 700}}); got["a"] != 400 {
+		t.Errorf("median of two %v", got)
+	}
+	if got := MedianTimings([]map[string]int64{{"a": 100}, {"a": 700}, {"a": 120}, {"a": 130}}); got["a"] != 125 {
+		t.Errorf("median of four %v", got)
+	}
+}
+
+// TestJUnitTimings: the slower requests are in the JUnit report as
+// properties and output, never as a failed case.
+func TestJUnitTimings(t *testing.T) {
+	r := &Report{Tag: "capture:x", Against: "baseline:local", Results: []Result{{ID: "slow", Outcome: Pass}},
+		Timings: &Timings{Requests: 1, Baseline: Percentiles{300, 300}, Current: Percentiles{900, 900}, Slower: []Slower{{ID: "slow", Baseline: 300, Current: 900}}}}
+	var b strings.Builder
+	if err := r.JUnit(&b, 20); err != nil {
+		t.Fatal(err)
+	}
+	x := b.String()
+	for _, want := range []string{`<property name="slower:slow" value="300 → 900 ms">`, `<property name="p95_ms" value="300 → 900">`, "<system-out>response times (information, never a gate)", `failures="0"`} {
+		if !strings.Contains(x, want) {
+			t.Errorf("JUnit lacks %q:\n%s", want, x)
+		}
+	}
+	if strings.Contains(x, "<failure") {
+		t.Errorf("a slower request failed:\n%s", x)
+	}
+}

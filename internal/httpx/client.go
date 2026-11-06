@@ -14,12 +14,16 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/credential"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
+
+// DefaultTimeout is the time limit of a request of a target that sets none.
+const DefaultTimeout = 60 * time.Second
 
 // MaxBody bounds a response body so a runaway endpoint cannot exhaust memory.
 const MaxBody = 256 << 20
@@ -165,7 +169,7 @@ func New(o Options) (*Client, error) {
 		o.UserAgent = DefaultUserAgent
 	}
 	if o.Timeout == 0 {
-		o.Timeout = 60 * time.Second
+		o.Timeout = DefaultTimeout
 	}
 	transport := &http.Transport{
 		Proxy:               nil, // never a proxy from the environment
@@ -246,12 +250,39 @@ func transportError(err error) string {
 	return err.Error()
 }
 
+// loadFailure names a failure a server under load gives now and then: a
+// timeout, or a connection reset or closed before the response was whole.
+// Empty for any other failure (a refused connection, a host not allowed)
+// and when ctx itself ended (an interrupt is no failure of the server).
+func loadFailure(ctx context.Context, err error) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	var ne net.Error
+	switch {
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection reset"
+	}
+	for _, r := range resetErrors {
+		if errors.Is(err, r) {
+			return "connection reset"
+		}
+	}
+	return ""
+}
+
 // Result is one sent request.
 type Result struct {
 	Record   *snapshot.Record
 	Body     []byte
 	Duration time.Duration
-	region   *region // the memory of a body read off the heap
+	// LoadFailure is set when the request failed as a server under load
+	// does now and then: "timeout" or "connection reset" (Record.Error
+	// says more).
+	LoadFailure string
+	region      *region // the memory of a body read off the heap
 }
 
 // Release gives back the memory of a body read outside the Go heap
@@ -305,7 +336,7 @@ func (c *Client) Do(ctx context.Context, r catalog.Request, token string) Result
 	resp, err := c.http.Do(req)
 	if err != nil {
 		rec.Error = transportError(err)
-		return Result{Record: rec, Duration: time.Since(start)}
+		return Result{Record: rec, Duration: time.Since(start), LoadFailure: loadFailure(ctx, err)}
 	}
 	defer resp.Body.Close()
 	length := resp.ContentLength
@@ -321,7 +352,7 @@ func (c *Client) Do(ctx context.Context, r catalog.Request, token string) Result
 	switch {
 	case err != nil:
 		rec.Error = "reading body: " + transportError(err)
-		return Result{Record: rec, Duration: dur}
+		return Result{Record: rec, Duration: dur, LoadFailure: loadFailure(ctx, err)}
 	case len(raw) > MaxBody:
 		reg.free()
 		rec.Error = fmt.Sprintf("body larger than %d bytes", MaxBody)

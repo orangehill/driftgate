@@ -105,6 +105,15 @@ func pathName(s string) string {
 	return s
 }
 
+// shownText writes a text of an element with children (<b>) so that it
+// never reads as one: its < and & as in HTML.
+func (e *element) shownText(s string) string {
+	if len(e.kids) == 0 || !strings.ContainsAny(s, "<&") {
+		return s
+	}
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;").Replace(s)
+}
+
 // joined is the element's own text as one string.
 func (e *element) joined() string {
 	parts := make([]string, len(e.text))
@@ -121,7 +130,7 @@ func (e *element) layout() string {
 	r := 0
 	for k := 0; k <= len(e.kids); k++ {
 		for ; r < len(e.text) && e.text[r].at == k; r++ {
-			parts = append(parts, e.text[r].text)
+			parts = append(parts, e.shownText(e.text[r].text))
 		}
 		if k < len(e.kids) {
 			parts = append(parts, "<"+e.kids[k].key()+">")
@@ -138,7 +147,7 @@ func (e *element) spacing() string {
 	r := 0
 	for k := 0; k <= len(e.kids); k++ {
 		for ; r < len(e.text) && e.text[r].at == k; r++ {
-			b.WriteString(e.text[r].edged())
+			b.WriteString(e.shownText(e.text[r].edged()))
 		}
 		if k < len(e.kids) {
 			b.WriteString("<" + e.kids[k].key() + ">")
@@ -282,6 +291,35 @@ func (p *page) element(n *html.Node, keep bool) *element {
 }
 
 // sum hashes the element with its attributes and its content in order.
+// shapeSum is the hash of what the shape and types levels compare of a
+// subtree (tags, ids, attribute names, payload marks): below the values
+// level children are aligned by it, not by content those levels ignore.
+// It is made when first asked for, and kept in shapes.
+func (e *element) shapeSum(shapes map[*element]string) string {
+	if s, ok := shapes[e]; ok {
+		return s
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%d:%s#%d:%s", len(e.tag), e.tag, len(e.id), e.id)
+	if e.flight {
+		fmt.Fprint(h, "f\x00")
+	}
+	names := make([]string, 0, len(e.attrs))
+	for k := range e.attrs {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		fmt.Fprintf(h, "@%d:%s", len(k), k)
+	}
+	for _, k := range e.kids {
+		fmt.Fprintf(h, ">%s", k.shapeSum(shapes))
+	}
+	s := string(h.Sum(nil))
+	shapes[e] = s
+	return s
+}
+
 func (e *element) sum() string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00", e.tag)
@@ -350,6 +388,9 @@ func (c *comparer) htmlBody(base, cur []byte) {
 	v, errV := parsePage(cur)
 	if errB != nil || errV != nil {
 		c.add(KindBody, "", unparsed(base, errB), unparsed(cur, errV))
+		if c.witnessing {
+			c.witness(base, cur)
+		}
 		return
 	}
 	// The declaration chooses how a browser renders the page (standards or
@@ -366,8 +407,14 @@ func (c *comparer) htmlBody(base, cur []byte) {
 	case len(b.flight) == 0 && len(v.flight) == 0:
 	case len(v.flight) == 0:
 		c.add(KindElementMissing, FlightPath, FlightPath, "")
+		if c.witnessing {
+			c.witness(c.source(FlightPath+"$", flightValue(b.flight)))
+		}
 	case len(b.flight) == 0:
 		c.add(KindElementExtra, FlightPath, "", FlightPath)
+		if c.witnessing {
+			c.witness(c.source(FlightPath+"$", flightValue(v.flight)))
+		}
 	default:
 		c.walk(FlightPath+"$", flightValue(b.flight), flightValue(v.flight))
 	}
@@ -383,7 +430,7 @@ func unparsed(body []byte, err error) string {
 // node compares two paired elements: attributes, text or embedded JSON, children.
 func (c *comparer) node(path string, b, v *element) {
 	c.attributes(path, b, v)
-	pairs, missing, extra, moved := align(b.kids, v.kids)
+	pairs, missing, extra, moved := align(c.alignKey(), b.kids, v.kids)
 	if kind := embeddedJSON(b); kind == "" || kind != embeddedJSON(v) || !c.embedded(path, kind, b.joined(), v.joined()) {
 		c.text(path, b, v, pairs)
 	}
@@ -412,7 +459,11 @@ func (c *comparer) text(path string, b, v *element, pairs [][2]int) {
 	same, placed := len(gb) == len(gv), len(gb) == len(gv)
 	for i := 0; i < len(gb) && same; i++ {
 		placed = placed && gb[i].anchor == gv[i].anchor
-		same = placed && gb[i].text == gv[i].text
+		// Where both sides have an element only they have between texts
+		// (one replaced by another), the spacing next to it is compared
+		// too: a client reads "aa" and "a a". An element only one side
+		// has explains the texts around it coming together or apart.
+		same = placed && gb[i].text == gv[i].text && (gb[i].from == gb[i].to || gv[i].from == gv[i].to || gb[i].edges(b) == gv[i].edges(v))
 	}
 	if same {
 		return
@@ -426,7 +477,17 @@ func (c *comparer) text(path string, b, v *element, pairs [][2]int) {
 		// Only a space between a text and an element came or went.
 		layout = [2]string{b.spacing(), v.spacing()}
 	}
+	before := len(c.drifts)
 	c.value(KindText, path, bj, vj, false, layout)
+	if c.witnessing && len(c.drifts) > before {
+		// The drift shows the joined texts or an excerpt: the witness has
+		// where every text stands and the spacing around the elements;
+		// under rules with parts the texts as those rules see them.
+		c.witness(c.runsSource(path, b), c.runsSource(path, v))
+		if _, parts := c.allow.TextRules(c.id, path); len(parts) > 0 {
+			c.drifts[len(c.drifts)-1].parted = true
+		}
+	}
 }
 
 // textGroup is the text that follows a child element both sides have (anchor,
@@ -434,6 +495,17 @@ func (c *comparer) text(path string, b, v *element, pairs [][2]int) {
 type textGroup struct {
 	anchor int
 	text   string
+	// from and to are the group's runs (Element.text); more than one when
+	// elements only this side has stood between them.
+	from, to int
+}
+
+// collapseSpaces writes runs of spaces as one.
+func collapseSpaces(s string) string {
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return s
 }
 
 // textGroups places every text of an element after the last child before it
@@ -443,7 +515,7 @@ func textGroups(e *element, anchor []int) []textGroup {
 	var out []textGroup
 	last := -1
 	k := 0
-	for _, t := range e.text {
+	for i, t := range e.text {
 		for ; k < t.at; k++ {
 			if anchor[k] >= 0 {
 				last = anchor[k]
@@ -452,11 +524,33 @@ func textGroups(e *element, anchor []int) []textGroup {
 		if n := len(out) - 1; n >= 0 && out[n].anchor == last {
 			// An element only one side has stood between them: one space.
 			out[n].text = strings.TrimRight(out[n].text, " ") + " " + strings.TrimLeft(t.edged(), " ")
+			out[n].to = i
 			continue
 		}
-		out = append(out, textGroup{anchor: last, text: t.edged()})
+		out = append(out, textGroup{anchor: last, text: t.edged(), from: i, to: i})
 	}
 	return out
+}
+
+// edges is a group's texts as they read with the elements only one side
+// has left out: their own spacing next to inline elements, a space for an
+// element that is not inline (a block, br, a script: a break), runs of
+// spaces as one.
+func (g textGroup) edges(e *element) string {
+	var b strings.Builder
+	for i := g.from; i <= g.to; i++ {
+		t := e.text[i]
+		if i > g.from {
+			for k := e.text[i-1].at; k < t.at; k++ {
+				if !inline[e.kids[k].tag] {
+					b.WriteByte(' ')
+					break
+				}
+			}
+		}
+		b.WriteString(t.edged())
+	}
+	return collapseSpaces(b.String())
 }
 
 func (c *comparer) attributes(path string, b, v *element) {
@@ -509,6 +603,9 @@ func (c *comparer) value(kind, where, b, v string, same bool, layout [2]string) 
 		bs, vs := excerpt(layout[0], layout[1])
 		c.add(kind, where, bs, vs)
 		c.drifts[len(c.drifts)-1].Texts = [2]string{b, v}
+		if c.witnessing {
+			c.witness([]byte(layout[0]), []byte(layout[1]), []byte(b), []byte(v))
+		}
 		return
 	}
 	if allowlist.SameParts(parts, b, v) {
@@ -517,6 +614,12 @@ func (c *comparer) value(kind, where, b, v string, same bool, layout [2]string) 
 	bs, vs := excerpt(b, v)
 	c.add(kind, where, bs, vs)
 	c.drifts[len(c.drifts)-1].Texts = [2]string{b, v}
+	if c.witnessing {
+		c.witness([]byte(b), []byte(v)) // the excerpt shows part of them
+	}
+	if c.witnessing {
+		c.parted(where, b, v, len(parts) > 0, false)
+	}
 }
 
 // excerpt quotes two long texts around the place where they differ, so a
@@ -564,12 +667,24 @@ func (c *comparer) children(path string, be, ve *element, pairs [][2]int, missin
 	bs, vs := steps(b), steps(v)
 	for _, i := range missing {
 		c.add(KindElementMissing, path+">"+bs[i], b[i].key(), "")
+		if c.witnessing {
+			c.witness(c.elementSource(path+">"+bs[i], b[i]), c.around(path, be), c.around(path, ve))
+		}
 	}
 	for _, j := range extra {
 		c.add(KindElementExtra, path+">"+vs[j], "", v[j].key())
+		// And where it stands, with the texts around it.
+		if c.witnessing {
+			c.witness(c.elementSource(path+">"+vs[j], v[j]), c.textsSource(keys(v)), c.around(path, be), c.around(path, ve))
+		}
 	}
 	if moved {
 		c.add(KindElementOrder, path, listText(keys(b)), listText(keys(v)))
+		// Which element went where: keys may repeat; the content of each
+		// pair is compared by itself.
+		if c.witnessing {
+			c.witness(pairsSource(pairs))
+		}
 	}
 	for _, p := range pairs {
 		c.node(path+">"+bs[p[0]], b[p[0]], v[p[1]])
@@ -613,7 +728,19 @@ const maxLCS = 1 << 22
 // n-th remaining element of a key is paired with the n-th of the same key.
 // An element that turns up elsewhere (the same subtree, or the same tag and
 // id) is paired too and makes the order a drift.
-func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
+// alignKey is what children are aligned by: their whole subtree at the
+// values level, below it what that level compares.
+func (c *comparer) alignKey() func(*element) string {
+	if c.level >= LevelValues {
+		return func(e *element) string { return e.hash }
+	}
+	if c.shapes == nil {
+		c.shapes = map[*element]string{}
+	}
+	return func(e *element) string { return e.shapeSum(c.shapes) }
+}
+
+func align(key func(*element) string, b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 	pb, pv := make([]int, len(b)), make([]int, len(v))
 	for i := range pb {
 		pb[i] = -1
@@ -624,12 +751,12 @@ func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 	link := func(i, j int) { pb[i], pv[j] = j, i }
 	// Common prefix and suffix, then the longest common subsequence.
 	lo := 0
-	for lo < len(b) && lo < len(v) && b[lo].hash == v[lo].hash {
+	for lo < len(b) && lo < len(v) && key(b[lo]) == key(v[lo]) {
 		link(lo, lo)
 		lo++
 	}
 	hiB, hiV := len(b), len(v)
-	for hiB > lo && hiV > lo && b[hiB-1].hash == v[hiV-1].hash {
+	for hiB > lo && hiV > lo && key(b[hiB-1]) == key(v[hiV-1]) {
 		hiB--
 		hiV--
 		link(hiB, hiV)
@@ -641,7 +768,7 @@ func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 		for i := n - 1; i >= 0; i-- {
 			for j := m - 1; j >= 0; j-- {
 				switch {
-				case b[lo+i].hash == v[lo+j].hash:
+				case key(b[lo+i]) == key(v[lo+j]):
 					*at(i, j) = *at(i+1, j+1) + 1
 				case *at(i+1, j) >= *at(i, j+1):
 					*at(i, j) = *at(i+1, j)
@@ -652,7 +779,7 @@ func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 		}
 		for i, j := 0, 0; i < n && j < m; {
 			switch {
-			case b[lo+i].hash == v[lo+j].hash:
+			case key(b[lo+i]) == key(v[lo+j]):
 				link(lo+i, lo+j)
 				i++
 				j++
@@ -689,7 +816,7 @@ func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 	byHash, byID := map[string][]int{}, map[string][]int{}
 	for y := range v {
 		if pv[y] < 0 {
-			byHash[v[y].hash] = append(byHash[v[y].hash], y)
+			byHash[key(v[y])] = append(byHash[key(v[y])], y)
 			if v[y].id != "" {
 				byID[v[y].key()] = append(byID[v[y].key()], y)
 			}
@@ -707,7 +834,7 @@ func align(b, v []*element) (pairs [][2]int, missing, extra []int, moved bool) {
 		if pb[x] >= 0 {
 			continue
 		}
-		y := take(byHash[b[x].hash])
+		y := take(byHash[key(b[x])])
 		if y < 0 && b[x].id != "" {
 			y = take(byID[b[x].key()])
 		}
@@ -761,20 +888,24 @@ func hasAttr(e *element, name string) bool {
 // embedded compares the JSON inside two script elements at path$…; false
 // when one of them is not JSON, so the scripts are compared as text.
 func (c *comparer) embedded(path, kind, b, v string) bool {
-	jb, errB := jsonx.Parse([]byte(b))
-	jv, errV := jsonx.Parse([]byte(v))
+	rb, rv := []byte(b), []byte(v)
+	jb, errB := jsonx.Parse(rb)
+	jv, errV := jsonx.Parse(rv)
 	if errB != nil || errV != nil {
 		return false
 	}
+	decoded := false
 	if kind == "devalue" {
 		db, okB := devalue(jb)
 		dv, okV := devalue(jv)
 		if okB && okV {
-			jb, jv = db, dv
+			jb, jv, decoded = db, dv, true
 		}
 	}
 	if b != v {
-		c.json(path+"$", []byte(b), []byte(v), jb, jv)
+		c.devalue = decoded
+		c.json(path+"$", rb, rv, jb, jv)
+		c.devalue = false
 	}
 	return true
 }
