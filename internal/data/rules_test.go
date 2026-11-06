@@ -106,6 +106,7 @@ func TestRulesReject(t *testing.T) {
 		"version: 1\ntables: {t: {columns: {c: {strategy: json, paths: {a: email}}}}}\n",
 		"version: 1\ntables: {t: {columns: {c: {kind: serialized-php, action: shred}}}}\n",
 		"version: 1\ntables: {t: {columns: {c: {kind: serialized-php, action: \"\"}}}}\n",
+		"version: 1\ntables:\n  t:\n    columns:\n      c:\n        kind: serialized-php\n        action:\n",
 		"version: 1\ntables: {}\nextra: 1\n",
 	} {
 		if _, err := ParseRules([]byte(bad)); err == nil {
@@ -289,16 +290,16 @@ func TestSchemaLiteralsNeedConfirmation(t *testing.T) {
 }
 
 // TestSerializedAction: action: null without quotes is the action null, as
-// with quotes; a missing action, or one with nothing after it, is the
-// default empty-table, which leaves the table's rows out.
+// with quotes; a missing action is the default empty-table, which leaves
+// the table's rows out (an action with nothing after it is refused:
+// TestRulesReject).
 func TestSerializedAction(t *testing.T) {
 	for in, want := range map[string]string{
-		"{kind: serialized-php, action: null}":                  SerializedNull,
-		"{kind: serialized-php, action: ~}":                     SerializedNull,
-		`{kind: serialized-php, action: "null"}`:                SerializedNull,
-		"{kind: serialized-php, action: empty-table}":           SerializedEmptyTable,
-		"{kind: serialized-php}":                                "",
-		"\n          kind: serialized-php\n          action:\n": "",
+		"{kind: serialized-php, action: null}":        SerializedNull,
+		"{kind: serialized-php, action: ~}":           SerializedNull,
+		`{kind: serialized-php, action: "null"}`:      SerializedNull,
+		"{kind: serialized-php, action: empty-table}": SerializedEmptyTable,
+		"{kind: serialized-php}":                      "",
 	} {
 		r, err := ParseRules([]byte("version: 1\ntables:\n  t:\n    columns:\n      c: " + in + "\n"))
 		if err != nil {

@@ -106,7 +106,7 @@ A column rule is one word for the plain cases, or a mapping. The word is
 
 - `action: empty-table`, or no `action`, leaves all rows of the table out of the copy.
 - `action: null` sets the column to NULL and keeps the rows. A bare `null` and `"null"` mean the same.
-- An empty `action: ""` is refused.
+- `action:` with nothing after it, or `action: ""`, is refused: only a missing `action` means the default.
 
 The kinds:
 

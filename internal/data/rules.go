@@ -153,16 +153,16 @@ func (c *ColumnRule) UnmarshalYAML(n *yaml.Node) error {
 	*c = ColumnRule(p)
 	// action: null written without quotes is the action null, as nullable
 	// reads it (decoding it into a string would give "", the default
-	// empty-table, and empty the table instead); an empty string written
-	// out names no action and is refused. action: with nothing after it is
-	// no action: the default.
+	// empty-table, and empty the table instead). action: with nothing after
+	// it, or an empty string, names no action and is refused: read as the
+	// default, it would drop every row. Only a missing action is the default.
 	if n.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			if k, v := n.Content[i], n.Content[i+1]; k.Value == "action" && v.Kind == yaml.ScalarNode {
 				switch {
 				case v.Tag == "!!null" && v.Value != "":
 					c.Action = SerializedNull
-				case v.Tag == "!!str" && v.Value == "":
+				case v.Value == "":
 					return fmt.Errorf("line %d: an empty action names none (%s or %s)", v.Line, SerializedEmptyTable, SerializedNull)
 				}
 			}
