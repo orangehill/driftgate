@@ -33,7 +33,7 @@ from the compose file: the `mysql` service's published port and its root
 user, which can create the pristine copy (fine for Sail's local container;
 on a shared server use a limited user). `init` writes `state:` commented
 out; `driftgate setup` turns it on after asking and goes on to the key,
-the pristine copy and the first baseline ([setup](../commands.md#setup)).
+the pristine copy and the first baseline ([setup](../reference/commands/project.md#driftgate-setup)).
 
 ## 2. Where the application runs
 

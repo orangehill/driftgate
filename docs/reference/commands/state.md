@@ -41,7 +41,7 @@ before and after it. A PostgreSQL, SQLite or SQL Server copy is of one
 moment.
 
 `seed` warns when the working database differs from the copy right after
-it was made: the application wrote during the seed, or just after it.
+it was made: the application wrote during the seed, or right after it.
 
 ## driftgate clean
 

@@ -5,12 +5,12 @@
 | Task or symptom | What to use |
 |---|---|
 | a value that may change on every request (a time, a token) | a body or header rule in [`allowlist.yaml`](#allowlistyaml), with a format and a reason |
-| the same header differs on every request (another server stack: `server`, `x-powered-by`, `via`) | a header rule: `name`, `format` (or `ignore_case`) and `reason` ([header rules](#allowlistyaml)); for those three headers the [line on the one change almost every request has](commands.md#compare) proposes it with the exact new value. Any other header that changed is fixed, accepted or expected |
+| the same header differs on every request (another server stack: `server`, `x-powered-by`, `via`) | a header rule: `name`, `format` (or `ignore_case`) and `reason` ([header rules](#allowlistyaml)); for those three headers the [line on the one change almost every request has](reference/reports.md#one-change-in-almost-every-request) proposes it with the exact new value. Any other header that changed is fixed, accepted or expected |
 | rows in another order (`item-order`; another database server or ORM) | an array rule: `key` pairs the items by an id, `any_order` allows the order ([arrays](#allowlistyaml)) |
 | uploading a file | a [`multipart`](#multipart) catalog entry with a fixture from the uploads folder |
 | a queue worker, an artisan or other command, an import or export, an admin path that changes the schema | a [command step](#command-steps) (`"output": true` compares what it prints), or a catalog request for the path; [side checks](guides/side-checks.md) |
 | measured, not compared (a value no rule can describe) | [`observe`](#observe) |
-| what the gate does not check | `driftgate coverage` and the [not-covered summary](commands.md#compare) after every comparison |
+| what the gate does not check | `driftgate coverage` and the [not-covered summary](reference/reports.md#what-the-result-does-not-cover) after every comparison |
 | two server stacks (database, PHP, web server) | [upgrading the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server) |
 
 `driftgate help catalog` and `driftgate help allowlist` list the fields of
@@ -130,7 +130,7 @@ observe:
 |---|---|---|---|
 | `version` | int | required | `1` |
 | `project` | string | required | a simple name (letters, digits, `. _ -`); names the local store and the Keychain entry |
-| `mode` | `freeze` \| `evolve` | `freeze` | `freeze`: every drift fails unless a ticket expects exactly that drift ([`expect`](commands.md#expect)), and `accept` is refused; `evolve`: drifts may be accepted with a reason |
+| `mode` | `freeze` \| `evolve` | `freeze` | `freeze`: every drift fails unless a ticket expects exactly that drift ([`expect`](reference/commands/review.md#driftgate-expect)), and `accept` is refused; `evolve`: drifts may be accepted with a reason |
 | `level` | `status` \| `shape` \| `types` \| `values` | `values` | how far comparison goes: status only; + keys, order and nesting; + the type of every value; + exact values. A catalog entry can set its own level; `compare --level` can only make it stricter |
 | [`baselines`](#baselines) | `local` \| `git` | where `driftgate.yaml` is | where the project's files, the store and the key are |
 | [`store`](#store) | path | `.driftgate/store` (local), `~/.driftgate/<project>` (git) | local store |
@@ -179,7 +179,7 @@ The place of `driftgate.yaml` decides the layout: without the key, a file in
 `.driftgate/` is `local` and one at the project root is `git`, so a
 configuration of an earlier release stays as it was. A `baselines:` value that
 disagrees with the place of the file is refused (exit 2); [`driftgate
-baselines local|git`](commands.md#baselines) moves the files. `driftgate init` makes a `local`
+baselines local|git`](reference/commands/project.md#driftgate-baselines) moves the files. `driftgate init` makes a `local`
 project (`--baselines git` for the other).
 
 With `local` nothing DriftGate writes leaves the project folder, and
@@ -295,7 +295,7 @@ instead; see [several services](guides/multi-service.md).
 | `connect_to` | host or IP, optional `:port` | | send the requests to this address instead of the one DNS gives for `base_url`'s host, as `curl --connect-to`; see [below](#connect_to) |
 | `user_agent` | string | `driftgate/1` | the `User-Agent` header of every request |
 | `timeout` | duration (`30s`) | `60s` | per request; `0` is the default, a negative one is refused |
-| `concurrency` | int, or `auto` | `1` | read-only requests sent in parallel; `auto`: measured once and recorded in the baseline (see [capture](commands.md#capture), `--calibrate`) |
+| `concurrency` | int, or `auto` | `1` | read-only requests sent in parallel; `auto`: measured once and recorded in the baseline (see [capture](reference/capture.md#parallel-requests-and-concurrency-auto), `--calibrate`) |
 | `follow_redirects` | bool | `false` | follow redirects instead of recording them (at most 10). A redirect from `https` to `http` is refused (the request fails); one to another host or port keeps only `User-Agent`, `Accept`, `Accept-Encoding` and `Accept-Language`, not the identity's token nor the catalog's headers |
 | `rate_limits` | list of `{match, per_minute}` | | spaces requests whose path (or `METHOD path`) matches the glob; `per_minute` must be positive |
 | `aliases` | list of origins | | other origins under which the application writes its own URLs (`APP_URL`, a second host name) |
@@ -471,7 +471,7 @@ keeps the first send's outcome and whether a later send recovered
 names the requests answered only after a retry, `run` warns when it makes
 a baseline from such a response (and so does `accept`), and `compare` and
 `report` show a request that passed only after a retry as a class of its
-own in every format (see [compare](commands.md#compare)). It counts as
+own in every format (see [compare](reference/reports.md#requests-that-passed-only-after-a-retry)). It counts as
 passed: the exit code does not change. A request that failed in every
 send is never counted as passed after a retry: it shows as failed in all
 its sends, and when it passes anyway (the baseline failed the same way,
@@ -633,7 +633,7 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   fingerprint has an older format keeps working while none of them differs;
   otherwise the capture stops with exit 3 and says so: run `driftgate
   seed`, and when the message names the baseline, `driftgate verify
-  --baseline <name> --migrate-state` (see [verify](commands.md#verify)).
+  --baseline <name> --migrate-state` (see [verify](reference/commands/review.md#driftgate-verify)).
 - MySQL 8: a column that takes its table's collation without naming it
   (any such column of a table whose collation is not its character set's
   default, as `utf8mb3_unicode_ci` in a Laravel 5.5 table) keeps it that
@@ -2119,7 +2119,7 @@ without their optional reference (`r`) are placed where the standard puts
 them. In a CSV, quoting, line ends, blank lines and empty fields at the
 end of a record that differ while the cells are the same are a `body`
 drift, the line ends also when a rule let a cell change; a byte order
-mark that came or went is a `body` drift whatever else changed. (An [expectation](commands.md#expect) of a drift covers all
+mark that came or went is a `body` drift whatever else changed. (An [expectation](reference/commands/review.md#driftgate-expect) of a drift covers all
 of these: they are in its digest.)
 
 - The worksheet is written as in the report: a name of letters, digits,
@@ -2212,7 +2212,7 @@ reason.
 
 `driftgate allowlist check` finds rules that apply to no request, reach
 nothing in the baseline, are broader than a value or never decide because
-an earlier rule does ([commands](commands.md#allowlist-check)).
+an earlier rule does ([commands](reference/commands/review.md#driftgate-allowlist-check)).
 
 ---
 
@@ -2246,7 +2246,7 @@ routes:
 kept for years, an upload broken until a later upgrade step) without
 dropping them: `generate` keeps them, `capture` and `compare` treat them as
 any other request, and `coverage` and `run` list them instead of failing on
-their routes ([coverage](commands.md#coverage)). An exclusion would drop the
+their routes ([coverage](reference/commands/catalog.md#driftgate-coverage)). An exclusion would drop the
 request, and its answer would no longer be compared at all. A known failure
 whose requests succeed now, or that matches no request, is reported as
 stale: remove it once the fix is accepted. Releases before `known_failures:`

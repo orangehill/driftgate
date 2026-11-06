@@ -116,6 +116,8 @@ records it read already.
 - Markdown: a short list.
 - JUnit: the lines in the suite's `system-out`.
 
+### What a green result does not prove
+
 A green result proves only that the responses of the requests in the
 catalog did not change. It does not exercise file uploads unless the
 catalog has [`multipart`](../configuration.md#multipart) requests with

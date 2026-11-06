@@ -18,10 +18,13 @@ the baseline from two equal captures.
 |---|---|
 | `--baseline <name>` | the baseline to make or compare with (default `local`) |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
-| `--skip-private` | accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3) |
-| `--read-only` | capture only the requests that do not change data, as `capture --read-only`; only with a baseline (the first run makes it from every request) |
-| `--target <service>` | work on this service only (repeatable or comma-separated); the check is then reported as partial |
+| `--skip-private` | accept that private bodies not on this machine are not compared |
+| `--read-only` | capture only the requests that do not change data, as `capture --read-only` |
+| `--target <service>` | work on this service only (repeatable or comma-separated) |
 
+- `--skip-private`: the status, headers and side effects of those requests are still compared. Without the flag, the result is incomplete (exit 3).
+- `--read-only` works only with a baseline: the first run makes it from every request.
+- `--target`: the check is then reported as partial.
 - `run` needs `.driftgate/catalog.json` to exist; `init` writes an empty one. An empty catalog is refused.
 - A catalog with requests that change data needs a state with a restore (`state:`), or `--allow-mutating-without-restore`.
 - When no request of the first capture gets an answer, `run` stops there (exit 3). It says how to start the application: its compose file, or the framework's own command, such as `php artisan serve`.
@@ -47,7 +50,7 @@ it with `discover --write` or `generate --write`. `run` still captures
 with the existing catalog and compares, so one run gives the whole
 picture.
 
-Later runs check the baseline in their coverage step. A baseline that
+Every run checks the baseline in its coverage step. A baseline that
 cannot be read for that check is a warning, and the catalog alone
 decides coverage.
 
@@ -56,7 +59,7 @@ decides coverage.
 - Without the baseline, `run` captures twice on the same state, and makes the baseline only when both captures agree. Otherwise it proposes allowlist entries with a format; you add the reason.
 - The second capture runs its `prepare:` commands and requests at least a second after the first one ended. It waits for what its restore did not take. A timestamp the application writes, such as `updated_at`, then differs between the two captures and is found, also when both are shorter than a second.
 - A baseline response that came only after a [retry](../capture.md#retries-of-requests-that-failed-under-load) is named in a warning, and keeps the mark in its record.
-- The new baseline is checked as [coverage](catalog.md#driftgate-coverage) checks one. Requests that failed in it are listed, and routes they leave uncovered make the run exit 1. The baseline is kept; a baseline that cannot be read for the check is a warning.
+- The new baseline is checked as [coverage](catalog.md#driftgate-coverage) checks one. Requests that failed in it are listed, and routes they leave uncovered make the run exit 1. The baseline is kept.
 
 ### Capture names in several worktrees
 
@@ -85,16 +88,19 @@ tag.
 | `--only <glob>` | only requests whose ID matches |
 | `--force` | replace an existing capture with this tag |
 | `--restore once\|each` | `once` (default) or `each`; see [Restore once or before each sequence](../capture.md#restore-once-or-before-each-sequence) |
-| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1); each run writes at least a second after the one before ended, as `run` does; the capture keeps the median response time of each request |
+| `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1) |
 | `--baseline <name>` | the state must match the one this baseline was captured from (default `local`) |
 | `--allow-remote` | allow a service outside `allow_hosts` |
 | `--allow-remote-mutations` | with `--allow-remote`, also send requests that change data or are repeated to it |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-fingerprint-check` | do not check the state fingerprint (diagnostics only; the capture is marked unreliable) |
-| `--calibrate` | decide `concurrency: auto`: measure, compare a capture at the chosen setting with a sequential one, record it in the baseline (implies `--repeat 2`; not with `--only`) |
+| `--calibrate` | decide `concurrency: auto` for the baseline ([how](../capture.md#parallel-requests-and-concurrency-auto)) |
 | `--read-only` | send only the requests that do not change data; see [below](#capture-only-the-requests-that-do-not-change-data) |
 | `--quiet` | no progress output |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
+
+- `--repeat N`: each run writes at least a second after the one before ended, as `run` does. The capture keeps the median response time of each request.
+- `--calibrate` measures, compares a capture at the chosen setting with a sequential one, and records the setting in the baseline. It implies `--repeat 2`, and does not go with `--only`.
 
 How the requests are ordered, restored, retried and checked is in
 [How a capture runs](../capture.md).
@@ -184,11 +190,14 @@ Compares a capture with a baseline or another capture (exit 1 on drift).
 | `--level status\|shape\|types\|values` | the level for this comparison; only stricter than the configured one |
 | `--only <glob>` | only requests whose ID matches |
 | `--format text\|json\|junit\|markdown` | output format (default text) |
-| `--max-drifts N` | list up to N drifts per request, every one (default 20; of a request whose status changed, the change, its location and content type and one line for the rest) |
+| `--max-drifts N` | list up to N drifts per request (default 20) |
 | `--skip-fingerprint-check` | compare captures made with the same flag |
 | `--show-private` | show values from private bodies, on your own machine only (never kept) |
-| `--skip-private` | accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3) |
+| `--skip-private` | accept that private bodies not on this machine are not compared |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
+
+- `--max-drifts N` lists every drift up to N. Of a request whose status changed, the default shows the change, its location and content type, and one line for the rest ([status changes](../reports.md#a-request-whose-status-changed)).
+- `--skip-private` is as for [`run`](#driftgate-run).
 
 `<tag>` `run` is this checkout's capture of `driftgate run`, when no
 baseline or capture is named `run`. What the output shows is in
@@ -224,8 +233,8 @@ Writes the last comparison again, for example as a pull-request comment.
 | Flag | Meaning |
 |---|---|
 | `--format text\|json\|junit\|markdown` | output format (default text) |
-| `--max-drifts N` | list up to N drifts per request, every one (default 20; of a request whose status changed, the change, its location and content type and one line for the rest) |
-| `--exit-code` | exit with the verdict of the comparison, as `compare` did: `1` on drift, `3` when incomplete, `0` clean (without it, `0`) |
+| `--max-drifts N` | as for [`compare`](#driftgate-compare) |
+| `--exit-code` | exit with the verdict of the comparison, as `compare` did ([below](#use-report-as-a-gate)) |
 
 - No format shows values from private bodies.
 - It exits `2` when there is no comparison yet or a flag is wrong, and `3` when the local store cannot be read.

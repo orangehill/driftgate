@@ -126,7 +126,7 @@ pristine copy of the database (MySQL, MariaDB, PostgreSQL,
 [SQL Server](docs/configuration.md#sql-server) 2017 and later, or an SQLite file such as a new Laravel application's
 [`database/database.sqlite`](docs/guides/laravel.md#sqlite)), then the
 first baseline, and says what to
-check by hand ([setup](docs/commands.md#setup)). After every upgrade
+check by hand ([setup](docs/reference/commands/project.md#driftgate-setup)). After every upgrade
 step, `driftgate run` compares with that baseline.
 
 **A worktree per change.** `.driftgate/` is not in git, so a worktree
@@ -283,7 +283,7 @@ With `baselines: local` nothing of this goes into git: the baseline stays
 on this machine, for the checks before each pull request. To share it
 with a team or a CI job, `driftgate baselines git` moves it into the
 repository; then commit `driftgate.yaml` and `driftgate/`
-([baselines](docs/commands.md#baselines)). Exit codes: `0` clean,
+([baselines](docs/reference/commands/project.md#driftgate-baselines)). Exit codes: `0` clean,
 `1` drift, `2` configuration error, `3` environment error or an incomplete
 result.
 

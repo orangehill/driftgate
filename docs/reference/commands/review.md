@@ -292,7 +292,7 @@ they disagree).
 | `--baseline <name>` | check this baseline only (default: all) |
 | `--adopt` | write the manifest of a baseline made before manifests (once) |
 | `--migrate-private` | keep the personal data of an older baseline out of git (once, with the key; below) |
-| `--migrate-state` | record the state fingerprint of a baseline made by an earlier release in the current format, after checking the data is the baseline's (once, after `driftgate seed`; below) |
+| `--migrate-state` | record an older baseline's state fingerprint in the current format (once, after `driftgate seed`; below) |
 
 - `verify` finds hand edits, deleted or extra files and edited log lines, also in a baseline's [expectations](#driftgate-expect) file.
 - `capture`, `compare` and `run` refuse such a baseline with exit 3.

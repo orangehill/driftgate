@@ -13,8 +13,8 @@ What each release adds and changes is in the
 
 - [Commands](commands.md): every command and flag, exit codes, environment
   variables, interrupts and the store lock; among them
-  [`allowlist check`](commands.md#allowlist-check) and
-  [`verify`](commands.md#verify) with `--migrate-state` and
+  [`allowlist check`](reference/commands/review.md#driftgate-allowlist-check) and
+  [`verify`](reference/commands/review.md#driftgate-verify) with `--migrate-state` and
   `--migrate-private`
 - [What to use for what](configuration.md#what-to-use-for-what): a task
   or symptom (an upload, rows in another order, a command, a gap) and the

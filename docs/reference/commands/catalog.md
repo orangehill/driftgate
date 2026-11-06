@@ -67,9 +67,10 @@ succeeds (exit 1 when there are any).
 | Flag | Meaning |
 |---|---|
 | `--format text\|json` | output format (default text) |
-| `--baseline <name>` | the baseline whose answers decide which requests succeed (default `local`, checked when it exists; a baseline named must exist, exit 2; `none`: the catalog alone) |
+| `--baseline <name>` | the baseline whose answers decide which requests succeed (default `local`) |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
+- `--baseline`: `local` is checked when it exists; a baseline named must exist (exit 2); `none` uses the catalog alone.
 - Each method of a route counts separately; `PUT` and `PATCH` of one route count as one.
 - A method is covered only by a request that should succeed. Error variants (`not-found`, `invalid-param` …) do not cover it.
 - Exclude a route on purpose in `.driftgate/exclusions.yaml`, with a reason.

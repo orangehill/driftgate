@@ -61,12 +61,14 @@ Sets up a new project from zero to its first baseline.
 
 | Flag | Meaning |
 |---|---|
-| `--yes` | ask nothing: take the best database setting and make the pristine copy. Where a value would have to be guessed, it stops and says what to pass |
+| `--yes` | ask nothing: take the best database setting and make the pristine copy |
 | `--project <name>` | the project name (default: the folder name) |
 | `--baselines local\|git` | as for `init`; default `local` |
 | `--driver mysql\|postgres\|sqlite\|sqlserver` | the database server, when the settings do not say |
 | `--database <name>` | the database the application uses (SQLite: its file, relative to the project root), when the settings do not say |
 | `--url <address>` | where the application answers, when the settings do not say it or say it wrongly |
+
+- `--yes` stops and says what to pass where a value would have to be guessed.
 
 Exit `0` once the baseline is there. That holds also when routes are
 left uncovered, or requests meant to succeed failed in it: the summary
