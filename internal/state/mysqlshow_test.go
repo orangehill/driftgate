@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/orangehill/driftgate/internal/dbx"
 )
 
@@ -309,6 +311,36 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		// [plain].
 		if want := []string{"news:1/2", "news_titles:1/2", "news_views:2/2", "plain:1/1"}; !slices.Equal(calls, want) {
 			t.Fatalf("batches %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("refused after good batches", func(t *testing.T) {
+		// A proxy that stops passing the multi-statement flag on after
+		// batches worked: the first 1064 switches to spread for the rest,
+		// with one note, and no batch is sent again.
+		defer func(n int) { showBatchMax = n }(showBatchMax)
+		showBatchMax = 2
+		calls := 0
+		defer func() { showManyFunc = (*MySQL).showMany }()
+		showManyFunc = func(m *MySQL, ctx context.Context, reqs []showReq, out []map[string]string) (int, error) {
+			calls++
+			if calls > 1 {
+				return 0, &mysql.MySQLError{Number: 1064, Message: "syntax"}
+			}
+			return m.showMany(ctx, reqs, out)
+		}
+		m, log, c := open(t)
+		ok := []showReq{reqs[0], reqs[2]}
+		if _, err := m.showAll(ctx, c, ok); err != nil || !m.multiOK.Load() {
+			t.Fatalf("first batch: %v", err)
+		}
+		got, err := m.showAll(ctx, c, reqs)
+		check(t, "refused later", got, err)
+		if _, err := m.showAll(ctx, c, reqs); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 2 || !m.multiRefused.Load() || strings.Count(log.String(), "SHOW CREATE is read one statement at a time") != 1 {
+			t.Fatalf("%d batches, refused %v, log %q", calls, m.multiRefused.Load(), log.String())
 		}
 	})
 

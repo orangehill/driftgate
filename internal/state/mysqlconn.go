@@ -49,13 +49,6 @@ func unknownVariable(err error) bool {
 	return errors.As(err, &me) && me.Number == 1193
 }
 
-// privilegeError reports the server's refusal of a setting for want of a
-// privilege (1227: SESSION_VARIABLES_ADMIN, SUPER, BINLOG ADMIN …).
-func privilegeError(err error) bool {
-	var me *mysql.MySQLError
-	return errors.As(err, &me) && (me.Number == 1227)
-}
-
 func serverError(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me)
@@ -83,7 +76,10 @@ func (m *MySQL) initConn(ctx context.Context, ex driver.ExecerContext, conn driv
 			m.connMu.Lock()
 			m.noFreshStats = true
 			m.connMu.Unlock()
-		case unlog && privilegeError(err):
+		case unlog && serverError(err):
+			// The documented case is 1227 (no SESSION_VARIABLES_ADMIN,
+			// BINLOG ADMIN …); any other refusal is taken the same way, as
+			// before: the copies are logged, with one note.
 			unlog = false
 			m.setLogBin(logBinOn)
 			m.binlog.Do(func() {

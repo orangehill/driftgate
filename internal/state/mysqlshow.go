@@ -67,7 +67,9 @@ func (m *MySQL) showAll(ctx context.Context, c *sql.Conn, reqs []showReq) ([]map
 			}
 			done = end
 			continue
-		case n == 0 && !m.multiOK.Load() && multiRefusal(err):
+		case n == 0 && multiRefusal(err):
+			// Also after batches that worked: a proxy that stops passing the
+			// flag on would otherwise cost a failed batch per statement.
 			m.multiRefused.Store(true)
 			m.multiNote.Do(func() {
 				m.logf("state %s: SHOW CREATE is read one statement at a time (a query of several statements was refused: %v)\n", m.o.Name, err)
