@@ -6,6 +6,8 @@ docs test (`go test ./internal/docscheck/`) checks the rules it can.
 
 ## Where a page belongs
 
+This is the structure the documentation is moving to; until a folder exists, a page stays where it is and follows the other rules here.
+
 - `docs/start/`: install, the tutorial, the first project.
 - `docs/concepts/`: ideas and principles.
 - `docs/guides/<group>/`: tasks, step by step.
@@ -21,6 +23,7 @@ docs test (`go test ./internal/docscheck/`) checks the rules it can.
 
 - Guides, start and concept pages: at most 25 words per sentence.
 - Reference pages and `docs/security.md`: at most 35 words per sentence.
+- `docs/glossary.md` and this guide: at most 25 words per sentence.
 - Paragraphs: at most 4 sentences in guides, 6 in reference.
 - Words outside code spans count as written. A code span counts as one word.
 

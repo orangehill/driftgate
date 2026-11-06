@@ -72,7 +72,7 @@ covers: a header, a JSON value, an HTML text or attribute, or a cell.
 
 | Kind | Meaning | Typical cause | Typical fix |
 |---|---|---|---|
-| `cell` | a spreadsheet or CSV cell's value changed | export change | a body rule for the cell (`xlsx:<sheet>!<cell>`) if it changes by itself |
+| `cell` | a spreadsheet or CSV cell's value changed | export change | a body rule at `xlsx:<sheet>!<cell>` or `csv!<cell>` if it changes by itself |
 | `cell-format` | a cell's number format or style changed | export library change | — |
 | `cell-formula` | a cell's formula changed | export library change | — |
 | `sheet-missing` | a worksheet is gone | export change | — |

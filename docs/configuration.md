@@ -175,7 +175,7 @@ Where the project's files are: `local` or `git`.
 | key without `key:` | `DRIFTGATE_KEY`, then `.driftgate/key` | `DRIFTGATE_KEY`, then the macOS Keychain |
 | for | checks on this machine before a pull request | baselines shared through git, CI |
 
-The place of `driftgate.yaml` is the mode: without the key, a file in
+The place of `driftgate.yaml` decides the layout: without the key, a file in
 `.driftgate/` is `local` and one at the project root is `git`, so a
 configuration of an earlier release stays as it was. A `baselines:` value that
 disagrees with the place of the file is refused (exit 2); [`driftgate

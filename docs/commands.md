@@ -641,7 +641,7 @@ see [the guide](guides/record.md#https-and-security). It runs until Ctrl-C
 which of them were uncovered before.
 Recording only proposes requests: `capture` records their responses on a
 restored state. Exit `0`; `2` for a non-loopback `--listen` without the flag
-or a target outside `allow_hosts`. See [the guide](guides/record.md).
+or a service outside `allow_hosts`. See [the guide](guides/record.md).
 
 ```sh
 driftgate record                                  # list what the session adds
@@ -667,7 +667,7 @@ Restores the state, sends the catalog and stores the responses under a tag.
 | `--restore once\|each` | `once` (default): restore before the read-only requests and once more before the requests that change data, which then run one after another, each on the data the ones before it left (a sequence with `restore: before` and a repeated request get their own restore); `each`: restore before every sequence and every request that changes data |
 | `--repeat N` | capture N times on the same state and propose allowlist entries for values that differ (default 1); each run writes at least a second after the one before ended, as `run` does; the capture keeps the median response time of each request |
 | `--baseline <name>` | the state must match the one this baseline was captured from (default `local`) |
-| `--allow-remote` | allow a target outside `allow_hosts` |
+| `--allow-remote` | allow a service outside `allow_hosts` |
 | `--allow-remote-mutations` | with `--allow-remote`, also send requests that change data or are repeated to it |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-fingerprint-check` | do not check the state fingerprint (diagnostics only; the capture is marked unreliable) |
