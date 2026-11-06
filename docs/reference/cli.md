@@ -16,7 +16,8 @@ driftgate help kinds           # every kind of drift, one line each
 The help of a command ends with a `Docs:` line. It links the command's
 section in the pages of the release you run, also after `go install …@<tag>`.
 A build from a checkout, or a `dev-…` build of a commit, links the
-`development` branch; any other build links `main`. An unknown command or help
+`development` branch; the GitHub Action's build and a release candidate
+link `main`. An unknown command or help
 topic names the table of
 [what to use for what](../configuration.md#what-to-use-for-what).
 

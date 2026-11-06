@@ -34,16 +34,18 @@ func docsBase() string {
 // docsRef is the git ref whose pages a build links, from its Version and
 // the module version Go recorded: a release tag in either (a release, or
 // go install …@v1.2.3) links that tag, so a link names a section the
-// release has; a build of a commit (dev-…, or dev from a checkout, whose
-// module version is "(devel)") links development, where the pages of
-// unreleased commands are first; any other build links main.
+// release has; any other build of a commit (dev-…, or dev from a checkout,
+// whose module version is "(devel)" or a pseudo-version Go stamped from
+// the repository) links development, where the pages of unreleased
+// commands are first; any other build (source, a release candidate)
+// links main.
 func docsRef(version, module string) string {
 	switch {
 	case releaseTag().MatchString(version):
 		return version
 	case releaseTag().MatchString(module):
 		return module
-	case strings.HasPrefix(version, "dev-"), version == "dev" && module == "(devel)":
+	case strings.HasPrefix(version, "dev-"), version == "dev":
 		return "development"
 	}
 	return "main"

@@ -61,8 +61,9 @@ func TestDocsBase(t *testing.T) {
 		{"dev", "(devel)", "development"},
 		{"dev-1a2b3c4d5e6f", "(devel)", "development"},
 		{"dev-1a2b3c4d5e6f", "", "development"},
-		{"dev", "v0.0.0-20261105120000-1a2b3c4d5e6f", "main"},
-		{"dev", "", "main"},
+		{"dev", "v0.0.0-20261105120000-1a2b3c4d5e6f", "development"},
+		{"dev", "v1.0.3-0.20261105120000-1a2b3c4d5e6f+dirty", "development"},
+		{"dev", "", "development"},
 		{"source", "(devel)", "main"},
 		{"v1.2.3-rc1", "(devel)", "main"},
 	} {
