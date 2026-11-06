@@ -376,7 +376,7 @@ baseline from two equal captures.
 | `--baseline <name>` | baseline to make or compare with (default `local`) |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-private` | accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3) |
-| `--read-only` | capture only the requests that do not change data, as `capture --read-only` |
+| `--read-only` | capture only the requests that do not change data, as `capture --read-only`; only with a baseline (the first run makes it from every request) |
 | `--target <service>` | work on this service only (repeatable or comma-separated); the check is then reported as partial |
 
 - Steps: `discover` (routes), `generate` (catalog), `coverage`, `seed` when
@@ -755,6 +755,14 @@ those, whatever the catalog says by then (`not sent: capture
 --read-only`), and lists those that change data under what the result
 does not cover. A request
 missing from it for any other reason still drifts.
+
+A read-only capture is never a baseline for the requests it left out:
+the first `run` makes the baseline from every request and refuses
+`--read-only`, and `baselines rebase --from` refuses a read-only
+capture. Compared against a read-only capture (`--against
+capture:<tag>`), the requests it left out were never checked: they are
+listed as such and the result is incomplete (exit 3), not new requests to
+accept.
 
 With a configuration without `state:` nothing is restored, seeded or
 fingerprinted, so this checks a server that must not change (a

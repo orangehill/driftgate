@@ -262,8 +262,9 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		}
 		return 0, err
 	}
-	unreliable := false         // the capture compared was made with --skip-fingerprint-check
-	var notSent map[string]bool // requests a read-only capture did not send
+	unreliable := false          // the capture compared was made with --skip-fingerprint-check
+	var notSent map[string]bool  // requests a read-only capture did not send
+	var baseLeft map[string]bool // requests a read-only set compared against did not send
 	for _, s := range []struct {
 		set  *snapshot.Set
 		name string
@@ -282,6 +283,12 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 			notSent = make(map[string]bool, len(meta.ReadOnlySkipped))
 			for _, id := range meta.ReadOnlySkipped {
 				notSent[id] = true
+			}
+		}
+		if meta != nil && meta.ReadOnly && s.set == base {
+			baseLeft = make(map[string]bool, len(meta.ReadOnlySkipped))
+			for _, id := range meta.ReadOnlySkipped {
+				baseLeft[id] = true
 			}
 		}
 		if meta != nil && meta.Unreliable && !o.skipFingerprint {
@@ -353,6 +360,17 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	}
 	if len(skipped) > 0 {
 		reqs, results, shown = withNotSent(cat, reqs, skipped, results, shown, allow)
+	}
+	// A request the set compared against left out as read-only is not a
+	// new request: it was never checked, and the result is incomplete.
+	if baseLeft != nil {
+		for _, rs := range [][]report.Result{results, shown} {
+			for i := range rs {
+				if rs[i].Note == report.NoteNoBaseline && baseLeft[rs[i].ID] {
+					rs[i].Note = report.NoteReadOnlyBaseline
+				}
+			}
+		}
 	}
 	// The baseline's bodies the comparison did not read are checked
 	// before anything of it is used.

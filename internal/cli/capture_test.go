@@ -458,10 +458,50 @@ func TestReadOnlyCapture(t *testing.T) {
 		t.Fatalf("catalog changed since: exit %d, %d skipped: %+v", code, r.Skipped, r.Results)
 	}
 	write(t, catPath, string(raw))
-	// A capture that sent everything compared with a read-only one as
-	// its baseline: the requests it lacks have no baseline.
-	if code, r := compareJSON(t, cfg, "full", "capture:ro"); code != ExitClean || r.Skipped != 4 {
-		t.Errorf("against a read-only capture: exit %d, %d skipped", code, r.Skipped)
+	// A capture that sent everything compared with a read-only one: the
+	// requests that one left out were never checked, so the result is
+	// incomplete (not new requests to accept).
+	if code, r := compareJSON(t, cfg, "full", "capture:ro"); code != ExitEnv || len(r.ReadOnlyBaseline) != 4 || len(r.NoBaseline) != 0 {
+		t.Errorf("against a read-only capture: exit %d, %+v", code, r.ReadOnlyBaseline)
+	}
+	code, out, _ = runCLI(t, "compare", "full", "--against", "capture:ro", "--config", cfg)
+	if code != ExitEnv || !strings.Contains(out, "incomplete: 4 requests not checked: capture:ro was captured with --read-only") {
+		t.Errorf("text: exit %d\n%s", code, out)
+	}
+	// Nor does a read-only capture become a baseline.
+	if code, out, errOut := runCLI(t, "run", "--config", cfg, "--allow-mutating-without-restore"); code != ExitClean {
+		t.Fatalf("run: %d\n%s\n%s", code, out, errOut)
+	}
+	code, out, errOut = runCLI(t, "baselines", "rebase", "local", "--from", "ro", "--reason", "x", "--allow-freeze", "--config", cfg)
+	if code != ExitConfig || !strings.Contains(errOut, "made with --read-only") {
+		t.Errorf("rebase from a read-only capture: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRunReadOnlyNeedsBaseline: the first run makes the baseline from
+// every request; --read-only there would leave the requests that change
+// data unchecked by every later run.
+func TestRunReadOnlyNeedsBaseline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\nstate:\n  db:\n    restore: [\"true\"]\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"news","method":"GET","path":"/news","storage":"public"},
+		{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only")
+	if code != ExitConfig || !strings.Contains(errOut, "makes it from every request") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	base := filepath.Join(root, "driftgate", "baselines", "local")
+	if _, err := os.Stat(base); err == nil {
+		t.Fatal("a baseline was made")
 	}
 }
 

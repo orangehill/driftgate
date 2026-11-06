@@ -29,6 +29,8 @@ func (r *Report) Markdown(maxDrifts int) string {
 		fmt.Fprintf(&b, "### DriftGate: ✗ %d of %d compared requests drifted\n\n", r.Drifted, r.Compared)
 	case r.Compared == 0:
 		fmt.Fprintf(&b, "### DriftGate: ✗ incomplete, nothing compared\n\n")
+	case len(r.ReadOnlyBaseline) > 0:
+		fmt.Fprintf(&b, "### DriftGate: ✗ incomplete, %s not in the read-only set compared against\n\n", plural(len(r.ReadOnlyBaseline), "request"))
 	case r.Incomplete():
 		fmt.Fprintf(&b, "### DriftGate: ✗ incomplete, %s not compared here\n\n", plural(len(r.PrivateMissing), "private request"))
 	case r.Expected > 0:
@@ -59,7 +61,7 @@ func (r *Report) Markdown(maxDrifts int) string {
 	}
 	// The expectations not met are named before what may be cut (ten at
 	// most): an expectation that held only in part is never left out.
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.UnmetNote(), r.KindsNote(), r.DominantNote(), r.NotCovered.CatalogLine()} {
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.UnmetNote(), r.KindsNote(), r.DominantNote(), r.NotCovered.CatalogLine()} {
 		if note != "" {
 			fmt.Fprintf(&b, "\n> %s\n", mdText(note))
 		}

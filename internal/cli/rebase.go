@@ -271,6 +271,8 @@ func rebaseChecks(p *config.Project, oldMeta *snapshot.Meta, cur *snapshot.Set, 
 	switch {
 	case meta == nil || meta.Incomplete:
 		return nil, envErr(fmt.Errorf("capture %s is incomplete (interrupted?); capture it again with --force", tag))
+	case meta.ReadOnly:
+		return nil, configErr("capture %s was made with --read-only: as a baseline it would leave the requests that change data unchecked; capture it again without --read-only", tag)
 	case meta.State == nil && oldMeta != nil && oldMeta.State != nil:
 		return nil, configErr("capture %s records no state fingerprint, and the baseline does, so later captures are checked against its data; capture it with the state restored", tag)
 	case meta.State != nil && meta.StateFormat != state.FingerprintFormat:

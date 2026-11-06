@@ -100,6 +100,9 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if first && *readOnly {
+		return 0, configErr("there is no baseline yet: the first run makes it from every request, so it takes no --read-only (a read-only baseline would leave the requests that change data unchecked)")
+	}
 	if first && sel != nil {
 		return 0, configErr("there is no baseline yet: the first run makes it for every service, so it takes no --target")
 	}

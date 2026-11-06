@@ -92,7 +92,7 @@ func (r *Report) JUnit(w io.Writer, maxDrifts int) error {
 		}
 		notes = append(notes, r.TimingsNote())
 	}
-	for _, note := range []string{r.RetryNote(), r.DominantNote(), r.NotCovered.CatalogLine(), r.NotCovered.NotCoveredNote()} {
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.RetryNote(), r.DominantNote(), r.NotCovered.CatalogLine(), r.NotCovered.NotCoveredNote()} {
 		if note != "" {
 			notes = append(notes, note)
 		}
