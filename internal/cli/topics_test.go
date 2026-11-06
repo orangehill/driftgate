@@ -7,10 +7,13 @@ import (
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/data"
+	"github.com/orangehill/driftgate/internal/routes"
 )
 
-// TestHelpTopics: help catalog and help allowlist list every field of
-// those files and the section to read (help allowlist also the allowlist
+// TestHelpTopics: help catalog, allowlist, exclusions, classify and
+// config list every field of those files and the section to read (help allowlist also the allowlist
 // command); an unknown topic points to the table of what to use for a task.
 func TestHelpTopics(t *testing.T) {
 	fields := func(v any, tag string) []string {
@@ -44,9 +47,15 @@ func TestHelpTopics(t *testing.T) {
 		want  []string
 	}{
 		{"catalog", append(append(fields(catalog.Request{}, "json"), fields(catalog.Catalog{}, "json")...), fields(multipart, "json")...),
-			[]string{"(beside driftgate.yaml", docsBase() + "configuration.md#catalogjson", docsBase() + tasksDoc}},
+			[]string{"(beside driftgate.yaml", docsBase() + "reference/catalog-json.md#request-fields", docsBase() + tasksDoc}},
 		{"allowlist", []string{"headers", "body", "arrays", "version", "request", "target", "reason"},
-			[]string{"(beside driftgate.yaml)", docsBase() + "configuration.md#allowlistyaml", "usage: driftgate allowlist check"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/allowlist-yaml.md", "usage: driftgate allowlist check"}},
+		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/exclusions-yaml.md"}},
+		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), fields(data.ColumnRule{}, "yaml")...), fields(data.SchemaRule{}, "yaml")...),
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/classify-yaml.md"}},
+		{"config", fields(config.Config{}, "yaml"),
+			[]string{"driftgate.yaml", docsBase() + "reference/driftgate-yaml.md#top-level-keys"}},
 	} {
 		code, out, errOut := runCLI(t, "help", c.topic)
 		if code != ExitClean || errOut != "" {

@@ -2,3 +2,4 @@
 # binaries and other sites. TestNoLinksIntoIndexes fails when one of our
 # own pages links into a section of one; a link to the page itself is fine.
 docs/commands.md
+docs/configuration.md

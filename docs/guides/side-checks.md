@@ -9,7 +9,7 @@ responses.
 
 ## Output of a command: a schema dump, a compiler
 
-A [command step](../configuration.md#command-steps) with `"output": true`
+A [command step](../reference/catalog-json.md#command-steps) with `"output": true`
 compares what a program prints, after the `output_ignore` patterns are
 removed. Its exit code is compared too, so a command that starts failing
 is a drift.
@@ -93,7 +93,7 @@ or expected (`driftgate expect --ref <ticket>` in freeze mode).
 ## Files on disk and Redis
 
 A `state:` component without a driver is restored and fingerprinted by
-commands ([state](../configuration.md#state)). Every capture then starts
+commands ([state](../reference/state.md)). Every capture then starts
 from the same files and keys, and a request that writes to them shows a
 side effect `<component>/<component>` (the fingerprint is one item: the
 SHA-256 of the command's output).
@@ -198,7 +198,7 @@ driftgate run                                     # this install against the mai
   `.env`) `working:` and `pristine:` ([setup](../reference/commands/project.md#driftgate-setup)); the
   address its `APP_URL` gives becomes `base_url`. Responses that write
   absolute URLs are compared through both origins
-  ([target and targets](../configuration.md#target-and-targets)).
+  ([target and targets](../reference/driftgate-yaml.md#target-and-targets)).
 - `seed:` commands that need development packages (a seeder that uses a
   fake-data library) do not run in this install. Seed it from a dump
   instead, or take the data as it is: `driftgate seed --skip-commands`.

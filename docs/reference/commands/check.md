@@ -165,7 +165,7 @@ driftgate compare live-after --against capture:live-before
 - `allow_hosts` names the server's address, which is outside the local and private ranges. Without it, the captures need `--allow-remote`.
 - Requests that change data are never sent, so `--allow-remote-mutations` is not needed.
 - Another developer's traffic on a shared server shows as drift in the data the responses hold. A side effect is not recorded without `state:`.
-- A login usually writes (a last-login time, a session row), so do not let DriftGate log in on such a server. Give each identity a token issued beforehand (an API or personal access token) under [`identities:`](../../configuration.md#identities-and-tokens), such as `admin: { env: DG_TOKEN_ADMIN }`.
+- A login usually writes (a last-login time, a session row), so do not let DriftGate log in on such a server. Give each identity a token issued beforehand (an API or personal access token) under [`identities:`](../driftgate-yaml.md#identities-and-tokens), such as `admin: { env: DG_TOKEN_ADMIN }`.
 - A page that loads data with its own requests (a filter, a search, a panel's widgets) is checked only if those requests are in the catalog. Use the frontend once through [`driftgate record`](catalog.md#driftgate-record) on a copy where writes are allowed, and add what it proposes.
 
 ### Capture tags

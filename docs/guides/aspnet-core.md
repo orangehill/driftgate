@@ -3,7 +3,7 @@
 An ASP.NET Core API whose data is in SQL Server through Entity Framework
 Core. The example is a project `Shop.Api` in `src/Shop.Api/`, run with
 `dotnet run`, on SQL Server 2022 in a container. What DriftGate restores
-and how is under [SQL Server](../configuration.md#sql-server).
+and how is under [SQL Server](../reference/databases/sql-server.md).
 
 ## 1. The database
 
@@ -44,7 +44,7 @@ certificate needs `TrustServerCertificate=True` in the application's
 string. DriftGate reads the client from the `.csproj` and connects with
 the same TLS, never a weaker one: with EF Core 6 or System.Data.SqlClient
 it follows their defaults instead (the table under
-[SQL Server](../configuration.md#sql-server)).
+[SQL Server](../reference/databases/sql-server.md)).
 
 ## 2. init and setup
 
@@ -135,7 +135,7 @@ The table of `AddDistributedSqlServerCache` (made by `dotnet sql-cache
 create`), `dbo.SessionCache` above, is a cache: `restore_empty` empties
 it at every restore and never compares it, so a cached value does not
 carry over from one capture to the next
-([restore_only](../configuration.md#restore_only)). Used for sessions,
+([restore_only](../reference/state.md#restore_only)). Used for sessions,
 excluding it keeps a browser's session through restores.
 
 An excluded table keeps its definition in the pristine copy, without
@@ -208,7 +208,7 @@ seed:
 - `Cache=Shared` is fine; `Mode=Memory` (an in-memory database) and an
   encrypted file (`Password=`) are refused, and so is a file that
   `|DataDirectory|` names: give the path. See
-  [SQLite](../configuration.md#sqlite).
+  [SQLite](../reference/databases/sqlite.md).
 
 ## 8. The first run
 

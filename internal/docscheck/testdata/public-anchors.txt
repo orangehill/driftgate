@@ -181,3 +181,11 @@ docs/reference/commands/review.md#driftgate-baselines-rebase
 docs/reference/commands/project.md#driftgate-key-create
 docs/reference/commands/project.md#driftgate-version
 docs/reference/cli.md#exit-codes
+
+# The pages the help topics link (driftgate help catalog, allowlist, exclusions, classify, config, kinds).
+docs/reference/catalog-json.md#request-fields
+docs/reference/allowlist-yaml.md
+docs/reference/exclusions-yaml.md
+docs/reference/classify-yaml.md
+docs/reference/driftgate-yaml.md#top-level-keys
+docs/reference/drift-kinds.md

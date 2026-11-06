@@ -1,0 +1,100 @@
+# MySQL and MariaDB
+
+What DriftGate does with a MySQL or MariaDB database under `state:`.
+The keys and the rules every driver shares are in
+[State: restoring the data](../state.md); the DSN is in
+[Database connection settings](../database-settings.md).
+
+## How seed and restore work
+
+- A restore copies only the tables that changed, with their counters, triggers and views.
+- `seed` marks the pristine database it makes with a table `driftgate_pristine`, which is never fingerprinted or restored ([how seed and restore work](../state.md#how-seed-and-restore-work)).
+- `seed` needs `CREATE` and `DROP` on the pristine database ([what the database user needs](../state.md#what-the-database-user-needs)).
+- Triggers and views are fingerprinted with the collation they were made with, which a restore keeps.
+
+## The binary log and replicas
+
+Restores and seeds stay out of the binary log: DriftGate's sessions set
+`sql_log_bin = 0`. MySQL 8 logs by default, and a restore would
+otherwise log every row it copies.
+
+- The user needs `SESSION_VARIABLES_ADMIN` (MySQL) or `BINLOG ADMIN` (MariaDB) for it.
+- Without it the copies are logged as before, with one note in the log.
+
+When something reads the server's binary log, restores and seeds are
+logged, so a replica gets them too. An application that reads from a
+replica would otherwise see old rows, and later replication may break.
+
+DriftGate checks once per command for:
+
+- a replica (`SHOW REPLICAS`, or `SHOW SLAVE HOSTS`);
+- another client reading the log: a `Binlog Dump` thread, such as a change-data-capture tool;
+- a Galera node, or group replication.
+
+When the user may not list replicas, DriftGate cannot tell, and the
+copies are logged; the log says why. Listing replicas needs
+`REPLICATION SLAVE` on MySQL, and `REPLICATION MASTER ADMIN` on MariaDB
+(`REPLICATION SLAVE` before 10.5).
+
+A replica that is disconnected at that moment is not seen. Stop it from
+replicating the state databases (`replicate-ignore-db`), or give the user
+no rights to list replicas.
+
+## The optional PROCESS privilege
+
+A fingerprint reads the server's write counters first. When none moved
+since the last fingerprint, no table is read again. When only rows were
+written, per-table counters name the tables to checksum again; anything
+else reads every table.
+
+The per-table counters need settings DriftGate reads but never changes,
+and some grants:
+
+- MySQL: each table's `UPDATE_TIME`, and the write counts of `performance_schema`. That needs `performance_schema` on, table I/O instrumented for the working database and every connection, and `SELECT ON performance_schema.*`.
+- MariaDB: `information_schema.TABLE_STATISTICS`, which needs `userstat=ON`.
+- Both: the global `PROCESS` privilege. Through `SHOW ENGINE INNODB STATUS`, it tells whether another connection still holds uncommitted writes.
+
+Without them the result is the same, and fingerprints still work. But
+every fingerprint after any write then checksums every table, which is
+slower on a large database. The log says once how fingerprints are taken,
+and why the per-table counters are off, naming the missing grant.
+
+## Column collations on MySQL 8
+
+A column that takes its table's collation without naming it keeps it
+that way through a seed and a restore. That is any such column of a
+table whose collation is not its character set's default, as
+`utf8mb3_unicode_ci` in a Laravel 5.5 table. A pristine copy seeded by
+an earlier release needs a step of its own:
+[column collations after v1.0.2 on MySQL 8](../upgrading-driftgate.md#column-collations-after-v102-on-mysql-8).
+
+## Run the server in a container
+
+Start the server with `--skip-name-resolve` (compose:
+`command: --skip-name-resolve`). Without it the server looks up the name
+of every client that connects, and a slow lookup makes each connection
+slow. Measured: fingerprints of 622 requests took 29 minutes, and 45
+seconds with it.
+
+- The official images set it in a file that a project's own mounted configuration can replace: `/etc/my.cnf` for `mysql`, `/etc/mysql/mariadb.conf.d/05-skipcache.cnf` for `mariadb`.
+- Accounts are then matched by address (`'app'@'%'`), not by host name.
+
+## Connections DriftGate keeps open
+
+DriftGate keeps up to 13 connections per database component open for
+the whole command, so fingerprints and restores do not connect again.
+Three components take 39, against the default `max_connections` of 151
+(MariaDB 10.3: 100).
+
+- Twelve serve fingerprints and restores. Each is prepared once, when it is made, with one `SET` statement for all its session settings.
+- One more reads `SHOW CREATE` for many objects in one query of many statements. It sends only quoted names, no parameters, and needs no extra grant.
+- When a server or proxy refuses a query of several statements, the statements are read one at a time, spread over several connections, with one line in the log. So it is when the connection's character set cannot quote a name safely.
+- Results and hashes are the same either way, and nothing needs a new seed.
+
+## Generated and virtual columns on MariaDB
+
+- A table with a generated column is fingerprinted from its rows: MariaDB's own table checksum of such a table changes without a change of data.
+- On MariaDB 10.3 and 10.4, a table with a `VIRTUAL` column is restored whole, not by chunks. The chunked restore made those versions crash now and then.
+
+---
+**Related:** [State: restoring the data](../state.md) · [Database connection settings](../database-settings.md) · [driftgate seed](../commands/state.md#driftgate-seed)

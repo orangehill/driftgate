@@ -449,7 +449,7 @@ Finds the first commit of each drift group of the last comparison
 | `--expected` | chase the drifts expectations name too ([`expect`](#driftgate-expect)); without it they are left out, as accepted ones are |
 
 It needs `bisect.checkout` in `driftgate.yaml`
-([bisect](../../configuration.md#bisect)). The task is in the
+([bisect](../driftgate-yaml.md#bisect)). The task is in the
 [bisect guide](../../guides/bisect.md).
 
 ```sh
@@ -458,4 +458,4 @@ driftgate bisect v2.3.0 HEAD
 ```
 
 ---
-**Related:** [Drift kinds](../drift-kinds.md) · [Reading a report in detail](../reports.md) · [allowlist.yaml](../../configuration.md#allowlistyaml)
+**Related:** [Drift kinds](../drift-kinds.md) · [Reading a report in detail](../reports.md) · [allowlist.yaml](../allowlist-yaml.md)

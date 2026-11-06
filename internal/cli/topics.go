@@ -51,12 +51,13 @@ func docsRef(version, module string) string {
 	return "main"
 }
 
-// tasksDoc is the table of what to use for a task, under docsBase.
+// tasksDoc is the table of what to use for a task, under docsBase; it is
+// kept on the configuration index page until capabilities.md takes it.
 const tasksDoc = "configuration.md#what-to-use-for-what"
 
 var topics = []topic{
 	{name: "catalog", summary: "catalog.json (beside driftgate.yaml: .driftgate/catalog.json, or driftgate/catalog.json with baselines: git) lists the requests every capture sends; generate writes it, entries may be written by hand. Its keys:",
-		doc: "configuration.md#catalogjson", fields: [][2]string{
+		doc: "reference/catalog-json.md#request-fields", fields: [][2]string{
 			{"version", "1"},
 			{"requests", "the requests, in order; each has the keys below"},
 			{"id", "the request's name, unique; reports, --only and globs use it"},
@@ -82,13 +83,58 @@ var topics = []topic{
 			{"sequences", "requests that run in order: id, requests (IDs), restore: before"},
 		}},
 	{name: "allowlist", summary: "allowlist.yaml (beside driftgate.yaml) names what may change between responses, each rule with a reason. Its keys:",
-		doc: "configuration.md#allowlistyaml", fields: [][2]string{
+		doc: "reference/allowlist-yaml.md", fields: [][2]string{
 			{"version", "1"},
 			{"headers:", "a header's value may change: name, and format or ignore_case"},
 			{"body:", "a value in a body may change: path, format, parts; any_length for arrays"},
 			{"arrays:", "a JSON array's items: path; key pairs them by a member, any_order lets them come in another order"},
 			{"request, target", "on every rule: only these requests (a glob), only this service"},
 			{"reason", "on every rule, required"},
+		}},
+	{name: "exclusions", summary: "exclusions.yaml (beside driftgate.yaml) names routes that are deliberately not checked, and requests that fail in the baseline, each with a reason. Its keys:",
+		doc: "reference/exclusions-yaml.md", fields: [][2]string{
+			{"version", "1"},
+			{"routes:", "routes not checked: generate makes no requests for them, coverage counts them as excluded"},
+			{"route", "of routes: a METHOD /path glob; without a method it matches every method"},
+			{"known_failures:", "requests that fail in the baseline: kept, compared, listed instead of failing coverage"},
+			{"request", "of known_failures: a request ID or glob"},
+			{"status", "of known_failures: the failure acknowledged (500, 5xx, error, timeout); without it, any failure"},
+			{"ref", "of known_failures: a ticket or link"},
+			{"target", "of routes: only routes of this service"},
+			{"reason", "on every entry, required"},
+		}},
+	{name: "classify", summary: "classify.yaml (beside driftgate.yaml) holds a rule for every column of the data module's source database; data classify proposes them. Its keys:",
+		doc: "reference/classify-yaml.md", fields: [][2]string{
+			{"version", "1"},
+			{"tables:", "table name → its rule"},
+			{"action", "of a table: copy (default), empty or skip; of a serialized-php column: empty-table or null"},
+			{"columns", "of a table: column name → its rule, one word (keep, file, a strategy) or a mapping"},
+			{"kind", "of a column: keep, personal, serialized-php or file"},
+			{"strategy", "of a personal column: universal, email, password, token, free-text, html, json, null, empty"},
+			{"paths, other", "of a json column: path glob → strategy or keep; strings under no path"},
+			{"options", "of a file column: passed to its placeholder"},
+			{"kinds", "of a schema entry: the kinds of personal data confirmed there"},
+			{"schema:", "schema object → the personal data confirmed in it"},
+			{"subset:", "the rows data subset takes: nullable, tables, references"},
+			{"reason, proposed", "on tables, columns and schema entries; proposed until a person checks the rule"},
+		}},
+	{name: "config", summary: "driftgate.yaml (.driftgate/driftgate.yaml, or driftgate.yaml at the root with baselines: git) configures the project. Its top-level keys:",
+		doc: "reference/driftgate-yaml.md#top-level-keys", fields: [][2]string{
+			{"version, project", "1, and the project's name"},
+			{"mode, level", "freeze or evolve; how far a comparison goes (status, shape, types, values)"},
+			{"baselines, store, key", "the layout (local or git), the local store, the project key"},
+			{"target, targets", "the service, or several services by name"},
+			{"identities, tokens", "users and where their tokens come from"},
+			{"state", "what is restored before captures: databases, or commands"},
+			{"seed, prepare, guards", "load the data; run after every restore; checks before requests that change data"},
+			{"discover", "the adapters that find the routes"},
+			{"templates, generate, params", "the request variants per route, the identity, the parameter values"},
+			{"storage, pii", "public or private bodies; values the personal-data detector lets through"},
+			{"observe", "generated requests measured, never compared"},
+			{"requests", "whether generated requests change data, and their bodies"},
+			{"uploads", "the folder of real files that requests upload"},
+			{"bisect", "the hooks of driftgate bisect"},
+			{"data", "the data module"},
 		}},
 	{name: "kinds", summary: "Every drift has a kind: the first word of a drift line, and \"kind\" in JSON. The names are stable. The kinds:",
 		doc: "reference/drift-kinds.md", fields: kindFields()},

@@ -125,7 +125,7 @@ application running, it recognises the framework, reads the database and
 the address from the project's own settings (`.env`, `appsettings.json`,
 compose…), writes `.driftgate/`, makes the key and, after asking, the
 pristine copy of the database (MySQL, MariaDB, PostgreSQL,
-[SQL Server](docs/configuration.md#sql-server) 2017 and later, or an SQLite file such as a new Laravel application's
+[SQL Server](docs/reference/databases/sql-server.md) 2017 and later, or an SQLite file such as a new Laravel application's
 [`database/database.sqlite`](docs/guides/laravel.md#sqlite)), then the
 first baseline, and says what to
 check by hand ([setup](docs/reference/commands/project.md#driftgate-setup)). After every upgrade
@@ -138,7 +138,7 @@ takes the main worktree's project with its baseline and key, switches
 `.env` names (after asking; `--yes` says yes), and makes no
 baseline of its own; `driftgate run` then compares the worktree's code
 with the main worktree's baseline
-([baselines](docs/configuration.md#baselines)).
+([baselines](docs/reference/driftgate-yaml.md#baselines)).
 
 `driftgate init` writes only the configuration (with the database found
 commented out), for the steps one by one.
@@ -164,7 +164,7 @@ Everything DriftGate keeps is in .driftgate/, which git ignores (.gitignore).
 Everything is in the project's `.driftgate/` folder, which `init` adds to
 `.gitignore` (with `--baselines git`, `driftgate.yaml` and `driftgate/`
 go into the repository instead, and the key into the macOS Keychain; see
-[baselines](docs/configuration.md#baselines)). The demo is not a
+[baselines](docs/reference/driftgate-yaml.md#baselines)). The demo is not a
 framework `init` knows, so tell DriftGate its address, its routes and how
 to reset its data. In `.driftgate/driftgate.yaml` set `base_url:
 http://127.0.0.1:8920` and `mode: evolve` (so that changes can be
@@ -320,7 +320,7 @@ pull-request comment, in the job summary and as a JUnit file. Full guide:
   (also `allowlist check`, which finds rules that cannot apply, and
   `verify --migrate-state` / `--migrate-private` for baselines of an earlier
   release)
-- [What to use for what](docs/configuration.md#what-to-use-for-what): an
+- [What to use for what](docs/configuration.md): an
   upload, rows in another order, a command, a value that may change, a gap
 - [Configuration](docs/configuration.md): `driftgate.yaml`,
   `allowlist.yaml`, `exclusions.yaml`, `classify.yaml`, `catalog.json`

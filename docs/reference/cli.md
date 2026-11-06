@@ -19,7 +19,7 @@ A build from a checkout, or a `dev-…` build of a commit, links the
 `development` branch; the GitHub Action's build and a release candidate
 link `main`. An unknown command or help
 topic names the table of
-[what to use for what](../configuration.md#what-to-use-for-what).
+[what to use for what](../configuration.md).
 
 ## Common flags
 
@@ -28,7 +28,7 @@ topic names the table of
 | `--config <path>` | the configuration file; every command except `version` takes it |
 | `--target <service>` | with several services, work on the named ones only (repeatable or comma-separated) |
 
-- Without `--config`, a command uses `.driftgate/driftgate.yaml` or `driftgate.yaml` in this folder. Otherwise it takes the nearest folder above that has one, up to the top of the git work tree ([baselines](../configuration.md#baselines)).
+- Without `--config`, a command uses `.driftgate/driftgate.yaml` or `driftgate.yaml` in this folder. Otherwise it takes the nearest folder above that has one, up to the top of the git work tree ([baselines](driftgate-yaml.md#baselines)).
 - Without `--target`, every command works on all services. `run` reports a check limited by `--target` as partial.
 - Flags go before or after the positional arguments: `driftgate compare before --only 'get-*'` works.
 
@@ -38,7 +38,16 @@ The paths in these pages are those of the local layout
 (`baselines: local`): everything is in the project's `.driftgate/`
 folder. With `baselines: git`, the same files are in `driftgate/`,
 `driftgate.yaml` is at the project root, and the local store is in
-`~/.driftgate/<project>` ([baselines](../configuration.md#baselines)).
+`~/.driftgate/<project>` ([baselines](driftgate-yaml.md#baselines)).
+
+Commands find the project from any folder inside it: the nearest folder
+that has `.driftgate/driftgate.yaml` or `driftgate.yaml`, up to the top of
+the git work tree. `--config <path>` names the file instead.
+
+A folder with both files is refused, with the commands that settle it.
+That happens after checking out a branch from before a switch of layouts.
+`.driftgate/` holds the store and the key, so it is moved aside, never
+deleted.
 
 ## Which baseline a command uses
 

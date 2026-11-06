@@ -54,13 +54,13 @@ to do it.
   on the pristine file opened read-only, on a connection that lets only
   reads compile, without `ATTACH`, `PRAGMA` or the functions and tables
   that reach other files or the file's pages
-  ([SQLite](configuration.md#sqlite)). On SQL Server a read-only database
+  ([SQLite](reference/databases/sqlite.md)). On SQL Server a read-only database
   still runs `EXEC xp_cmdshell` and `OPENROWSET`, so the query is also
   refused with any other statement's keyword (T-SQL needs no `;` between
   statements), `NEXT VALUE FOR`, names of three or four parts (another
   database or server), and the system procedures, functions and views
   that reach files, programs, other servers, sessions or logins
-  ([SQL Server](configuration.md#sql-server)). Its login needs
+  ([SQL Server](reference/databases/sql-server.md)). Its login needs
   `dbcreator` and `db_owner` in the working database, not `sysadmin`
   (`sa` only for a local container). `dbcreator` lets the login take any
   database of the server offline, restore over it or drop it; the
@@ -172,7 +172,7 @@ to do it.
   configuration file itself. A database DSN can also come from the file
   where the project already keeps it (`{ dotenv: .env }`,
   `{ appsettings: … }`, …; see
-  [database DSNs](configuration.md#database-dsns)): `driftgate.yaml` holds
+  [database DSNs](reference/database-settings.md)): `driftgate.yaml` holds
   only the file's name and key, the file is read when a command runs, and
   nothing of it is copied or written anywhere. The file must be inside the
   project, also past symbolic links; only the .NET user secrets of a
@@ -193,7 +193,7 @@ to do it.
   a setting names by a relative path must be inside the project (an
   absolute path or `~/` may name a system CA; the file is only read as a
   certificate, and no message shows what it holds)
-  ([SQL Server](configuration.md#sql-server)). A
+  ([SQL Server](reference/databases/sql-server.md)). A
   connection string is never read as a URL or the MySQL driver's form, so
   no part of its password is taken for the user and shown. No project code runs to read
   a setting: PHP, Python and Ruby (ERB) are read as text. A password read
@@ -239,7 +239,7 @@ to do it.
   project's `.driftgate/` folder. DriftGate adds it to `.gitignore` and,
   before it writes the store or the key there, checks with `git
   check-ignore` that git ignores the folder; when git does not, the command
-  stops (see [baselines](configuration.md#baselines)). `driftgate baselines
+  stops (see [baselines](reference/driftgate-yaml.md#baselines)). `driftgate baselines
   git` checks what would enter the repository as `verify` does and never
   copies the key file into it.
 - Where a private body is not available (CI, another machine), the body is

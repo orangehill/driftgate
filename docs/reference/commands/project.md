@@ -18,7 +18,7 @@ this folder, from the frameworks it finds.
 | `--baselines local\|git` | `local` (default): everything in `.driftgate/`, which git ignores; `git`: `driftgate.yaml` and `driftgate/` in the repository, the store in `~/.driftgate/<project>` |
 | `--service <name>` | write only this service (repeatable or comma-separated) |
 
-- `local` adds `.driftgate/` to `.gitignore`, and to `.dockerignore` where Docker would copy it ([baselines](../../configuration.md#baselines)).
+- `local` adds `.driftgate/` to `.gitignore`, and to `.dockerignore` where Docker would copy it ([baselines](../driftgate-yaml.md#baselines)).
 - `--config <path>` decides the layout too: a path in `.driftgate/` is `local`, any other `git`.
 - In a worktree whose main worktree has a `baselines: local` project, `init` points to [setup](#setup-in-a-git-worktree) (exit 2).
 
@@ -40,12 +40,12 @@ driftgate init --project shop
 The database and the address come from the project's own settings:
 `.env`, `appsettings.json`, `application.properties`, `database.yml`,
 compose files and the others under
-[database DSNs](../../configuration.md#database-dsns).
+[database DSNs](../database-settings.md).
 
 - `state: db` names the setting (`dsn: { dotenv: .env }`), never its value. `base_url` is the address found.
 - `state:` is written **commented out**: a `run` would otherwise create the pristine database unasked. `driftgate setup` turns it on after asking, or you uncomment it.
 - With several settings, it takes the one `setup --yes` would, and lists the others above `state:`.
-- For every driver, it writes the tables the framework keeps its own state in (sessions, cache, jobs; Hangfire, Solid) as `exclude:` and `restore_empty:` ([the framework's own tables](../../configuration.md#the-frameworks-own-tables)).
+- For every driver, it writes the tables the framework keeps its own state in (sessions, cache, jobs; Hangfire, Solid) as `exclude:` and `restore_empty:` ([the framework's own tables](../state.md#the-frameworks-own-tables)).
 
 ## driftgate setup
 
@@ -124,9 +124,9 @@ service, or a variable of this shell.
 ### When the database user may not create a database
 
 Before it makes the pristine copy, setup says what an administrator must
-grant. The statements are under [state](../../configuration.md#state) for
+grant. The statements are under [state](../state.md) for
 MySQL, MariaDB and PostgreSQL, and under
-[SQL Server](../../configuration.md#sql-server); `sa` needs nothing.
+[SQL Server](../databases/sql-server.md); `sa` needs nothing.
 
 - For SQL Server it asks for the server role `dbcreator` and `db_owner` in the working database. `dbcreator` lets the login take any database of the server offline, restore over it or drop it.
 - So it also prints the narrower grant: `CREATE ANY DATABASE` and ownership of the working database. That changes the database's owner, and the login must have no user in it.
@@ -144,10 +144,10 @@ a missing right are:
 ### When setup finds an SQLite file
 
 SQLite is the default of Laravel 11 and later, and is used by Django,
-Rails, Prisma and ASP.NET ([SQLite](../../configuration.md#sqlite)).
+Rails, Prisma and ASP.NET ([SQLite](../databases/sqlite.md)).
 
 - `working:` is the file, the pristine copy is a file of DriftGate's store, and nothing is granted.
-- As for every driver, setup proposes the framework's own tables for `exclude` and `restore_empty` ([which](../../configuration.md#the-frameworks-own-tables)). The default is yes, and `--yes` says yes.
+- As for every driver, setup proposes the framework's own tables for `exclude` and `restore_empty` ([which](../state.md#the-frameworks-own-tables)). The default is yes, and `--yes` says yes.
 - When the file does not exist yet, setup says to run the application's migrations first (exit 2).
 - `--driver sqlite` for a setting that names a database server stops setup (exit 2). So does another driver for a setting that names an SQLite file.
 
@@ -163,13 +163,17 @@ does not carry the file.
 This applies to a worktree added with `git worktree add` whose main
 worktree has a `baselines: local` project.
 
-- Setup takes that project instead of starting one: the configuration, catalog, allowlist, routes, baselines with their acceptance logs, and the key.
-- It captures no baseline: `run` compares the worktree's code with the main worktree's baseline.
-- When the worktree's settings name a database of their own, setup offers to make it `working:` and `pristine:` (`--yes`: it does). The address they give becomes `base_url`; comments are kept.
-- Settings that name the main worktree's database, or none, stop setup before it takes anything (exit 2). So does a main worktree without a baseline.
+Every worktree has its own `.driftgate/`, and git does not carry it, so
+a new worktree starts without one; its commands name the main
+worktree's project until setup runs ([baselines](../driftgate-yaml.md#baselines)).
 
-What else a worktree takes, and why, is under
-[baselines](../../configuration.md#baselines).
+- Setup takes that project instead of starting one: the configuration, catalog, allowlist, routes, exclusions, the baselines with their acceptance logs, the key, and the private bodies those baselines name.
+- It does not take the captures or pristine records. The worktree's runs compare its changed code with the main worktree's baseline, never with a baseline made from that code.
+- It captures no baseline: `run` compares the worktree's code with the main worktree's baseline.
+- `state:` is copied as it is: a worktree that runs on another database must name it there.
+- When the worktree's own settings (its `.env`) name another database than `working`, setup offers to make it `working:` and `pristine:` in the copied file (`--yes`: it does). The worktree's `APP_URL` becomes `base_url`; comments are kept.
+- Setup then makes that database's pristine copy.
+- Settings that name the main worktree's database, or none, stop setup before it takes anything (exit 2): its runs would restore the main worktree's database. So does a main worktree without a baseline.
 
 ### Setup in a project that init made
 
@@ -208,7 +212,7 @@ driftgate key create
 Creates the project key (32 random bytes, base64).
 
 - With `baselines: local`: in `.driftgate/key`, open to its owner only (mode 600; not checked on Windows). Only once git ignores `.driftgate/`.
-- With `baselines: git`: in the macOS Keychain (service `driftgate`, account the project name). On Linux and Windows, set `DRIFTGATE_KEY` or `key:` instead ([key](../../configuration.md#key)).
+- With `baselines: git`: in the macOS Keychain (service `driftgate`, account the project name). On Linux and Windows, set `DRIFTGATE_KEY` or `key:` instead ([key](../driftgate-yaml.md#key)).
 - It refuses to replace an existing key: private bodies encrypted with it would become unreadable.
 
 ```sh
@@ -221,7 +225,7 @@ driftgate key create
 driftgate baselines local|git
 ```
 
-Moves the project to the other [layout](../../configuration.md#baselines).
+Moves the project to the other [layout](../driftgate-yaml.md#baselines).
 For `driftgate baselines rebase`, see
 [review](review.md#driftgate-baselines-rebase).
 
@@ -278,4 +282,4 @@ driftgate v1.0.2 (commit …, built …)
 ```
 
 ---
-**Related:** [Command line basics](../cli.md) · [driftgate.yaml](../../configuration.md#driftgateyaml) · [Security model](../../security.md)
+**Related:** [Command line basics](../cli.md) · [driftgate.yaml](../driftgate-yaml.md) · [Security model](../../security.md)
