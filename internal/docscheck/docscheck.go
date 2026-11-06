@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode"
 )
 
@@ -39,8 +39,9 @@ type Heading struct {
 // Block is a fenced code block.
 type Block struct {
 	Line   int    // the line of the opening fence, 1-based
-	Lang   string // the info string's first word
-	Body   string
+	End    int    // the line of the closing fence
+	Lang   string // the info string's language: yaml for yaml{…}
+	Body   string // without the indentation of the fence
 	Marker string // the check marker on the line before: "config-fragment files=a", or ""
 }
 
@@ -51,18 +52,19 @@ type Marker struct {
 	Text string
 }
 
-// Link is a link or image target outside code.
+// Link is a link or image target outside code and comments.
 type Link struct {
 	Line   int
 	Target string
 }
 
 var (
-	fence      = regexp.MustCompile("^\\s*(```+|~~~+)\\s*([^\\s`]*)")
+	fence      = regexp.MustCompile("^(\\s*)(```+|~~~+)\\s*([A-Za-z0-9_+-]*)")
 	atx        = regexp.MustCompile(`^ {0,3}(#{1,6})\s+(.*?)(\s+#+)?\s*$`)
 	marker     = regexp.MustCompile(`^\s*<!--\s*check:\s*(.*?)\s*-->\s*$`)
 	codeSpan   = regexp.MustCompile("`+[^`]*`+")
 	inlineLink = regexp.MustCompile(`!?\[(?:[^\]\[]|\[[^\]]*\])*\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)`)
+	htmlHref   = regexp.MustCompile(`<a\s[^>]*href="([^"]+)"`)
 	refDef     = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(\s+".*")?\s*$`)
 	htmlID     = regexp.MustCompile(`<a\s+(?:name|id)="([^"]+)"`)
 	htmlTag    = regexp.MustCompile(`<[^>]+>`)
@@ -75,24 +77,58 @@ func Parse(root, rel string) (*Doc, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Doc{Path: rel, Lines: strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")}
-	var open *Block
-	var closer string
-	var body []string
+	return ParseText(rel, string(raw))
+}
+
+// ParseText reads the Markdown text of the page rel.
+func ParseText(rel, text string) (*Doc, error) {
+	d := &Doc{Path: rel, Lines: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
+	var (
+		open      *Block
+		closer    string
+		indent    int
+		body      []string
+		para      []string // the lines of a paragraph, whose links may wrap
+		paraStart int
+		comment   bool // in an HTML comment of several lines
+	)
+	flush := func() {
+		// Code spans are dropped, their line breaks kept.
+		text := codeSpan.ReplaceAllStringFunc(strings.Join(para, "\n"), func(m string) string {
+			return strings.Repeat("\n", strings.Count(m, "\n"))
+		})
+		for _, re := range []*regexp.Regexp{inlineLink, htmlHref} {
+			for _, m := range re.FindAllStringSubmatchIndex(text, -1) {
+				line := paraStart + strings.Count(text[:m[0]], "\n")
+				d.Links = append(d.Links, Link{Line: line, Target: text[m[2]:m[3]]})
+			}
+		}
+		para = nil
+	}
 	for i, line := range d.Lines {
 		n := i + 1
 		if open != nil {
 			if t := strings.TrimSpace(line); strings.HasPrefix(t, closer) && strings.Trim(t, closer[:1]) == "" {
-				open.Body = strings.Join(body, "\n")
+				open.Body, open.End = strings.Join(body, "\n"), n
 				d.Blocks = append(d.Blocks, *open)
 				open, body = nil, nil
 				continue
 			}
-			body = append(body, line)
+			// The fence's indentation is not part of the content.
+			k := 0
+			for k < indent && k < len(line) && line[k] == ' ' {
+				k++
+			}
+			body = append(body, line[k:])
+			continue
+		}
+		if comment {
+			comment = !strings.Contains(line, "-->")
 			continue
 		}
 		if m := fence.FindStringSubmatch(line); m != nil {
-			open, closer = &Block{Line: n, Lang: strings.ToLower(m[2])}, m[1]
+			flush()
+			open, closer, indent = &Block{Line: n, Lang: strings.ToLower(m[3])}, m[2], len(m[1])
 			if i > 0 {
 				if mm := marker.FindStringSubmatch(d.Lines[i-1]); mm != nil {
 					open.Marker = mm[1]
@@ -101,24 +137,40 @@ func Parse(root, rel string) (*Doc, error) {
 			continue
 		}
 		if mm := marker.FindStringSubmatch(line); mm != nil {
+			flush()
 			if i+1 >= len(d.Lines) || !fence.MatchString(d.Lines[i+1]) {
 				d.Markers = append(d.Markers, Marker{Line: n, Text: mm[1]})
 			}
 			continue
 		}
-		if m := atx.FindStringSubmatch(line); m != nil {
-			d.Headings = append(d.Headings, Heading{Line: n, Level: len(m[1]), Text: m[2]})
+		if at := strings.LastIndex(line, "<!--"); at >= 0 && !strings.Contains(line[at:], "-->") {
+			flush()
+			comment = true
+			continue
 		}
-		prose := codeSpan.ReplaceAllString(line, "")
-		for _, m := range inlineLink.FindAllStringSubmatch(prose, -1) {
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		heading := atx.FindStringSubmatch(line)
+		if heading != nil {
+			flush()
+			d.Headings = append(d.Headings, Heading{Line: n, Level: len(heading[1]), Text: heading[2]})
+		}
+		if m := refDef.FindStringSubmatch(codeSpan.ReplaceAllString(line, "")); m != nil {
 			d.Links = append(d.Links, Link{Line: n, Target: m[1]})
 		}
-		if m := refDef.FindStringSubmatch(prose); m != nil {
-			d.Links = append(d.Links, Link{Line: n, Target: m[1]})
+		if para == nil {
+			paraStart = n
+		}
+		para = append(para, line)
+		if heading != nil {
+			flush()
 		}
 	}
+	flush()
 	if open != nil {
-		return nil, fmt.Errorf("%s:%d: the fenced block is not closed", rel, open.Line)
+		return nil, fmt.Errorf("%s:%d: the fenced block is not closed", d.Path, open.Line)
 	}
 	d.anchors = map[string]bool{}
 	seen := map[string]int{}
@@ -140,7 +192,7 @@ func Parse(root, rel string) (*Doc, error) {
 }
 
 // HasAnchor reports whether #anchor exists in the page.
-func (d *Doc) HasAnchor(anchor string) bool { return d.anchors[strings.ToLower(anchor)] }
+func (d *Doc) HasAnchor(anchor string) bool { return d.anchors[anchor] }
 
 // Slug is the anchor GitHub gives a heading: the text as shown, lower case,
 // without characters other than letters, digits, spaces, - and _, with
@@ -179,18 +231,42 @@ func Root() (string, error) {
 	}
 }
 
-// Files lists every Markdown file under root (slash-separated, relative),
-// outside .git and testdata.
+// Files lists the Markdown files of the repository (slash-separated,
+// relative to root): those git tracks or would add, outside testdata.
+// Without git, every file under root outside dot-folders (but .github),
+// testdata and node_modules.
 func Files(root string) ([]string, error) {
+	var all []string
+	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "*.md")
+	cmd.Dir = root
+	if out, err := cmd.Output(); err == nil {
+		all = strings.Split(strings.TrimSpace(string(out)), "\n")
+	} else if all, err = walk(root); err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range all {
+		if f == "" || strings.HasPrefix(f, "testdata/") || strings.Contains(f, "/testdata/") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(f))); err == nil { // not deleted
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
+
+func walk(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if e.IsDir() && (e.Name() == ".git" || e.Name() == "testdata" || e.Name() == "node_modules") {
+		name := e.Name()
+		if e.IsDir() && p != root && (name == "testdata" || name == "node_modules" || strings.HasPrefix(name, ".") && name != ".github") {
 			return filepath.SkipDir
 		}
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+		if !e.IsDir() && strings.HasSuffix(name, ".md") {
 			rel, err := filepath.Rel(root, p)
 			if err != nil {
 				return err
@@ -202,10 +278,10 @@ func Files(root string) ([]string, error) {
 	return out, err
 }
 
-// Pages parses the Markdown files of a repository once.
+// Pages parses the Markdown files of a repository once; it is not safe
+// for concurrent use.
 type Pages struct {
 	Root string
-	mu   sync.Mutex
 	docs map[string]*Doc
 }
 
@@ -214,8 +290,6 @@ func NewPages(root string) *Pages { return &Pages{Root: root, docs: map[string]*
 
 // Get parses the page rel, once.
 func (p *Pages) Get(rel string) (*Doc, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if d, ok := p.docs[rel]; ok {
 		return d, nil
 	}
@@ -241,6 +315,7 @@ func Local(from, target string) (rel, anchor string, ok bool) {
 		return "", "", false
 	}
 	target, anchor, _ = strings.Cut(target, "#")
+	target, _, _ = strings.Cut(target, "?")
 	switch {
 	case target == "":
 		rel = from
