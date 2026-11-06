@@ -882,6 +882,11 @@ func columns(ctx context.Context, c *sql.Conn, db, table string, generated bool)
 
 func dropObject(ctx context.Context, c *sql.Conn, db, name, kind string) error {
 	_, err := c.ExecContext(ctx, "DROP "+strings.ToUpper(kind)+" IF EXISTS "+qi(db)+"."+qi(name))
+	if me := (*mysql.MySQLError)(nil); errors.As(err, &me) && me.Number == 1227 {
+		// MySQL: a view whose DEFINER has SYSTEM_USER (root) may be dropped
+		// only by a login that has it too.
+		return fmt.Errorf("%s %s cannot be dropped from %s to be made again: an object whose DEFINER has SYSTEM_USER, as root does, may be changed only by a login that has it too. Create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again (%w)", kind, name, db, me)
+	}
 	return err
 }
 
@@ -1019,7 +1024,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			continue
 		}
 		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
-			return nil, fmt.Errorf("trigger %s: %w", tr.Name, err)
+			return nil, createRefused(ctx, c, "trigger", tr.Name, dst, r["SQL Original Statement"], err)
 		}
 	}
 
@@ -1043,7 +1048,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		var lastErr error
 		for name, v := range pending {
 			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
-				lastErr = fmt.Errorf("view %s: %w", name, err)
+				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
 				continue
 			}
 			delete(pending, name)
@@ -1053,6 +1058,62 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 	return extra, nil
+}
+
+// definerClause reads the account of a DEFINER clause as SHOW CREATE
+// writes it (DEFINER=`app`@`%`).
+var definerClause = lazy.Regexp("DEFINER=`((?:[^`]|``)*)`@`((?:[^`]|``)*)`")
+
+// createRefused explains why the server refused to create the trigger or
+// view kind name in db as stmt defines it, when that is a privilege: a
+// restore and a seed make them with their DEFINER, as SHOW CREATE gives it.
+// A login may name another account as DEFINER only with SET_ANY_DEFINER
+// (MySQL 8.2 and later; SET_USER_ID before; and SYSTEM_USER for an account
+// that has it), SET USER (MariaDB) or SUPER: error 1227. With the binary
+// log on, MySQL lets a login without SUPER create no trigger at all unless
+// log_bin_trust_function_creators is set: error 1419. The DEFINER is never dropped or changed to make the object
+// fit the login: a trigger, and a view with SQL SECURITY DEFINER, run with
+// their definer's rights, so the copy would run under another account
+// than the original, and the DEFINER is part of the fingerprint, so the
+// copy would not be the one checked. login is the login's account,
+// CURRENT_USER(), read only on such an error.
+func createRefused(ctx context.Context, c *sql.Conn, kind, name, db, stmt string, err error) error {
+	var me *mysql.MySQLError
+	if !errors.As(err, &me) || me.Number != 1227 && me.Number != 1419 {
+		return fmt.Errorf("%s %s: %w", kind, name, err)
+	}
+	var login string
+	if c.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&login) != nil {
+		login = ""
+	}
+	return refusedText(kind, name, db, stmt, login, me)
+}
+
+// refusedText is the error of createRefused.
+func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error {
+	// other is the DEFINER when it is not the login's account.
+	other := ""
+	if m := definerClause().FindStringSubmatch(stmt); m != nil && login != "" {
+		user, host := strings.ReplaceAll(m[1], "``", "`"), strings.ReplaceAll(m[2], "``", "`")
+		at := strings.LastIndexByte(login, '@')
+		if at < 0 || login[:at] != user || !strings.EqualFold(login[at+1:], host) {
+			other = m[0][len("DEFINER="):]
+		}
+	}
+	const setDefiner = "naming another account as DEFINER needs SET_ANY_DEFINER (MySQL 8.2 and later; SET_USER_ID before; and SYSTEM_USER when that account has it, as root does), SET USER (MariaDB) or SUPER"
+	const why = "DriftGate creates triggers and views with their DEFINER and does not change it: a trigger, and a view with SQL SECURITY DEFINER, run with their definer's rights, and the DEFINER is part of the fingerprint"
+	switch {
+	case me.Number == 1419:
+		msg := fmt.Sprintf("%s %s cannot be created in %s: the server writes a binary log and log_bin_trust_function_creators is off, so a login without SUPER may create no trigger; set it on the server (as an administrator: SET PERSIST log_bin_trust_function_creators = 1) or give the login SUPER", kind, name, db)
+		if other != "" {
+			msg += fmt.Sprintf(". Its DEFINER %s is not this login (%s) either: %s; grant it, or create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again", other, login, setDefiner)
+		}
+		return fmt.Errorf("%s. %s (%w)", msg, why, me)
+	case other != "":
+		return fmt.Errorf("%s %s cannot be created in %s: its DEFINER is %s, this login is %s, and %s. Grant it to this login, or create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again. %s (%w)",
+			kind, name, db, other, login, setDefiner, why, me)
+	}
+	return fmt.Errorf("%s %s: %w", kind, name, me)
 }
 
 func splitItems(items []string) (tables, views, sequences, triggers []string) {

@@ -603,6 +603,18 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   `*.*`), PostgreSQL `CREATEDB` (`ALTER ROLE shop CREATEDB`), SQL Server
   the grants [below](#sql-server). Without them `seed` stops with the
   server's refusal.
+- MySQL/MariaDB: a seed and a restore make triggers and views again with
+  their `DEFINER`, which DriftGate never drops or changes: a trigger, and a
+  view with `SQL SECURITY DEFINER`, run with their definer's rights, and
+  the `DEFINER` is part of the fingerprint. A login may name another
+  account as `DEFINER` only with `SET_ANY_DEFINER` (MySQL 8.2 and later;
+  `SET_USER_ID` before, and `SYSTEM_USER` for an account that has it, such
+  as root), `SET USER` (MariaDB) or `SUPER`, and MySQL with the binary log
+  on lets a login without `SUPER` create a trigger only when
+  `log_bin_trust_function_creators` is on. Otherwise the seed or restore
+  stops and names the object. Best: create the triggers and views with
+  the application's login as their `DEFINER` (run the migrations as it)
+  and seed again.
 - Give the DSN a user limited to the working and pristine databases (for
   PostgreSQL with `CREATEDB`), not a superuser and not one with MySQL's
   `FILE` privilege. The one exception is a disposable database in a local
