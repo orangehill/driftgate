@@ -3,7 +3,9 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 
@@ -57,8 +59,9 @@ func TestRefusedText(t *testing.T) {
 // TestMySQLDefinerRefused: a login without the right to name another
 // account as DEFINER (an application's own login, owning its databases)
 // cannot re-create a trigger or a view root defined. The restore and the
-// seed stop and say which object, why and what to do; the DEFINER is
-// never dropped to make the object fit.
+// seed stop before they drop anything (definerProbe) and say which
+// object, why and what to do; the DEFINER is never dropped to make the
+// object fit, and no probe is left behind or fingerprinted.
 func TestMySQLDefinerRefused(t *testing.T) {
 	for _, dsn := range mysqlServers(t) {
 		u, _ := url.Parse(dsn)
@@ -67,8 +70,7 @@ func TestMySQLDefinerRefused(t *testing.T) {
 			root := mysqlAdmin(t, dsn, "")
 			work, pristine := "dgt_definer", "dgt_definer_pristine"
 			var logBin int
-			var version string
-			root.QueryRow("SELECT @@log_bin, VERSION()").Scan(&logBin, &version)
+			root.QueryRow("SELECT @@log_bin").Scan(&logBin)
 			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_definer'@'%'", "DROP USER IF EXISTS 'dgt_definer_other'@'%'",
 				"CREATE DATABASE "+work, "CREATE USER 'dgt_definer_other'@'%' IDENTIFIED BY 'x'", "GRANT SELECT ON "+work+".* TO 'dgt_definer_other'@'%'", "CREATE USER 'dgt_definer'@'%' IDENTIFIED BY 'x'",
 				"GRANT ALL ON "+work+".* TO 'dgt_definer'@'%'", "GRANT ALL ON "+pristine+".* TO 'dgt_definer'@'%'")
@@ -105,7 +107,7 @@ func TestMySQLDefinerRefused(t *testing.T) {
 					t.Fatal("the trigger was created")
 				}
 				want := []string{"trigger items_ai cannot be created in " + db, "does not change it"}
-				if logBin != 0 && !strings.Contains(version, "MariaDB") { // MySQL: no trigger without SUPER
+				if logBin != 0 { // no trigger without SUPER
 					want = append(want, "log_bin_trust_function_creators")
 				}
 				if !strings.Contains(err.Error(), "log_bin_trust_function_creators") {
@@ -119,40 +121,103 @@ func TestMySQLDefinerRefused(t *testing.T) {
 				t.Log(err)
 			}
 
-			// The application's login seeds: the pristine copy's trigger
-			// would be root's.
-			trigger(open(app.String()).Seed(ctx), pristine)
+			// objects lists the triggers and views of the database with
+			// their DEFINERs, and any probe.
+			objects := func(db string) string {
+				t.Helper()
+				var out []string
+				for _, q := range []string{
+					"SELECT CONCAT('trigger ', TRIGGER_NAME, ' ', DEFINER) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?",
+					"SELECT CONCAT('view ', TABLE_NAME, ' ', DEFINER) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?",
+					"SELECT CONCAT('probe ', TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE 'dgt\\_probe\\_%'",
+				} {
+					rows, err := root.Query(q, db)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for rows.Next() {
+						var s string
+						rows.Scan(&s)
+						out = append(out, s)
+					}
+					rows.Close()
+				}
+				sort.Strings(out)
+				return strings.Join(out, ", ")
+			}
+			fingerprint := func(pristine bool) string {
+				t.Helper()
+				m := open(dsn)
+				get := m.Fingerprint
+				if pristine {
+					get = m.PristineFingerprint
+				}
+				f, err := get(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return fmt.Sprint(f)
+			}
+			workObjects := objects(work)
+			if strings.Contains(workObjects, "probe") || strings.Count(workObjects, ", ")+1 != 3 {
+				t.Fatalf("working database: %s", workObjects)
+			}
 
-			// root seeds; the application's login restores.
+			// The application's login seeds: the pristine copy's trigger
+			// would be root's. The seed stops before the copy is touched.
+			trigger(open(app.String()).Seed(ctx), pristine)
+			if got := objects(work); got != workObjects {
+				t.Fatalf("after the refused seed: %s", got)
+			}
+
+			// root seeds; the application's login restores, and seeds again.
 			if err := open(dsn).Seed(ctx); err != nil {
 				t.Fatal(err)
 			}
+			workPrint, pristinePrint, pristineObjects := fingerprint(false), fingerprint(true), objects(pristine)
 			m := open(app.String())
 			trigger(m.Restore(ctx, []string{"trigger:items_ai"}), work)
-			// MySQL refuses already to drop a view root defined (root has
-			// SYSTEM_USER); MariaDB to create it again.
+			trigger(m.Restore(ctx, []string{"table:items"}), work) // its trigger is made again
 			err := m.Restore(ctx, []string{"view:v_items"})
-			if err == nil || !strings.Contains(err.Error(), "view v_items cannot be created in "+work+": its DEFINER is "+definer+", this login is dgt_definer@%") &&
-				!strings.Contains(err.Error(), "view v_items cannot be dropped from "+work+" to be made again: an object whose DEFINER has SYSTEM_USER") {
+			if err == nil || !strings.Contains(err.Error(), "view v_items cannot be created in "+work+": its DEFINER is "+definer+", this login is dgt_definer@%") {
 				t.Fatalf("view: %v", err)
 			}
 			t.Log(err)
-			// A view of another account without SYSTEM_USER: dropped, and
-			// not made again.
 			err = m.Restore(ctx, []string{"view:v_other"})
 			if err == nil || !strings.Contains(err.Error(), "view v_other cannot be created in "+work+": its DEFINER is `dgt_definer_other`@`%`, this login is dgt_definer@%") {
 				t.Fatalf("view: %v", err)
 			}
 			t.Log(err)
-			// Nothing was made with another DEFINER.
-			var n int
-			root.QueryRow("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND DEFINER <> ?", work, rootAccount).Scan(&n)
-			if k := 0; n != k {
-				t.Fatalf("%d triggers with another DEFINER", n)
+			trigger(open(app.String()).Seed(ctx), pristine)
+			// Nothing was dropped, nothing made with another DEFINER, no
+			// probe is left, and the fingerprints did not change.
+			if got := objects(work); got != workObjects {
+				t.Fatalf("working database after the refused restores: %s, was %s", got, workObjects)
 			}
-			root.QueryRow("SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND DEFINER <> ?", work, rootAccount).Scan(&n)
-			if n != 0 {
-				t.Fatalf("%d views with another DEFINER", n)
+			if got := objects(pristine); got != pristineObjects {
+				t.Fatalf("pristine database after the refused seed: %s, was %s", got, pristineObjects)
+			}
+			if fingerprint(false) != workPrint || fingerprint(true) != pristinePrint {
+				t.Fatal("a fingerprint changed")
+			}
+
+			// root may: its restore probes, makes the objects again and
+			// leaves no probe. A probe a killed process left behind is in
+			// no fingerprint, and the next restore drops it.
+			mustExec(t, mysqlAdmin(t, dsn, work), "CREATE TABLE dgt_probe_0123456789abcdef (id INT PRIMARY KEY)",
+				"CREATE TRIGGER dgt_probe_0123456789abcdef BEFORE INSERT ON dgt_probe_0123456789abcdef FOR EACH ROW SET @x = 1",
+				"CREATE VIEW dgt_probe_fedcba9876543210 AS SELECT 1 AS a")
+			if fingerprint(false) != workPrint {
+				t.Fatal("a probe left behind is in the fingerprint")
+			}
+			if err := open(dsn).Restore(ctx, []string{"trigger:items_ai", "view:v_items", "view:v_other"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := objects(work); got != workObjects {
+				t.Fatalf("working database after root's restore: %s, was %s", got, workObjects)
+			}
+			if fingerprint(false) != workPrint {
+				t.Fatal("the fingerprint changed")
 			}
 		})
 	}

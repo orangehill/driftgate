@@ -115,6 +115,9 @@ type MySQL struct {
 	binlogMu      sync.Mutex
 	binlogDecided bool
 	unlog         bool
+	// probed holds the DEFINERs definerProbe found the login may use.
+	probeMu sync.Mutex
+	probed  map[string]bool
 }
 
 // checksumConns is how many connections share the CHECKSUM TABLE work.
@@ -274,6 +277,7 @@ type mysqlObjects struct {
 	restoreOnly              []string           // tables restored but not fingerprinted (Options.RestoreOnly)
 	kind                     map[string]string  // name → table, view or sequence
 	triggers                 []dbx.MySQLTrigger // by table, timing, event and firing order
+	probes                   map[string]string  // probe objects left behind (probeName): name → table or view
 }
 
 func (o *mysqlObjects) trigger(name string) (dbx.MySQLTrigger, bool) {
@@ -296,6 +300,15 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		switch {
 		case name == pristineTable && typ == "BASE TABLE":
 			continue // Seed's mark of a pristine database, not the application's
+		case probeName().MatchString(name):
+			// A probe left behind (definerProbe): never part of the state.
+			if o.probes == nil {
+				o.probes = map[string]string{}
+			}
+			o.probes[name] = "table"
+			if typ == "VIEW" {
+				o.probes[name] = "view"
+			}
 		case typ == "VIEW":
 			if !m.o.excluded(name) {
 				o.views = append(o.views, name)
@@ -326,7 +339,7 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		return nil, err
 	}
 	for _, t := range trs {
-		if !m.o.excluded(t.Table) {
+		if !m.o.excluded(t.Table) && !probeName().MatchString(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
 	}
@@ -909,6 +922,66 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err != nil {
 		return nil, err
 	}
+	trigTables := map[string]bool{}
+	for _, t := range tables {
+		trigTables[t] = true
+	}
+	for _, name := range triggers {
+		if tr, ok := srcObjs.trigger(name); ok {
+			trigTables[tr.Table] = true
+		}
+		if tr, ok := dstObjs.trigger(name); ok {
+			trigTables[tr.Table] = true
+		}
+	}
+
+	// What is made again, read before anything is dropped: the login is
+	// first tried on each DEFINER (definerProbe), so a refusal leaves dst
+	// as it was.
+	var trigDefs []map[string]string // in firing order per table
+	for _, tr := range srcObjs.triggers {
+		if !trigTables[tr.Table] && !contains(triggers, tr.Name) {
+			continue
+		}
+		r, err := show(ctx, c, "TRIGGER", src, tr.Name)
+		if err != nil {
+			return nil, err
+		}
+		if r != nil {
+			r["name"] = tr.Name
+			trigDefs = append(trigDefs, r)
+		}
+	}
+	type view struct{ def, collation string }
+	pending := map[string]view{}
+	for _, v := range views {
+		if srcObjs.kind[v] != "view" {
+			continue
+		}
+		r, err := show(ctx, c, "VIEW", src, v)
+		if err != nil {
+			return nil, err
+		}
+		if r != nil {
+			pending[v] = view{localView(r["Create View"], src), r["collation_connection"]}
+		}
+	}
+	for name, kind := range dstObjs.probes {
+		if err := dropObject(ctx, c, dst, name, kind); err != nil {
+			return nil, err
+		}
+	}
+	var probes []probeItem
+	for _, r := range trigDefs {
+		probes = append(probes, probeItem{"trigger", r["name"], r["SQL Original Statement"]})
+	}
+	for name, v := range pending {
+		probes = append(probes, probeItem{"view", name, v.def})
+	}
+	if err := m.definerProbe(ctx, c, dst, dst, probes); err != nil {
+		return nil, err
+	}
+
 	// Views first: they are created last, once their tables exist. An object
 	// that changed kind (a view that became a table) is dropped as what it is.
 	for _, name := range append(append([]string{}, views...), sequences...) {
@@ -923,19 +996,6 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if err := dropObject(ctx, c, dst, t, k); err != nil {
 				return nil, err
 			}
-		}
-	}
-
-	trigTables := map[string]bool{}
-	for _, t := range tables {
-		trigTables[t] = true
-	}
-	for _, name := range triggers {
-		if tr, ok := srcObjs.trigger(name); ok {
-			trigTables[tr.Table] = true
-		}
-		if tr, ok := dstObjs.trigger(name); ok {
-			trigTables[tr.Table] = true
 		}
 	}
 	for _, tr := range dstObjs.triggers {
@@ -1011,38 +1071,14 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		return err
 	}
 
-	// srcObjs.triggers is in firing order per table.
-	for _, tr := range srcObjs.triggers {
-		if !trigTables[tr.Table] && !contains(triggers, tr.Name) {
-			continue
-		}
-		r, err := show(ctx, c, "TRIGGER", src, tr.Name)
-		if err != nil {
-			return nil, err
-		}
-		if r == nil {
-			continue
-		}
+	// trigDefs are in firing order per table.
+	for _, r := range trigDefs {
 		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
-			return nil, createRefused(ctx, c, "trigger", tr.Name, dst, r["SQL Original Statement"], err)
+			return nil, createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
 		}
 	}
 
 	// A view may use another view: create them until no more succeed.
-	type view struct{ def, collation string }
-	pending := map[string]view{}
-	for _, v := range views {
-		if srcObjs.kind[v] != "view" {
-			continue
-		}
-		r, err := show(ctx, c, "VIEW", src, v)
-		if err != nil {
-			return nil, err
-		}
-		if r != nil {
-			pending[v] = view{localView(r["Create View"], src), r["collation_connection"]}
-		}
-	}
 	for len(pending) > 0 {
 		before := len(pending)
 		var lastErr error
@@ -1070,8 +1106,8 @@ var definerClause = lazy.Regexp("DEFINER=`((?:[^`]|``)*)`@`((?:[^`]|``)*)`")
 // A login may name another account as DEFINER only with SET_ANY_DEFINER
 // (MySQL 8.2 and later; SET_USER_ID before; and SYSTEM_USER for an account
 // that has it), SET USER (MariaDB) or SUPER: error 1227. With the binary
-// log on, MySQL lets a login without SUPER create no trigger at all unless
-// log_bin_trust_function_creators is set: error 1419. The DEFINER is never dropped or changed to make the object
+// log on, a login without SUPER may create no trigger at all unless
+// log_bin_trust_function_creators is set (MySQL and MariaDB): error 1419. The DEFINER is never dropped or changed to make the object
 // fit the login: a trigger, and a view with SQL SECURITY DEFINER, run with
 // their definer's rights, so the copy would run under another account
 // than the original, and the DEFINER is part of the fingerprint, so the
@@ -1209,6 +1245,36 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		return err
 	}
 	if err := m.checkPristine(ctx, c); err != nil {
+		return err
+	}
+	// The triggers and views are made again in the pristine copy: the
+	// login is tried on their DEFINERs before the old copy is dropped, in
+	// the working database (the privileges tried are global ones).
+	for name, kind := range objs.probes {
+		if err := dropObject(ctx, c, m.o.Working, name, kind); err != nil {
+			return err
+		}
+	}
+	var probes []probeItem
+	for _, tr := range objs.triggers {
+		r, err := show(ctx, c, "TRIGGER", m.o.Working, tr.Name)
+		if err != nil {
+			return err
+		}
+		if r != nil {
+			probes = append(probes, probeItem{"trigger", tr.Name, r["SQL Original Statement"]})
+		}
+	}
+	for _, v := range objs.views {
+		r, err := show(ctx, c, "VIEW", m.o.Working, v)
+		if err != nil {
+			return err
+		}
+		if r != nil {
+			probes = append(probes, probeItem{"view", v, r["Create View"]})
+		}
+	}
+	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, probes); err != nil {
 		return err
 	}
 	if m.o.Replacing != nil {

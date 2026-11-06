@@ -609,10 +609,12 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   the `DEFINER` is part of the fingerprint. A login may name another
   account as `DEFINER` only with `SET_ANY_DEFINER` (MySQL 8.2 and later;
   `SET_USER_ID` before, and `SYSTEM_USER` for an account that has it, such
-  as root), `SET USER` (MariaDB) or `SUPER`, and MySQL with the binary log
-  on lets a login without `SUPER` create a trigger only when
-  `log_bin_trust_function_creators` is on. Otherwise the seed or restore
-  stops and names the object. Best: create the triggers and views with
+  as root), `SET USER` (MariaDB) or `SUPER`, and with the binary log on, a
+  login without `SUPER` may create a trigger only when
+  `log_bin_trust_function_creators` is on. Each `DEFINER` is first tried
+  on a short-lived probe object (`dgt_probe_…`, in no fingerprint), so a
+  seed or restore the login may not make stops before it drops anything,
+  and names the object. Best: create the triggers and views with
   the application's login as their `DEFINER` (run the migrations as it)
   and seed again.
 - Give the DSN a user limited to the working and pristine databases (for
