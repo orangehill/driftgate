@@ -132,12 +132,13 @@ func TestMethodDecidesMutates(t *testing.T) {
 func TestLiteralID(t *testing.T) {
 	for path, want := range map[string]string{"/api/users/17": "17", "/api/users/17/edit": "17", "/api/v2/users": "", "/api/users/{id}": "",
 		"/reports?year=2024": "", "/a/0": "0", "/2fa": "", "/": "",
-		// versions
+		// versions: followed by a segment that is not a number
 		"/api/2/users": "", "/API/1/users": "", "/v/3/items": "", "/api/2/users/17": "17", "/v2/users/17": "17",
-		"/api/123/users": "123", "/users/2": "2", "/2/api": "2",
-		// dates
-		"/reports/2024/05": "", "/posts/2024/5/17": "", "/posts/2024/05/17/comments/9": "9", "/archive/1999/12/31": "",
-		"/stats/2024": "2024", "/users/2024/13": "2024", "/users/1800/05": "1800", "/posts/2024/05/32": "32", "/a/12345/05": "12345"} {
+		"/api/123/users": "123", "/users/2": "2", "/2/api": "2", "/api/17": "17", "/api/17/": "17", "/api/1/2": "1",
+		// dates: year, month and day
+		"/posts/2024/5/17": "", "/posts/2024/05/17/comments/9": "9", "/archive/1999/12/31": "",
+		"/reports/2024/05": "2024", "/users/2024/5": "2024", "/stats/2024": "2024", "/users/2024/13/01": "2024",
+		"/users/1800/05/01": "1800", "/posts/2024/05/32": "2024", "/a/12345/05": "12345"} {
 		if got := LiteralID(path); got != want {
 			t.Errorf("%s: %q", path, got)
 		}

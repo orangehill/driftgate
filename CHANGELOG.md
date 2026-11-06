@@ -66,7 +66,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - Row tracking finds a table named in another letter case or schema. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - A capture that was already cancelled can no longer complete. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - MySQL/MariaDB: a seed or restore that the login may not complete because of a trigger or view `DEFINER` (or because the binary log is on) now stops before it drops anything. It names the object, explains the privilege needed and leaves the working database whole.
-- No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/reports/2024/05`.
+- No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/posts/2024/05/17`.
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value. Its JSON error requests are still made.
 
 ### Security
