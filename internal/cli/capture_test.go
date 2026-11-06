@@ -577,3 +577,35 @@ func TestReadOnlyProjectCommands(t *testing.T) {
 		t.Fatalf("tokens: exit %d\n%s\n%s", code, out, errOut)
 	}
 }
+
+// TestRunReadOnlyRefusesPrepareFirst: run --read-only refuses prepare:
+// before anything runs, also the seed of a store without a pristine copy.
+func TestRunReadOnlyRefusesPrepareFirst(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	sqliteDB(t, filepath.Join(root, "app.sqlite"), "CREATE TABLE news (id INTEGER PRIMARY KEY)")
+	cfg := filepath.Join(root, "driftgate.yaml")
+	conf := fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\nstate:\n  db:\n    driver: sqlite\n    working: app.sqlite\n", srv.URL)
+	write(t, cfg, conf)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"news","method":"GET","path":"/news","storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	if code, out, errOut := runCLI(t, "run", "--config", cfg); code != ExitClean {
+		t.Fatalf("baseline: %d\n%s\n%s", code, out, errOut)
+	}
+	// A new store: run would seed first.
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	seeded := filepath.Join(t.TempDir(), "seeded")
+	write(t, cfg, conf+"seed:\n  - [\"touch\", \""+seeded+"\"]\nprepare:\n  - [\"true\"]\n")
+	code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only")
+	if code != ExitConfig || !strings.Contains(errOut, "prepare: runs after every restore") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if _, err := os.Stat(seeded); err == nil {
+		t.Fatal("the seed ran before the refusal")
+	}
+}

@@ -100,6 +100,12 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Before anything runs (the seed, routes, a capture).
+	if *readOnly {
+		if err := capture.CheckReadOnly(p); err != nil {
+			return 0, failed(err)
+		}
+	}
 	if first && *readOnly {
 		return 0, configErr("there is no baseline yet: the first run makes it from every request, so it takes no --read-only (a read-only baseline would leave the requests that change data unchecked)")
 	}

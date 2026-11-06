@@ -188,8 +188,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if opt.ReadOnly {
 		// --read-only selects requests; the project's own commands run as
 		// configured, and connect_to does not apply to them.
-		if len(p.Prepare) > 0 {
-			return nil, configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
+		if err := CheckReadOnly(p); err != nil {
+			return nil, err
 		}
 		skip = cat.ReadOnlySkips()
 	}
@@ -699,6 +699,16 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 		}
 	}
 	return ids
+}
+
+// CheckReadOnly refuses a configuration a read-only capture cannot keep
+// from writing: --read-only selects requests, and prepare: runs after
+// every restore as configured.
+func CheckReadOnly(p *config.Project) error {
+	if len(p.Prepare) > 0 {
+		return configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
+	}
+	return nil
 }
 
 // checkGuards runs the guards; say prints each that succeeded.
