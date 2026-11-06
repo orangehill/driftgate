@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/docscheck"
 )
 
@@ -142,4 +148,143 @@ func tableFlags(d *docscheck.Doc, line int) []string {
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// TestDriftKinds: the drift kinds of internal/compare (its constants named
+// Kind…), compare.Kinds() (the text of driftgate help kinds), the kinds
+// docs/reference/drift-kinds.md describes (the first column of its kind
+// tables) and the output of driftgate help kinds are one set; the page's
+// Meaning of each kind is its text in compare.Kinds().
+func TestDriftKinds(t *testing.T) {
+	root, err := docscheck.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := codeKinds(t, filepath.Join(root, "internal", "compare"))
+	if len(code) == 0 {
+		t.Fatal("internal/compare has no Kind constants")
+	}
+	d, err := docPages(t).Get("docs/reference/drift-kinds.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	page, meanings := tableKinds(d)
+	for _, k := range compare.Kinds() {
+		listed = append(listed, k.Name)
+		if k.Text == "" {
+			t.Errorf("compare.Kinds(): %s has no text", k.Name)
+		}
+		if m, ok := meanings[k.Name]; ok && m != k.Text {
+			t.Errorf("docs/reference/drift-kinds.md: the meaning of %s is %q, compare.Kinds() has %q", k.Name, m, k.Text)
+		}
+	}
+	_, out, _ := runCLI(t, "help", "kinds")
+	var help []string
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && len(f) > 0 {
+			help = append(help, f[0])
+		}
+	}
+	for _, c := range []struct {
+		where string
+		kinds []string
+	}{{"compare.Kinds()", listed}, {"docs/reference/drift-kinds.md", page}, {"driftgate help kinds", help}} {
+		for _, k := range code {
+			if !slices.Contains(c.kinds, k) {
+				t.Errorf("%s does not list the drift kind %s", c.where, k)
+			}
+		}
+		for _, k := range c.kinds {
+			if !slices.Contains(code, k) {
+				t.Errorf("%s lists %s, which is no drift kind of internal/compare", c.where, k)
+			}
+		}
+		if dup := len(c.kinds) - len(slices.Compact(slices.Sorted(slices.Values(c.kinds)))); dup > 0 {
+			t.Errorf("%s lists %d kinds twice", c.where, dup)
+		}
+	}
+}
+
+// codeKinds lists the values of the string constants named Kind… in the
+// package in dir, without its tests.
+func codeKinds(t *testing.T, dir string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			g, ok := decl.(*ast.GenDecl)
+			if !ok || g.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range g.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, n := range vs.Names {
+					if !strings.HasPrefix(n.Name, "Kind") || i >= len(vs.Values) {
+						continue
+					}
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						v, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						out = append(out, v)
+					}
+				}
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+var codeWord = regexp.MustCompile("^`([a-z-]+)`$")
+
+// tableKinds lists the kinds in the first column of the kind tables of a
+// page, those whose header row starts with "| Kind |", outside fenced
+// blocks: one kind, a code span, per row; and the second column of each
+// (its meaning), without the backquotes of code spans.
+func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
+	code := map[int]bool{}
+	for _, b := range d.Blocks {
+		for n := b.Line; n <= b.End; n++ {
+			code[n] = true
+		}
+	}
+	var out []string
+	meanings := map[string]string{}
+	inTable := false
+	for i, l := range d.Lines {
+		if code[i+1] || !strings.HasPrefix(l, "|") {
+			inTable = false
+			continue
+		}
+		if strings.HasPrefix(l, "| Kind |") {
+			inTable = true
+			continue
+		}
+		if !inTable {
+			continue
+		}
+		cells := strings.Split(strings.TrimPrefix(l, "|"), "|")
+		if m := codeWord.FindStringSubmatch(strings.TrimSpace(cells[0])); m != nil {
+			out = append(out, m[1])
+			if len(cells) > 1 {
+				meanings[m[1]] = strings.ReplaceAll(strings.TrimSpace(cells[1]), "`", "")
+			}
+		}
+	}
+	return out, meanings
 }

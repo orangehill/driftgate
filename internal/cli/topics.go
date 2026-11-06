@@ -5,12 +5,13 @@ import (
 	"io"
 	"strings"
 
+	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
 
-// topic is the help of a file DriftGate reads: its fields, one line each,
-// and the section of the documentation to read, under docsBase (driftgate
-// help <topic>).
+// topic is the help of a file DriftGate reads, or of the names its reports
+// use: one line each, and the section of the documentation to read, under
+// docsBase (driftgate help <topic>).
 type topic struct {
 	name, summary, doc string
 	fields             [][2]string // name, what it is
@@ -39,7 +40,7 @@ var topics = []topic{
 			{"version", "1"},
 			{"requests", "the requests, in order; each has the keys below"},
 			{"id", "the request's name, unique; reports, --only and globs use it"},
-			{"target", "the service, with several targets"},
+			{"target", "the service, with several services"},
 			{"method, path", "HTTP method and path, with {param} placeholders"},
 			{"params", "values of the placeholders"},
 			{"params_from", "a placeholder's value from an earlier response: {request, path}"},
@@ -69,6 +70,18 @@ var topics = []topic{
 			{"request, target", "on every rule: only these requests (a glob), only this service"},
 			{"reason", "on every rule, required"},
 		}},
+	{name: "kinds", summary: "Every drift has a kind: the first word of a drift line, and \"kind\" in JSON. The names are stable. The kinds:",
+		doc: "reference/drift-kinds.md", fields: kindFields()},
+}
+
+// kindFields are the drift kinds of compare.Kinds(), one line each.
+func kindFields() [][2]string {
+	all := compare.Kinds()
+	out := make([][2]string, len(all))
+	for i, k := range all {
+		out[i] = [2]string{k.Name, k.Text}
+	}
+	return out
 }
 
 func lookupTopic(name string) *topic {

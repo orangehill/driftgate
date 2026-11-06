@@ -230,7 +230,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	// A request sent many times in a row (repeat:) is a burst, like a
 	// change of data, to a server outside allow_hosts.
 	if len(mutating)+len(repeats) > 0 && opt.AllowRemote && !opt.AllowRemoteMutations {
-		return nil, configErr("refusing to send requests that change data or are repeated (%s) to a target outside allow_hosts without --allow-remote-mutations%s",
+		return nil, configErr("refusing to send requests that change data or are repeated (%s) to a service outside allow_hosts without --allow-remote-mutations%s",
 			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
 	}
 
@@ -758,7 +758,7 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 		return nil, configErr("%s: %v", req.ID, err)
 	}
 	if t.BaseURL == "" {
-		return nil, configErr("%s: the target has no base_url", req.ID)
+		return nil, configErr("%s: the service has no base_url", req.ID)
 	}
 	allow, err := t.Allow(allowRemote)
 	if err != nil {

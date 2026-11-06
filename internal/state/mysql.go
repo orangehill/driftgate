@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -92,6 +94,19 @@ func (o Options) tracked(table string) bool { return contains(o.RowTracking, tab
 type MySQL struct {
 	o  Options
 	db *sql.DB
+	// multi takes queries of several statements: SHOW CREATE for many
+	// objects in one round trip (see showAll). multiRefused is set once
+	// one was refused.
+	multi        *sql.DB
+	multiRefused atomic.Bool
+	multiNote    sync.Once
+	// multiConnNote: the one note that a batch could not be sent.
+	multiConnNote sync.Once
+	// The state of new connections (see initConn): connMu guards it.
+	connMu       sync.Mutex
+	noFreshStats bool                 // the server has no information_schema_stats_expiry (MariaDB)
+	logBin       int                  // logBinUndecided, logBinOff or logBinOn
+	early        map[driver.Conn]bool // connections made before logBin was decided
 	// The last full fingerprint, the server's write counters and the
 	// per-table counters read before it (nil: none to trust), and the items
 	// the counters do not cover.
@@ -137,8 +152,14 @@ func NewMySQL(o Options) (*MySQL, error) {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
-	db, err := dbx.OpenMySQL(o.DSN, "", o.Dial)
+	m := &MySQL{o: o, early: map[driver.Conn]bool{}}
+	db, err := dbx.OpenMySQLWith(o.DSN, "", o.Dial, dbx.MySQLOpen{Init: m.initConn})
 	if err != nil {
+		return nil, err
+	}
+	multi, err := dbx.OpenMySQLWith(o.DSN, "", o.Dial, dbx.MySQLOpen{MultiStatements: true, Init: m.initMulti})
+	if err != nil {
+		db.Close()
 		return nil, err
 	}
 	// The connections a fingerprint or a restore uses at the same time
@@ -147,12 +168,13 @@ func NewMySQL(o Options) (*MySQL, error) {
 	// end of the command: a new connection costs a server that resolves the
 	// client's name a reverse DNS lookup (database/sql keeps 2 by default).
 	db.SetMaxIdleConns(copyConns * 3)
-	return &MySQL{o: o, db: db}, nil
+	m.db, m.multi = db, multi
+	return m, nil
 }
 
 func (m *MySQL) Name() string  { return m.o.Name }
 func (m *MySQL) Partial() bool { return true }
-func (m *MySQL) Close() error  { return m.db.Close() }
+func (m *MySQL) Close() error  { return errors.Join(m.db.Close(), m.multi.Close()) }
 
 func qi(name string) string { return dbx.QuoteMySQL(name) }
 
@@ -162,27 +184,26 @@ func qi(name string) string { return dbx.QuoteMySQL(name) }
 // and current table statistics (MySQL 8 caches them; see tableCounters).
 var mysqlSession = dbx.MySQLSession{SQLMode: "NO_AUTO_VALUE_ON_ZERO", FreshStats: true}
 
-// session returns a connection prepared with mysqlSession. Its writes stay
-// out of the binary log (MySQL 8 has it on by default): a restore rewrites
-// whole tables, which would otherwise fill the log with copies of the
-// pristine rows (measured on MySQL 8.4: 78 MB per restore of an 800k-row
-// table). That is only so on a server whose log nothing reads (see
-// unlogged): a replica would no longer get the restores and serve the
-// application old rows. Without the privilege for it (MySQL:
-// SESSION_VARIABLES_ADMIN; MariaDB: BINLOG ADMIN) the copies are logged as
-// before, with one note in the log.
+// session returns a connection prepared with mysqlSession (by initConn,
+// once per connection). Its writes stay out of the binary log (MySQL 8 has
+// it on by default): a restore rewrites whole tables, which would otherwise
+// fill the log with copies of the pristine rows (measured on MySQL 8.4: 78
+// MB per restore of an 800k-row table). That is only so on a server whose
+// log nothing reads (see unlogged): a replica would no longer get the
+// restores and serve the application old rows. Without the privilege for
+// it (MySQL: SESSION_VARIABLES_ADMIN; MariaDB: BINLOG ADMIN) the copies are
+// logged as before, with one note in the log.
 func (m *MySQL) session(ctx context.Context) (*sql.Conn, error) {
 	c, err := m.db.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := mysqlSession.Apply(ctx, c); err != nil {
-		c.Close()
-		return nil, err
-	}
 	unlog, err := m.unlogged(ctx, c)
-	if err == nil && unlog {
-		_, err = c.ExecContext(ctx, "SET SESSION sql_log_bin = 0")
+	if err == nil && unlog && m.madeEarly(c) {
+		// Made before the decision: initConn could not leave the log.
+		if _, err = c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil && ctx.Err() == nil {
+			m.setLogBin(logBinOn)
+		}
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -227,6 +248,11 @@ func (m *MySQL) unlogged(ctx context.Context, c *sql.Conn) (bool, error) {
 			return false, err
 		}
 		m.unlog = on != 0
+	}
+	if m.unlog {
+		m.setLogBin(logBinOff)
+	} else {
+		m.setLogBin(logBinOn)
 	}
 	return m.unlog, nil
 }
@@ -423,15 +449,16 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 	// Both kinds of counters are read before any table, so a write after
 	// them shows at the next fingerprint.
 	var tables *tableState
+	var mode string // said once the fingerprint is kept (keep may turn the counters off)
 	if writes != nil {
 		var why string
 		if tables, why, err = m.tableCounters(ctx, c, m.o.Working); err != nil {
 			tables, why = nil, err.Error()
 		}
 		if tables != nil {
-			m.setMode("fingerprint " + m.counterSource())
+			mode = "fingerprint " + m.counterSource()
 		} else {
-			m.setMode("fingerprint of every table after any write (no per-table counters: " + why + ")")
+			mode = noCountersMode(why)
 		}
 	}
 	if writes != nil && tables != nil && m.last != nil && m.tables != nil && onlyRowWrites(m.writes, writes) {
@@ -440,7 +467,10 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 			return nil, err
 		}
 		if ok {
-			m.keep(ctx, c, f, writes, tables, nil)
+			if why := m.keep(ctx, c, f, writes, tables, nil); why != "" {
+				mode = noCountersMode(why)
+			}
+			m.setMode(mode)
 			return f, nil
 		}
 	}
@@ -451,10 +481,18 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 	m.forget()
 	if writes != nil {
 		if m.always, err = uncounted(ctx, c, m.o.Working); err == nil {
-			m.keep(ctx, c, f, writes, tables, nil)
+			if why := m.keep(ctx, c, f, writes, tables, nil); why != "" {
+				mode = noCountersMode(why)
+			}
 		}
+		m.setMode(mode)
 	}
 	return f, nil
+}
+
+// noCountersMode is the mode of fingerprints without per-table counters.
+func noCountersMode(why string) string {
+	return "fingerprint of every table after any write (no per-table counters: " + why + ")"
 }
 
 // Reused reports whether the last fingerprint came from the write check.
@@ -566,23 +604,45 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 	}
 	want := func(item string) bool { return items == nil || contains(items, item) }
 	f := Fingerprint{}
-	if err := m.hashTables(ctx, c, db, objs.tables, want, f); err != nil {
-		return nil, err
+	// One read of SHOW CREATE for every table, view and trigger (showAll).
+	var tables, views []string
+	var trigs []dbx.MySQLTrigger
+	var reqs []showReq
+	for _, t := range objs.tables {
+		if want("table:" + t) {
+			tables = append(tables, t)
+			reqs = append(reqs, showReq{"TABLE", db, t})
+		}
 	}
 	for _, v := range objs.views {
-		if !want("view:" + v) {
-			continue
+		if want("view:" + v) {
+			views = append(views, v)
+			reqs = append(reqs, showReq{"VIEW", db, v})
 		}
-		r, err := show(ctx, c, "VIEW", db, v)
-		if err != nil {
-			return nil, err
+	}
+	for _, tr := range objs.triggers {
+		if want("trigger:" + tr.Name) {
+			trigs = append(trigs, tr)
+			reqs = append(reqs, showReq{"TRIGGER", db, tr.Name})
 		}
+	}
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.hashCreated(ctx, c, db, tables, shown[:len(tables)], f); err != nil {
+		return nil, err
+	}
+	shown = shown[len(tables):]
+	for i, v := range views {
+		r := shown[i]
 		if format >= 2 {
 			f["view:"+v] = hash([]byte(localView(r["Create View"], db) + "\x00" + r["collation_connection"]))
 		} else {
 			f["view:"+v] = hash([]byte(localView(r["Create View"], db)))
 		}
 	}
+	shown = shown[len(views):]
 	for _, s := range objs.sequences {
 		if !want("sequence:" + s) {
 			continue
@@ -597,14 +657,8 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 		}
 		f["sequence:"+s] = hash([]byte(def + "\x00" + next))
 	}
-	for _, tr := range objs.triggers {
-		if !want("trigger:" + tr.Name) {
-			continue
-		}
-		r, err := show(ctx, c, "TRIGGER", db, tr.Name)
-		if err != nil {
-			return nil, err
-		}
+	for i, tr := range trigs {
+		r := shown[i]
 		if format >= 2 {
 			f["trigger:"+tr.Name] = hash([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s",
 				tr.Table, tr.Timing, tr.Event, tr.Order, r["sql_mode"], r["collation_connection"], r["SQL Original Statement"])))
@@ -620,16 +674,29 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 // its CREATE statement and its checksum.
 func (m *MySQL) hashTables(ctx context.Context, c *sql.Conn, db string, names []string, want func(string) bool, f Fingerprint) error {
 	var tables []string
-	creates := map[string]string{}
+	var reqs []showReq
 	for _, t := range names {
-		if !want("table:" + t) {
-			continue
+		if want("table:" + t) {
+			tables = append(tables, t)
+			reqs = append(reqs, showReq{"TABLE", db, t})
 		}
-		def, err := showCreate(ctx, c, "TABLE", db, t)
+	}
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return err
+	}
+	return m.hashCreated(ctx, c, db, tables, shown, f)
+}
+
+// hashCreated adds to f the item of every table: its CREATE statement, from
+// its row of SHOW CREATE TABLE in shown, and its checksum.
+func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint) error {
+	creates := map[string]string{}
+	for i, t := range tables {
+		def, err := dbx.ShowCreateStatement("TABLE", t, shown[i])
 		if err != nil {
 			return err
 		}
-		tables = append(tables, t)
 		creates[t] = def
 	}
 	sums, err := m.checksums(ctx, c, db, tables, creates)
@@ -870,12 +937,17 @@ func copyTable(ctx context.Context, c *sql.Conn, src, dst, table, where string) 
 	if err != nil {
 		return err
 	}
+	return copyColumns(ctx, c, src, dst, table, where, cols)
+}
+
+// copyColumns is copyTable with the columns to copy (quoted) known.
+func copyColumns(ctx context.Context, c *sql.Conn, src, dst, table, where string, cols []string) error {
 	list := strings.Join(cols, ", ")
 	q := "INSERT INTO " + qi(dst) + "." + qi(table) + " (" + list + ") SELECT " + list + " FROM " + qi(src) + "." + qi(table)
 	if where != "" {
 		q += " WHERE " + where
 	}
-	_, err = c.ExecContext(ctx, q)
+	_, err := c.ExecContext(ctx, q)
 	return err
 }
 
@@ -944,37 +1016,80 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			trigTables[tr.Table] = true
 		}
 	}
-
-	// What is made again, read before anything is dropped: the login is
-	// first tried on each DEFINER (definerProbe), so a refusal leaves dst
-	// as it was.
-	var trigDefs []map[string]string // in firing order per table
-	for _, tr := range srcObjs.triggers {
-		if !trigTables[tr.Table] && !contains(triggers, tr.Name) {
-			continue
+	var copied []string
+	for _, t := range tables {
+		if srcObjs.kind[t] == "table" {
+			copied = append(copied, t)
 		}
-		r, err := show(ctx, c, "TRIGGER", src, tr.Name)
+	}
+	// Every SHOW CREATE the copy needs is read here, at once (showAll),
+	// before dst is changed: the tables in both databases, and the
+	// triggers and views of src, which the copy does not change.
+	var reqs []showReq
+	for _, t := range copied {
+		reqs = append(reqs, showReq{"TABLE", src, t})
+		if dstObjs.kind[t] == "table" {
+			reqs = append(reqs, showReq{"TABLE", dst, t})
+		}
+	}
+	var trigs []dbx.MySQLTrigger // srcObjs.triggers is in firing order per table
+	for _, tr := range srcObjs.triggers {
+		if trigTables[tr.Table] || contains(triggers, tr.Name) {
+			trigs = append(trigs, tr)
+			reqs = append(reqs, showReq{"TRIGGER", src, tr.Name})
+		}
+	}
+	var srcViews []string
+	for _, v := range views {
+		if srcObjs.kind[v] == "view" {
+			srcViews = append(srcViews, v)
+			reqs = append(reqs, showReq{"VIEW", src, v})
+		}
+	}
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return nil, err
+	}
+	var jobs []tableJob
+	for _, t := range copied {
+		sdef, err := dbx.ShowCreateStatement("TABLE", t, shown[0])
 		if err != nil {
 			return nil, err
 		}
-		if r != nil {
+		shown = shown[1:]
+		ddef := ""
+		if dstObjs.kind[t] == "table" {
+			if ddef, err = dbx.ShowCreateStatement("TABLE", t, shown[0]); err != nil {
+				return nil, err
+			}
+			shown = shown[1:]
+		}
+		jobs = append(jobs, tableJob{t: t, sdef: sdef, ddef: ddef})
+	}
+	// A name among the views and sequences is dropped below whatever dst
+	// holds under it, a table too: its job then starts from no table.
+	for i, j := range jobs {
+		if contains(views, j.t) || contains(sequences, j.t) {
+			jobs[i].ddef = ""
+		}
+	}
+	trigShown, viewShown := shown[:len(trigs)], shown[len(trigs):]
+	var trigDefs []map[string]string // in firing order per table
+	for i, tr := range trigs {
+		if r := trigShown[i]; r != nil {
 			r["name"] = tr.Name
 			trigDefs = append(trigDefs, r)
 		}
 	}
 	pending := map[string]viewDef{}
-	for _, v := range views {
-		if srcObjs.kind[v] != "view" {
-			continue
-		}
-		r, err := show(ctx, c, "VIEW", src, v)
-		if err != nil {
-			return nil, err
-		}
-		if r != nil {
+	for i, v := range srcViews {
+		if r := viewShown[i]; r != nil {
 			pending[v] = viewDef{localView(r["Create View"], src), r["collation_connection"]}
 		}
 	}
+
+	// The login is first tried on each DEFINER of what is made again
+	// (definerProbe), so a refusal leaves dst as it was.
 	for name, kind := range dstObjs.probes {
 		if err := dropObject(ctx, c, dst, name, kind); err != nil {
 			return nil, err
@@ -989,6 +1104,30 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	if err := m.definerProbe(ctx, c, dst, dst, dstObjs.tables, probes); err != nil {
 		return nil, err
+	}
+
+	// Triggers and views are made with the collation of the connection
+	// that made them (their string literals have it), as mysqldump does;
+	// the session's own is set back after each.
+	var own string
+	if err := c.QueryRowContext(ctx, "SELECT @@collation_connection").Scan(&own); err != nil {
+		return nil, err
+	}
+	// A session that cannot be set back is not put back into the pool
+	// (sessions are prepared once, see initConn), and the restore stops.
+	var lost error
+	create := func(stmt, mode, collation string) error {
+		if lost != nil {
+			return lost
+		}
+		if _, err := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mode, collation); err != nil {
+			return err // a SET that fails changes nothing
+		}
+		_, err := c.ExecContext(ctx, stmt)
+		if _, err2 := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mysqlSession.SQLMode, own); err2 != nil {
+			return setBack(c, &lost, err2)
+		}
+		return err
 	}
 
 	// Views first: they are created last, once their tables exist. An object
@@ -1009,56 +1148,25 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			drops = append(drops, dropItem{kind: "trigger", name: tr.Name, definer: tr.Definer})
 		}
 	}
-	// Triggers and views are made with the collation of the connection
-	// that made them (their string literals have it), as mysqldump does;
-	// the session's own is set back after each.
-	var own string
-	if err := c.QueryRowContext(ctx, "SELECT @@collation_connection").Scan(&own); err != nil {
-		return nil, err
-	}
-	create := func(stmt, mode, collation string) error {
-		if _, err := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mode, collation); err != nil {
-			return err
-		}
-		_, err := c.ExecContext(ctx, stmt)
-		if _, err2 := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mysqlSession.SQLMode, own); err == nil {
-			err = err2
-		}
-		return err
-	}
-
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
 	}
 	var dropped []dropItem
 	for _, d := range drops {
 		if err := dropObject(ctx, c, dst, d.name, d.kind); err != nil {
+			if lost != nil {
+				return nil, lost
+			}
 			return nil, undoDrops(dst, dropped, trigDefs, pending, create, err)
 		}
 		dropped = append(dropped, d)
 	}
-
-	var jobs []tableJob
 	for _, t := range tables {
-		if srcObjs.kind[t] != "table" {
-			if dstObjs.kind[t] == "table" {
-				if err := dropObject(ctx, c, dst, t, "table"); err != nil {
-					return nil, err
-				}
-			}
-			continue
-		}
-		sdef, err := showCreate(ctx, c, "TABLE", src, t)
-		if err != nil {
-			return nil, err
-		}
-		ddef := ""
-		if dstObjs.kind[t] == "table" {
-			if ddef, err = showCreate(ctx, c, "TABLE", dst, t); err != nil {
+		if srcObjs.kind[t] != "table" && dstObjs.kind[t] == "table" {
+			if err := dropObject(ctx, c, dst, t, "table"); err != nil {
 				return nil, err
 			}
 		}
-		jobs = append(jobs, tableJob{t: t, sdef: sdef, ddef: ddef})
 	}
 	extra, err := m.copyTables(ctx, c, src, dst, jobs)
 	if err != nil {
@@ -1088,6 +1196,9 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	// trigDefs are in firing order per table.
 	for _, r := range trigDefs {
 		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
+			if lost != nil {
+				return nil, lost
+			}
 			return nil, createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
 		}
 	}
@@ -1098,6 +1209,9 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		var lastErr error
 		for name, v := range pending {
 			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
+				if lost != nil {
+					return nil, lost
+				}
 				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
 				continue
 			}
@@ -1237,6 +1351,15 @@ func undoDrops(dst string, dropped []dropItem, trigDefs []map[string]string, vie
 // viewDef is a view's CREATE statement and the collation it was made with.
 type viewDef struct{ def, collation string }
 
+// setBack records that c's session could not be set back after a SET
+// failed with err: the session may be half changed, so c is closed instead
+// of put back into the pool.
+func setBack(c *sql.Conn, lost *error, err error) error {
+	*lost = fmt.Errorf("setting the session back: %w", err)
+	discardConn(c)
+	return *lost
+}
+
 func splitItems(items []string) (tables, views, sequences, triggers []string) {
 	for _, it := range items {
 		kind, name, _ := strings.Cut(it, ":")
@@ -1340,23 +1463,26 @@ func (m *MySQL) Seed(ctx context.Context) error {
 			return err
 		}
 	}
-	var probes []probeItem
+	var defReqs []showReq
+	var items []probeItem
 	for _, tr := range objs.triggers {
-		r, err := show(ctx, c, "TRIGGER", m.o.Working, tr.Name)
-		if err != nil {
-			return err
-		}
-		if r != nil {
-			probes = append(probes, probeItem{"trigger", tr.Name, r["SQL Original Statement"]})
-		}
+		defReqs, items = append(defReqs, showReq{"TRIGGER", m.o.Working, tr.Name}), append(items, probeItem{kind: "trigger", name: tr.Name})
 	}
 	for _, v := range objs.views {
-		r, err := show(ctx, c, "VIEW", m.o.Working, v)
-		if err != nil {
-			return err
-		}
-		if r != nil {
-			probes = append(probes, probeItem{"view", v, r["Create View"]})
+		defReqs, items = append(defReqs, showReq{"VIEW", m.o.Working, v}), append(items, probeItem{kind: "view", name: v})
+	}
+	defs, err := m.showAll(ctx, c, defReqs)
+	if err != nil {
+		return err
+	}
+	var probes []probeItem
+	for i, it := range items {
+		if r := defs[i]; r != nil {
+			it.stmt = r["SQL Original Statement"]
+			if it.kind == "view" {
+				it.stmt = r["Create View"]
+			}
+			probes = append(probes, it)
 		}
 	}
 	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, objs.tables, probes); err != nil {
@@ -1394,8 +1520,16 @@ func (m *MySQL) Seed(ctx context.Context) error {
 			copied = append(copied, t)
 		}
 	}
-	for _, t := range empty {
-		def, err := showCreate(ctx, c, "TABLE", m.o.Working, t)
+	reqs := make([]showReq, len(empty))
+	for i, t := range empty {
+		reqs[i] = showReq{"TABLE", m.o.Working, t}
+	}
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return err
+	}
+	for i, t := range empty {
+		def, err := dbx.ShowCreateStatement("TABLE", t, shown[i])
 		if err != nil {
 			return err
 		}
@@ -1549,15 +1683,18 @@ func (m *MySQL) Query(ctx context.Context, query string) ([]string, error) {
 		return nil, err
 	}
 	defer c.Close()
+	// The user's query may change the session (a function that sets a
+	// variable, the time zone): sessions are prepared once (initConn), so
+	// this one is closed, never put back into the pool.
+	defer discardConn(c)
 	if _, err := c.ExecContext(ctx, "USE "+qi(m.o.Pristine)); err != nil {
 		return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", m.o.Pristine, err)
 	}
 	// The session stays read-only too, should the transaction end early
-	// (an implicit commit); the connection goes back to the pool writable.
+	// (an implicit commit).
 	if _, err := c.ExecContext(ctx, "SET SESSION TRANSACTION READ ONLY"); err != nil {
 		return nil, err
 	}
-	defer c.ExecContext(context.Background(), "SET SESSION TRANSACTION READ WRITE")
 	if _, err := c.ExecContext(ctx, "START TRANSACTION READ ONLY"); err != nil {
 		return nil, err
 	}
