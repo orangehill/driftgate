@@ -885,6 +885,11 @@ with `catalog` (`requests`, `reads`, `mutating`, `commands`, and
 routes; left out when empty); markdown: a short list; JUnit: the lines in
 the suite's `system-out`.
 
+With drift, one line counts the drifts by kind, the most first, status
+included: `kinds: header-extra 622, array-length 188, type 154,
+side-effect 6` (text and markdown; JSON: `kinds`, a count per kind). It
+stands right before the line below.
+
 When one change is in nine of ten requests with an unexpected drift or
 more (at least five; expected drifts do not count), a line says so and how
 many drift in something else once it is set aside: `one change in 622 of

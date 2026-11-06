@@ -186,6 +186,15 @@
    "explanation": "1 drift in 1 request: $.status changed value (\"ok\" → \"error\")"
   }
  ],
+ "kinds": {
+  "encoding": 1,
+  "header-missing": 1,
+  "header-value": 1,
+  "key-extra": 2,
+  "key-missing": 1,
+  "status": 1,
+  "value": 1
+ },
  "status_changes": [
   {
    "from": "200",

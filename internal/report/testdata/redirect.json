@@ -191,6 +191,14 @@
    "explanation": "1 drift in 1 request: text of html>head>title changed (\"Home\" → \"Redirecting to http://localhost:8080\")"
   }
  ],
+ "kinds": {
+  "element-extra": 3,
+  "element-missing": 1,
+  "header-extra": 1,
+  "header-missing": 1,
+  "status": 1,
+  "text": 2
+ },
  "status_changes": [
   {
    "from": "200",

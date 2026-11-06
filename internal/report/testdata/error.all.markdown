@@ -6,6 +6,8 @@
 |---:|---:|---:|---:|---:|
 | 2 | 1 | 1 | 0 | 0 |
 
+> kinds: key-extra 2, encoding 1, header-missing 1, header-value 1, key-missing 1, status 1, value 1
+
 #### What changed
 
 1. 1 drift in 1 request: header content-type changed value (\["application/json"\] → \["application/problem+json"\])

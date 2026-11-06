@@ -97,6 +97,9 @@ type Report struct {
 	Observed int      `json:"observed"`
 	Results  []Result `json:"results"`
 	Groups   []Group  `json:"groups"`
+	// Kinds counts the drifts of all results by their kind (status,
+	// header-extra, type, …); nil without drift.
+	Kinds map[string]int `json:"kinds,omitempty"`
 	// The status changes shared by requests, the most common first: one
 	// cause, whatever drifts follow from it.
 	StatusChanges []StatusGroup `json:"status_changes,omitempty"`
@@ -340,6 +343,10 @@ func Build(tag, against string, results []Result) *Report {
 			r.Resent = append(r.Resent, res.ID)
 		}
 		for _, d := range res.Drifts {
+			if r.Kinds == nil {
+				r.Kinds = map[string]int{}
+			}
+			r.Kinds[d.Kind]++
 			sig := d.Signature()
 			a := groups[sig]
 			if a == nil {
@@ -556,7 +563,7 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		}
 	}
 	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %s, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.driftedText(), r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.DominantNote()} {
+	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.KindsNote(), r.DominantNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}

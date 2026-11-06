@@ -10,3 +10,4 @@ Groups:
   … 6 more groups only in requests whose status changed, summarized there (driftgate review lists them)
 
 run against baseline:local: 2 compared, 1 passed, 1 drifted, 0 skipped, 0 observed
+kinds: key-extra 2, encoding 1, header-missing 1, header-value 1, key-missing 1, status 1, value 1

@@ -6,6 +6,8 @@
 |---:|---:|---:|---:|---:|
 | 2 | 1 | 1 | 0 | 0 |
 
+> kinds: element-extra 3, text 2, element-missing 1, header-extra 1, header-missing 1, status 1
+
 #### What changed
 
 1. 1 drift in 1 request: header location is new
