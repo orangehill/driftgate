@@ -384,3 +384,28 @@ func TestJSONErrors(t *testing.T) {
 		t.Errorf("an error variant covers: %+v", c)
 	}
 }
+
+// TestJSONErrorsWithoutValue: a route without a parameter value skips the
+// templates that need one, but not json-errors, whose twins of not-found
+// and invalid-param are still made.
+func TestJSONErrorsWithoutValue(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "invalid-param", "json", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped, ids []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template)
+	}
+	for _, r := range res.Catalog.Requests {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"ok", "json"}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped %v, want %v", skipped, want)
+	}
+	if want := []string{"get-api-items-id-not-found", "get-api-items-id-not-found-json", "get-api-items-id-invalid-param", "get-api-items-id-invalid-param-json"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids\n got %v\nwant %v", ids, want)
+	}
+}

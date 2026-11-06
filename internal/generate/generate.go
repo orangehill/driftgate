@@ -580,7 +580,9 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 		return b, any
 	}
 	for _, tpl := range templates {
-		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" {
+		// Without a value, not-found and invalid-param still make their
+		// requests, and json-errors (added below) makes the twins of those.
+		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" && tpl != routes.JSONErrors {
 			g.skip(route, tpl, "%s", missing)
 			continue
 		}
