@@ -108,7 +108,7 @@ var commands = []commandHelp{
 		{name: "restore", arg: "once|each", text: "restore the state once (default), or also before every sequence"},
 		{name: "repeat", arg: "N", text: "capture N times on the same state and propose allowlist entries for values that differ (default 1); the capture keeps the median response time of each request"},
 		{name: "baseline", arg: "<name>", text: "the state must match the one this baseline was captured from (default local)"},
-		{name: "allow-remote", text: "allow a target outside allow_hosts"},
+		{name: "allow-remote", text: "allow a service outside allow_hosts"},
 		{name: "allow-remote-mutations", text: "with --allow-remote, also send requests that change data or are repeated to it"},
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-fingerprint-check", text: "do not check the state fingerprint (diagnostics only; the capture is marked unreliable)"},
@@ -206,7 +206,8 @@ Common flags:
   --config <path>   configuration file (default: .driftgate/driftgate.yaml or driftgate.yaml here or in the nearest folder above)
 
 driftgate help <command> (or <command> --help) describes a command and its flags;
-driftgate help catalog and help allowlist the fields of those files.
+driftgate help catalog and help allowlist the fields of those files;
+driftgate help kinds the kinds of drift.
 
 Exit codes: 0 clean, 1 drift (also: changed routes, uncovered routes, a stale
 catalog with --check, findings of allowlist check), 2 configuration error, 3 environment error or an incomplete

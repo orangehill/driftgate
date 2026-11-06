@@ -23,6 +23,9 @@ What each release adds and changes is in the
   `exclusions.yaml`, `catalog.json`, `classify.yaml`
 - [Security model](security.md): what a pull request can run, secrets,
   personal data, allowed hosts, release verification
+- [Drift kinds](reference/drift-kinds.md): what each kind of drift means
+  and how it is usually fixed
+- [Glossary](glossary.md): every term these pages use, with one definition
 
 ## Guides
 

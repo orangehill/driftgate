@@ -11,8 +11,9 @@ import (
 	"github.com/orangehill/driftgate/internal/jsonx"
 )
 
-// KindItemOrder is a changed order of the items of an array paired by key
-// (allowlist arrays:), unless the rule says any_order.
+// KindItemOrder is the same items of an array in another order: of an
+// array paired by a key rule (allowlist arrays:) or of one without a
+// rule (order.go). A key only pairs the items; any_order allows the order.
 const KindItemOrder = "item-order"
 
 // itemKeys reads the key of every item of an array: its identity (the

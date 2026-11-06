@@ -415,7 +415,8 @@ func TestVersionStrings(t *testing.T) {
 // folder; 0 for pages without a limit.
 func sentenceLimit(path string) int {
 	switch {
-	case strings.HasPrefix(path, "docs/start/"), strings.HasPrefix(path, "docs/concepts/"), strings.HasPrefix(path, "docs/guides/"):
+	case strings.HasPrefix(path, "docs/start/"), strings.HasPrefix(path, "docs/concepts/"), strings.HasPrefix(path, "docs/guides/"),
+		path == "docs/glossary.md", path == ".github/docs-style.md":
 		return 25
 	case strings.HasPrefix(path, "docs/reference/"), path == "docs/security.md":
 		return 35

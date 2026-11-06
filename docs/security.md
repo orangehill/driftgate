@@ -86,20 +86,20 @@ to do it.
 
 ## Where requests and connections go
 
-- **Requests** go only to hosts in the target's `allow_hosts`; by default
+- **Requests** go only to hosts in the service's `allow_hosts`; by default
   `localhost` and local and private addresses. DriftGate checks the address
   it actually connects to (no second DNS lookup) and every redirect. A
-  target outside the list needs `capture --allow-remote`; requests that
+  service outside the list needs `capture --allow-remote`; requests that
   change data on it, and repeated requests (`repeat:`), need
   `--allow-remote-mutations` as well, and its `rate_limits` hold for every
   send.
 - **Every request and route path must start with `/`**, from every source
   (catalog, `routes.json`, adapters, HAR import, record): the path is appended to the
-  target's address, and `@host/…` would send an identity's token to another
+  service's address, and `@host/…` would send an identity's token to another
   host. A failed request is recorded without its URL.
 - **Databases under `state:`** are restored, which rewrites their tables, so
   they must be copies: on this machine (a local address or a socket) or on a
-  host some target's `allow_hosts` names. A private address alone is not
+  host some service's `allow_hosts` names. A private address alone is not
   enough, as it may be production. Every host the driver may connect to is
   checked (PostgreSQL `host=`, several hosts, `PG*` variables; SQL Server
   takes one host over TCP, and a named instance without its port, a
@@ -124,7 +124,7 @@ to do it.
   own, so whoever reaches it acts as the developer. It is a reverse proxy to
   `target.base_url` and nothing else (no `CONNECT`, an absolute URL still
   goes to the service), connects only to `allow_hosts`, and refuses to start
-  for a target outside them. It answers only for its own address: a request
+  for a service outside them. It answers only for its own address: a request
   whose `Host` is not the listen address (`127.0.0.1`, `[::1]` or
   `localhost` with its port; with `--allow-non-loopback`, that host exactly)
   gets 421, so a web page cannot point its own name at 127.0.0.1 (DNS
@@ -163,7 +163,7 @@ to do it.
   through unrecorded. The request rate is not limited: the proxy
   is local and as fast as the service.
 - No telemetry and no update checks. The only network traffic goes to the
-  targets and to whatever the project's own commands contact.
+  services and to whatever the project's own commands contact.
 
 ## Secrets
 

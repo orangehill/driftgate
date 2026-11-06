@@ -43,6 +43,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `review --show-private`, and `compare run` for this checkout's run capture. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - `--repeat` keeps the median response time of each request. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - `driftgate help <command>` ends with a link to its docs for the release you run. New help topics `catalog` and `allowlist`. ([#17](https://github.com/orangehill/driftgate/pull/17), [#20](https://github.com/orangehill/driftgate/pull/20))
+- `driftgate help kinds` lists every drift kind; the docs gain a glossary and a drift kinds reference. ([#23](https://github.com/orangehill/driftgate/pull/23))
 - Detection reads NestJS/TypeORM `DB_TYPE`. Laravel closure routes with a FormRequest get a body from its rules. ([#15](https://github.com/orangehill/driftgate/pull/15), [#16](https://github.com/orangehill/driftgate/pull/16))
 
 ### Changed
