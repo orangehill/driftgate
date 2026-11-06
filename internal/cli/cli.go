@@ -22,7 +22,7 @@ var (
 	Date    = "unknown"
 )
 
-// Exit codes (docs/commands.md#exit-codes).
+// Exit codes (docs/reference/cli.md#exit-codes).
 const (
 	ExitClean  = 0
 	ExitDrift  = 1

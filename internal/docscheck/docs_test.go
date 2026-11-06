@@ -71,6 +71,35 @@ func TestLinks(t *testing.T) {
 	}
 }
 
+// TestNoLinksIntoIndexes: no page links into a section of an index page
+// (testdata/index-pages.txt), which only keeps old headings for links from
+// outside; our own pages link the new home. A link to the index page
+// itself, and a link within it, are fine.
+func TestNoLinksIntoIndexes(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "index-pages.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			index[line] = true
+		}
+	}
+	if len(index) == 0 {
+		t.Fatal("testdata/index-pages.txt lists no page")
+	}
+	_, all := docs(t)
+	for _, d := range all {
+		for _, l := range d.Links {
+			rel, anchor, ok := Local(d.Path, l.Target)
+			if ok && anchor != "" && index[rel] && rel != d.Path {
+				t.Errorf("%s:%d: %s links a section of the index page %s; link its new home", d.Path, l.Line, l.Target, rel)
+			}
+		}
+	}
+}
+
 // TestPublicAnchors: the anchors released binaries, code and other sites
 // link to keep resolving (testdata/public-anchors.txt).
 func TestPublicAnchors(t *testing.T) {

@@ -47,6 +47,7 @@ This is the structure the documentation is moving to; until a folder exists, a p
 - Every key, flag or behaviour a reader may search for has its own heading, never only a table cell or a bold line.
 - No bold pseudo-headings, and no numbers in headings.
 - Published heading text is frozen: other pages and released binaries link its anchor. A rename keeps the old heading as a stub and adds it to `internal/docscheck/testdata/public-anchors.txt`.
+- Our own pages link the new home, never an old heading kept in an index page (`internal/docscheck/testdata/index-pages.txt`).
 
 ## Code blocks
 

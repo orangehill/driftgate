@@ -49,12 +49,12 @@ const (
 var configFlag = flagHelp{name: "config", arg: "<path>", text: "configuration file (default: .driftgate/driftgate.yaml or driftgate.yaml here or in the nearest folder above)"}
 
 var commands = []commandHelp{
-	{name: "init", doc: "commands.md#init", summary: "writes driftgate.yaml, a catalog and an allowlist for the project in this folder, from the frameworks it finds", flags: []flagHelp{
+	{name: "init", doc: "reference/commands/project.md#driftgate-init", summary: "writes driftgate.yaml, a catalog and an allowlist for the project in this folder, from the frameworks it finds", flags: []flagHelp{
 		{name: "project", arg: "<name>", text: "project name (default: the folder name)"},
 		{name: "baselines", arg: "local|git", text: "local (default): everything in .driftgate/, which git ignores; git: driftgate.yaml and driftgate/ in the repository, the store in ~/.driftgate"},
 		{name: "service", arg: "<name>", text: "write only this service (repeatable or comma-separated)"},
 	}},
-	{name: "setup", doc: "commands.md#setup", summary: "sets up a new project from zero to its first baseline: framework, database and address from the project's own settings, the key, routes, the pristine copy (asked first) and the baseline; a second run goes on where it stopped", flags: []flagHelp{
+	{name: "setup", doc: "reference/commands/project.md#driftgate-setup", summary: "sets up a new project from zero to its first baseline: framework, database and address from the project's own settings, the key, routes, the pristine copy (asked first) and the baseline; a second run goes on where it stopped", flags: []flagHelp{
 		{name: "yes", text: "ask nothing: take the best database setting and make the pristine copy; stop with an instruction where a value would have to be guessed"},
 		{name: "project", arg: "<name>", text: "project name (default: the folder name)"},
 		{name: "baselines", arg: "local|git", text: "local (default): everything in .driftgate/, which git ignores; git: driftgate.yaml and driftgate/ in the repository"},
@@ -62,39 +62,39 @@ var commands = []commandHelp{
 		{name: "database", arg: "<name>", text: "the database the application uses (SQLite: its file, relative to the project root), when the settings do not say"},
 		{name: "url", arg: "<address>", text: "where the application answers (default: from its settings)"},
 	}},
-	{name: "seed", doc: "commands.md#seed", summary: "runs the seed: commands and keeps a pristine copy of every state database", flags: []flagHelp{
+	{name: "seed", doc: "reference/commands/state.md#driftgate-seed", summary: "runs the seed: commands and keeps a pristine copy of every state database", flags: []flagHelp{
 		{name: "skip-commands", text: "take the data already loaded as pristine, without the seed: commands (a database cache in CI)"},
 	}},
-	{name: "clean", doc: "commands.md#clean", args: "[<component>…]", summary: "removes the pristine copies driftgate seed made (of every database component under state:, or of those named) and their records in the local store; never a working database, nor a copy seed did not make", flags: []flagHelp{
+	{name: "clean", doc: "reference/commands/state.md#driftgate-clean", args: "[<component>…]", summary: "removes the pristine copies driftgate seed made (of every database component under state:, or of those named) and their records in the local store; never a working database, nor a copy seed did not make", flags: []flagHelp{
 		{name: "yes", text: "remove without asking (needed without a terminal)"},
 	}},
-	{name: "run", doc: "commands.md#run", summary: "routes, catalog, capture and compare in one command; the first run makes the baseline from two equal captures", flags: []flagHelp{
+	{name: "run", doc: "reference/commands/check.md#driftgate-run", summary: "routes, catalog, capture and compare in one command; the first run makes the baseline from two equal captures", flags: []flagHelp{
 		{name: "baseline", arg: "<name>", text: "baseline to make or compare with (default local)"},
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-private", text: "accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3)"},
 		{name: "read-only", text: "capture only the requests that do not change data, as capture --read-only"},
 		{name: "target", arg: "<service>", text: targetText + "; the check is then reported as partial"},
 	}},
-	{name: "discover", doc: "commands.md#discover", summary: "finds the routes of the application and compares them with the route inventory (exit 1 when they changed)", flags: []flagHelp{
+	{name: "discover", doc: "reference/commands/catalog.md#driftgate-discover", summary: "finds the routes of the application and compares them with the route inventory (exit 1 when they changed)", flags: []flagHelp{
 		{name: "write", text: "write the routes found as the new inventory"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "generate", doc: "commands.md#generate", summary: "generates catalog requests for routes the hand-written and imported ones do not cover", flags: []flagHelp{
+	{name: "generate", doc: "reference/commands/catalog.md#driftgate-generate", summary: "generates catalog requests for routes the hand-written and imported ones do not cover", flags: []flagHelp{
 		{name: "write", text: "write the generated catalog (not with --check)"},
 		{name: "check", text: "exit 1 when the catalog is not what generate would write (not with --write)"},
 		{name: "all", text: "generate requests for every route, also the covered ones"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "coverage", doc: "commands.md#coverage", summary: "routes of the inventory without a catalog request that succeeds (exit 1 when there are any)", flags: []flagHelp{
+	{name: "coverage", doc: "reference/commands/catalog.md#driftgate-coverage", summary: "routes of the inventory without a catalog request that succeeds (exit 1 when there are any)", flags: []flagHelp{
 		{name: "format", arg: "text|json", text: "output format (default text)"},
 		{name: "baseline", arg: "<name>", text: "baseline whose answers decide which requests succeed (default local, when it exists; none: the catalog alone)"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "har import", doc: "commands.md#har-import", args: "<file.har>", summary: "adds the requests of a HAR file (recorded in a browser) to the catalog", flags: []flagHelp{
+	{name: "har import", doc: "reference/commands/catalog.md#driftgate-har-import", args: "<file.har>", summary: "adds the requests of a HAR file (recorded in a browser) to the catalog", flags: []flagHelp{
 		{name: "target", arg: "<service>", text: "service the requests belong to (once; needed with several services)"},
 		{name: "write", text: "write the catalog; without it the requests are only listed"},
 	}},
-	{name: "record", doc: "commands.md#record", summary: "a recording proxy on 127.0.0.1: use the application through it (a browser, a frontend, an E2E suite) and it proposes catalog requests for what it saw; responses are never kept", flags: []flagHelp{
+	{name: "record", doc: "reference/commands/catalog.md#driftgate-record", summary: "a recording proxy on 127.0.0.1: use the application through it (a browser, a frontend, an E2E suite) and it proposes catalog requests for what it saw; responses are never kept", flags: []flagHelp{
 		{name: "listen", arg: "<addr>", text: "address to listen on (default " + defaultListen + "; loopback only)"},
 		{name: "target", arg: "<service>", text: "service to forward to (once; needed with several services)"},
 		{name: "write", text: "on stop, add the new requests to the catalog; without it they are only listed"},
@@ -102,7 +102,7 @@ var commands = []commandHelp{
 		{name: "exclude", arg: "<glob>", text: "do not record paths that match, besides static files and dev-server noise (repeatable or comma-separated)"},
 		{name: "allow-non-loopback", text: "allow a --listen address other than loopback (anyone who reaches it acts as you)"},
 	}},
-	{name: "capture", doc: "commands.md#capture", args: "<tag>", summary: "restores the state, sends the catalog and stores the responses under a tag", flags: []flagHelp{
+	{name: "capture", doc: "reference/commands/check.md#driftgate-capture", args: "<tag>", summary: "restores the state, sends the catalog and stores the responses under a tag", flags: []flagHelp{
 		{name: "only", arg: "<glob>", text: "only requests whose ID matches"},
 		{name: "force", text: "replace an existing capture with this tag"},
 		{name: "restore", arg: "once|each", text: "restore the state once (default), or also before every sequence"},
@@ -117,7 +117,7 @@ var commands = []commandHelp{
 		{name: "quiet", text: "no progress output"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "compare", doc: "commands.md#compare", args: "<tag>", summary: "compares a capture with a baseline or another capture (exit 1 on drift)", flags: []flagHelp{
+	{name: "compare", doc: "reference/commands/check.md#driftgate-compare", args: "<tag>", summary: "compares a capture with a baseline or another capture (exit 1 on drift)", flags: []flagHelp{
 		{name: "against", arg: "<baseline|tag>", text: "baseline name or capture tag to compare with (default local)"},
 		{name: "level", arg: "status|shape|types|values", text: "level for this comparison; only stricter than the configured one"},
 		{name: "only", arg: "<glob>", text: "only requests whose ID matches"},
@@ -128,25 +128,25 @@ var commands = []commandHelp{
 		{name: "skip-private", text: "accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3)"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},
-	{name: "report", doc: "commands.md#report", summary: "the last comparison again, e.g. as a pull-request comment; exits 0 also after drift (compare and run are the gate), unless --exit-code", flags: []flagHelp{
+	{name: "report", doc: "reference/commands/check.md#driftgate-report", summary: "the last comparison again, e.g. as a pull-request comment; exits 0 also after drift (compare and run are the gate), unless --exit-code", flags: []flagHelp{
 		{name: "format", arg: formats, text: "output format (default text)"},
 		{name: "max-drifts", arg: "N", text: maxDriftsText},
 		{name: "exit-code", text: "exit with the verdict of the comparison, as compare did: 1 on drift, 3 when incomplete, 0 clean"},
 	}},
-	{name: "allowlist check", doc: "commands.md#allowlist-check", summary: "checks the allowlist without capturing: rules for no request, rules that reach nothing in the baseline, any_length over values, $raw for every request, broad and shadowed rules (exit 1 on findings)", flags: []flagHelp{
+	{name: "allowlist check", doc: "reference/commands/review.md#driftgate-allowlist-check", summary: "checks the allowlist without capturing: rules for no request, rules that reach nothing in the baseline, any_length over values, $raw for every request, broad and shadowed rules (exit 1 on findings)", flags: []flagHelp{
 		{name: "baseline", arg: "<name>", text: "baseline whose responses the rules are checked against (default local; without it, only the catalog)"},
 		{name: "format", arg: "text|json", text: "output format (default text)"},
 	}},
-	{name: "review", doc: "commands.md#review", summary: "drift groups of the last comparison, with the accept command for each", flags: []flagHelp{
+	{name: "review", doc: "reference/commands/review.md#driftgate-review", summary: "drift groups of the last comparison, with the accept command for each", flags: []flagHelp{
 		{name: "group", arg: "N", text: "show this group with every request it touches"},
 		{name: "show-private", text: "show values from private bodies, on your own machine only (never kept)"},
 	}},
-	{name: "accept", doc: "commands.md#accept", args: "<request|glob|group:N>...", summary: "takes drifts of the last comparison into its baseline (mode evolve), with a reason in the acceptance log", flags: []flagHelp{
+	{name: "accept", doc: "reference/commands/review.md#driftgate-accept", args: "<request|glob|group:N>...", summary: "takes drifts of the last comparison into its baseline (mode evolve), with a reason in the acceptance log", flags: []flagHelp{
 		{name: "reason", arg: `"…"`, text: "why the change is right", required: true},
 		{name: "ref", arg: "<ticket>", text: "ticket or link kept with the acceptance"},
 		{name: "comparison", arg: "<id>", text: "the comparison review showed; accept refuses a newer one"},
 	}},
-	{name: "expect", doc: "commands.md#expect", args: "<request|glob|group:N>...", summary: "records drifts of the last comparison that a change intends, by ticket, without changing the baseline (also in mode freeze): compare then passes a request every drift of which is exactly a recorded one, and fails on any other drift", flags: []flagHelp{
+	{name: "expect", doc: "reference/commands/review.md#driftgate-expect", args: "<request|glob|group:N>...", summary: "records drifts of the last comparison that a change intends, by ticket, without changing the baseline (also in mode freeze): compare then passes a request every drift of which is exactly a recorded one, and fails on any other drift", flags: []flagHelp{
 		{name: "ref", arg: "<ticket>", text: "ticket or link of the change that intends the drifts", required: true},
 		{name: "reason", arg: `"…"`, text: "why the change makes these drifts", required: true},
 		{name: "comparison", arg: "<id>", text: "the comparison review showed; expect refuses a newer one"},
@@ -154,39 +154,39 @@ var commands = []commandHelp{
 		{name: "import", arg: "<file>", text: "take a ref's expectations file from another checkout (a worktree) instead, after checking it"},
 		{name: "baseline", arg: "<name>", text: "with --drop or --import: the baseline (default: the last comparison's, else local)"},
 	}},
-	{name: "verify", doc: "commands.md#verify", summary: "checks baselines against their manifest and acceptance log (exit 1 when they disagree)", flags: []flagHelp{
+	{name: "verify", doc: "reference/commands/review.md#driftgate-verify", summary: "checks baselines against their manifest and acceptance log (exit 1 when they disagree)", flags: []flagHelp{
 		{name: "baseline", arg: "<name>", text: "check this baseline only (default: all)"},
 		{name: "adopt", text: "write the manifest of a baseline made before manifests (once)"},
 		{name: "migrate-private", text: "keep the personal data of an older baseline out of git: private bodies named by a keyed hash and moved into the local store, public bodies a capture would store private stored private, header values masked (once, with the key)"},
 		{name: "migrate-state", text: "check that the data is the one a baseline with an older state fingerprint format was captured from, and record its fingerprint in the current format (once, after driftgate seed)"},
 	}},
-	{name: "bisect", doc: "commands.md#bisect", args: "<good> <bad>", summary: "first commit of each drift group of the last comparison (bisect: in driftgate.yaml)", flags: []flagHelp{
+	{name: "bisect", doc: "reference/commands/review.md#driftgate-bisect", args: "<good> <bad>", summary: "first commit of each drift group of the last comparison (bisect: in driftgate.yaml)", flags: []flagHelp{
 		{name: "group", arg: "N", text: "chase this drift group only (repeatable)"},
 		{name: "only", arg: "<glob>", text: "chase these requests; without a comparison yet, the requests to chase"},
 		{name: "baseline", arg: "<name>", text: "baseline to compare with when there is no comparison yet (default local)"},
 		{name: "format", arg: "text|json", text: "output format (default text)"},
 		{name: "expected", text: "chase the drifts expectations name too (driftgate expect); without it they are left out, as accepted ones are"},
 	}},
-	{name: "data classify", doc: "commands.md#data-classify", summary: "proposes rules for the columns classify.yaml does not cover", flags: []flagHelp{
+	{name: "data classify", doc: "reference/commands/data.md#driftgate-data-classify", summary: "proposes rules for the columns classify.yaml does not cover", flags: []flagHelp{
 		{name: "write", text: "add the proposed rules to classify.yaml"},
 		{name: "sample", arg: "N", text: "rows sampled per table (default 200)"},
 	}},
-	{name: "data subset", doc: "commands.md#data-subset", summary: "data anonymize of a sample with closed references: the rows subset: in classify.yaml chooses, and every row they reference", flags: dataAnonymizeFlags},
-	{name: "data anonymize", doc: "commands.md#data-anonymize", summary: "copies data: (source) into data: (target) and/or a dump, with personal values replaced by classify.yaml; the output is made only if data verify finds nothing in it", flags: dataAnonymizeFlags},
-	{name: "data verify", doc: "commands.md#data-verify", summary: "checks an output of anonymize against the source: the detector over every value, and every original personal value looked for", flags: []flagHelp{
+	{name: "data subset", doc: "reference/commands/data.md#driftgate-data-subset", summary: "data anonymize of a sample with closed references: the rows subset: in classify.yaml chooses, and every row they reference", flags: dataAnonymizeFlags},
+	{name: "data anonymize", doc: "reference/commands/data.md#driftgate-data-anonymize", summary: "copies data: (source) into data: (target) and/or a dump, with personal values replaced by classify.yaml; the output is made only if data verify finds nothing in it", flags: dataAnonymizeFlags},
+	{name: "data verify", doc: "reference/commands/data.md#driftgate-data-verify", summary: "checks an output of anonymize against the source: the detector over every value, and every original personal value looked for", flags: []flagHelp{
 		{name: "target", arg: "<database>", text: "database to check (default data.target)"},
 		{name: "dump", arg: "<file>", text: "dump to check"},
 		{name: "format", arg: "text|json", text: "output format (default text)"},
 	}},
-	{name: "baselines", doc: "commands.md#baselines", args: "local|git", summary: "moves the project to baselines: local (everything in .driftgate/, which git ignores) or git (driftgate.yaml and driftgate/ in the repository, the store in ~/.driftgate); a switch to git first checks the baselines as verify does"},
-	{name: "baselines rebase", doc: "commands.md#baselines-rebase", args: "<name>", summary: "makes a capture the content of a baseline (after a merge), with the checks of a baseline made by run and one line in the acceptance log; closes the expectations the new baseline holds", flags: []flagHelp{
+	{name: "baselines", doc: "reference/commands/project.md#driftgate-baselines", args: "local|git", summary: "moves the project to baselines: local (everything in .driftgate/, which git ignores) or git (driftgate.yaml and driftgate/ in the repository, the store in ~/.driftgate); a switch to git first checks the baselines as verify does"},
+	{name: "baselines rebase", doc: "reference/commands/review.md#driftgate-baselines-rebase", args: "<name>", summary: "makes a capture the content of a baseline (after a merge), with the checks of a baseline made by run and one line in the acceptance log; closes the expectations the new baseline holds", flags: []flagHelp{
 		{name: "from", arg: "<tag>", text: "the capture that becomes the baseline's content (all of the catalog)", required: true},
 		{name: "reason", arg: `"…"`, text: "why the baseline takes the capture", required: true},
 		{name: "ref", arg: "<ticket>", text: "ticket or link kept with the log line"},
 		{name: "allow-freeze", text: "rebase in mode freeze too (for changes reviewed elsewhere, such as a merge)"},
 	}},
-	{name: "key create", doc: "commands.md#key-create", summary: "creates the project key: .driftgate/key with baselines: local, the macOS Keychain with baselines: git"},
-	{name: "version", doc: "commands.md#version", summary: "prints the version", local: true},
+	{name: "key create", doc: "reference/commands/project.md#driftgate-key-create", summary: "creates the project key: .driftgate/key with baselines: local, the macOS Keychain with baselines: git"},
+	{name: "version", doc: "reference/commands/project.md#driftgate-version", summary: "prints the version", local: true},
 }
 
 var dataAnonymizeFlags = []flagHelp{

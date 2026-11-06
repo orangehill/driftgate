@@ -19,8 +19,8 @@ which kinds it can report.
 ## What to do with a drift
 
 - Fix the code when the change is not intended.
-- [Accept](../commands.md#accept) the change when it is intended, in mode `evolve`.
-- [Expect](../commands.md#expect) the change for a ticket: the baseline stays as it is, also in mode `freeze`.
+- [Accept](commands/review.md#driftgate-accept) the change when it is intended, in mode `evolve`.
+- [Expect](commands/review.md#driftgate-expect) the change for a ticket: the baseline stays as it is, also in mode `freeze`.
 - Add an [allowlist rule](../configuration.md#allowlistyaml) only for a value that changes by itself, such as a time or a token.
 
 The "Typical fix" column adds only what is specific to a kind. A dash
@@ -109,4 +109,4 @@ A request that was sent and got no answer is a `status` drift, not this
 one.
 
 ---
-**Related:** [Glossary: drift](../glossary.md#drift) · [allowlist.yaml](../configuration.md#allowlistyaml) · [accept](../commands.md#accept) · [expect](../commands.md#expect)
+**Related:** [Glossary: drift](../glossary.md#drift) · [allowlist.yaml](../configuration.md#allowlistyaml) · [accept](commands/review.md#driftgate-accept) · [expect](commands/review.md#driftgate-expect)

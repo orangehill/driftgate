@@ -195,7 +195,7 @@ driftgate run                                     # this install against the mai
 
 - `setup` in a worktree takes the main worktree's configuration and
   baseline, and offers to make the worktree's own database (from its
-  `.env`) `working:` and `pristine:` ([setup](../commands.md#setup)); the
+  `.env`) `working:` and `pristine:` ([setup](../reference/commands/project.md#driftgate-setup)); the
   address its `APP_URL` gives becomes `base_url`. Responses that write
   absolute URLs are compared through both origins
   ([target and targets](../configuration.md#target-and-targets)).
