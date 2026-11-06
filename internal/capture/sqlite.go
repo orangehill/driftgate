@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -73,4 +74,31 @@ func sqliteOverlap(working, pristine string) bool {
 		}
 	}
 	return false
+}
+
+// SQLitePristine is the pristine copy of the SQLite component name of p,
+// as its seed made it: "" when p has no record of one (no seed yet).
+func SQLitePristine(p *config.Project, name string) (string, error) {
+	sc := p.State[name]
+	server, err := serverOf(p, sc, "")
+	if err != nil {
+		return "", err
+	}
+	record, err := pristinePath(p, name, server)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(record); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	_, pristine, err := sqliteFiles(p, sc, server, record)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(pristine); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return pristine, nil
 }

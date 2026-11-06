@@ -236,6 +236,18 @@ type Side struct {
 	// was captured from and its aliases. When the two sides have different
 	// ones, all of them are taken as the same origin (origin.go).
 	Origins []string
+	// Roots are the folders of the checkout the side was captured in (the
+	// project folder and its real path): when the two sides have
+	// different ones, each is taken as the same folder (roots.go).
+	Roots []string
+	// RowTables are the items whose rows the side's capture tracked
+	// (row_tracking); nil when it does not say (a set of an earlier
+	// release). Rows of an item the other side did not track are not
+	// compared: a note says so.
+	RowTables []string
+	// Folders are the forms of the two sides' Roots, made once for many
+	// requests (NewFolders, the same on both sides); nil: made from Roots.
+	Folders *Folders
 }
 
 // FastPaths turns on the shortcuts that only save work: rules narrowed to
@@ -282,6 +294,18 @@ func oneNotes(id string, base, cur Side, allow *allowlist.List, level Level, wit
 		c.material()
 		return c.drifts, nil
 	}
+	r := base.Folders
+	if r == nil {
+		r = newRoots(base.Roots, cur.Roots)
+	}
+	if r != nil {
+		// Bodies that differ only in the folders are equal now: their
+		// Content-Length still differs, which is no drift either. Equal
+		// bodies stay equal, both sides' folders being replaced on both:
+		// they are not read for them.
+		c.rawDiffer = !bytes.Equal(base.Body, cur.Body)
+		base, cur = r.side(base, r.base, c.rawDiffer), r.side(cur, r.cur, c.rawDiffer)
+	}
 	if c.origins = newOrigins(base.Origins, cur.Origins); c.origins != nil {
 		c.compare(base, cur)
 		c.origins.restore(c.drifts)
@@ -320,7 +344,7 @@ func (c *comparer) compare(base, cur Side) {
 		// A different body has a different length: Content-Length then says
 		// nothing new, and the body itself is compared below.
 		noBody := base.NoBody || cur.NoBody
-		if !noBody && !bytes.Equal(base.Body, cur.Body) {
+		if !noBody && (c.rawDiffer || !bytes.Equal(base.Body, cur.Body)) {
 			kept := c.drifts[:0]
 			for _, d := range c.drifts {
 				if !(d.Kind == KindHeaderValue && d.Where == "header:content-length") {
@@ -339,7 +363,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables)
 		}
 	}
 }
@@ -362,7 +386,10 @@ func (c *comparer) rawAllowed(base, cur Side) bool {
 
 // sideEffects compares what two requests changed in the state: the changed
 // items, and for tracked tables the changed rows and columns.
-func (c *comparer) sideEffects(base, cur *snapshot.SideEffects) {
+// sideEffects compares the items a request changed and, of the tables
+// both sides tracked rows of (bTables, vTables; nil: every table), its
+// rows.
+func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string) {
 	b, v := map[string]bool{}, map[string]bool{}
 	for _, it := range base.Items {
 		b[it] = true
@@ -386,10 +413,26 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects) {
 		}
 		return r.Change
 	}
-	rows := func(list []snapshot.RowChange) (map[string]string, []string) {
+	// untracked notes, once per item, the rows of a table the other side
+	// did not track: row_tracking came or went after the baseline.
+	noted := map[string]bool{}
+	untracked := func(item string, other []string, why string) bool {
+		if other == nil || tracks(other, item) {
+			return false
+		}
+		if !noted[item] {
+			noted[item] = true
+			c.notes = append(c.notes, fmt.Sprintf("side-effects:%s: rows not compared: %s; make the baseline again to compare them (accept keeps the baseline's tracking)", item, why))
+		}
+		return true
+	}
+	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string) {
 		m := map[string]string{}
 		var keys []string
 		for _, r := range list {
+			if untracked(r.Item, other, why) {
+				continue
+			}
 			k := r.Item + "[" + r.Key + "]"
 			if _, ok := m[k]; !ok {
 				keys = append(keys, k)
@@ -398,8 +441,8 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects) {
 		}
 		return m, keys
 	}
-	bRows, bKeys := rows(base.Rows)
-	vRows, vKeys := rows(cur.Rows)
+	bRows, bKeys := rows(base.Rows, vTables, "row_tracking no longer covers the table")
+	vRows, vKeys := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
 	for _, k := range bKeys {
 		if vRows[k] != bRows[k] {
 			c.add(KindSideEffect, "side-effects:"+k, bRows[k], orNone(vRows[k]))
@@ -453,6 +496,9 @@ type comparer struct {
 	// own writes the origins of both sides as one neutral origin, for what
 	// expectations digest (also when the sides share their origins).
 	own *originSide
+	// rawDiffer: the bodies differed before the project folders were
+	// replaced (roots.go).
+	rawDiffer bool
 }
 
 // memberTextMax bounds the text of a key's value in a key-missing or
@@ -1058,4 +1104,35 @@ func sameNumber(a, b *jsonx.Value) bool {
 	x, ok1 := new(big.Float).SetPrec(4096).SetString(a.Text)
 	y, ok2 := new(big.Float).SetPrec(4096).SetString(b.Text)
 	return ok1 && ok2 && x.Cmp(y) == 0
+}
+
+// tracks reports whether the tables another side tracked (meta.RowTracking:
+// <component>/table:<name>, from the configuration) hold item, the table
+// a row change names as the driver read it. The drivers match a table
+// more loosely than its configured name: SQL Server and others without
+// letter case, PostgreSQL a name without a schema in any schema. So does
+// this, without letter case and by the name without its schema too: a
+// table taken for tracked keeps its rows compared, and a looser match can
+// only show a difference, never hide one.
+func tracks(other []string, item string) bool {
+	comp, name, ok := strings.Cut(item, "/table:")
+	if !ok {
+		return slices.Contains(other, item)
+	}
+	bare := func(n string) string {
+		if i := strings.LastIndexByte(n, '.'); i >= 0 {
+			return n[i+1:]
+		}
+		return n
+	}
+	for _, o := range other {
+		oc, on, ok := strings.Cut(o, "/table:")
+		if !ok || oc != comp {
+			continue
+		}
+		if strings.EqualFold(on, name) || strings.EqualFold(bare(on), bare(name)) {
+			return true
+		}
+	}
+	return false
 }

@@ -486,7 +486,7 @@ func (s *SQLServer) fingerprintWorking(ctx context.Context, items []string) (Fin
 			}
 		}
 		inv := s.cached(sig)
-		fp, err := s.fingerprint(ctx, c, s.o.Working, items, inv, sig.values, reuse)
+		fp, err := s.fingerprint(ctx, c, s.o.Working, items, inv, sig.values, reuse, false)
 		if err != nil {
 			return nil, err
 		}

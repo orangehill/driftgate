@@ -167,6 +167,21 @@ func TestFind(t *testing.T) {
 			dsns: []string{"svc:S3cr-go-env@tcp(127.0.0.1:3306)/svc?parseTime=true", "postgres://svc:S3cr-go-yaml@localhost:5434/"},
 		},
 		{
+			dir:  "nestjs",
+			dbs:  []string{"postgres 127.0.0.1:5433/nest_dev nest <- dotenv .env "},
+			dsns: []string{"postgres://nest:S3cr-nest@127.0.0.1:5433/"},
+		},
+		{
+			dir:  "typeorm",
+			dbs:  []string{"mysql 127.0.0.1:3307/orm_dev orm <- dotenv .env "},
+			dsns: []string{"mysql://orm:S3cr-typeorm@127.0.0.1:3307/"},
+		},
+		{
+			dir:  "nest-database",
+			dbs:  []string{"postgres localhost:5434/api root <- dotenv .env "},
+			dsns: []string{"postgres://root:S3cr-boiler@localhost:5434/"},
+		},
+		{
 			dir:  "compose",
 			dbs:  []string{"postgres 127.0.0.1:55432/shop_dev shop <- compose compose.yaml db"},
 			urls: []string{"http://localhost:8089 compose.yaml services.web.ports"},

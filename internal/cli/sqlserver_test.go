@@ -293,14 +293,14 @@ func TestSQLServerDescribe(t *testing.T) {
 	if server(local) != server(d) {
 		t.Errorf("%s and %s are one server", server(local), server(d))
 	}
-	block := stateBlock(d, true)
+	block := stateBlock(d, true, appconf.Tables{})
 	for _, want := range []string{"    driver: sqlserver\n", "    working: Shop\n", "    pristine: Shop_pristine   #"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("state block without %q:\n%s", want, block)
 		}
 	}
 	d.Ref = appconf.Ref{}
-	if block = stateBlock(d, true); !strings.Contains(block, "sqlserver://user:pass@host:1433?database=Shop") {
+	if block = stateBlock(d, true, appconf.Tables{}); !strings.Contains(block, "sqlserver://user:pass@host:1433?database=Shop") {
 		t.Errorf("state block without a setting:\n%s", block)
 	}
 }

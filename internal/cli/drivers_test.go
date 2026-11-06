@@ -48,7 +48,7 @@ func TestNewProjectDrivers(t *testing.T) {
 	if s := server(lite); s != "sqlite:database/database.sqlite" {
 		t.Errorf("server: %s", s)
 	}
-	block := stateBlock(lite, true)
+	block := stateBlock(lite, true, appconf.Tables{})
 	for _, want := range []string{"    driver: sqlite\n", "    dsn: {dotenv: .env}", "    working: database/database.sqlite\n", "# pristine: a file of DriftGate's store"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("state block without %q:\n%s", want, block)
@@ -58,7 +58,7 @@ func TestNewProjectDrivers(t *testing.T) {
 		t.Errorf("state block:\n%s", block)
 	}
 	lite.Ref = appconf.Ref{}
-	if block = stateBlock(lite, true); strings.Contains(block, "dsn:") {
+	if block = stateBlock(lite, true, appconf.Tables{}); strings.Contains(block, "dsn:") {
 		t.Errorf("state block of an SQLite file without a setting has a dsn:\n%s", block)
 	}
 }

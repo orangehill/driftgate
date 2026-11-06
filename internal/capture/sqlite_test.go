@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -204,6 +205,9 @@ func TestCaptureSQLite(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if meta, err := set.Meta(); err != nil || strings.Join(meta.RowTracking, ",") != "db/table:users" {
+					t.Fatalf("capture %s: tables whose rows it tracked: %+v %v", tag, meta, err)
+				}
 				runs[tag] = map[string]snapshot.Record{}
 				for _, r := range sqliteCatalog().Requests {
 					rec, err := set.Record(r.ID)
@@ -324,6 +328,142 @@ func TestSeedSQLiteWhileWriting(t *testing.T) {
 	}
 }
 
+// TestCaptureSQLiteRestoreOnly: the session table the application writes
+// on every request is restore_only. No request has it as a side effect, a
+// capture brings its rows back to the pristine ones (the last restore
+// too), and a capture with another restore_only than the seed's asks for
+// a seed. A pristine copy of a tracked table changed behind DriftGate's
+// back still fails the restore's check.
+func TestCaptureSQLiteRestoreOnly(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	file := filepath.Join(root, "app.sqlite")
+	app := newSQLiteApp(t, file, "wal")
+	if _, err := app.db.Exec("INSERT INTO sessions (path) VALUES ('seeded')"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	cfg := config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", RestoreOnly: []string{"Sessions"}}}}
+	p, err := config.New(cfg, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range []string{"a", "b"} {
+		out.Reset()
+		sum, err := Run(ctx, p, sqliteCatalog(), Options{Tag: tag, Restore: "each", Out: &out})
+		if err != nil {
+			t.Fatalf("capture %s: %v\n%s", tag, err, out.String())
+		}
+		if !sum.Tracked || len(sum.Failed) > 0 {
+			t.Fatalf("capture %s: %+v", tag, sum)
+		}
+		if !strings.Contains(out.String(), "restore_only table …") {
+			t.Fatalf("capture %s restored no restore_only table:\n%s", tag, out.String())
+		}
+		set, err := p.Capture(tag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range sqliteCatalog().Requests {
+			rec, err := set.Record(r.ID)
+			if err != nil || rec == nil || rec.SideEffects == nil {
+				t.Fatalf("%s %s: %+v %v", tag, r.ID, rec, err)
+			}
+			for _, it := range rec.SideEffects.Items {
+				if it != "db/table:users" {
+					t.Fatalf("%s %s: side effect %s", tag, r.ID, it)
+				}
+			}
+		}
+		if n := app.count(t, "sessions"); n != 1 {
+			t.Fatalf("%d session rows after capture %s, want the seeded one", n, tag)
+		}
+	}
+
+	// Another restore_only: the pristine copy keeps other rows.
+	cfg.State = map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite"}}
+	other, err := config.New(cfg, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, other, sqliteCatalog(), Options{Tag: "c", Restore: "each", Out: &out}); err == nil || !strings.Contains(err.Error(), "restore_only changed since the pristine copy was made (it was [Sessions]); run driftgate seed") {
+		t.Fatalf("capture with another restore_only: %v", err)
+	}
+
+	server, err := serverOf(p, p.State["db"], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := pristinePath(p, "db", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pristine, err := sql.Open("sqlite", sqliteTestURI(sqliteStorePristine(record), "mode=rw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pristine.Exec("UPDATE users SET email = 'tampered' WHERE id = 2"); err != nil {
+		t.Fatal(err)
+	}
+	pristine.Close()
+	out.Reset()
+	_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "c", Restore: "each", Out: &out})
+	if err == nil || !strings.Contains(err.Error(), "restore of db left 1 items different from the fingerprint driftgate seed recorded of the pristine copy: [table:users]") {
+		t.Fatalf("capture on a changed pristine copy: %v\n%s", err, out.String())
+	}
+}
+
+// TestBaselineStateAfterSeed: a seed of other data than the baseline's
+// stops the capture, saying what to do.
+func TestBaselineStateAfterSeed(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app := newSQLiteApp(t, filepath.Join(root, "app.sqlite"), "wal")
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "base"}); err != nil {
+		t.Fatal(err)
+	}
+	base, err := p.Capture("base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The capture records the folder it was made in, for a comparison
+	// with another checkout's.
+	if meta, err := base.Meta(); err != nil || len(meta.Roots) == 0 || !slices.Equal(meta.Roots, projectRoots(p.Root)) {
+		t.Fatalf("roots of the capture: %+v %v", meta, err)
+	}
+	if _, err := app.db.Exec("INSERT INTO users (email) VALUES ('new@x')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now", Baseline: base})
+	if err == nil || !strings.Contains(err.Error(), "the state differs from the one the baseline was captured from (1 items): [db/table:users]") ||
+		!strings.Contains(err.Error(), "seed the data the baseline was captured from, or make a new baseline of this data (move "+base.Dir+" away; the next driftgate run makes it)") {
+		t.Fatalf("capture after a seed of other data: %v", err)
+	}
+}
+
 // The comparison of the working database with the copy just made only
 // warns: a working database that cannot be read then fails no seed, and
 // the record of the sound copy is written.
@@ -423,5 +563,125 @@ func TestPrepareThatWritesSQLite(t *testing.T) {
 	}
 	if len(clean.Prepared) != 0 {
 		t.Errorf("a prepare that writes nothing: %v", clean.Prepared)
+	}
+}
+
+// TestRowTrackingRecordedWithoutSteps: a capture of read-only requests
+// only records the tables under row_tracking too, from the
+// configuration, so a comparison with a capture that ran the writes does
+// not take their rows for untracked.
+func TestRowTrackingRecordedWithoutSteps(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app := newSQLiteApp(t, filepath.Join(root, "app.sqlite"), "wal")
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}, RowTracking: []string{"users"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "read", Only: "list"}); err != nil {
+		t.Fatal(err)
+	}
+	set, err := p.Capture("read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta, err := set.Meta(); err != nil || strings.Join(meta.RowTracking, ",") != "db/table:users" {
+		t.Fatalf("tables whose rows a read-only capture tracked: %+v %v", meta, err)
+	}
+}
+
+// TestBaselineBeforeRestoreOnly: a table made restore_only after the
+// baseline is in the baseline's state: the capture says the
+// configuration changed, not that the data did.
+func TestBaselineBeforeRestoreOnly(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app := newSQLiteApp(t, filepath.Join(root, "app.sqlite"), "wal")
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	project := func(c config.Component) *config.Project {
+		c.Driver, c.Working = config.SQLite, "app.sqlite"
+		p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+			Target: config.Target{BaseURL: srv.URL}, State: map[string]config.Component{"db": c}}, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	ctx := context.Background()
+	p := project(config.Component{})
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "base", Only: "list"}); err != nil {
+		t.Fatal(err)
+	}
+	base, err := p.Capture("base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = project(config.Component{RestoreOnly: []string{"sessions"}})
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now", Only: "list", Baseline: base})
+	if err == nil || !strings.Contains(err.Error(), "[db/table:sessions]; they are restore_only now, which the baseline's state still holds: the configuration changed") {
+		t.Fatalf("capture with a table made restore_only: %v", err)
+	}
+}
+
+// TestProjectRootsInHome: a project folder in a home folder of a form the
+// comparison knows is recorded as ~ and the rest, which names no user,
+// also outside $HOME (WSL's /mnt/c/Users/<name>); one elsewhere or in a
+// home of another form as it is; the home folder itself, and one name in
+// it, not at all.
+func TestProjectRootsInHome(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("paths of Unix")
+	}
+	t.Setenv("HOME", "/data/home/jane")
+	for root, want := range map[string]string{
+		"/Users/alice/Sites/shop":     "~/Sites/shop",
+		"/mnt/c/Users/alice/src/shop": "~/src/shop",
+		"/home/bob/work/shop/shop":    "~/work/shop/shop",
+		"/srv/shop":                   "/srv/shop",
+		"/var/lib/jenkins/jobs/shop":  "/var/lib/jenkins/jobs/shop",
+		"/Users/alice":                "",
+		"/Users/alice/app":            "",
+		// An absolute path would name the user: not recorded.
+		"/Users/Jane Doe/Sites/shop": "",
+		"/home/Jane Doe/work/shop":   "",
+		"/data/home/janet/src/shop":  "/data/home/janet/src/shop",
+	} {
+		got := projectRoots(root)
+		if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
+			t.Errorf("%s: %v, want %q", root, got, want)
+		}
+	}
+	// This machine's home ($HOME): a person's of another form is ~/…, a
+	// service account's is recorded as it is, one with white space not at
+	// all.
+	for home, c := range map[string][2]string{
+		"/data/home/jane":     {"/data/home/jane/src/shop", "~/src/shop"},
+		"/nfs/home/jane":      {"/nfs/home/jane/src/shop", "~/src/shop"},
+		"/var/lib/jenkins":    {"/var/lib/jenkins/jobs/shop", "/var/lib/jenkins/jobs/shop"},
+		"/srv/app":            {"/srv/app", "/srv/app"},
+		"/var/home/jane":      {"/var/home/jane/src/shop", "~/src/shop"},
+		"/app":                {"/app/shop", "/app/shop"},
+		"/data/home/Jane Doe": {"/data/home/Jane Doe/src/shop", ""},
+	} {
+		t.Setenv("HOME", home)
+		got := projectRoots(c[0])
+		if c[1] == "" && len(got) != 0 || c[1] != "" && (len(got) != 1 || got[0] != c[1]) {
+			t.Errorf("HOME %s: %s: %v, want %q", home, c[0], got, c[1])
+		}
 	}
 }

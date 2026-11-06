@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,24 +30,25 @@ func TestSetupSQLite(t *testing.T) {
 		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
 	}
 	_, c := loadState(t, root)
-	want := []string{"sessions", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs"}
-	if c.Driver != config.SQLite || c.Working != "database/database.sqlite" || c.Pristine != "" || c.DSN != (config.Secret{Dotenv: ".env"}) || !reflect.DeepEqual(c.Exclude, want) {
+	want := []string{"sessions", "jobs", "job_batches", "failed_jobs"}
+	if c.Driver != config.SQLite || c.Working != "database/database.sqlite" || c.Pristine != "" || c.DSN != (config.Secret{Dotenv: ".env"}) || !reflect.DeepEqual(c.Exclude, want) ||
+		!reflect.DeepEqual(c.RestoreEmpty, []string{"cache", "cache_locks"}) {
 		t.Errorf("state db: %+v", c)
 	}
 	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); !strings.Contains(raw, "dsn: {dotenv: .env}   # from .env, read when a command runs; it must name the working file\n") {
 		t.Errorf("configuration:\n%s", raw)
 	}
-	if !strings.Contains(out, "chosen: exclude: sessions, cache") || strings.Contains(out+errOut, "GRANT") || strings.Contains(out, "password") {
+	if !strings.Contains(out, "chosen: exclude: sessions, jobs, job_batches, failed_jobs; restore_empty: cache, cache_locks") || strings.Contains(out+errOut, "GRANT") || strings.Contains(out, "password") {
 		t.Errorf("output:\n%s\n%s", out, errOut)
 	}
 
 	// At a terminal, the exclusion is a question whose default is yes.
 	root = setupDir(t, map[string]string{"artisan": "", ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
 	input(t, "n\n")
-	if code, out, errOut = runCLI(t, "setup"); code != ExitConfig || !strings.Contains(errOut, "Exclude the framework's own tables sessions") {
+	if code, out, errOut = runCLI(t, "setup"); code != ExitConfig || !strings.Contains(errOut, "The framework keeps its own state in this database (") || !strings.Contains(errOut, "empty cache, cache_locks at every restore (a cache; never compared)") {
 		t.Fatalf("setup at a terminal: %d\n%s\n%s", code, out, errOut)
 	}
-	if _, c := loadState(t, root); len(c.Exclude) != 0 || c.Working != "database/database.sqlite" {
+	if _, c := loadState(t, root); len(c.Exclude)+len(c.RestoreEmpty) != 0 || c.Working != "database/database.sqlite" {
 		t.Errorf("state db after no: %+v", c)
 	}
 }
@@ -61,7 +63,7 @@ func TestInitSQLite(t *testing.T) {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
-	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, cache, cache_locks, jobs, job_batches, failed_jobs]", "\n#     # pristine: a file of DriftGate's store",
+	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]", "\n#     # pristine: a file of DriftGate's store",
 		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("configuration without %q:\n%s", want, raw)
@@ -150,7 +152,7 @@ state:
 	// The main worktree's own file is refused.
 	s := &setup{a: &asker{yes: true}, resume: "driftgate setup"}
 	c := config.Component{Driver: config.SQLite, Working: "database/database.sqlite"}
-	if err := s.adoptSQLite(main, main, "db", c, appconf.Found{}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "is the main worktree's database file") {
+	if err := s.adoptSQLite(nil, main, main, "db", c, appconf.Found{}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "is the main worktree's database file") {
 		t.Errorf("the main worktree's file: %v", err)
 	}
 }
@@ -196,17 +198,17 @@ func TestSQLiteAdoptNotes(t *testing.T) {
 	s := &setup{a: &asker{yes: true}, resume: "driftgate setup", out: &strings.Builder{}}
 	c := config.Component{Driver: config.SQLite, Working: "database/database.sqlite"}
 	outside := appconf.Note{File: ".env", Text: "the SQLite file is outside the project; DriftGate restores a file of the project only"}
-	if err := s.adoptSQLite(here, t.TempDir(), "db", c, appconf.Found{Notes: []appconf.Note{outside}}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "name no database file of this worktree") {
+	if err := s.adoptSQLite(nil, here, t.TempDir(), "db", c, appconf.Found{Notes: []appconf.Note{outside}}, appconf.Database{}, false); err == nil || !strings.Contains(err.Error(), "name no database file of this worktree") {
 		t.Errorf("outside only: %v", err)
 	}
 	found := appconf.Found{Notes: []appconf.Note{outside}, Databases: []appconf.Database{{Driver: appconf.SQLite, Path: "database/database.sqlite"}}}
-	if err := s.adoptSQLite(here, t.TempDir(), "db", c, found, appconf.Database{}, false); err != nil {
+	if err := s.adoptSQLite(nil, here, t.TempDir(), "db", c, found, appconf.Database{}, false); err != nil {
 		t.Errorf("a setting names working: %v", err)
 	}
 	if out := s.out.(*strings.Builder).String(); !strings.Contains(out, "note: .env: the SQLite file is outside the project") {
 		t.Errorf("note not shown: %q", out)
 	}
-	if err := s.adoptSQLite(here, t.TempDir(), "db", c, appconf.Found{}, appconf.Database{}, false); err != nil {
+	if err := s.adoptSQLite(nil, here, t.TempDir(), "db", c, appconf.Found{}, appconf.Database{}, false); err != nil {
 		t.Errorf("no settings: %v", err)
 	}
 }
@@ -233,11 +235,11 @@ func TestSQLiteDescribe(t *testing.T) {
 	if d := describe(appconf.Database{Driver: appconf.SQLite, File: ".env", Ref: appconf.Ref{Source: appconf.Dotenv, File: ".env"}}); !strings.Contains(d, "(no database file named)") {
 		t.Errorf("describe without a file: %s", d)
 	}
-	block := stateBlock(primary, true, "solid_queue_jobs")
-	if !strings.Contains(block, "    exclude: [solid_queue_jobs]") || strings.Contains(block, "# exclude:") {
+	block := stateBlock(primary, true, appconf.Tables{Exclude: []string{"solid_queue_jobs"}, RestoreEmpty: []string{"solid_cache_entries"}})
+	if !strings.Contains(block, "    exclude: [solid_queue_jobs]") || !strings.Contains(block, "    restore_empty: [solid_cache_entries]") || strings.Contains(block, "# exclude:") {
 		t.Errorf("state block:\n%s", block)
 	}
-	if block = stateBlock(appconf.Database{Driver: appconf.SQLite, Ref: ref}, true); !strings.Contains(block, "# set working (the database file the application uses") {
+	if block = stateBlock(appconf.Database{Driver: appconf.SQLite, Ref: ref}, true, appconf.Tables{}); !strings.Contains(block, "# set working (the database file the application uses") {
 		t.Errorf("state block without a file:\n%s", block)
 	}
 }
@@ -268,5 +270,56 @@ func TestSeedExample(t *testing.T) {
 		if err != nil || len(p.Seed) != 1 || len(p.Seed[0].Run) < 2 || p.Seed[0].Dir != "" || p.Seed[0].Stdin != "" || strings.Contains(p.Seed[0].String(), "***") {
 			t.Errorf("%+v %t: %s: %+v %v", c.d, c.laravel, got, p, err)
 		}
+	}
+}
+
+// TestSetupSQLiteWorktreeFromPristine: a worktree without the database
+// file (git does not carry it) gets one from the main worktree's pristine
+// copy, the data its baseline was captured from, without the pristine
+// copy's mark; a run there then starts from the baseline's data.
+func TestSetupSQLiteWorktreeFromPristine(t *testing.T) {
+	main := setupDir(t, map[string]string{".gitignore": ".env\n.driftgate/\n*.sqlite\n", ".env": "APP_URL=http://127.0.0.1:" + closedPort(t) + "\nDB_CONNECTION=sqlite\n",
+		"artisan": "", "database/.gitkeep": ""})
+	db, err := sql.Open("sqlite", filepath.Join(main, "database", "database.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)", "INSERT INTO users (email) VALUES ('a@x'), ('b@x')"} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	write(t, filepath.Join(main, ".driftgate", "driftgate.yaml"), "version: 1\nproject: shop\nbaselines: local\ntarget:\n  base_url: http://127.0.0.1:1\nstate:\n  db:\n    driver: sqlite\n    working: database/database.sqlite\n")
+	write(t, filepath.Join(main, ".driftgate", "baselines", "local", "acceptances.jsonl"), "")
+	if code, out, errOut := runCLI(t, "seed"); code != ExitClean {
+		t.Fatalf("seed in the main worktree: %d\n%s\n%s", code, out, errOut)
+	}
+	wt := worktree(t, main, map[string]string{".env": "DB_CONNECTION=sqlite\n"})
+	code, out, errOut := runCLI(t, "setup", "--yes")
+	if !strings.Contains(out, "state db: database/database.sqlite made from the main worktree's pristine copy") {
+		t.Fatalf("setup without the file: %d\n%s\n%s", code, out, errOut)
+	}
+	copied, err := sql.Open("sqlite", filepath.Join(wt, "database", "database.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copied.Close()
+	var users, marks int
+	if err := copied.QueryRow("SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM sqlite_schema WHERE name = 'driftgate_pristine')").Scan(&users, &marks); err != nil || users != 2 || marks != 0 {
+		t.Fatalf("the worktree's file: %d users, %d marks (%v)", users, marks, err)
+	}
+	copied.Close()
+
+	// Gone again in the worktree that has the project: a command says
+	// where to get it, and setup makes it again.
+	if err := os.Remove(filepath.Join(wt, "database", "database.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := runCLI(t, "seed"); code != ExitConfig || !strings.Contains(errOut, "working: database/database.sqlite: not found in this worktree (git does not carry it): driftgate setup makes it") {
+		t.Fatalf("seed without the file: %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "setup", "--yes"); !strings.Contains(out, "state db: database/database.sqlite made from the main worktree's pristine copy") {
+		t.Fatalf("setup in the worktree's project without the file: %d\n%s\n%s", code, out, errOut)
 	}
 }

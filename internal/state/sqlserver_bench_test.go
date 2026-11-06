@@ -86,7 +86,7 @@ func BenchmarkSQLServerFull(b *testing.B) {
 	}
 	defer c.Close()
 	for b.Loop() {
-		if _, err := s.fingerprint(ctx, c, s.o.Working, nil, nil, nil, nil); err != nil {
+		if _, err := s.fingerprint(ctx, c, s.o.Working, nil, nil, nil, nil, false); err != nil {
 			b.Fatal(err)
 		}
 	}

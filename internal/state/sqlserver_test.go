@@ -104,7 +104,7 @@ func sqlServerFull(t testing.TB, s *SQLServer) Fingerprint {
 			return err
 		}
 		defer c.Close()
-		fp, err = fresh.fingerprint(ctx, c, o.Working, nil, nil, nil, nil)
+		fp, err = fresh.fingerprint(ctx, c, o.Working, nil, nil, nil, nil, false)
 		return err
 	})
 	if err != nil {

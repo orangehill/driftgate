@@ -708,7 +708,7 @@ func TestSQLServerRowversion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.fingerprint(context.Background(), c, s.o.Pristine, nil, nil, nil, nil)
+	p, err := s.fingerprint(context.Background(), c, s.o.Pristine, nil, nil, nil, nil, false)
 	c.Close()
 	if err != nil {
 		t.Fatal(err)

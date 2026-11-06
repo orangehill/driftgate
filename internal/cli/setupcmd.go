@@ -143,6 +143,7 @@ type setup struct {
 	check    []string // what the user must check by hand
 	database string   // the database line of the summary
 	adopted  string   // the main worktree whose project this run took (relative), if any
+	copied   string   // what became of the pristine copy, for the summary
 	answered []string // what answered at each address
 }
 
@@ -440,8 +441,8 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 	if db.Ref.IsZero() {
 		s.check = append(s.check, fmt.Sprintf("%s cannot be read from a file: set %s to the DSN before DriftGate runs (dsn: { env: %s })", where(db), dsnEnv, dsnEnv))
 	}
-	if db.Driver == appconf.SQLite && db.Path != "" {
-		if err := s.sqliteExclude(dr, db); err != nil {
+	if workingOf(db) != "" {
+		if err := s.askTables(dr, db); err != nil {
 			return err
 		}
 	}
@@ -635,6 +636,7 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	}
 	if seeded {
 		fmt.Fprintln(s.out, "the pristine copy is there already; kept")
+		s.copied = "the one made before is kept; driftgate seed --skip-commands makes it again of the data as it is then (driftgate seed runs the seed: commands first)"
 		return nil
 	}
 	if len(grants) > 0 {
@@ -654,6 +656,9 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	_, err = s.interruptible(func() (int, error) {
 		return 0, seedCmd([]string{"--config", path, "--skip-commands"}, s.out, s.errOut)
 	})
+	if err == nil {
+		s.copied = "the data in the database as it was now: every capture starts from it; after the data changes, driftgate seed --skip-commands takes it as it is again (driftgate seed runs the seed: commands first)"
+	}
 	if err != nil && len(grants) > 0 && denied().MatchString(err.Error()) {
 		var e *exitError
 		code := ExitEnv
@@ -918,6 +923,14 @@ func (s *setup) summary(p *config.Project, d detected) {
 	}
 	if len(s.answered) > 0 {
 		urls = s.answered
+	}
+	if s.copied != "" {
+		row("pristine", s.copied)
+	}
+	if p.Mode == config.Evolve {
+		row("mode", "evolve: a drift may be accepted with a reason (driftgate accept)")
+	} else {
+		row("mode", "freeze: every drift fails, and driftgate accept is refused; mode: evolve in "+rel(p.Root, p.Layout.Config)+" lets a drift be accepted with a reason")
 	}
 	row("app", strings.Join(urls, ", "))
 	row("routes", s.coverage(p))

@@ -162,7 +162,7 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	if s.sums == nil {
 		s.sums = map[string]sqliteSum{}
 	}
-	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums)
+	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums, false)
 	s.scanned = read
 	if err != nil {
 		return nil, err
@@ -290,8 +290,10 @@ func (s *SQLite) end(conns []*sql.Conn) {
 // fingerprint hashes the items of a schema (main, or the pristine file's)
 // that want accepts (nil: all of them), read on conns, which share one
 // snapshot. With sums, a table whose pages did not change keeps its row
-// hash from there, and the row hashes read are kept in it.
-func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum) (Fingerprint, []string, error) {
+// hash from there, and the row hashes read are kept in it. The
+// restore_only tables are left out; with restoreOnly they are all it
+// hashes.
+func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum, restoreOnly bool) (Fingerprint, []string, error) {
 	objs, err := s.objects(ctx, conns[0], schema)
 	if err != nil {
 		return nil, nil, err
@@ -302,7 +304,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
-		if want("table:" + name) {
+		if objs.tables[name].restoreOnly == restoreOnly && want("table:"+name) {
 			tables = append(tables, objs.tables[name])
 		}
 	}
@@ -330,6 +332,10 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		}
 		h.Write(got[t.name].rows)
 		f["table:"+t.name] = hex.EncodeToString(h.Sum(nil))
+	}
+	if restoreOnly {
+		sort.Strings(read)
+		return f, read, nil
 	}
 	for _, v := range objs.vorder {
 		if want("view:" + v) {
@@ -897,12 +903,57 @@ func (s *SQLite) pristineFingerprint(ctx context.Context) (Fingerprint, error) {
 		return nil, fmt.Errorf("pristine file %s: %w", s.o.Pristine, err)
 	}
 	defer c.ExecContext(context.Background(), "ROLLBACK")
-	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil)
+	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
 	s.pristine, s.pristineID = f, fi
 	return f, nil
+}
+
+// RestoreOnlyFingerprint hashes the restore_only tables of the working
+// file, or of the pristine one (RestoreOnly), in a read transaction of a
+// connection of its own: the last fingerprint and the page digests stay as
+// they were.
+func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (_ Fingerprint, err error) {
+	defer s.busy(&err)
+	var db *sql.DB
+	if pristine {
+		if _, err := os.Stat(s.o.Pristine); errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("state %s: pristine file %s does not exist; run driftgate seed", s.o.Name, s.o.Pristine)
+		}
+		if db, err = sqliteOpen(s.o.Pristine, sqliteReadOnly); err != nil {
+			return nil, err
+		}
+		defer db.Close()
+	} else {
+		if err := s.current(); err != nil {
+			return nil, err
+		}
+		if s.seen.ok {
+			dv, err := s.dataVersion(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if s.unseen(dv, s.stampNow()) {
+				if err := s.reopen(); err != nil {
+					return nil, err
+				}
+			}
+		}
+		db = s.db
+	}
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	if err := sqliteBegin(ctx, c); err != nil {
+		return nil, err
+	}
+	defer c.ExecContext(context.Background(), "ROLLBACK")
+	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, true)
+	return f, err
 }
 
 // sameVersion reports whether two reads of a file's identity are of the

@@ -5,12 +5,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/demo"
 	"github.com/orangehill/driftgate/internal/report"
 	"github.com/orangehill/driftgate/internal/secret"
@@ -297,12 +301,65 @@ func TestByMethodNote(t *testing.T) {
 		{"id":"login","method":"POST","path":"/api/auth/login","body":{"user":"admin"},"storage":"private"}]}`)
 	code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg, "--repeat", "2")
 	if code != ExitClean || strings.Count(out, "only by their method") != 1 || !strings.Contains(out, "1 request changes data only by their method, as the catalog does not say mutates: login") ||
-		!strings.Contains(out, `"mutates": false`) || !strings.Contains(out, "--restore once") {
+		!strings.Contains(out, "mutates: false") || !strings.Contains(out, "under requests: in driftgate.yaml") || !strings.Contains(out, "--restore once") {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
 	write(t, catalogPath, `{"version":1,"requests":[{"id":"news","method":"GET","path":"/api/news","storage":"public"},
 		{"id":"login","method":"POST","path":"/api/auth/login","body":{"user":"admin"},"mutates":false,"storage":"private"}]}`)
 	if code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg, "--force"); code != ExitClean || strings.Contains(out, "only by their method") {
 		t.Fatalf("with mutates: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRepeatedRunsInOtherSeconds: a run of a repeated capture writes at
+// least a second after the run before it ended, so a timestamp of the
+// second the application wrote (updated_at) differs between the runs and
+// the comparison finds it, however short the runs are.
+func TestRepeatedRunsInOtherSeconds(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = time.Second
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		mu.Lock()
+		at = append(at, now)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":1,"updated_at":%q}`, now.UTC().Format("2006-01-02 15:04:05"))
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"item","method":"GET","path":"/item","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	if code == ExitClean || !strings.Contains(out, "updated_at") {
+		t.Fatalf("the timestamp is not found volatile: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) != 2 || at[1].Sub(at[0]) < time.Second {
+		t.Fatalf("requests at %v: the second run began within a second", at)
+	}
+}
+
+// TestMarkWriters: a generated request that changed data is marked under
+// requests: by its route, once per route; one written by hand in the
+// catalog.
+func TestMarkWriters(t *testing.T) {
+	cat := &catalog.Catalog{Requests: []catalog.Request{
+		{ID: "get-api-news-id", Method: "GET", Path: "/api/news/{id}", Source: &catalog.Source{Route: "GET /api/news/{id}", Template: "ok"}},
+		{ID: "get-api-news-id-json", Method: "GET", Path: "/api/news/{id}", Source: &catalog.Source{Route: "GET /api/news/{id}", Template: "json"}},
+		{ID: "hand", Method: "GET", Path: "/api/stats"},
+	}}
+	var out strings.Builder
+	markWriters(&out, []string{"get-api-news-id", "get-api-news-id-json", "hand"}, cat)
+	want := "mark them as changing data, so they run one at a time on a known state:\n" +
+		"  in driftgate.yaml, then driftgate generate --write:\n  requests:\n    - match: \"GET /api/news/{id}\"\n      mutates: true\n" +
+		"  in the catalog, written by hand: \"mutates\": true on hand\n"
+	if out.String() != want {
+		t.Errorf("advice:\n%s\nwant\n%s", out.String(), want)
 	}
 }

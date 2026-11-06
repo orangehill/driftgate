@@ -3,9 +3,13 @@ package generate
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -203,6 +207,86 @@ func TestMethodsAndObserve(t *testing.T) {
 	for _, r := range res.Catalog.Requests {
 		if r.Observe != (r.ID == "put-items-id-not-found") {
 			t.Errorf("observe by ID: %s %v", r.ID, r.Observe)
+		}
+	}
+}
+
+// TestRequestSettings: requests: in the configuration says which
+// generated requests change data and gives their bodies, by route or by
+// ID; the last entry that names a request wins, and empty-body keeps {}.
+func TestRequestSettings(t *testing.T) {
+	yes, no := true, false
+	p := project(t, config.Config{Templates: []string{"ok", "empty-body"}, Params: []config.Param{{Name: "id", Value: "1"}},
+		Requests: []config.RequestSetting{
+			{Match: "GET /items/*", Mutates: &yes},
+			{Match: "POST /search", Mutates: &no, Body: yamlBody(t, "{q: news, page: 1}")},
+			{Match: "post-items", Body: yamlBody(t, "[a]")},
+			{Match: "post-items", Body: yamlBody(t, "{name: x}")},
+		}})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"GET"}, Path: "/items/{id}"},
+		{Methods: []string{"GET", "POST"}, Path: "/items", BodyType: "application/x-www-form-urlencoded", Body: json.RawMessage(`{"name":"sample"}`)},
+		{Methods: []string{"POST"}, Path: "/search", Body: json.RawMessage(`{"q":"sample"}`)},
+	}}
+	inv.Sort()
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range res.Catalog.Requests {
+		m := "-"
+		if r.Mutates != nil {
+			m = fmt.Sprint(*r.Mutates)
+		}
+		got[r.ID] = fmt.Sprintf("%s %s %v", m, string(r.Body), r.Headers)
+	}
+	want := map[string]string{
+		"get-items-id":           "true  []",
+		"get-items":              "-  []",
+		"post-items":             `true {"name":"x"} []`,
+		"post-items-empty-body":  "true {} [[content-type application/x-www-form-urlencoded]]",
+		"post-search":            `false {"q":"news","page":1} []`,
+		"post-search-empty-body": "false {} []",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests:\n got %v\nwant %v", got, want)
+	}
+}
+
+func yamlBody(t *testing.T, text string) *yaml.Node {
+	t.Helper()
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &n); err != nil {
+		t.Fatal(err)
+	}
+	return n.Content[0]
+}
+
+// TestRequestSettingsRefused: mutates: false of a DELETE, PUT or PATCH,
+// or of requests of more than one route, is refused; an entry that names
+// no generated request is listed.
+func TestRequestSettingsRefused(t *testing.T) {
+	no := false
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"POST", "PUT"}, Path: "/items"},
+		{Methods: []string{"POST"}, Path: "/search"},
+		{Methods: []string{"PURGE"}, Path: "/cache"},
+	}}
+	inv.Sort()
+	for _, c := range []struct{ match, err string }{
+		{"PURGE /cache", "mutates: false names a PURGE request"},
+		{"PUT /items", "requests 1 (match \"PUT /items\"): mutates: false names a PUT request"},
+		{"POST *", "requests 1 (match \"POST *\"): mutates: false names requests of 2 routes"},
+		{"POST /search", ""},
+	} {
+		p := project(t, config.Config{Requests: []config.RequestSetting{{Match: c.match, Mutates: &no}, {Match: "GET /none", Mutates: &no}}})
+		res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+		switch {
+		case c.err != "" && (err == nil || !errors.Is(err, ErrSetting) || !strings.Contains(err.Error(), c.err)):
+			t.Errorf("%s: %v", c.match, err)
+		case c.err == "" && (err != nil || !reflect.DeepEqual(res.Unused, []string{`requests 2 (match "GET /none")`})):
+			t.Errorf("%s: %v %+v", c.match, err, res)
 		}
 	}
 }

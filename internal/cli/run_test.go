@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/demo"
 	"github.com/orangehill/driftgate/internal/routes"
@@ -110,6 +111,34 @@ body:
 	}
 	if code, out, errOut = runCLI(t, "run", "--config", cfg); code != ExitClean || !strings.Contains(out, "No drift") {
 		t.Fatalf("second run: %d\n%s\n%s", code, out, errOut)
+	}
+	// A generated request marked under requests: (the advice for a
+	// read-only request that changes data): the catalog generate makes
+	// differs until it is written, and then run passes again.
+	text, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, cfg, string(text)+"requests:\n  - match: \"GET /api/news/*\"\n    mutates: true\n")
+	if code, out, _ = runCLI(t, "run", "--config", cfg); code != ExitDrift || !strings.Contains(out, "get-api-news-id") {
+		t.Fatalf("run with a request marked, before generate --write: %d\n%s", code, out)
+	}
+	if code, out, errOut = runCLI(t, "generate", "--config", cfg, "--write"); code != ExitClean {
+		t.Fatalf("generate --write: %d\n%s\n%s", code, out, errOut)
+	}
+	cat, err := catalog.Load(filepath.Join(root, "driftgate", "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := false
+	for _, r := range cat.Requests {
+		marked = marked || r.ID == "get-api-news-id" && r.Mutates != nil && *r.Mutates
+	}
+	if !marked {
+		t.Fatalf("catalog after generate --write: %+v", cat.Requests)
+	}
+	if code, out, errOut = runCLI(t, "run", "--config", cfg); code != ExitClean || !strings.Contains(out, "No drift") {
+		t.Fatalf("run with the request marked: %d\n%s\n%s", code, out, errOut)
 	}
 	api.SetVersion("v2")
 	if code, out, _ = runCLI(t, "run", "--config", cfg); code != ExitDrift || !strings.Contains(out, "x-powered-by") {

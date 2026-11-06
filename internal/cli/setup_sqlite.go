@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,7 +10,9 @@ import (
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/appconf"
+	"github.com/orangehill/driftgate/internal/capture"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // An SQLite database is a file of the project: setup names it by its path
@@ -72,49 +75,67 @@ func (s *setup) sqliteDatabase(db *appconf.Database, database string) error {
 	return nil
 }
 
-// sqliteExclude proposes, for the SQLite file of db, to exclude the tables
-// the framework keeps its sessions, cache and jobs in, in the same file
-// (appconf.SQLiteExclude): they change on every request, and restoring
-// them would only log users out and drop jobs. The default is yes (--yes
-// says yes); the answer is written to state:.
-func (s *setup) sqliteExclude(dr *draft, db appconf.Database) error {
-	tables, why := appconf.SQLiteExclude(dr.p.Root, db, os.LookupEnv)
-	dr.excludeAsked = true
-	if len(tables) == 0 {
+// askTables proposes, for the database of db, to leave the tables the
+// framework keeps its own state in out of the comparison
+// (appconf.FrameworkTables): excluded, as restoring them would log the
+// developer out or disturb a running worker, or restore_empty (a cache,
+// whose entries would carry over between captures). The default is yes
+// (--yes says yes); the answer is written to state:.
+func (s *setup) askTables(dr *draft, db appconf.Database) error {
+	t := appconf.FrameworkTables(dr.p.Root, db, os.LookupEnv)
+	dr.tablesAsked = true
+	if len(t.Exclude)+len(t.RestoreEmpty) == 0 {
 		return nil
 	}
-	q := fmt.Sprintf("Exclude the framework's own tables %s from state: (never compared or restored; %s)?", strings.Join(tables, ", "), why)
+	var parts, chosen []string
+	if len(t.Exclude) > 0 {
+		parts = append(parts, "exclude "+strings.Join(t.Exclude, ", ")+" (never compared or restored)")
+		chosen = append(chosen, "exclude: "+strings.Join(t.Exclude, ", "))
+	}
+	if len(t.RestoreEmpty) > 0 {
+		parts = append(parts, "empty "+strings.Join(t.RestoreEmpty, ", ")+" at every restore (a cache; never compared)")
+		chosen = append(chosen, "restore_empty: "+strings.Join(t.RestoreEmpty, ", "))
+	}
+	q := fmt.Sprintf("The framework keeps its own state in this database (%s): %s?", t.Why, strings.Join(parts, "; "))
 	yes := s.a.yes
 	for !yes {
 		a, ok := s.a.line(q + " [Y/n]: ")
 		if !ok {
-			return s.a.cannot(q, "pass --yes to exclude them")
+			return s.a.cannot(q, "pass --yes to take them")
 		}
 		if a = strings.ToLower(a); a == "n" || a == "no" {
 			return nil
 		}
 		yes = a == "" || a == "y" || a == "yes"
 	}
-	dr.exclude = tables
-	s.chosen = append(s.chosen, fmt.Sprintf("exclude: %s (%s)", strings.Join(tables, ", "), why))
+	dr.tables = t
+	s.chosen = append(s.chosen, fmt.Sprintf("%s (%s)", strings.Join(chosen, "; "), t.Why))
 	return nil
 }
 
-// excludeTables are the tables state: excludes: those setup's question
-// took, or for init, which asks nothing, the framework's proposal.
-func (dr *draft) excludeTables() []string {
-	if dr.excludeAsked || dr.db == nil || dr.db.Driver != appconf.SQLite {
-		return dr.exclude
+// frameworkTables are the tables state: excludes or restores only: those
+// setup's question took, or for init, which asks nothing, the
+// framework's proposal.
+func (dr *draft) frameworkTables() appconf.Tables {
+	if dr.tablesAsked || dr.db == nil {
+		return dr.tables
 	}
-	tables, _ := appconf.SQLiteExclude(dr.p.Root, *dr.db, os.LookupEnv)
-	return tables
+	return appconf.FrameworkTables(dr.p.Root, *dr.db, os.LookupEnv)
 }
 
 // sqliteMissing stops setup before the pristine copy of an SQLite
-// database whose file is not there yet: the application makes it.
+// database whose file is not there yet: the application makes it. In a
+// worktree whose main worktree has a pristine copy of it, setup offers to
+// make it from there (sqliteFromMain).
 func (s *setup) sqliteMissing(p *config.Project, name string, c config.Component) error {
 	if _, err := appconf.LocalPath(p.Root, c.Working); err != nil {
 		if errors.Is(err, os.ErrNotExist) || strings.HasSuffix(err.Error(), ": not found") {
+			if main := config.MainCheckout(p.Root); main != "" {
+				src, err := loadIn(main)
+				if err == nil && src.State[name].Driver == config.SQLite {
+					return s.sqliteFromMain(src, p.Root, main, name, c.Working)
+				}
+			}
 			return configErr("state %s: the database file %s does not exist yet; the application creates it with its migrations (php artisan migrate, bin/rails db:prepare, python manage.py migrate, npx prisma migrate dev): run them, then %s", name, c.Working, s.resume)
 		}
 		return configErr("state %s: working %s: %v", name, c.Working, err)
@@ -132,7 +153,9 @@ func (s *setup) sqliteMissing(p *config.Project, name string, c config.Component
 // path to the main worktree's file) is refused too, unless one of them
 // names working: the application may run on the main worktree's file,
 // and a run that restores this worktree's would pass without testing it.
-func (s *setup) adoptSQLite(here, main, name string, c config.Component, found appconf.Found, d appconf.Database, known bool) error {
+// A file that is not here is made from the main worktree's pristine copy
+// (src: its project), after asking (sqliteFromMain).
+func (s *setup) adoptSQLite(src *config.Project, here, main, name string, c config.Component, found appconf.Found, d appconf.Database, known bool) error {
 	var notes []string
 	for _, n := range found.Notes {
 		if strings.Contains(n.Text, "SQLite") && !controls(n.File, n.Text) {
@@ -159,11 +182,13 @@ func (s *setup) adoptSQLite(here, main, name string, c config.Component, found a
 		}
 	}
 	mine, err := appconf.LocalPath(here, file)
-	if err != nil {
-		if strings.HasSuffix(err.Error(), ": not found") {
-			return configErr("state %s: the database file %s is not in this worktree (git does not carry it): copy the main worktree's (%s), or create it with the application's migrations, then run %s",
-				name, file, filepath.Join(main, filepath.FromSlash(c.Working)), s.resume)
+	if err != nil && strings.HasSuffix(err.Error(), ": not found") {
+		if err = s.sqliteFromMain(src, here, main, name, file); err != nil {
+			return err
 		}
+		mine, err = appconf.LocalPath(here, file)
+	}
+	if err != nil {
 		return configErr("state %s: working %s: %v", name, file, err)
 	}
 	theirs, err := appconf.LocalPath(main, c.Working)
@@ -176,6 +201,52 @@ func (s *setup) adoptSQLite(here, main, name string, c config.Component, found a
 		return configErr("state %s: %s in this worktree is the main worktree's database file; its runs would restore it while the main worktree uses it. Give this worktree a file of its own, then run %s", name, file, s.resume)
 	}
 	return nil
+}
+
+// sqliteFromMain makes the database file of this worktree (file, which
+// is not there: git does not carry it) a copy of the main worktree's
+// pristine copy of state name, the data the main worktree's baseline was
+// captured from, so the worktree's runs start from it; after asking
+// (--yes says yes). Without a pristine copy there, or refused, setup
+// stops and says how to make the file.
+func (s *setup) sqliteFromMain(src *config.Project, here, main, name, file string) error {
+	missing := configErr("state %s: the database file %s is not in this worktree (git does not carry it): copy the main worktree's (%s), or create it with the application's migrations, then run %s",
+		name, file, filepath.Join(main, filepath.FromSlash(src.State[name].Working)), s.resume)
+	pristine, err := capture.SQLitePristine(src, name)
+	if err != nil || pristine == "" {
+		return missing
+	}
+	s.step("database file")
+	ok, err := s.a.confirm(fmt.Sprintf("The database file %s is not in this worktree (git does not carry it). Make it a copy of the main worktree's pristine copy of state %s, the data its baseline was captured from?", file, name),
+		"pass --yes to make it")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return missing
+	}
+	// As the system opens it: a folder linked out of the worktree is
+	// refused, though the file is not there yet.
+	working, err := appconf.SQLitePath(here, file)
+	if err != nil {
+		return configErr("state %s: working %s: %v", name, file, err)
+	}
+	if err := state.SQLiteFromPristine(context.Background(), pristine, working); err != nil {
+		return configErr("state %s: making %s from the main worktree's pristine copy: %v", name, file, err)
+	}
+	fmt.Fprintf(s.out, "state %s: %s made from the main worktree's pristine copy\n", name, file)
+	s.chosen = append(s.chosen, fmt.Sprintf("%s: a copy of the main worktree's pristine copy", file))
+	return nil
+}
+
+// loadIn loads the configuration of the project folder dir:
+// .driftgate/driftgate.yaml (baselines: local) or driftgate.yaml.
+func loadIn(dir string) (*config.Project, error) {
+	path := filepath.Join(dir, config.LocalDir, config.FileName)
+	if _, err := os.Stat(path); err != nil {
+		path = filepath.Join(dir, config.FileName)
+	}
+	return config.Load(path)
 }
 
 // namesFile reports whether a setting Find took names the SQLite file

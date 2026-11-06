@@ -150,6 +150,14 @@ type Meta struct {
 	// to, per service (the empty name: the only one). Responses that write
 	// absolute URLs are compared with another origin's through them.
 	Origins map[string]string `json:"origins,omitempty"`
+	// Roots are the folder of the project the capture was made in and its
+	// real path: responses that write it (a debug stack trace) are
+	// compared with another checkout's through them.
+	Roots []string `json:"roots,omitempty"`
+	// RowTracking are the items whose rows the capture tracked
+	// (row_tracking: <component>/table:<name>), [] for none; nil in a
+	// capture of an earlier release, which does not say.
+	RowTracking []string `json:"row_tracking"`
 }
 
 // Concurrency is the decision of concurrency: auto for one service, with

@@ -17,6 +17,7 @@ import (
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/generate"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
@@ -94,6 +95,10 @@ type captureOptions struct {
 	first func(*capture.Summary)
 }
 
+// runGap is the least time between the end of a run of a repeated capture
+// and the first write of the next (captureSet).
+var runGap = time.Second
+
 // captureSet captures the catalog under tag, repeated as the options say,
 // prints the outcome and returns its exit code.
 func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tag string, o captureOptions, out, errOut io.Writer) (int, error) {
@@ -141,13 +146,19 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 	}()
 	code := ExitClean
 	var first *capture.Summary
+	// Each run writes at least a second after the last one ended: a
+	// timestamp the application writes (updated_at) then differs between
+	// the runs, so the comparison finds it, whatever the clocks of the
+	// application and the database are set to. Two runs within one second
+	// would leave it equal, and it would drift on every later run.
+	var notBefore time.Time
 	for i, tag := range tags {
 		if len(tags) > 1 {
 			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
 		}
 		opt := capture.Options{Tag: tag, Only: o.only, Force: o.force || i > 0, AllowRemote: o.allowRemote,
 			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used}
+			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used, NotBefore: notBefore}
 		sum, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return 0, failed(err)
@@ -160,12 +171,13 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 				return 0, failed(err)
 			}
 		}
+		notBefore = time.Now().Add(runGap)
 		if i == 0 {
 			first = sum
 			if o.first != nil {
 				o.first(sum)
 			}
-			code = summarize(out, errOut, tag, sum)
+			code = summarize(out, errOut, tag, sum, cat)
 			if len(sum.Failed) > 0 {
 				// More runs would only fail the same way.
 				if len(sum.Failed) == sum.Requests {
@@ -267,12 +279,52 @@ func byMethodNote(out io.Writer, ids []string, restore string) {
 	}
 	fmt.Fprintf(out, "%d %s data only by their method, as the catalog does not say mutates: %s\n"+
 		"  each runs one at a time after the read-only requests, on %s;\n"+
-		"  write \"mutates\": false on those that only read (a search sent as POST), \"mutates\": true on the others\n",
+		"  say mutates: false for those that only read (a search sent as POST), mutates: true for the others,\n"+
+		"  under requests: in driftgate.yaml (match: the request ID), then driftgate generate --write; an entry written by hand says it in the catalog\n",
 		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
 }
 
+// markWriters says how to mark read-only requests that changed data as
+// changing it, so they run one at a time on a known state: a generated
+// one under requests: in driftgate.yaml, by its route (what generate
+// matches; generate --write then writes it), one written by hand in the
+// catalog.
+func markWriters(out io.Writer, ids []string, cat *catalog.Catalog) {
+	byID := map[string]catalog.Request{}
+	if cat != nil {
+		for _, r := range cat.Requests {
+			byID[r.ID] = r
+		}
+	}
+	var entries, hand []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		r, ok := byID[id]
+		if !ok || !generate.IsGenerated(r) {
+			hand = append(hand, id)
+			continue
+		}
+		_, path, _ := strings.Cut(r.Source.Route, " ")
+		e := fmt.Sprintf("    - match: %q\n", r.Method+" "+path)
+		if r.Target != "" {
+			e += fmt.Sprintf("      target: %s\n", r.Target)
+		}
+		if !seen[e] {
+			seen[e] = true
+			entries = append(entries, e+"      mutates: true\n")
+		}
+	}
+	fmt.Fprintln(out, "mark them as changing data, so they run one at a time on a known state:")
+	if len(entries) > 0 {
+		fmt.Fprint(out, "  in driftgate.yaml, then driftgate generate --write:\n  requests:\n"+strings.Join(entries, ""))
+	}
+	if len(hand) > 0 {
+		fmt.Fprintf(out, "  in the catalog, written by hand: \"mutates\": true on %s\n", strings.Join(hand, ", "))
+	}
+}
+
 // summarize prints the outcome of a capture and returns its exit code.
-func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
+func summarize(out, errOut io.Writer, tag string, sum *capture.Summary, cat *catalog.Catalog) int {
 	fmt.Fprintf(out, "\ncaptured %d requests into %s\n", sum.Requests, tag)
 	if t := sum.Time; t.Fingerprints > 0 {
 		fmt.Fprintf(out, "time %s: state fingerprints %s (%d, %d of them unnecessary after a check of the write counters), restores %s, the rest requests\n",
@@ -293,7 +345,7 @@ func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
 		for _, id := range ids {
 			fmt.Fprintf(out, "  %s → %s\n", id, strings.Join(sum.Writers[id], ", "))
 		}
-		fmt.Fprintln(out, "mark them mutates: true in the catalog, so they run one at a time on a known state")
+		markWriters(out, ids, cat)
 	}
 	if len(sum.Unattributed) > 0 {
 		fmt.Fprintf(out, "\nread-only requests changed %s, but no single request does it alone (an order effect or background work)\n", strings.Join(sum.Unattributed, ", "))
