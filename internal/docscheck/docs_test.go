@@ -98,12 +98,17 @@ func TestPublicAnchors(t *testing.T) {
 }
 
 // TestNoDuplicateHeadings: no heading repeats within a page, so no anchor
-// needs a -1 that moves when a heading above it changes.
+// needs a -1 that moves when a heading above it changes. The changelog
+// repeats its section headings (Added, Fixed, …) under every release; only
+// its release headings must be unique there.
 func TestNoDuplicateHeadings(t *testing.T) {
 	_, all := docs(t)
 	for _, d := range all {
 		first := map[string]int{}
 		for _, h := range d.Headings {
+			if d.Path == "CHANGELOG.md" && h.Level > 2 {
+				continue
+			}
 			s := Slug(h.Text)
 			if line, ok := first[s]; ok {
 				t.Errorf("%s:%d: heading %q repeats the one on line %d (anchor #%s)", d.Path, h.Line, h.Text, line, s)
