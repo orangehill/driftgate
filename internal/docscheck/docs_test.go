@@ -234,13 +234,16 @@ func nameFindings(line string, yaml bool) []string {
 			h := hosts[m[2]:m[3]]
 			// A bare name or address ends where no name character follows;
 			// the pattern cannot look ahead without taking that character.
+			// A dot goes on with the name only when a name character follows
+			// it; otherwise it ends a sentence.
 			next := byte(' ')
 			if m[3] < len(hosts) {
 				next = hosts[m[3]]
 			}
+			goesOn := next == '.' && m[3]+1 < len(hosts) && isAlnum(hosts[m[3]+1])
 			switch {
-			case re == bareHost && (next == '.' || next == '-' || next == '_' || isAlnum(next) || !hostTLD(h) || notHosts[h]),
-				re == bareIP && (next == '.' || next >= '0' && next <= '9'):
+			case re == bareHost && (goesOn || next == '-' || next == '_' || isAlnum(next) || !hostTLD(h) || notHosts[h]),
+				re == bareIP && (goesOn || next >= '0' && next <= '9'):
 				continue
 			}
 			if name := hostName(h); !seen[name] && !exampleHost(h) {
@@ -320,6 +323,11 @@ func TestNameFindings(t *testing.T) {
 		"connect to 10.1.2.3 or 192.168.1.5":             2,
 		"mail admin@acme.de":                             1,
 		"driftgate expect --ref JIRA-1":                  1,
+		"go to acme.de.":                                 1,
+		"api.acme.rs. Next":                              1,
+		"at 10.1.2.3.":                                   1,
+		"Connect to staging.acme.rs.":                    1,
+		"version 1.2.3.4.5":                              0,
 		"a.acme.rs b.acme.de":                            2,
 		"[a.acme.rs,b.acme.de]":                          2,
 		"10.1.2.3 192.168.1.5":                           2,
