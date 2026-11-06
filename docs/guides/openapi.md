@@ -50,6 +50,7 @@ routes the description leaves out.
 
 Checked with a three-route description against the demo API:
 
+<!-- check: yaml -->
 ```yaml
 openapi: 3.0.3
 info: {title: demo, version: "1"}

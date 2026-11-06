@@ -54,6 +54,9 @@ Never report a security problem in a public issue: see
   Tests that need MySQL, MariaDB, PostgreSQL or SQL Server are skipped
   unless the matching `DRIFTGATE_TEST_*` variable is set; CI runs them all.
 - Update the documentation under `docs/` when behaviour changes.
+- A pull request that changes behaviour adds one line under `[Unreleased]`
+  in [CHANGELOG.md](CHANGELOG.md). Docs-only and test-only changes need
+  none.
 
 ## Principles a change is judged by
 

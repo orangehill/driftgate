@@ -6,6 +6,8 @@ same requests and reports every difference. Its primary use is local:
 checking each step of a framework upgrade before the pull request; CI is
 optional. Start with the [README](../README.md) (install and a 5-minute
 quick start). This documentation describes DriftGate 1.0.
+What each release adds and changes is in the
+[changelog](../CHANGELOG.md).
 
 ## Reference
 
@@ -42,6 +44,10 @@ quick start). This documentation describes DriftGate 1.0.
 - [Side checks in the same gate](guides/side-checks.md): a schema dump and a compiler
   output, the settings of the stack, files and Redis, mail, the production install
 
-The configuration examples marked `<!-- check: … -->` in the source of
-these pages were loaded with DriftGate's own parsers when the pages were
-written.
+Every `yaml` and `json` example in these pages carries a
+`<!-- check: … -->` marker in its source, and the docs test
+(`go test ./internal/docscheck/`) loads each one with DriftGate's own
+parsers on every change; the examples in another tool's format (a GitHub
+workflow, a compose file, an OpenAPI description) are checked as plain YAML
+or JSON.
+The same test checks every link and anchor between the pages.

@@ -259,6 +259,12 @@ func command(ctx context.Context, root string, a Adapter, log io.Writer) ([]rout
 	if err != nil {
 		return nil, err
 	}
+	return ParseCommandOutput(out)
+}
+
+// ParseCommandOutput reads the output of the command adapter: a JSON list of
+// routes, each with method or methods and path (a leading / is added).
+func ParseCommandOutput(out []byte) ([]routes.Route, error) {
 	var list []struct {
 		Method  string          `json:"method"`
 		Methods []string        `json:"methods"`

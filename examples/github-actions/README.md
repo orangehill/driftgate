@@ -93,6 +93,7 @@ action warns and seeds in full.
 The dump and load commands are yours, so they use the database's own tools,
 best from inside the service container, where the tool matches the server:
 
+<!-- check: skip: the same inputs for two databases, one after the other -->
 ```yaml
 # MySQL / MariaDB
 pristine-dump: docker exec ${{ job.services.db.id }} mariadb-dump -uroot -pdg --single-transaction --routines --triggers --databases app > "$DRIFTGATE_PRISTINE_DIR/app.sql"
@@ -139,6 +140,7 @@ hash alone:
   requests are reported as skipped and the exit code comes from the rest
   (0 or 1).
 
+<!-- check: yaml -->
 ```yaml
 - uses: orangehill/driftgate@v1.0.2
   with:

@@ -187,7 +187,7 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 	case "help", "-h", "--help":
 		err = helpCmd(args[1:], stdout)
 	default:
-		err = configErr("unknown command %q (run 'driftgate help'; what to use for a task: %s)", args[0], tasksDoc)
+		err = configErr("unknown command %q (run 'driftgate help'; what to use for a task: %s)", args[0], docsBase()+tasksDoc)
 	}
 	return code, err
 }
