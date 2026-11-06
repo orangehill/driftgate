@@ -215,6 +215,42 @@ func TestCompareSets(t *testing.T) {
 	}
 }
 
+// TestCompareReadsNoState: compare, report and review read captures
+// only, so a state: whose DSN cannot be read on this machine (a variable
+// not set, a file of the project not there, a command's variables) does
+// not stop them; only the YAML itself is checked.
+func TestCompareReadsNoState(t *testing.T) {
+	_, cfg := setsFixture(t)
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DG_TEST_NO_DSN", "")
+	write(t, cfg, string(raw)+`state:
+  db:
+    driver: mysql
+    dsn:
+      env: DG_TEST_NO_DSN
+    working: app
+  pg:
+    driver: postgres
+    dsn:
+      dotenv: missing/.env
+      key: DATABASE_URL
+    working: app
+  cache:
+    restore: ["sh", "-c", "redis-cli -u \"$DG_TEST_NO_DSN\" flushall"]
+`)
+	if code, out, errOut := runCLI(t, "compare", "l56", "--against", "capture:l55", "--config", cfg); code != ExitDrift {
+		t.Fatalf("compare: exit %d\n%s%s", code, out, errOut)
+	}
+	for _, args := range [][]string{{"report", "--config", cfg}, {"review", "--config", cfg}} {
+		if code, out, errOut := runCLI(t, args...); code == ExitConfig || code == ExitEnv {
+			t.Errorf("%v: exit %d\n%s%s", args, code, out, errOut)
+		}
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	for _, args := range [][]string{{}, {"nope"}, {"compare"}, {"import", "x"}, {"compare", "a", "--format", "xml"}} {
 		if code, _, _ := runCLI(t, args...); code != ExitConfig {

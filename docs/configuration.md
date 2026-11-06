@@ -690,7 +690,12 @@ and change its responses.
 
 The DSNs of `state:` and `data:` hold the password, so they come from the
 environment, 1Password or the project's own settings file, and no error
-message shows them. Percent-encode
+message shows them. A DSN is read only by a command that works with the
+database (`seed`, `capture`, `run`, `setup`, and the commands that run
+or query it); `compare`, `report`, `review`, `accept` and `expect`
+read captures only, so on a machine where the variable is not set or the
+settings file is not there they still run (the YAML itself is checked).
+Percent-encode
 special characters (`@ : / ? # %`) in the user name and password. The
 database named in the URL is ignored (`working`, `pristine` and
 `database` name it). A `mysql://` (or `mariadb://`) URL takes these
