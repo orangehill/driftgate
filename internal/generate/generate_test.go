@@ -430,20 +430,22 @@ func TestJSONErrorsWithoutTwins(t *testing.T) {
 }
 
 // TestJSONErrorsNothingToFollow: a route where no error template makes a
-// request (no required parameter, no auth, no body) lists json-errors as
-// skipped, with the reason.
+// request (no parameter, as GET /api/news with init's templates) lists
+// nothing as skipped; json-errors without any error template is noted once,
+// for the configuration.
 func TestJSONErrorsNothingToFollow(t *testing.T) {
-	p := project(t, config.Config{Templates: []string{"ok", "not-found", "json-errors"}})
-	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items"}}}
-	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var skipped []string
-	for _, s := range res.Skipped {
-		skipped = append(skipped, s.Template+": "+s.Reason)
-	}
-	if want := []string{"json-errors: no error request to follow (not-found made none for this route)"}; !reflect.DeepEqual(skipped, want) || len(res.Catalog.Requests) != 1 {
-		t.Errorf("skipped %v, want %v; requests %d", skipped, want, len(res.Catalog.Requests))
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/news"}, {Methods: []string{"GET"}, Path: "/api/items"}}}
+	for _, c := range []struct {
+		templates []string
+		notes     int
+	}{{[]string{"ok", "not-found", "json", "json-errors"}, 0}, {[]string{"ok", "json-errors"}, 1}} {
+		p := project(t, config.Config{Templates: c.templates})
+		res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Skipped) != 0 || len(res.Notes) != c.notes || c.notes == 1 && !strings.Contains(res.Notes[0], "json-errors repeats the requests of not-found, invalid-param, anonymous, empty-body") {
+			t.Errorf("%v: skipped %+v, notes %q", c.templates, res.Skipped, res.Notes)
+		}
 	}
 }

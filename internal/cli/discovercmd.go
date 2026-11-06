@@ -300,6 +300,9 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	if len(res.Skipped) > 0 {
 		printSkipped(out, res.Skipped, rel(p.Root, p.Layout.Config))
 	}
+	for _, n := range res.Notes {
+		fmt.Fprintf(out, "\nnote: %s\n", n)
+	}
 	jsonErrorsNote(p, out, o.check)
 	literalIDNote(out, res.Catalog, "")
 	for _, u := range res.Unused {

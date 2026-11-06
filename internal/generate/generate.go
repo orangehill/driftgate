@@ -57,6 +57,8 @@ type Result struct {
 	// Unused are the entries of requests: in the configuration that name
 	// no generated request (requests 2: match …).
 	Unused []string
+	// Notes are remarks on the configuration, once per run.
+	Notes []string
 }
 
 // ErrSetting is an entry of requests: in the configuration that generate
@@ -85,6 +87,10 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		templates = []string{"ok"}
 	}
 	g := &generator{o: o, res: &Result{}, ids: map[string]bool{}, values: map[string][]string{}}
+	if slices.Contains(templates, routes.JSONErrors) && !slices.ContainsFunc(routes.ErrorTemplates, func(t string) bool { return slices.Contains(templates, t) }) {
+		g.res.Notes = append(g.res.Notes, fmt.Sprintf("json-errors repeats the requests of %s with Accept: application/json, and templates: has none of them, so it makes nothing; add not-found (as init does) or remove json-errors",
+			strings.Join(routes.ErrorTemplates, ", ")))
+	}
 	for _, r := range manual.Requests {
 		g.ids[r.ID] = true
 	}
@@ -630,15 +636,11 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 		}
 	}
 	out = withMultipart(route, out)
-	if slices.Contains(templates, routes.JSONErrors) && (bindings != nil || slices.Contains(templates, "not-found") || slices.Contains(templates, "invalid-param")) {
-		if slices.ContainsFunc(out, func(r catalog.Request) bool { return slices.Contains(routes.ErrorTemplates, r.Source.Template) }) {
-			out = g.jsonErrors(route, out)
-		} else {
-			// None of not-found, invalid-param, anonymous and empty-body
-			// made a request here (no required parameter, no auth, no
-			// body): json-errors has nothing to follow.
-			g.skip(route, routes.JSONErrors, "no error request to follow (%s made none for this route)", strings.Join(slices.DeleteFunc(slices.Clone(routes.ErrorTemplates), func(t string) bool { return !slices.Contains(templates, t) }), ", "))
-		}
+	if slices.Contains(templates, routes.JSONErrors) {
+		// A route none of the error templates makes a request for (no
+		// required parameter, no auth, no body) gets no twin, as it gets
+		// no not-found: nothing to list.
+		out = g.jsonErrors(route, out)
 	}
 	return out, nil
 }
