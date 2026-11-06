@@ -70,7 +70,7 @@ func record(ctx context.Context, args []string, out io.Writer, ready func(addr s
 	if err != nil || base.Host == "" {
 		return 0, configErr("target.base_url %q is not a URL", target.BaseURL)
 	}
-	allow, err := httpx.NewAllow(target.AllowHosts, false)
+	allow, err := target.Allow(false)
 	if err != nil {
 		return 0, configErr("%v", err)
 	}

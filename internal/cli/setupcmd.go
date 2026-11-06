@@ -22,7 +22,6 @@ import (
 	"github.com/orangehill/driftgate/internal/capture"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
-	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/routes"
 	"github.com/orangehill/driftgate/internal/secret"
@@ -865,7 +864,7 @@ func answers(ctx context.Context, t config.Target) (string, error) {
 	if err != nil || u.Host == "" {
 		return "", fmt.Errorf("%q is not an address", t.BaseURL)
 	}
-	allow, err := httpx.NewAllow(t.AllowHosts, false)
+	allow, err := t.Allow(false)
 	if err != nil {
 		return "", err
 	}

@@ -23,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/orangehill/driftgate/internal/compare"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/discover"
 	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/lazy"
@@ -441,6 +442,10 @@ func (pr Param) validate() error {
 type Target struct {
 	BaseURL         string      `yaml:"base_url,omitempty"`
 	AllowHosts      []string    `yaml:"allow_hosts,omitempty"` // host names or CIDR ranges; default: local and private
+	// ConnectTo sends the requests to this host or IP address (with an
+	// optional port) while they keep base_url's host name for the Host
+	// header and TLS, as curl --connect-to: DNS may name another server.
+	ConnectTo string `yaml:"connect_to,omitempty"`
 	UserAgent       string      `yaml:"user_agent,omitempty"`
 	Timeout         Duration    `yaml:"timeout,omitempty"`
 	Concurrency     Concurrency `yaml:"concurrency,omitempty"`
@@ -454,6 +459,19 @@ type Target struct {
 	// (a timeout, a reset connection, a 5xx status) is sent again; unset
 	// is DefaultRetry, 0 none (Retries).
 	Retry *int `yaml:"retry,omitempty"`
+}
+
+// Allow is the target's allow-list (allow_hosts; anyHost lifts it), with
+// its connections sent to connect_to.
+func (t Target) Allow(anyHost bool) (*httpx.Allow, error) {
+	a, err := httpx.NewAllow(t.AllowHosts, anyHost)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ConnectTo(t.BaseURL, t.ConnectTo); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // DefaultRetry is the retry of a target that sets none: once. A response
@@ -932,6 +950,14 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		}
 		if t.Retry != nil && (*t.Retry < 0 || *t.Retry > MaxRetry) {
 			return nil, fmt.Errorf("%s: %s.retry must be from 0 (no retry) to %d", FileName, where, MaxRetry)
+		}
+		if t.ConnectTo != "" {
+			if t.BaseURL == "" {
+				return nil, fmt.Errorf("%s: %s.connect_to needs base_url", FileName, where)
+			}
+			if _, _, err := httpx.ParseConnectTo(t.ConnectTo); err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", FileName, where, err)
+			}
 		}
 		for _, a := range t.Aliases {
 			if err := checkOrigin(a); err != nil {

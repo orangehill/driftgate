@@ -170,3 +170,74 @@ func TestReadBodySize(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectTo: connect_to sends the requests to a fixed address while
+// they keep the URL's host name; the allow-list applies to the address
+// connected to, not to the name.
+func TestConnectTo(t *testing.T) {
+	var host string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { host = r.Host }))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]
+	base := "http://shop.example:" + port
+
+	// The name does not resolve; the request goes to 127.0.0.1 (allowed
+	// by default) with the name in the Host header.
+	a, err := NewAllow(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ConnectTo(base, "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{BaseURL: base, Allow: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, "")
+	if res.Record.Error != "" || host != "shop.example:"+port {
+		t.Fatalf("error %q, host %q", res.Record.Error, host)
+	}
+	if err := a.Check(context.Background(), "shop.example"); err != nil {
+		t.Errorf("check of the name sent to an allowed address: %v", err)
+	}
+
+	// A port of its own replaces the URL's.
+	b, _ := NewAllow(nil, false)
+	if err := b.ConnectTo("http://shop.example:1", "127.0.0.1:"+port); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = New(Options{BaseURL: "http://shop.example:1", Allow: b})
+	if res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, ""); res.Record.Error != "" {
+		t.Fatalf("port: %s", res.Record.Error)
+	}
+
+	// The name is allowed, the address it is sent to is not: refused
+	// without a connection.
+	named, _ := NewAllow([]string{"shop.example"}, false)
+	if err := named.ConnectTo(base, "203.0.113.10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := named.Check(context.Background(), "shop.example"); !errors.Is(err, ErrHostNotAllowed) {
+		t.Errorf("check: %v", err)
+	}
+	c, _ = New(Options{BaseURL: base, Allow: named})
+	if res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, ""); !strings.Contains(res.Record.Error, ErrHostNotAllowed.Error()) {
+		t.Fatalf("connection to an address outside the allow-list: %q", res.Record.Error)
+	}
+}
+
+func TestParseConnectTo(t *testing.T) {
+	for in, want := range map[string]string{"203.0.113.10": "203.0.113.10|", "203.0.113.10:8443": "203.0.113.10|8443",
+		"shop-new.internal": "shop-new.internal|", "[2001:db8::1]:443": "2001:db8::1|443", "[2001:db8::1]": "2001:db8::1|", "2001:db8::1": "2001:db8::1|"} {
+		h, p, err := ParseConnectTo(in)
+		if err != nil || h+"|"+p != want {
+			t.Errorf("%s: %s|%s %v", in, h, p, err)
+		}
+	}
+	for _, in := range []string{"", "http://203.0.113.10", "203.0.113.10:0", "203.0.113.10:x", "a/b", ":80", "user@host"} {
+		if _, _, err := ParseConnectTo(in); err == nil {
+			t.Errorf("%q accepted", in)
+		}
+	}
+}

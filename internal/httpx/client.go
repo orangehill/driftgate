@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +49,65 @@ type Allow struct {
 	// LookupIP, when set, resolves names instead of the system resolver
 	// (tests).
 	LookupIP func(ctx context.Context, network, host string) ([]net.IP, error)
+	// pin sends connections to a host name elsewhere (ConnectTo), by the
+	// name in lower case; nil without connect_to.
+	pin map[string]pinned
+}
+
+// pinned is where connections to a host name go: host, and port unless
+// empty (then the connection's own port).
+type pinned struct{ host, port string }
+
+// ParseConnectTo reads a connect_to setting: a host name or IP address
+// with an optional port (shop-new.internal, 203.0.113.10:8443,
+// [2001:db8::1]:443).
+func ParseConnectTo(s string) (host, port string, err error) {
+	host = s
+	if h, p, err := net.SplitHostPort(s); err == nil {
+		host, port = h, p
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return "", "", fmt.Errorf("connect_to %q: the port must be from 1 to 65535", s)
+		}
+	} else if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		host = s[1 : len(s)-1]
+	}
+	if host == "" || strings.ContainsAny(host, "/@?#[] ") || (strings.Contains(host, ":") && net.ParseIP(host) == nil) {
+		return "", "", fmt.Errorf("connect_to %q must be a host name or IP address with an optional port (203.0.113.10:8443)", s)
+	}
+	return host, port, nil
+}
+
+// ConnectTo makes every connection to the host of baseURL go to addr (a
+// host name or IP address with an optional port; without one, the
+// connection's own), as curl --connect-to does: requests keep the URL's
+// host name in the Host header, TLS server name and certificate check.
+// The allow-list applies to addr, the address actually connected to, and
+// Check of the host name checks addr. Empty addr changes nothing.
+func (a *Allow) ConnectTo(baseURL, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Hostname() == "" {
+		return fmt.Errorf("connect_to needs base_url, got %q", baseURL)
+	}
+	host, port, err := ParseConnectTo(addr)
+	if err != nil {
+		return err
+	}
+	a.pin = map[string]pinned{strings.ToLower(u.Hostname()): {host, port}}
+	return nil
+}
+
+// pinnedAddr is host and port as a connection to them goes (ConnectTo).
+func (a *Allow) pinnedAddr(host, port string) (string, string) {
+	if to, ok := a.pin[strings.ToLower(host)]; ok {
+		host = to.host
+		if to.port != "" {
+			port = to.port
+		}
+	}
+	return host, port
 }
 
 func (a *Allow) lookupIP(ctx context.Context, host string) ([]net.IP, error) {
@@ -92,8 +152,10 @@ func (a *Allow) ipAllowed(ip net.IP) bool {
 }
 
 // Check reports an error unless the host is allowed: named in the list, or
-// every address it resolves to inside an allowed range.
+// every address it resolves to inside an allowed range. A host sent
+// elsewhere (ConnectTo) is checked by where it goes.
 func (a *Allow) Check(ctx context.Context, host string) error {
+	host, _ = a.pinnedAddr(host, "")
 	if a.any || a.names[strings.ToLower(host)] {
 		return nil
 	}
@@ -117,6 +179,10 @@ func (a *Allow) Dial(ctx context.Context, network, addr string) (net.Conn, error
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
+	}
+	if a.pin != nil {
+		host, port = a.pinnedAddr(host, port)
+		addr = net.JoinHostPort(host, port)
 	}
 	if a.any || a.names[strings.ToLower(host)] {
 		return d.DialContext(ctx, network, addr)

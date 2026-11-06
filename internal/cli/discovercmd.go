@@ -154,7 +154,7 @@ func fetcher(p *config.Project) discover.Fetch {
 		if base == "" {
 			return nil, fmt.Errorf("%s: target.base_url is not set", raw)
 		}
-		allow, err := httpx.NewAllow(t.AllowHosts, false)
+		allow, err := t.Allow(false)
 		if err != nil {
 			return nil, err
 		}

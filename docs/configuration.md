@@ -271,6 +271,7 @@ instead; see [several services](guides/multi-service.md).
 |---|---|---|---|
 | `base_url` | URL | | where requests go; the request path is appended |
 | `allow_hosts` | list of host names, IPs or CIDR ranges | `localhost` and local and private addresses (`127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) | hosts requests may go to. A list replaces the default. A host name in the list may resolve anywhere; any other name must resolve only to allowed addresses. Redirects are checked too |
+| `connect_to` | host or IP, optional `:port` | | send the requests to this address instead of the one DNS gives for `base_url`'s host, as `curl --connect-to`; see [below](#connect_to) |
 | `user_agent` | string | `driftgate/1` | the `User-Agent` header of every request |
 | `timeout` | duration (`30s`) | `60s` | per request; `0` is the default, a negative one is refused |
 | `concurrency` | int, or `auto` | `1` | read-only requests sent in parallel; `auto`: measured once and recorded in the baseline (see [capture](commands.md#capture), `--calibrate`) |
@@ -374,6 +375,33 @@ the capture it takes bodies from to the baseline's.
 
 A target outside `allow_hosts` needs `capture --allow-remote`; requests that
 change data need `--allow-remote-mutations` as well.
+
+#### connect_to
+
+When DNS names another server for the target's host than the one under
+test (the host name still points to the old production while the new
+server is being prepared), `connect_to` sends every request to a fixed
+address, as `curl --connect-to` or `--resolve` does:
+
+<!-- check: config-fragment -->
+```yaml
+target:
+  base_url: https://shop.example
+  connect_to: 203.0.113.10        # or 203.0.113.10:8443, [2001:db8::1]:443
+  allow_hosts: [203.0.113.10]
+```
+
+The requests keep `base_url`'s host name in the `Host` header, the TLS
+server name and the certificate check; only the connection goes to
+`connect_to` (without a port, to `base_url`'s port). A redirect to the
+same host name goes there too; one to another host is not changed.
+`allow_hosts` applies to the address connected to, not to the host name:
+naming `shop.example` there does not allow `connect_to` to reach an
+address outside the list, and such a target needs `--allow-remote` (and
+`--allow-remote-mutations` for requests that change data) like any
+remote one. `record`, `discover` and `setup` connect the same way. A
+capture records the setting per service in its `meta.json`
+(`connect_to`).
 
 #### Retries
 

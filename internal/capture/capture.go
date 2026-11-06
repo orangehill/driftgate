@@ -438,6 +438,12 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 			}
 			meta.Origins[name] = o
 		}
+		if t.ConnectTo != "" {
+			if meta.ConnectTo == nil {
+				meta.ConnectTo = map[string]string{}
+			}
+			meta.ConnectTo[name] = t.ConnectTo
+		}
 	}
 	// The meta without Incomplete marks the capture whole: it is written last.
 	if err := snapshot.WriteJSON(filepath.Join(set.Dir, "timings.json"), r.timings); err != nil {
@@ -690,7 +696,7 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 	if t.BaseURL == "" {
 		return nil, configErr("%s: the target has no base_url", req.ID)
 	}
-	allow, err := httpx.NewAllow(t.AllowHosts, allowRemote)
+	allow, err := t.Allow(allowRemote)
 	if err != nil {
 		return nil, configErr("%v", err)
 	}
@@ -702,7 +708,7 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 	}
 	remote := false
 	if allowRemote {
-		strict, err := httpx.NewAllow(t.AllowHosts, false)
+		strict, err := t.Allow(false)
 		if err != nil {
 			return nil, configErr("%v", err)
 		}

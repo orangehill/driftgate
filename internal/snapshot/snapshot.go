@@ -150,6 +150,9 @@ type Meta struct {
 	// to, per service (the empty name: the only one). Responses that write
 	// absolute URLs are compared with another origin's through them.
 	Origins map[string]string `json:"origins,omitempty"`
+	// ConnectTo is, per service with target.connect_to, the address its
+	// requests were sent to instead of the one DNS gives for its origin.
+	ConnectTo map[string]string `json:"connect_to,omitempty"`
 	// Roots are the folder of the project the capture was made in and its
 	// real path: responses that write it (a debug stack trace) are
 	// compared with another checkout's through them.
