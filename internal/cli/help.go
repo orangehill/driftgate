@@ -206,7 +206,8 @@ Common flags:
   --config <path>   configuration file (default: .driftgate/driftgate.yaml or driftgate.yaml here or in the nearest folder above)
 
 driftgate help <command> (or <command> --help) describes a command and its flags;
-driftgate help catalog and help allowlist the fields of those files.
+driftgate help catalog and help allowlist the fields of those files;
+driftgate help kinds the kinds of drift.
 
 Exit codes: 0 clean, 1 drift (also: changed routes, uncovered routes, a stale
 catalog with --check, findings of allowlist check), 2 configuration error, 3 environment error or an incomplete

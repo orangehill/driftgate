@@ -11,6 +11,7 @@ driftgate help                 # synopsis of every command
 driftgate help <command>       # one command with its flags (also: <command> --help)
 driftgate help catalog         # the fields of catalog.json, and where to read more
 driftgate help allowlist       # the rules of allowlist.yaml, then allowlist check
+driftgate help kinds           # every kind of drift, one line each
 ```
 
 An unknown command or help topic names the table of
