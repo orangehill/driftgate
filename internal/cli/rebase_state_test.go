@@ -53,10 +53,7 @@ func TestRebaseAfterNewSeed(t *testing.T) {
 // database db, whose state component is component, with a table items
 // (item) the application counts.
 func rebaseAfterNewSeed(t *testing.T, root string, db *sql.DB, component, item string) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No Date header: the two captures of the baseline may fall in two
-		// seconds, and a flaky date is not what this test is about.
-		w.Header()["Date"] = nil
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var n int
 		if err := db.QueryRow("SELECT COUNT(*) FROM items").Scan(&n); err != nil {
 			http.Error(w, err.Error(), 500)
@@ -64,7 +61,7 @@ func rebaseAfterNewSeed(t *testing.T, root string, db *sql.DB, component, item s
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"items":%d}`, n)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	cfg := filepath.Join(root, "driftgate.yaml")
 	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: evolve\nlevel: values\ntarget:\n  base_url: %s\nstate:\n  db:\n%s", srv.URL, component))
