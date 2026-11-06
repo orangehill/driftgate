@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,9 +153,15 @@ func TestRefFile(t *testing.T) {
 }
 
 // TestExpectationsScale: reading is linear in the number of
-// expectations.
+// expectations. Allocations are counted, which does not depend on the
+// machine's load: 8 times the expectations may take at most 12 times the
+// allocations and bytes (linear is 8, quadratic would be 64). Wall time
+// is checked as well, for work that does not allocate, with a generous
+// ratio and the best of several runs, and a measurement over the ratio is
+// taken again before it fails: a quadratic read is over it every time,
+// a busy machine is not.
 func TestExpectationsScale(t *testing.T) {
-	read := func(n int) time.Duration {
+	folder := func(n int) string {
 		dir := filepath.Join(t.TempDir(), "local")
 		for ref := 0; ref < 10; ref++ {
 			var reqs []Expected
@@ -165,20 +172,49 @@ func TestExpectationsScale(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		return dir
+	}
+	read := func(dir string, n int) {
+		if exps, _, err := Expectations(dir); err != nil || len(exps) != n {
+			t.Fatalf("%v %d", err, len(exps))
+		}
+	}
+	// cost returns the allocations and bytes of one read.
+	cost := func(dir string, n int) (allocs, bytes float64) {
+		allocs = testing.AllocsPerRun(3, func() { read(dir, n) })
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		read(dir, n)
+		runtime.ReadMemStats(&after)
+		return allocs, float64(after.TotalAlloc - before.TotalAlloc)
+	}
+	elapsed := func(dir string, n int) time.Duration {
 		best := time.Hour
-		for range 3 {
+		for range 5 {
 			start := time.Now()
-			if exps, _, err := Expectations(dir); err != nil || len(exps) != n {
-				t.Fatalf("%v %d", err, len(exps))
-			}
+			read(dir, n)
 			best = min(best, time.Since(start))
 		}
 		return best
 	}
-	small, large := read(1000), read(8000)
-	if large > 20*small {
-		t.Errorf("8,000 expectations take %v, 1,000 take %v: not linear", large, small)
+	smallDir, largeDir := folder(1000), folder(8000)
+	smallAllocs, smallBytes := cost(smallDir, 1000)
+	largeAllocs, largeBytes := cost(largeDir, 8000)
+	if largeAllocs > 12*smallAllocs {
+		t.Errorf("8,000 expectations make %v allocations, 1,000 make %v: not linear", largeAllocs, smallAllocs)
 	}
+	if largeBytes > 12*smallBytes {
+		t.Errorf("8,000 expectations allocate %v bytes, 1,000 allocate %v: not linear", largeBytes, smallBytes)
+	}
+	var small, large time.Duration
+	for range 3 {
+		small, large = elapsed(smallDir, 1000), elapsed(largeDir, 8000)
+		if large <= 32*small {
+			return
+		}
+	}
+	t.Errorf("8,000 expectations take %v, 1,000 take %v, three times: not linear", large, small)
 }
 
 // TestRefFileLong: a ref longer than 60 characters is cut and hashed
