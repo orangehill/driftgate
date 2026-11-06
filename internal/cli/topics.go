@@ -3,8 +3,9 @@ package cli
 import (
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+
+	"github.com/orangehill/driftgate/internal/lazy"
 )
 
 // topic is the help of a file DriftGate reads: its fields, one line each,
@@ -16,14 +17,14 @@ type topic struct {
 }
 
 // releaseTag is the Version of a release build.
-var releaseTag = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+var releaseTag = lazy.Regexp(`^v\d+\.\d+\.\d+$`)
 
 // docsBase is where the documentation is read: the pages of this build's
 // release tag, so that a link names a section the release has; main for a
 // build that is not a release.
 func docsBase() string {
 	ref := "main"
-	if releaseTag.MatchString(Version) {
+	if releaseTag().MatchString(Version) {
 		ref = Version
 	}
 	return "https://github.com/orangehill/driftgate/blob/" + ref + "/docs/"
