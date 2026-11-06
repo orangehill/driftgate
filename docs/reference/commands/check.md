@@ -3,6 +3,7 @@
 The commands that send the catalog and compare the answers. How a
 capture runs is in [How a capture runs](../capture.md), and what a
 report shows is in [Reading a report in detail](../reports.md).
+Paths are those of the local layout ([where the project's files are](../cli.md#where-the-projects-files-are)).
 
 ## driftgate run
 
@@ -236,7 +237,7 @@ Writes the last comparison again, for example as a pull-request comment.
 | `--max-drifts N` | as for [`compare`](#driftgate-compare) |
 | `--exit-code` | exit with the verdict of the comparison, as `compare` did ([below](#use-report-as-a-gate)) |
 
-- No format shows values from private bodies.
+- It writes the saved report, which never holds values from private bodies ([report formats](../reports.md#report-formats)).
 - It exits `2` when there is no comparison yet or a flag is wrong, and `3` when the local store cannot be read.
 
 ```sh

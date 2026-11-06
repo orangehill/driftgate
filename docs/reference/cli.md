@@ -14,7 +14,8 @@ driftgate help kinds           # every kind of drift, one line each
 ```
 
 The help of a command ends with a `Docs:` line. It links the command's
-section in the pages of the release you run. An unknown command or help
+section in the pages of the release you run; a development build links
+the `development` branch. An unknown command or help
 topic names the table of
 [what to use for what](../configuration.md#what-to-use-for-what).
 
@@ -28,6 +29,14 @@ topic names the table of
 - Without `--config`, a command uses `.driftgate/driftgate.yaml` or `driftgate.yaml` in this folder. Otherwise it takes the nearest folder above that has one, up to the top of the git work tree ([baselines](../configuration.md#baselines)).
 - Without `--target`, every command works on all services. `run` reports a check limited by `--target` as partial.
 - Flags go before or after the positional arguments: `driftgate compare before --only 'get-*'` works.
+
+## Where the project's files are
+
+The paths in these pages are those of the local layout
+(`baselines: local`): everything is in the project's `.driftgate/`
+folder. With `baselines: git`, the same files are in `driftgate/`,
+`driftgate.yaml` is at the project root, and the local store is in
+`~/.driftgate/<project>` ([baselines](../configuration.md#baselines)).
 
 ## Which baseline a command uses
 

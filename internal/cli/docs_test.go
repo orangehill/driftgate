@@ -49,14 +49,16 @@ func TestHelpDocLinks(t *testing.T) {
 	}
 }
 
-// TestDocsBase: a release links the pages of its own tag, any other build
-// those of main.
+// TestDocsBase: a release links the pages of its own tag, a development
+// build those of development, any other build those of main.
 func TestDocsBase(t *testing.T) {
 	defer func(v string) { Version = v }(Version)
 	for v, want := range map[string]string{
 		"v9.9.9":     "https://github.com/orangehill/driftgate/blob/v9.9.9/docs/",
 		"v1.2.3":     "https://github.com/orangehill/driftgate/blob/v1.2.3/docs/",
-		"dev":        "https://github.com/orangehill/driftgate/blob/main/docs/",
+		"dev":        "https://github.com/orangehill/driftgate/blob/development/docs/",
+		"dev-1a2b3c": "https://github.com/orangehill/driftgate/blob/development/docs/",
+		"source":     "https://github.com/orangehill/driftgate/blob/main/docs/",
 		"v1.2.3-rc1": "https://github.com/orangehill/driftgate/blob/main/docs/",
 	} {
 		Version = v

@@ -4,6 +4,7 @@ The commands that find the routes, write the catalog and show what it
 does not cover. The files they write are described under
 [catalog.json](../../configuration.md#catalogjson) and
 [exclusions.yaml](../../configuration.md#exclusionsyaml).
+Paths are those of the local layout ([where the project's files are](../cli.md#where-the-projects-files-are)).
 
 ## driftgate discover
 

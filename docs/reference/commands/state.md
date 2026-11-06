@@ -69,8 +69,12 @@ driftgate clean db --yes
 
 - Only the pristine copies the configuration names, on the server its DSN names now; never a working database.
 - A name that is not a database component under `state:` is refused (exit 2).
-- A copy is removed only when `seed` made it as the copy of this project's working database. The mark that says so names the working database: the note of the `driftgate_pristine` table (MySQL, MariaDB), the database's comment (PostgreSQL), its mark (SQL Server), or the `driftgate_pristine` table (SQLite).
-- Any other database or file of that name, such as another project's copy, is left as it is with its record (exit 3).
+- A copy is removed only when `seed` made it, as its mark shows. On a database server the mark also names the working database it is a copy of:
+  - MySQL and MariaDB: the note in the copy's `driftgate_pristine` table;
+  - PostgreSQL: the database's comment;
+  - SQL Server: DriftGate's mark on the database, which must be online to be read.
+- An SQLite copy is a file of its own; its `driftgate_pristine` table only marks it as a copy `seed` made.
+- Any other database or file of that name, such as another project's copy on the same server, is left as it is with its record (exit 3).
 - A MySQL or MariaDB copy made by an earlier release has a mark that names no working database, and is refused too. Remove it yourself, or run `seed` once to mark it.
 - SQL Server: the backup of the pristine copy in the server's backup folder is not removed.
 - SQLite: the working file need not be there, as in a worktree that git did not give it. The copy is found by its record in the local store. Without the file and without a record, clean stops (exit 2) and names the folder of the store's copies.

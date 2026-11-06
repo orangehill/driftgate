@@ -21,12 +21,16 @@ type topic struct {
 var releaseTag = lazy.Regexp(`^v\d+\.\d+\.\d+$`)
 
 // docsBase is where the documentation is read: the pages of this build's
-// release tag, so that a link names a section the release has; main for a
-// build that is not a release.
+// release tag, so that a link names a section the release has; development
+// for a development build (dev, dev-…), whose pages are there first; main
+// for any other build, such as the action's source build.
 func docsBase() string {
 	ref := "main"
-	if releaseTag().MatchString(Version) {
+	switch {
+	case releaseTag().MatchString(Version):
 		ref = Version
+	case Version == "dev" || strings.HasPrefix(Version, "dev-"):
+		ref = "development"
 	}
 	return "https://github.com/orangehill/driftgate/blob/" + ref + "/docs/"
 }

@@ -48,6 +48,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
+- The command reference is split into pages per command group; `driftgate help <command>` links its page. A development build links the docs of the `development` branch.
 - MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing. ([#22](https://github.com/orangehill/driftgate/pull/22))
 - Allowlist proposals are narrower: enum values as the words seen, digit widths kept, a stable UUID kept literal. ([#10](https://github.com/orangehill/driftgate/pull/10), [#15](https://github.com/orangehill/driftgate/pull/15))
 - `key-extra` and `key-missing` drifts show the value, hidden for private bodies. ([#15](https://github.com/orangehill/driftgate/pull/15))

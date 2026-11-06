@@ -1,10 +1,7 @@
 # Commands: set up a project
 
-The commands that create a project, its key and its layout. Paths are
-those of the local layout: everything in `.driftgate/`. With
-`baselines: git` the same files are in `driftgate/`, and
-`driftgate.yaml` is at the project root
-([baselines](../../configuration.md#baselines)).
+The commands that create a project, its key and its layout.
+Paths are those of the local layout ([where the project's files are](../cli.md#where-the-projects-files-are)).
 
 ## driftgate init
 

@@ -3,6 +3,7 @@
 The commands that read the last comparison and change what the baseline
 holds, plus the checks of the baseline and the allowlist. What to do
 with a drift is under [Drift kinds](../drift-kinds.md#what-to-do-with-a-drift).
+Paths are those of the local layout ([where the project's files are](../cli.md#where-the-projects-files-are)).
 
 ## driftgate review
 

@@ -118,8 +118,8 @@ records it read already.
 
 ### What a green result does not prove
 
-A green result proves only that the responses of the requests in the
-catalog did not change. It does not exercise file uploads unless the
+A green result proves only that the responses and side effects of the
+requests in the catalog did not change. It does not exercise file uploads unless the
 catalog has [`multipart`](../configuration.md#multipart) requests with
 fixtures. Nor does it reach admin paths that change the schema, or code
 that only background jobs, queue workers or commands reach.
@@ -221,7 +221,12 @@ Allowlist rules that applied to no change in the comparison are listed:
 ## Report formats
 
 `compare --format` and `report --format` take `text`, `json`, `junit` or
-`markdown`. No format shows values from private bodies.
+`markdown`.
+
+Without `compare --show-private`, no format shows values from private
+bodies. With it, every format of that output shows them, so never post
+it. The saved report, which `report`, `review` and `accept` read, never
+holds them.
 
 ### Text and markdown
 
