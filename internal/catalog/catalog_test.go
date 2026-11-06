@@ -136,7 +136,7 @@ func TestLiteralID(t *testing.T) {
 		"/api/2/users": "", "/API/1/users": "", "/v/3/items": "", "/api/2/users/17": "17", "/v2/users/17": "17",
 		"/api/123/users": "123", "/users/2": "2", "/2/api": "2", "/api/17": "17", "/api/17/": "17", "/api/1/2": "1",
 		// dates: year, month and day
-		"/posts/2024/5/17": "", "/posts/2024/05/17/comments/9": "9", "/archive/1999/12/31": "",
+		"/posts/2024/05/17": "", "/posts/2024/5/17": "2024", "/users/2024/5/7": "2024", "/posts/2024/05/17/comments/9": "9", "/archive/1999/12/31": "",
 		"/reports/2024/05": "2024", "/users/2024/5": "2024", "/stats/2024": "2024", "/users/2024/13/01": "2024",
 		"/users/1800/05/01": "1800", "/posts/2024/05/32": "2024", "/a/12345/05": "12345"} {
 		if got := LiteralID(path); got != want {

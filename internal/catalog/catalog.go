@@ -113,9 +113,10 @@ func (r Request) Mutating() bool {
 // Two kinds of number are not ids and are passed over: an API version, a
 // number of one or two digits right after a segment api or v and followed
 // by a segment that is not a number (/api/2/users, /v/1/items; v2 is not a
-// number anyway), and a date, a year from 1900 to 2099, a month (1 to 12)
-// and a day (1 to 31), as in /posts/2024/05/17. Anything shorter may as
-// well be an id, and is one: /api/17, /stats/2024, /users/2024/5.
+// number anyway), and a date written in full, a year of four digits from
+// 1900 to 2099, a month of two (01 to 12) and a day of two (01 to 31), as
+// in /posts/2024/05/17. Anything else may as well be an id, and is one:
+// /api/17, /stats/2024, /users/2024/5, /users/2024/5/7.
 func LiteralID(path string) string {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
@@ -130,7 +131,8 @@ func LiteralID(path string) string {
 			i+1 < len(segs) && segs[i+1] != "" && !number(segs[i+1]) {
 			continue // a version
 		}
-		if inRange(seg, 4, 1900, 2099) && i+2 < len(segs) && inRange(segs[i+1], 2, 1, 12) && inRange(segs[i+2], 2, 1, 31) {
+		if inRange(seg, 4, 1900, 2099) && i+2 < len(segs) && len(segs[i+1]) == 2 && inRange(segs[i+1], 2, 1, 12) &&
+			len(segs[i+2]) == 2 && inRange(segs[i+2], 2, 1, 31) {
 			i += 2 // the month and the day
 			continue
 		}
