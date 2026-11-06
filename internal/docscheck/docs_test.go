@@ -117,19 +117,26 @@ func TestNoDuplicateHeadings(t *testing.T) {
 var (
 	urlHost  = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://(?:[^@/\s` + "`" + `]*@)?([^/\s:?#)\]>'"` + "`" + `;,]+)`)
 	mailHost = regexp.MustCompile(`(?i)[a-z0-9._%+-]+@((?:[a-z0-9-]+\.)+[a-z]{2,})\b`)
-	bareHost = regexp.MustCompile(`(?i)(?:^|\*\.|[^.\w/@$-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?:$|[^.\w-])`)
+	bareHost = regexp.MustCompile(`(?i)(?:^|\*\.|[>}]\.|[^.\w/@$-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?:$|[^.\w-])`)
 	bareIP   = regexp.MustCompile(`(?:^|[^.\d])(\d{1,3}(?:\.\d{1,3}){3})(?:$|[^.\d])`)
 	yamlProj = regexp.MustCompile(`^\s*project:\s*["']?([^\s"']+)`)
 	flagProj = regexp.MustCompile(`--project[ =]+["']?([^\s"'` + "`" + `)\]]+)`)
 	flagRef  = regexp.MustCompile(`(?:--ref|--drop)[ =]+["']?([^\s"'` + "`" + `)\]]+)`)
 	yamlRef  = regexp.MustCompile(`^[\s-]*ref:\s*["']?([^\s"']+)`)
+	ghOwner  = regexp.MustCompile(`(?i)github\.com[/:]([a-z0-9_.-]+)`)
 	goodRef  = regexp.MustCompile(`^(SHOP|API|APP|DEMO)-\d+$`)
 )
 
 // vendors are the sites the pages may name besides the reserved example
 // names, and product names written like one.
 var vendors = []string{"github.com", "pkg.go.dev", "token.actions.githubusercontent.com",
-	"mcr.microsoft.com", "modernc.org", "coveralls.io", "img.shields.io", "honnef.co", "asp.net", "ado.net"}
+	"mcr.microsoft.com", "modernc.org", "coveralls.io", "img.shields.io", "honnef.co"}
+
+// products are product names written like a host; only the name itself.
+var products = map[string]bool{"asp.net": true, "ado.net": true}
+
+// githubOwners are the accounts whose repositories the pages may link.
+var githubOwners = map[string]bool{"orangehill": true, "microsoft": true, "slavenkobozic-ohd": true}
 
 // notHosts are keys of the pages that look like a host with a country's
 // domain; a GitHub expression (${{ job.services.db.id }}) is not read.
@@ -155,7 +162,10 @@ var genericTLDs = map[string]bool{}
 
 func init() {
 	for _, d := range strings.Fields(`com net org info biz io co ai app dev cloud tech online site shop store
-		xyz eu asia mobi pro tv me us local lan internal corp home intranet`) {
+		xyz eu asia mobi pro tv me us local lan internal corp home intranet agency studio digital group
+		solutions software systems network company live club page ltd gmbh global consulting media design
+		team works world website space top one inc services partners center today email host hosting tools
+		technology marketing`) {
 		genericTLDs[d] = true
 	}
 }
@@ -174,13 +184,25 @@ func hostTLD(name string) bool {
 var exampleAddrs = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("10.0.0.0/32"), netip.MustParsePrefix("172.16.0.0/32"), netip.MustParsePrefix("192.168.0.0/32")}
 
+// hostName is the part of a host that names it, in lower case: a wildcard
+// or a placeholder label ({tenant}, <tenant>, ${TENANT}) says nothing.
+func hostName(host string) string {
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	var labels []string
+	for _, l := range strings.Split(host, ".") {
+		if l != "*" && !strings.ContainsAny(l, "…<>{}$%") {
+			labels = append(labels, l)
+		}
+	}
+	return strings.Join(labels, ".")
+}
+
 // exampleHost reports whether a host name may appear in the public pages:
 // a name reserved for examples or tests (RFC 2606, RFC 6761), a loopback or
 // documentation address, a placeholder, or a vendor's site. A wildcard is
 // judged by the name after *.
 func exampleHost(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
-	host = strings.TrimPrefix(host, "*.")
+	host = hostName(host)
 	if a, err := netip.ParseAddr(host); err == nil {
 		for _, n := range exampleAddrs {
 			if n.Contains(a) {
@@ -189,8 +211,8 @@ func exampleHost(host string) bool {
 		}
 		return a.IsLoopback() || a.IsUnspecified()
 	}
-	if !strings.Contains(host, ".") || strings.ContainsAny(host, "…<>{}$%") {
-		return true // a placeholder or a single name such as db
+	if !strings.Contains(host, ".") || products[host] {
+		return true // a single name such as db, or none
 	}
 	for _, name := range append([]string{"example", "test", "invalid", "localhost", "example.com", "example.net", "example.org"}, vendors...) {
 		if host == name || strings.HasSuffix(host, "."+name) {
@@ -213,10 +235,15 @@ func nameFindings(line string, yaml bool) []string {
 			if re == bareHost && (!hostTLD(h) || notHosts[h]) {
 				continue
 			}
-			if !seen[h] && !exampleHost(h) {
-				seen[h] = true
+			if name := hostName(h); !seen[name] && !exampleHost(h) {
+				seen[name] = true
 				out = append(out, fmt.Sprintf("host %q is not an example name (.example, .test, .invalid, localhost) or a listed vendor", h))
 			}
+		}
+	}
+	for _, m := range ghOwner.FindAllStringSubmatch(line, -1) {
+		if o := strings.ToLower(m[1]); !githubOwners[o] {
+			out = append(out, fmt.Sprintf("GitHub account %q: the pages link only orangehill and the listed vendors", m[1]))
 		}
 	}
 	projects := flagProj.FindAllStringSubmatch(line, -1)
@@ -281,6 +308,19 @@ func TestNameFindings(t *testing.T) {
 		"connect to 10.1.2.3 or 192.168.1.5":             2,
 		"mail admin@acme.de":                             1,
 		"driftgate expect --ref JIRA-1":                  1,
+		"REDIS_HOST=cache.acme.agency":                   1,
+		`{"host": "db.acme.agency"}`:                     1,
+		"tcp(db.acme.agency:3306)/":                      1,
+		"https://{tenant}.acme.rs/":                      1,
+		"https://{tenant}.shop.example/":                 0,
+		"<tenant>.acme.rs":                               1,
+		"${TENANT}.acme.rs":                              1,
+		"https://github.com/acme-client/app":             1,
+		"git@github.com:acme-client/app.git":             1,
+		"https://github.com/orangehill/driftgate":        0,
+		"https://github.com/microsoft/go-mssqldb":        0,
+		"ASP.NET Core and ADO.NET":                       0,
+		"https://docs.asp.net/x":                         1,
 	} {
 		if got := nameFindings(line, true); len(got) != want {
 			t.Errorf("%q: %d findings %v, want %d", line, len(got), got, want)
@@ -300,6 +340,8 @@ func TestExampleHost(t *testing.T) {
 		"127.0.0.1": true, "203.0.113.10": true, "github.com": true, "db": true, "example.com": true, "10.0.0.0": true,
 		"shop.com": false, "db.internal": false, "notexample.com": false, "8.8.8.8": false, "examplecom.test.org": false,
 		"10.1.2.3": false, "192.168.1.5": false, "*.acme.rs": false, "SHOP.ACME.COM": false,
+		"{tenant}.acme.rs": false, "<tenant>.acme.rs": false, "${tenant}.acme.rs": false, "{tenant}.shop.example": true,
+		"asp.net": true, "docs.asp.net": false, "<host>": true, "…": true,
 	} {
 		if got := exampleHost(host); got != want {
 			t.Errorf("exampleHost(%q) = %v", host, got)

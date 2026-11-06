@@ -41,7 +41,7 @@ type Block struct {
 	Line   int    // the line of the opening fence, 1-based
 	End    int    // the line of the closing fence
 	Lang   string // the info string's language: yaml for yaml{…}
-	Body   string // without the indentation of the fence
+	Body   string // without what precedes the fence (indentation, a quote's >)
 	Marker string // the check marker on the line before: "config-fragment files=a", or ""
 }
 
@@ -59,13 +59,13 @@ type Link struct {
 }
 
 var (
-	fence      = regexp.MustCompile("^(\\s*)(```+|~~~+)\\s*([A-Za-z0-9_+-]*)")
+	fence      = regexp.MustCompile("^((?:\\s*>)*\\s*)(```+|~~~+)\\s*([A-Za-z0-9_+-]*)")
 	atx        = regexp.MustCompile(`^ {0,3}(#{1,6})\s+(.*?)(\s+#+)?\s*$`)
-	marker     = regexp.MustCompile(`^\s*<!--\s*check:\s*(.*?)\s*-->\s*$`)
+	marker     = regexp.MustCompile(`^[\s>]*<!--\s*check:\s*(.*?)\s*-->\s*$`)
 	codeSpan   = regexp.MustCompile("`+[^`]*`+")
-	inlineLink = regexp.MustCompile(`!?\[(?:[^\]\[]|\[[^\]]*\])*\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)`)
+	inlineLink = regexp.MustCompile(`!?\[(?:[^\]\[]|\[[^\]]*\])*\]\(\s*<?([^)\s>]*)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)`)
 	htmlHref   = regexp.MustCompile(`<a\s[^>]*href="([^"]+)"`)
-	refDef     = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(\s+".*")?\s*$`)
+	refDef     = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(\s+(?:".*"|'.*'))?\s*$`)
 	htmlID     = regexp.MustCompile(`<a\s+(?:name|id)="([^"]+)"`)
 	htmlTag    = regexp.MustCompile(`<[^>]+>`)
 	mdLinkText = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
@@ -86,7 +86,7 @@ func ParseText(rel, text string) (*Doc, error) {
 	var (
 		open      *Block
 		closer    string
-		indent    int
+		prefix    string // what precedes the fence: indentation, a quote's >
 		body      []string
 		para      []string // the lines of a paragraph, whose links may wrap
 		paraStart int
@@ -108,18 +108,19 @@ func ParseText(rel, text string) (*Doc, error) {
 	for i, line := range d.Lines {
 		n := i + 1
 		if open != nil {
+			// What precedes the fence is not part of the content.
+			if strings.HasPrefix(line, prefix) {
+				line = line[len(prefix):]
+			} else {
+				line = strings.TrimLeft(line, " ")
+			}
 			if t := strings.TrimSpace(line); strings.HasPrefix(t, closer) && strings.Trim(t, closer[:1]) == "" {
 				open.Body, open.End = strings.Join(body, "\n"), n
 				d.Blocks = append(d.Blocks, *open)
 				open, body = nil, nil
 				continue
 			}
-			// The fence's indentation is not part of the content.
-			k := 0
-			for k < indent && k < len(line) && line[k] == ' ' {
-				k++
-			}
-			body = append(body, line[k:])
+			body = append(body, line)
 			continue
 		}
 		if comment {
@@ -128,7 +129,7 @@ func ParseText(rel, text string) (*Doc, error) {
 		}
 		if m := fence.FindStringSubmatch(line); m != nil {
 			flush()
-			open, closer, indent = &Block{Line: n, Lang: strings.ToLower(m[3])}, m[2], len(m[1])
+			open, closer, prefix = &Block{Line: n, Lang: strings.ToLower(m[3])}, m[2], m[1]
 			if i > 0 {
 				if mm := marker.FindStringSubmatch(d.Lines[i-1]); mm != nil {
 					open.Marker = mm[1]
@@ -237,10 +238,10 @@ func Root() (string, error) {
 // testdata and node_modules.
 func Files(root string) ([]string, error) {
 	var all []string
-	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "*.md")
+	cmd := exec.Command("git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.md")
 	cmd.Dir = root
 	if out, err := cmd.Output(); err == nil {
-		all = strings.Split(strings.TrimSpace(string(out)), "\n")
+		all = strings.Split(string(out), "\x00")
 	} else if all, err = walk(root); err != nil {
 		return nil, err
 	}

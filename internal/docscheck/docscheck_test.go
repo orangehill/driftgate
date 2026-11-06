@@ -86,3 +86,18 @@ func TestResolve(t *testing.T) {
 		}
 	}
 }
+
+// TestParseQuote: a block in a quote is read without the quote's >, and a
+// link with a title in single quotes is found.
+func TestParseQuote(t *testing.T) {
+	d, err := ParseText("x.md", "> <!-- check: yaml -->\n> ```yaml\n> a: 1\n> ```\n\nSee [it](gone.md 'title').\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Blocks) != 1 || d.Blocks[0].Body != "a: 1" || d.Blocks[0].Marker != "yaml" || d.Blocks[0].End != 4 {
+		t.Errorf("blocks %+v", d.Blocks)
+	}
+	if want := []Link{{6, "gone.md"}}; !reflect.DeepEqual(d.Links, want) {
+		t.Errorf("links %v, want %v", d.Links, want)
+	}
+}
