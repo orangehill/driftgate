@@ -12,8 +12,8 @@ import (
 )
 
 // KindItemOrder is the same items of an array in another order: of an
-// array paired by key (allowlist arrays:), unless the rule says any_order,
-// and of an array without a rule (order.go), unless any_order allows it.
+// array paired by a key rule (allowlist arrays:) or of one without a
+// rule (order.go). A key only pairs the items; any_order allows the order.
 const KindItemOrder = "item-order"
 
 // itemKeys reads the key of every item of an array: its identity (the

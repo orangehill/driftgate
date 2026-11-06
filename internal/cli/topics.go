@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
 
@@ -70,41 +71,16 @@ var topics = []topic{
 			{"reason", "on every rule, required"},
 		}},
 	{name: "kinds", summary: "Every drift has a kind: the first word of a drift line, and \"kind\" in JSON. The names are stable. The kinds:",
-		doc: "reference/drift-kinds.md", fields: [][2]string{
-			{"status", "the HTTP status changed, or the request got no answer"},
-			{"header-missing", "a header of the baseline is gone"},
-			{"header-extra", "a header is new"},
-			{"header-value", "a header's value changed"},
-			{"key-missing", "a JSON key is gone, or an item of an array paired by key"},
-			{"key-extra", "a JSON key is new, or an item of an array paired by key"},
-			{"key-order", "the same keys in another order"},
-			{"array-length", "an array has more or fewer items"},
-			{"item-order", "the same items of an array in another order"},
-			{"type", "a value's type changed (JSON, or a spreadsheet cell)"},
-			{"number-literal", "the same number written otherwise (1.0 for 1)"},
-			{"value", "a JSON value changed"},
-			{"format", "a value an allowlist rule covers no longer matches its format"},
-			{"encoding", "the same values written with other bytes (layout, escapes, byte order mark, charset)"},
-			{"body", "a body that is not JSON changed, or JSON became non-JSON"},
-			{"element-missing", "an HTML element is gone"},
-			{"element-extra", "an HTML element is new"},
-			{"element-order", "the same HTML elements in another order"},
-			{"attribute-missing", "an attribute of an HTML element is gone"},
-			{"attribute-extra", "an attribute of an HTML element is new"},
-			{"attribute-value", "an attribute's value changed"},
-			{"text", "the text of an HTML element changed"},
-			{"doctype", "the document type declaration came, went or changed"},
-			{"cell", "a spreadsheet or CSV cell's value changed"},
-			{"cell-format", "a cell's number format or style changed"},
-			{"cell-formula", "a cell's formula changed"},
-			{"sheet-missing", "a worksheet is gone, or was renamed"},
-			{"sheet-extra", "a worksheet is new"},
-			{"sheet-order", "the worksheets are in another order"},
-			{"exit-code", "a command step ended with another exit code"},
-			{"repeat", "the statuses of a repeated request changed"},
-			{"side-effect", "the request changed other data than in the baseline"},
-			{"not-captured", "the baseline has a response, the capture has none"},
-		}},
+		doc: "reference/drift-kinds.md", fields: kindFields()},
+}
+
+// kindFields are the drift kinds of compare.Kinds, one line each.
+func kindFields() [][2]string {
+	out := make([][2]string, len(compare.Kinds))
+	for i, k := range compare.Kinds {
+		out[i] = [2]string{k.Name, k.Text}
+	}
+	return out
 }
 
 func lookupTopic(name string) *topic {

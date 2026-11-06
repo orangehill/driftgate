@@ -1,7 +1,6 @@
 # Glossary
 
-Each term has one meaning in these pages. A definition is one or two
-sentences; "More" links the full description.
+Each term has one meaning in these pages. A definition is one or two sentences; "More" links the full description.
 
 ## The check
 
@@ -39,13 +38,16 @@ The class of a drift, such as `status` or `item-order`. More: [drift kinds](refe
 Drifts of the same kind at the same place, across requests, numbered `[1]`, `[2]` and so on. `accept`, `expect` and `bisect` take a group by its number. More: [driftgate review](commands.md#review).
 
 ### Side effect
-A change a request made to the data. A capture finds it by comparing fingerprints before and after the request. More: [Data drift](reference/drift-kinds.md#data).
+A change a request made to the data. A capture finds it by comparing fingerprints before and after the request. More: [state](configuration.md#state).
 
 ### Last comparison
 The result of the latest `compare` or `run`. `report`, `review`, `accept`, `expect` and `bisect` read it. More: [driftgate compare](commands.md#compare).
 
+### Pass
+A comparison with no drift other than expected ones. It exits with code 0. More: [exit codes](commands.md#exit-codes).
+
 ### Verdict
-The outcome of a comparison: no drift, drift, or an incomplete result. It sets the exit code: 0, 1 or 3. More: [exit codes](commands.md#exit-codes).
+The outcome of a comparison: a pass, drift, or an incomplete result. It sets the exit code: 0, 1 or 3. More: [exit codes](commands.md#exit-codes).
 
 ### Incomplete result
 A result that cannot be trusted, such as a comparison that compared nothing. It exits with code 3 and is never a pass. More: [exit codes](commands.md#exit-codes).
@@ -71,10 +73,10 @@ The database the application uses, named by `working:`. A capture restores it fr
 A copy of the working database made by `driftgate seed`. Every restore copies the data back from it. More: [state](configuration.md#state).
 
 ### Seed
-Load the data and make the pristine copy, with `driftgate seed` or the `seed:` commands. More: [driftgate seed](commands.md#seed).
+The `seed:` commands load the data; `driftgate seed` runs them and keeps the pristine copy. More: [driftgate seed](commands.md#seed).
 
 ### Restore
-Put the state back to the pristine copy before a capture, so every capture starts from the same data. More: [state](configuration.md#state).
+Put the state back to how the seed left it: databases from the pristine copy, other components by their `restore` command. Every capture starts from the same data. More: [state](configuration.md#state).
 
 ### Fingerprint
 A hash of the state. A capture stops with exit code 3 when the restored state does not match the baseline's fingerprint. More: [state](configuration.md#state).
@@ -89,7 +91,7 @@ Commands that run after every restore, such as clearing a cache. More: [seed, pr
 A request that does not change data. By default these are `GET`, `HEAD` and `OPTIONS` requests; they run first. More: [catalog.json](configuration.md#catalogjson).
 
 ### Request that changes data
-A request with any other method, or with `"mutates": true`. It runs after the read-only requests, one at a time, after a restore. More: [catalog.json](configuration.md#catalogjson).
+A request with any other method, or with `"mutates": true`. After the read-only requests and one restore, these run one after another, each on the data the earlier ones left (`--restore once`, the default). More: [catalog.json](configuration.md#catalogjson).
 
 ## Rules and decisions
 
@@ -103,7 +105,7 @@ A route that is not checked on purpose, with a reason, in `exclusions.yaml`. Mor
 A request that fails in the baseline, acknowledged in `exclusions.yaml`. It is still sent and compared. More: [exclusions.yaml](configuration.md#exclusionsyaml).
 
 ### Observe
-Measure a request (status, time, size) without comparing it. More: [observe](configuration.md#observe).
+Measure a request (status, time, size) without comparing it: `"observe": true` in the catalog, or `observe:` in `driftgate.yaml` for generated requests. More: [observe](configuration.md#observe).
 
 ### Accept
 Take the drifts of the last comparison into the baseline, with a reason. Only in mode `evolve`. More: [driftgate accept](commands.md#accept).
@@ -144,7 +146,7 @@ A response body kept encrypted in the local store, never in the repository. Gene
 A response body stored as it is, after a scan for personal data. More: [storage and pii](configuration.md#storage-and-pii).
 
 ### Personal-data detector
-The scan of every public body for e-mail addresses, phone numbers, personal ID numbers, card numbers and IBANs. More: [storage and pii](configuration.md#storage-and-pii).
+The scan of every public body for e-mail addresses, phone numbers, a Serbian personal ID number (with its check digit), card numbers and IBANs. More: [storage and pii](configuration.md#storage-and-pii).
 
 ### Worktree
 A second checkout of the repository made with `git worktree add`, often one per change. More: [baselines](configuration.md#baselines).
@@ -188,7 +190,6 @@ Sending a read-only request again after it failed under load. The report always 
 A check of what the application does besides answering, such as its schema, files, Redis keys or mail, in the same gate. More: [side checks](guides/side-checks.md).
 
 ## Words we do not use
-
 - "local mode": say "the local layout", or "the baseline `local`" for the name.
 - "target" for a running application: say "service". `target` and `targets:` are only keys.
 - "snapshot", "golden file" or "recording" for a baseline: say "baseline". "Record" is only the `record` command.

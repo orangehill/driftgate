@@ -39,7 +39,7 @@ docs test (`go test ./internal/docscheck/`) checks the rules it can.
 ## Headings
 
 - H1 is the page title. A guide's title is a task; a reference page's title is the file or command name.
-- H2 and H3 are tasks or questions in plain words. A command's reference section is exactly `## driftgate <command>`.
+- H2 and H3 are a task, a question or a name, in plain words. A command's reference section is exactly `## driftgate <command>`.
 - No heading text repeats within a page, so no anchor gets a `-1`.
 - Every key, flag or behaviour a reader may search for has its own heading, never only a table cell or a bold line.
 - No bold pseudo-headings, and no numbers in headings.
@@ -51,7 +51,8 @@ docs test (`go test ./internal/docscheck/`) checks the rules it can.
 - `console` for real output: lines start with `$ driftgate …`, then the output. Cut lines with `...` on a line of their own. Output comes from a real run, or is marked `abridged`.
 - Every `yaml` or `json` block has a check marker on the line above it: `<!-- check: KIND [files=a,b] -->`.
 - KIND is `config`, `config-fragment`, `catalog`, `allowlist`, `exclusions`, `classify`, `routes-json`, `yaml`, `json` or `skip: <reason>`.
-- Use `skip` only for another tool's format: a compose file, a GitHub workflow, an OpenAPI document, `appsettings.json`.
+- Another tool's format (a compose file, a GitHub workflow, an OpenAPI document, `appsettings.json`) is checked as `yaml` or `json`.
+- Use `skip` only for a block no parser can read, such as one with duplicate keys.
 - `sql` for statements, `ini` for `.env` files.
 - Placeholders are written `<name>` and are never real values.
 - Long command lines wrap with ` \`.
@@ -73,9 +74,7 @@ docs test (`go test ./internal/docscheck/`) checks the rules it can.
 ## Words
 
 - Use the terms of the [glossary](../docs/glossary.md), with the meanings given there.
-- Never "local mode": write "the local layout", or "the baseline `local`".
-- "Service" in prose; `target` and `targets:` only as keys.
-- "A request that changes data", not "a mutating request".
+- Avoid the [words we do not use](../docs/glossary.md#words-we-do-not-use).
 - Cut words that carry nothing: "note that", "it is important to", "in order to", "basically", "simply", "just", "as mentioned", "please", "actually", "of course".
 - Active voice, present tense, and "you" in guides.
 
@@ -97,7 +96,5 @@ The repository is public: never a client's or an internal name.
 
 ## Line budgets
 
-- Start pages fit one screen (80 lines); the tutorial has 170.
-- Guides have at most 150 lines, framework guides 180.
-- Index and stub pages have at most 120 lines; reference pages have no limit.
-- `internal/docscheck/testdata/budgets.txt` holds the budget of each page. A page over budget is split, or its detail moves to the reference.
+- `internal/docscheck/testdata/budgets.txt` holds each page's budget.
+- A page over budget is split, or its detail moves to the reference.

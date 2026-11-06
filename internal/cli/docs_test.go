@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/docscheck"
 )
 
@@ -150,8 +151,9 @@ func tableFlags(d *docscheck.Doc, line int) []string {
 }
 
 // TestDriftKinds: the drift kinds of internal/compare (its constants named
-// Kind…), the kinds docs/reference/drift-kinds.md describes (the first
-// column of its tables) and those of driftgate help kinds are one set.
+// Kind…), compare.Kinds (the text of driftgate help kinds), the kinds
+// docs/reference/drift-kinds.md describes (the first column of its kind
+// tables) and the output of driftgate help kinds are one set.
 func TestDriftKinds(t *testing.T) {
 	root, err := docscheck.Root()
 	if err != nil {
@@ -165,16 +167,24 @@ func TestDriftKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var listed []string
+	for _, k := range compare.Kinds {
+		listed = append(listed, k.Name)
+		if k.Text == "" {
+			t.Errorf("compare.Kinds: %s has no text", k.Name)
+		}
+	}
+	_, out, _ := runCLI(t, "help", "kinds")
 	var help []string
-	if tp := lookupTopic("kinds"); tp != nil {
-		for _, f := range tp.fields {
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && len(f) > 0 {
 			help = append(help, f[0])
 		}
 	}
 	for _, c := range []struct {
 		where string
 		kinds []string
-	}{{"docs/reference/drift-kinds.md", tableKinds(d)}, {"driftgate help kinds", help}} {
+	}{{"compare.Kinds", listed}, {"docs/reference/drift-kinds.md", tableKinds(d)}, {"driftgate help kinds", help}} {
 		for _, k := range code {
 			if !slices.Contains(c.kinds, k) {
 				t.Errorf("%s does not list the drift kind %s", c.where, k)
@@ -237,12 +247,28 @@ func codeKinds(t *testing.T, dir string) []string {
 
 var codeWord = regexp.MustCompile("^`([a-z-]+)`$")
 
-// tableKinds lists the kinds in the first column of the tables of a page:
-// one kind, a code span, per row.
+// tableKinds lists the kinds in the first column of the kind tables of a
+// page, those whose header row starts with "| Kind |", outside fenced
+// blocks: one kind, a code span, per row.
 func tableKinds(d *docscheck.Doc) []string {
+	code := map[int]bool{}
+	for _, b := range d.Blocks {
+		for n := b.Line; n <= b.End; n++ {
+			code[n] = true
+		}
+	}
 	var out []string
-	for _, l := range d.Lines {
-		if !strings.HasPrefix(l, "|") {
+	inTable := false
+	for i, l := range d.Lines {
+		if code[i+1] || !strings.HasPrefix(l, "|") {
+			inTable = false
+			continue
+		}
+		if strings.HasPrefix(l, "| Kind |") {
+			inTable = true
+			continue
+		}
+		if !inTable {
 			continue
 		}
 		first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
