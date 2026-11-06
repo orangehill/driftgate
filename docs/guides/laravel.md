@@ -18,7 +18,7 @@ driftgate init
 - a `laravel` adapter: routes from `php artisan route:list --json` (the
   table of Laravel before 8), and with `php: ["php"]` the validation rules of
   form request classes, from which `generate` builds request bodies;
-- `templates: [ok, not-found, json, json-errors]` (`json-errors`: the error variants once more as an API client asks for them, see [templates](../configuration.md#templates-generate-params));
+- `templates: [ok, not-found, json, json-errors]` (`json-errors`: the error variants once more as an API client asks for them, see [templates](../reference/driftgate-yaml.md#templates-generate-params));
 - exclusions with reasons for Debugbar, Ignition, Telescope, Horizon and
   `/storage/*`;
 - allowlist entries for `Date` and the throttle headers that depend on time
@@ -104,7 +104,7 @@ guards:
   restore, never compared, so a cached value or a rate limit's counter
   does not carry over from one capture to the next, and the cache the
   application had when the pristine copy was made is not kept
-  ([restore_only](../configuration.md#restore_only)). A large
+  ([restore_only](../reference/state.md#restore_only)). A large
   `failed_jobs` table makes fingerprints slow; empty it in a seed
   command, or exclude it.
 - With a Redis cache or session store, add it as a component:
@@ -136,7 +136,7 @@ state:
 
 - Restores write inside the file while `php artisan serve` (or Herd) keeps
   it open; the application sees the restored data on its next query. See
-  [SQLite](../configuration.md#sqlite) for what is restored and how.
+  [SQLite](../reference/databases/sqlite.md) for what is restored and how.
 - Leave `DB_DATABASE` unset or make it absolute. A relative one is taken
   from the project root, as Laravel 11 and later do when it is not in the
   folder PHP runs in; Laravel 10 and earlier open it from that folder
@@ -194,7 +194,7 @@ DB_TRUST_SERVER_CERTIFICATE=true
   -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -Q "CREATE DATABASE shop"`);
   `setup` reads the compose service and signs in as `sa` for DriftGate,
   and the application keeps a login that is only a user of `shop`
-  ([why](../configuration.md#sql-server)).
+  ([why](../reference/databases/sql-server.md)).
 - `seed: [["php", "artisan", "migrate:fresh", "--seed", "--force"]]` as
   above; exclude `sessions`, `jobs`, `job_batches` and `failed_jobs` and
   restore only `cache` and `cache_locks` when they are tables of the
@@ -237,8 +237,8 @@ lifetime as classes); add a reason to each and run again.
 
 Routes that upload files get a synthetic file of a kind their rules accept
 (`file`, `image`, `mimes:`, `mimetypes:`). To check a real import, write a
-catalog entry with a real file from the [uploads folder](../configuration.md#multipart).
-A queued job can run as a [command step](../configuration.md#command-steps):
+catalog entry with a real file from the [uploads folder](../reference/catalog-json.md#multipart).
+A queued job can run as a [command step](../reference/catalog-json.md#command-steps):
 `["php", "artisan", "queue:work", "--stop-when-empty"]`.
 
 With `baselines: git`, commit `driftgate.yaml` and `driftgate/`, and add

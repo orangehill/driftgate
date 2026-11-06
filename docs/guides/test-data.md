@@ -69,7 +69,7 @@ A column without a rule (new after a migration, say), a proposal nobody
 confirmed, or a rule for a column that no longer exists stops `anonymize`
 and `subset` with exit 2. Personal-looking literals in schema objects
 (comments, defaults, views, triggers, functions) must be confirmed under
-`schema:` too. All rules: [configuration, classify.yaml](../configuration.md#classifyyaml).
+`schema:` too. All rules: [configuration, classify.yaml](../reference/classify-yaml.md).
 
 ## 3. Make the copy
 

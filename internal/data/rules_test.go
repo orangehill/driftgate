@@ -105,6 +105,11 @@ func TestRulesReject(t *testing.T) {
 		"version: 1\ntables: {t: {columns: {c: {strategy: universal, paths: {$.a: email}}}}}\n",
 		"version: 1\ntables: {t: {columns: {c: {strategy: json, paths: {a: email}}}}}\n",
 		"version: 1\ntables: {t: {columns: {c: {kind: serialized-php, action: shred}}}}\n",
+		"version: 1\ntables: {t: {columns: {c: {kind: serialized-php, action: \"\"}}}}\n",
+		"version: 1\ntables:\n  t:\n    columns:\n      c:\n        kind: serialized-php\n        action:\n",
+		"version: 1\ntables:\n  t:\n    reason: &e \"\"\n    columns:\n      c: {kind: serialized-php, action: *e}\n",
+		"version: 1\ntables:\n  t:\n    reason: &kind action\n    columns:\n      c: {reason: x, kind: serialized-php, *kind: \"\"}\n",
+		"version: 1\ntables:\n  t:\n    reason: &reason action2\n    columns:\n      c: {kind: serialized-php, *reason: x}\n",
 		"version: 1\ntables: {}\nextra: 1\n",
 	} {
 		if _, err := ParseRules([]byte(bad)); err == nil {
@@ -284,5 +289,68 @@ func TestSchemaLiteralsNeedConfirmation(t *testing.T) {
 	}
 	if _, err := ParseRules([]byte(exampleRules + "schema:\n  view vip: [name]\n")); err == nil {
 		t.Fatal("an unknown kind was accepted")
+	}
+}
+
+// TestSerializedAction: action: null without quotes is the action null, as
+// with quotes; a missing action is the default empty-table, which leaves
+// the table's rows out (an action with nothing after it is refused:
+// TestRulesReject).
+func TestSerializedAction(t *testing.T) {
+	for in, want := range map[string]string{
+		"{kind: serialized-php, action: null}":        SerializedNull,
+		"{kind: serialized-php, action: ~}":           SerializedNull,
+		`{kind: serialized-php, action: "null"}`:      SerializedNull,
+		"{kind: serialized-php, action: empty-table}": SerializedEmptyTable,
+		"{kind: serialized-php}":                      "",
+	} {
+		r, err := ParseRules([]byte("version: 1\ntables:\n  t:\n    columns:\n      c: " + in + "\n"))
+		if err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		tr := r.Tables["t"]
+		if got := tr.Columns["c"].Action; got != want {
+			t.Errorf("%s: action %q, want %q", in, got, want)
+		}
+		if emptied := tr.emptied(); emptied != (want != SerializedNull) {
+			t.Errorf("%s: emptied = %v", in, emptied)
+		}
+	}
+}
+
+// TestAliasesReadAsTheirValue: an alias (*name) reads as the value at its
+// anchor, also where a bare null has a meaning of its own: the action null
+// of a serialized-php column, the strategy null of a column and the
+// nullable rule null of a reference.
+func TestAliasesReadAsTheirValue(t *testing.T) {
+	r, err := ParseRules([]byte(`version: 1
+tables:
+  t:
+    columns:
+      a: {kind: serialized-php, action: &n null}
+      b: {kind: serialized-php, action: *n}
+      c: &s null
+      d: *s
+subset:
+  nullable: &p null
+  references:
+    - {from: "t(a)", to: "u(id)", nullable: *p}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := r.Tables["t"].Columns
+	if got := cols["b"].Action; got != SerializedNull {
+		t.Errorf("action of an alias of null: %q, want null", got)
+	}
+	if r.Tables["t"].emptied() {
+		t.Error("the table is emptied, though both actions are null")
+	}
+	if got := cols["d"]; got.Kind != KindPersonal || got.Strategy != StrategyNull {
+		t.Errorf("a column given an alias of null: %+v, want the strategy null", got)
+	}
+	if got := r.Subset.References[0].Nullable; got != NullableNull {
+		t.Errorf("nullable of an alias of null: %q, want null", got)
 	}
 }

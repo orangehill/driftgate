@@ -1,8 +1,8 @@
 # Commands: the data module
 
 The commands that make anonymized test data from a source database. They
-need [`data:`](../../configuration.md#data) in `driftgate.yaml` and the
-rules of [classify.yaml](../../configuration.md#classifyyaml). The task
+need [`data:`](../driftgate-yaml.md#data) in `driftgate.yaml` and the
+rules of [classify.yaml](../classify-yaml.md). The task
 is in [anonymized test data](../../guides/test-data.md).
 
 ## driftgate data classify
@@ -68,7 +68,7 @@ Runs `data anonymize` on a sample with closed references: the rows that
 | `--replace` | drop an existing target database and write it again |
 | `--format text\|json` | output format (default text) |
 
-It needs a [`subset:`](../../configuration.md#subset) section in
+It needs a [`subset:`](../classify-yaml.md#subset) section in
 `classify.yaml`. It stops where
 [data anonymize](#driftgate-data-anonymize) stops.
 
@@ -101,4 +101,4 @@ driftgate data verify --dump out/shop-sample.sql
 ```
 
 ---
-**Related:** [data](../../configuration.md#data) · [classify.yaml](../../configuration.md#classifyyaml) · [Anonymized test data](../../guides/test-data.md)
+**Related:** [data](../driftgate-yaml.md#data) · [classify.yaml](../classify-yaml.md) · [Anonymized test data](../../guides/test-data.md)

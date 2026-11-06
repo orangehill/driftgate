@@ -111,7 +111,7 @@ state:
 
 The pristine copy is a file of DriftGate's store, and restores write
 inside `dev.db` while the server keeps it open (see
-[SQLite](../configuration.md#sqlite)). `_prisma_migrations` is
+[SQLite](../reference/databases/sqlite.md)). `_prisma_migrations` is
 fingerprinted and restored like any other table. Run `prisma migrate dev`
 (or `migrate deploy`) before `setup`, so the file exists.
 

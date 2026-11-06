@@ -198,17 +198,25 @@ var dataAnonymizeFlags = []flagHelp{
 
 const helpIntro = "driftgate — a regression gate for HTTP APIs\n\nUsage:\n"
 
-const helpOutro = `
+// helpOutro ends driftgate help: the common flags, the help topics (from
+// topics, so a new one is always named) and the exit codes.
+func helpOutro() string {
+	var names []string
+	for _, t := range topics {
+		names = append(names, t.name)
+	}
+	return strings.Replace(helpOutroText, "{topics}", wrap(strings.Fields("driftgate help <topic> lists the fields of a file, or the kinds of drift: "+strings.Join(names, ", ")+"."), "", "", 80), 1)
+}
+
+const helpOutroText = `
 Several services (targets: in driftgate.yaml): every command checks all of
 them; --target <service> works on the named ones only, and run says so.
 
 Common flags:
   --config <path>   configuration file (default: .driftgate/driftgate.yaml or driftgate.yaml here or in the nearest folder above)
 
-driftgate help <command> (or <command> --help) describes a command and its flags;
-driftgate help catalog and help allowlist the fields of those files;
-driftgate help kinds the kinds of drift.
-
+driftgate help <command> (or <command> --help) describes a command and its flags.
+{topics}
 Exit codes: 0 clean, 1 drift (also: changed routes, uncovered routes, a stale
 catalog with --check, findings of allowlist check), 2 configuration error, 3 environment error or an incomplete
 result (an interrupted capture; private requests whose body is not on this
@@ -289,7 +297,7 @@ func writeUsage(w io.Writer) {
 		b.WriteString(wrap(c.synopsis(), "  ", "      ", 80))
 		b.WriteString(wrap(strings.Fields(c.summary), "        ", "        ", 80))
 	}
-	b.WriteString(helpOutro)
+	b.WriteString(helpOutro())
 	fmt.Fprint(w, b.String())
 }
 

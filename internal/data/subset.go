@@ -72,6 +72,7 @@ type Reference struct {
 // nullableValue reads a nullable rule; a bare null in YAML is the rule null
 // (decoding it into a string would give no rule at all).
 func nullableValue(n yaml.Node) (string, error) {
+	n = *resolve(&n)
 	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" && n.Value != "" {
 		return NullableNull, nil
 	}
@@ -115,6 +116,7 @@ func (r *Reference) UnmarshalYAML(n *yaml.Node) error {
 }
 
 func (s *SampleRule) UnmarshalYAML(n *yaml.Node) error {
+	n = resolve(n)
 	if n.Kind == yaml.ScalarNode {
 		if n.Value != SampleAll && n.Value != SampleNone {
 			return fmt.Errorf("line %d: %q is not all, none or a mapping", n.Line, n.Value)

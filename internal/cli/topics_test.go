@@ -7,10 +7,13 @@ import (
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/data"
+	"github.com/orangehill/driftgate/internal/routes"
 )
 
-// TestHelpTopics: help catalog and help allowlist list every field of
-// those files and the section to read (help allowlist also the allowlist
+// TestHelpTopics: help catalog, allowlist, exclusions, classify and
+// config list every field of those files and the section to read (help allowlist also the allowlist
 // command); an unknown topic points to the table of what to use for a task.
 func TestHelpTopics(t *testing.T) {
 	fields := func(v any, tag string) []string {
@@ -44,9 +47,15 @@ func TestHelpTopics(t *testing.T) {
 		want  []string
 	}{
 		{"catalog", append(append(fields(catalog.Request{}, "json"), fields(catalog.Catalog{}, "json")...), fields(multipart, "json")...),
-			[]string{"(beside driftgate.yaml", docsBase() + "configuration.md#catalogjson", docsBase() + tasksDoc}},
+			[]string{"(beside driftgate.yaml", docsBase() + "reference/catalog-json.md#request-fields", docsBase() + tasksDoc}},
 		{"allowlist", []string{"headers", "body", "arrays", "version", "request", "target", "reason"},
-			[]string{"(beside driftgate.yaml)", docsBase() + "configuration.md#allowlistyaml", "usage: driftgate allowlist check"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/allowlist-yaml.md", "usage: driftgate allowlist check"}},
+		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/exclusions-yaml.md"}},
+		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), withoutKey(fields(data.ColumnRule{}, "yaml"), "options")...), fields(data.SchemaRule{}, "yaml")...),
+			[]string{"(beside driftgate.yaml)", docsBase() + "reference/classify-yaml.md"}},
+		{"config", fields(config.Config{}, "yaml"),
+			[]string{"driftgate.yaml", docsBase() + "reference/driftgate-yaml.md#top-level-keys"}},
 	} {
 		code, out, errOut := runCLI(t, "help", c.topic)
 		if code != ExitClean || errOut != "" {
@@ -74,6 +83,38 @@ func TestHelpTopics(t *testing.T) {
 	for _, args := range [][]string{{"help", "uploads"}, {"uploads"}} {
 		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, docsBase()+tasksDoc) {
 			t.Errorf("%v: exit %d %s", args, code, errOut)
+		}
+	}
+}
+
+// withoutKey is keys without key. ColumnRule's options is refused for every
+// column kind (data.ColumnRule.validate), so help classify does not offer it.
+func withoutKey(keys []string, key string) []string {
+	var out []string
+	for _, k := range keys {
+		if k != key {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// TestHelpNamesTopics: driftgate help names every help topic.
+func TestHelpNamesTopics(t *testing.T) {
+	_, out, _ := runCLI(t, "help")
+	at := strings.Index(out, "driftgate help <topic>")
+	if at < 0 {
+		t.Fatalf("driftgate help has no line on the help topics:\n%s", out)
+	}
+	line := out[at:]
+	end := strings.Index(line, ".\n")
+	if end < 0 {
+		t.Fatalf("the line on the help topics does not end:\n%s", line)
+	}
+	line = strings.Join(strings.Fields(line[:end]), " ")
+	for _, tp := range topics {
+		if !strings.Contains(line, " "+tp.name+",") && !strings.HasSuffix(line, " "+tp.name) {
+			t.Errorf("driftgate help does not name the topic %s: %s", tp.name, line)
 		}
 	}
 }
