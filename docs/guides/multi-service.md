@@ -48,7 +48,7 @@ run there and its files are found there.
 
 - Use `target:` for one service or `targets:` for several, not both.
   Service names are simple names (letters, digits, `. _ -`).
-- With several targets, every adapter needs `target:`; every catalog entry
+- With several services, every adapter needs `target:`; every catalog entry
   carries `"target"`. `params`, `observe`, allowlist and exclusion entries
   without `target` apply to every service.
 - `state:` is shared: every database is restored before the capture, since

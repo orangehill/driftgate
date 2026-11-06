@@ -394,12 +394,12 @@ holds `/driftgate-project` itself, are taken for the project's folder. A set mad
 records no folder and is compared as it is. `accept` adds the folders of
 the capture it takes bodies from to the baseline's.
 
-A target outside `allow_hosts` needs `capture --allow-remote`; requests that
+A service outside `allow_hosts` needs `capture --allow-remote`; requests that
 change data need `--allow-remote-mutations` as well.
 
 #### connect_to
 
-When DNS names another server for the target's host than the one under
+When DNS names another server for the service's host than the one under
 test (the host name still points to the old production while the new
 server is being prepared), `connect_to` sends every request to a fixed
 address, as `curl --connect-to` or `--resolve` does:
@@ -423,7 +423,7 @@ there fails rather than reach the server DNS names. A redirect to another
 host is not changed.
 `allow_hosts` applies to the address connected to, not to the host name:
 naming `shop.example` there does not allow `connect_to` to reach an
-address outside the list, and such a target needs `--allow-remote` (and
+address outside the list, and such a service needs `--allow-remote` (and
 `--allow-remote-mutations` for requests that change data) like any
 remote one. `record`, `discover` and `setup` connect the same way; the
 project's own commands (`prepare`, `tokens.command`, `seed`, guards)
@@ -525,7 +525,7 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
 | `restore_only` | list of globs | tables restored to the pristine copy's rows, but never fingerprinted: no side effect, no part of the state a baseline is checked against ([below](#restore_only)); not an excluded table |
 | `restore_empty` | list of globs | `restore_only` tables restored to no rows: the pristine copy leaves their rows out, as an excluded table's (a cache; [below](#restore_only)) |
 | `row_tracking` | list of tables | also record which rows and columns each request changes (without values); not an excluded or restore_only table. A capture records which tables it tracked: rows of a table the baseline did not track (row_tracking came after it) are not compared, and a note says to make the baseline again |
-| `allow_remote` | bool | allow a database host that is neither local nor named in some target's `allow_hosts` |
+| `allow_remote` | bool | allow a database host that is neither local nor named in some service's `allow_hosts` |
 
 - `driftgate seed` (or the first `run`) copies `working` to `pristine` and
   records the fingerprint of the pristine copy (not of `working`, which the
@@ -593,7 +593,7 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   made those versions crash now and then). PostgreSQL before 15 has no file copy of a
   database; restores use the default copy.
 - The database must be on this machine (a local address or a socket) or on a
-  host some target's `allow_hosts` names; a private address is not enough.
+  host some service's `allow_hosts` names; a private address is not enough.
   Every host the driver may connect to is checked (PostgreSQL `host=`,
   several hosts, `PG*` variables), and every connection on the address it
   goes to. Otherwise set `allow_remote: true`.
@@ -1078,7 +1078,7 @@ number, which Go refuses to read by default (also with
 `TrustServerCertificate`), so no connection to it would work. When a
 command makes its first SQL Server component, DriftGate turns on
 `GODEBUG=x509negativeserial=1` for its own process: from then on, for
-the whole process (the target's HTTPS included, and the commands it
+the whole process (the service's HTTPS included, and the commands it
 starts, which inherit it), such a certificate is read; its chain and host
 name are verified as any other's. A project without SQL Server never has
 it, and an `x509negativeserial` you set in `GODEBUG` yourself is kept.
@@ -1412,7 +1412,7 @@ with the component, its working database, a hash of its server's
 address and the time, and used once, by a capture of the same database
 within an hour; the store is shared by every checkout of the project),
 as many requests answered with 5xx once more: a `GET` or
-`HEAD` to a target on an allowed host, not a `repeat:`, a step of a
+`HEAD` to a service on an allowed host, not a `repeat:`, a step of a
 sequence or one the baseline knows writes (a `GET` can write). Each is
 sent at most twice, the second answer is kept (a 5xx that stays is the
 application's; only a load failure such as a `503` is then
@@ -1710,9 +1710,9 @@ Common keys:
 | `command` | `laravel`: the `route:list` command; `command`: the command that prints routes |
 | `php` | `laravel`: how to run PHP inside the application (for validation rules) |
 | `file` | `openapi`: path of the description |
-| `url` | `openapi`: a path on the target (`/openapi.json`) or a full URL, read only from allowed hosts |
+| `url` | `openapi`: a path on the service (`/openapi.json`) or a full URL, read only from allowed hosts |
 | `identity` | `openapi` with `url`, `spring`: read the description as this identity (some applications describe only what the caller may use) |
-| `target` | the service these routes belong to (required with several targets) |
+| `target` | the service these routes belong to (required with several services) |
 | `dir` | the folder of the service: commands run there and files are found there (default the project root) |
 | `base_path` | a prefix of every path (Next.js `basePath`, an API prefix); starts with `/`, does not end with one |
 
@@ -2331,7 +2331,7 @@ with their own ID.
 |---|---|
 | `id` | unique, also ignoring case (it names a file, and macOS and Windows ignore case); letters, digits, `. _ -`, starting with a letter or digit, not ending with `.`, and not a device name Windows reserves (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, also with an extension) |
 | `method`, `path` | the request; `method` is an HTTP method (written in upper case; `post` is read as `POST`; none is `GET`), `path` starts with `/` and may hold `{name}` parameters and a query string |
-| `target` | the service, with several targets |
+| `target` | the service, with several services |
 | `params` | values of the path parameters |
 | `params_from` | `{"<param>": {"request": "<id>", "path": "$.data.id"}}`: a value from the response of a request earlier in the same sequence |
 | `headers` | list of `[name, value]` pairs, sent in this order; the first of a name replaces DriftGate's own (`User-Agent`, `Accept-Encoding: identity`), more of that name are sent too |
@@ -2411,7 +2411,7 @@ time.
 
 `"repeat": 61` sends the request 61 times in a row and compares the last
 response together with the statuses of all (`200×60, 429×1`). The sends skip
-`rate_limits`, and the request runs on a freshly restored state. On a target
+`rate_limits`, and the request runs on a freshly restored state. On a service
 outside its `allow_hosts` (`capture --allow-remote`) a repeated request needs
 `--allow-remote-mutations`, like one that changes data, and keeps
 `rate_limits`.

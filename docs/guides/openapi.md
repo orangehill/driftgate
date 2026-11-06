@@ -24,7 +24,7 @@ target:
   base_url: http://localhost:8080
 discover:
   - adapter: openapi
-    url: /v3/api-docs          # a path on the target, or a full URL on an allowed host
+    url: /v3/api-docs          # a path on the service, or a full URL on an allowed host
   # or: file: openapi.yaml     # JSON or YAML, relative to the project (or to dir:)
 ```
 
