@@ -229,6 +229,14 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := checkAllCommands(p, readonly, units); err != nil {
 		return nil, err
 	}
+	// The guards are checked before anything is restored or sent, so one
+	// that fails stops the capture at once, not after the read-only
+	// requests; again right before the requests that change data.
+	if len(units) > 0 {
+		if err := checkGuards(ctx, p, opt, true); err != nil {
+			return nil, err
+		}
+	}
 
 	set, err := p.Capture(opt.Tag)
 	if err != nil {
@@ -403,11 +411,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	if len(units) > 0 {
-		for _, g := range p.Guards {
-			if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
-				return nil, envErr("guard %q failed: %v", g.Name, err)
-			}
-			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
+		if err := checkGuards(ctx, p, opt, false); err != nil {
+			return nil, err
 		}
 		prev, err := r.reset(ctx)
 		if err != nil {
@@ -673,6 +678,19 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 		}
 	}
 	return ids
+}
+
+// checkGuards runs the guards; say prints each that succeeded.
+func checkGuards(ctx context.Context, p *config.Project, opt Options, say bool) error {
+	for _, g := range p.Guards {
+		if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
+			return envErr("guard %q failed: %v", g.Name, err)
+		}
+		if say {
+			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
+		}
+	}
+	return nil
 }
 
 func unitRequests(units []unit) []catalog.Request {

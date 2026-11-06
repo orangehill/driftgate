@@ -142,7 +142,7 @@ observe:
 | [`state`](#state) | map of name → component | | what is restored before captures |
 | [`seed`](#seed-prepare-guards) | list of commands | | load the data; `driftgate seed` then keeps the pristine copy |
 | [`prepare`](#seed-prepare-guards) | list of commands | | run after every restore |
-| [`guards`](#seed-prepare-guards) | list | | must succeed before any request that changes data |
+| [`guards`](#seed-prepare-guards) | list | | must succeed before the capture starts and before any request that changes data |
 | [`discover`](#discover) | list of adapters | | where the routes come from |
 | [`templates`](#templates-generate-params) | list | `[ok]` | request variants `generate` makes per route |
 | [`generate`](#templates-generate-params) | `{identity}` | | identity for routes that need authentication |
@@ -1576,7 +1576,7 @@ or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
 |---|---|
 | `seed` | commands that load the data into the working databases (migrations and seeders, a dump import). `driftgate seed` runs them and keeps the pristine copy; `seed --skip-commands` takes the data already loaded |
 | `prepare` | commands run after every restore |
-| `guards` | `{name, command}`: each must succeed before the first request that changes data, or the capture stops before it (e.g. mail goes to a log, not to people) |
+| `guards` | `{name, command}`: when the capture has requests that change data (or command steps, repeated requests), each must succeed before anything is restored or sent, and again right before the first request that changes data; a guard that fails stops the capture there (e.g. mail goes to a log, not to people) |
 
 <!-- check: config-fragment -->
 ```yaml

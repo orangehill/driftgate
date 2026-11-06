@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -216,11 +217,13 @@ func TestCaptureRefusals(t *testing.T) {
 		t.Fatalf("remote repeat: exit %d %s", code, errOut)
 	}
 
-	// A failing guard stops before any request that changes data.
+	// A failing guard stops before any request is sent, and before the
+	// state is restored.
 	p = newDemoProject(t, "")
 	raw, _ = os.ReadFile(p.cfg)
 	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["false"]`, 1))
-	if code, out, _ := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitEnv || strings.Contains(out, "faq-create") {
+	if code, out, _ := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitEnv || strings.Contains(out, "faq-create") ||
+		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) || strings.Contains(out, "restoring") {
 		t.Fatalf("failing guard: exit %d\n%s", code, out)
 	}
 
@@ -252,7 +255,8 @@ func TestInit(t *testing.T) {
 }
 
 // TestInterruptedCaptureIsIncomplete: a capture that stopped half way (here
-// at a failing guard, after the read-only requests) is not compared as one
+// at a guard that passed at the start and fails when checked again, after
+// the read-only requests) is not compared as one
 // whose other requests are gone (drift, exit 1), but refused as incomplete
 // (exit 3).
 func TestInterruptedCaptureIsIncomplete(t *testing.T) {
@@ -261,9 +265,10 @@ func TestInterruptedCaptureIsIncomplete(t *testing.T) {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	raw, _ := os.ReadFile(p.cfg)
-	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["false"]`, 1))
-	if code, _, errOut := runCLI(t, "capture", "c2", "--config", p.cfg); code != ExitEnv {
-		t.Fatalf("failing guard: exit %d %s", code, errOut)
+	flag := filepath.Join(t.TempDir(), "checked")
+	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["sh", "-c", "test ! -e '`+flag+`' && touch '`+flag+`'"]`, 1))
+	if code, out, errOut := runCLI(t, "capture", "c2", "--config", p.cfg); code != ExitEnv || !strings.Contains(out, "news") {
+		t.Fatalf("failing guard: exit %d %s\n%s", code, errOut, out)
 	}
 	code, _, errOut := runCLI(t, "compare", "c2", "--against", "c1", "--config", p.cfg)
 	if code != ExitEnv || !strings.Contains(errOut, "incomplete capture") {

@@ -684,6 +684,10 @@ Restores the state, sends the catalog and stores the responses under a tag.
   with [`driftgate baselines rebase`](#baselines-rebase). When the items that
   differ are tables made `restore_only` since, it says that the
   configuration changed: make the baseline again.
+- The [guards](configuration.md#seed-prepare-guards) are checked before
+  anything is restored or sent (when requests change data), and again
+  right before the first request that changes data: one that fails stops
+  the capture at once (exit 3).
 - When `prepare` changed the restored state, the capture warns and lists
   what it changed ([seed, prepare,
   guards](configuration.md#seed-prepare-guards)); the exit code stays.
