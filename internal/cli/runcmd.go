@@ -39,6 +39,7 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	baseline := fs.String("baseline", "local", "")
 	noRestore := fs.Bool("allow-mutating-without-restore", false, "")
 	skipPrivate := fs.Bool("skip-private", false, "")
+	readOnly := fs.Bool("read-only", false, "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -141,7 +142,7 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 
 	step("capture")
 	var retried []string // of the capture a first run makes the baseline from
-	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore,
+	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore, readOnly: *readOnly,
 		first: func(sum *capture.Summary) { retried = retriedIDs(sum) }}
 	if first {
 		// Two sequential captures that agree, then concurrency: auto is

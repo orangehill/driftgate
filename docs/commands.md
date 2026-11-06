@@ -329,7 +329,7 @@ driftgate seed
 
 ```
 driftgate run [--baseline <name>] [--allow-mutating-without-restore]
-    [--skip-private] [--target <service>]
+    [--skip-private] [--read-only] [--target <service>]
 ```
 
 Routes, catalog, capture and compare in one command; the first run makes the
@@ -340,6 +340,7 @@ baseline from two equal captures.
 | `--baseline <name>` | baseline to make or compare with (default `local`) |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-private` | accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3) |
+| `--read-only` | capture only the requests that do not change data, as `capture --read-only` |
 | `--target <service>` | work on this service only (repeatable or comma-separated); the check is then reported as partial |
 
 - Steps: `discover` (routes), `generate` (catalog), `coverage`, `seed` when
@@ -607,7 +608,8 @@ driftgate record --write --exclude '/admin/*'     # add it to the catalog on Ctr
 driftgate capture <tag> [--only <glob>] [--force] [--restore once|each]
     [--repeat N] [--baseline <name>] [--allow-remote]
     [--allow-remote-mutations] [--allow-mutating-without-restore]
-    [--skip-fingerprint-check] [--calibrate] [--quiet] [--target <service>]
+    [--skip-fingerprint-check] [--calibrate] [--read-only] [--quiet]
+    [--target <service>]
 ```
 
 Restores the state, sends the catalog and stores the responses under a tag.
@@ -624,6 +626,7 @@ Restores the state, sends the catalog and stores the responses under a tag.
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-fingerprint-check` | do not check the state fingerprint (diagnostics only; the capture is marked unreliable) |
 | `--calibrate` | decide `concurrency: auto`: measure, compare a capture at the chosen setting with a sequential one, record it in the baseline (implies `--repeat 2`; not with `--only`) |
+| `--read-only` | send only the requests that do not change data; see [below](#read-only-check-of-a-live-server) |
 | `--quiet` | no progress output |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
@@ -696,6 +699,45 @@ restoring api …
 ...
 2 runs on the same state gave the same responses ✓
 ```
+
+### Read-only check of a live server
+
+`--read-only` sends only the requests that do not change data: `GET`,
+`HEAD` and `OPTIONS`, and those marked `mutates: false` (a search sent as
+`POST`). It leaves out the requests that change data, command steps (but
+those marked `mutates: false`) and every request of a sequence that holds
+one of them, as its later requests may need the earlier ones. The capture
+says how many it left out and records `read_only` in its `meta.json`; a
+comparison of it skips them (`not sent: capture --read-only`) and lists
+those that change data under what the result does not cover. A request
+missing from it for any other reason still drifts.
+
+With a configuration without `state:` nothing is restored, seeded or
+fingerprinted, so this checks a server that must not change (a
+production, a new server before the switch) without writing to it:
+
+<!-- check: config-fragment -->
+```yaml
+version: 1
+project: shop
+target:
+  base_url: https://shop.example
+  connect_to: 203.0.113.10        # the new server, whatever DNS says
+  allow_hosts: [203.0.113.10]
+```
+
+```sh
+driftgate capture live-before --read-only
+# … the change on the server …
+driftgate capture live-after --read-only
+driftgate compare live-after --against capture:live-before
+```
+
+`allow_hosts` names the server's address, which is outside the local and
+private ranges; without it, the captures need `--allow-remote`. Requests
+that change data are never sent, so `--allow-remote-mutations` is not
+needed. Another developer's traffic on a shared server shows as drift in the data
+the responses hold; a side effect is not recorded without `state:`.
 
 ## compare
 

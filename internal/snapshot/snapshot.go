@@ -150,6 +150,9 @@ type Meta struct {
 	// to, per service (the empty name: the only one). Responses that write
 	// absolute URLs are compared with another origin's through them.
 	Origins map[string]string `json:"origins,omitempty"`
+	// ReadOnly marks a capture that sent only the requests that do not
+	// change data (capture --read-only): a comparison skips the others.
+	ReadOnly bool `json:"read_only,omitempty"`
 	// ConnectTo is, per service with target.connect_to, the address its
 	// requests were sent to instead of the one DNS gives for its origin.
 	ConnectTo map[string]string `json:"connect_to,omitempty"`

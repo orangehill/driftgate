@@ -66,6 +66,9 @@ func envErr(format string, a ...any) error {
 type Options struct {
 	Tag                         string
 	Only                        string // glob over request IDs
+	// ReadOnly sends only the requests that do not change data
+	// (catalog.ReadOnlySkips leaves the others out).
+	ReadOnly bool
 	Force                       bool   // replace an existing capture with this tag
 	AllowRemote                 bool   // allow a target outside allow_hosts
 	AllowRemoteMutations        bool   // and send requests that change data to it
@@ -123,11 +126,12 @@ type unit struct {
 	reqs []catalog.Request
 }
 
-// plan splits the selected requests into read-only requests and units.
-func plan(cat *catalog.Catalog, only string) (readonly []catalog.Request, units []unit) {
+// plan splits the selected requests into read-only requests and units;
+// skip are requests left out (a read-only capture's).
+func plan(cat *catalog.Catalog, only string, skip map[string]bool) (readonly []catalog.Request, units []unit) {
 	selected := map[string]catalog.Request{}
 	for _, r := range cat.Requests {
-		if only == "" || glob.Match(only, r.ID) {
+		if (only == "" || glob.Match(only, r.ID)) && !skip[r.ID] {
 			selected[r.ID] = r
 		}
 	}
@@ -180,8 +184,15 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	default:
 		return nil, configErr("--restore must be once or each")
 	}
-	readonly, units := plan(cat, opt.Only)
+	var skip map[string]bool
+	if opt.ReadOnly {
+		skip = cat.ReadOnlySkips()
+	}
+	readonly, units := plan(cat, opt.Only, skip)
 	if len(readonly)+len(units) == 0 {
+		if opt.ReadOnly {
+			return nil, configErr("no catalog request that leaves data unchanged is selected (--read-only)")
+		}
 		if opt.Only != "" {
 			return nil, configErr("no catalog request matches --only %s", opt.Only)
 		}
@@ -426,7 +437,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
-		RowTracking: rowTrackingItems(p)}
+		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
 	if r.sum.Tracked {
 		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
 	}

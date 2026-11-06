@@ -263,6 +263,7 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		return 0, err
 	}
 	unreliable := false // the capture compared was made with --skip-fingerprint-check
+	var notSent map[string]bool // requests a read-only capture did not send
 	for _, s := range []struct {
 		set  *snapshot.Set
 		name string
@@ -276,6 +277,9 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		}
 		if meta != nil && meta.Unreliable && s.set == cur {
 			unreliable = true
+		}
+		if meta != nil && meta.ReadOnly && s.set == cur {
+			notSent = cat.ReadOnlySkips()
 		}
 		if meta != nil && meta.Unreliable && !o.skipFingerprint {
 			return 0, configErr("%s was captured with --skip-fingerprint-check; compare it only with the same flag", s.name)
@@ -314,8 +318,13 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	// read, and a CI step may post) holds them hidden.
 	var reqs []catalog.Request
 	var levels []compare.Level
+	var skipped []catalog.Request // not sent by a read-only capture
 	for _, req := range cat.Requests {
 		if o.only != "" && !glob.Match(o.only, req.ID) {
+			continue
+		}
+		if notSent[req.ID] {
+			skipped = append(skipped, req)
 			continue
 		}
 		level := p.Level
@@ -338,6 +347,9 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	results, shown, err := compareAll(reqs, levels, base, cur, origins, allow, digest, o.showPrivate)
 	if err != nil {
 		return stop(err)
+	}
+	if len(skipped) > 0 {
+		reqs, results, shown = withNotSent(cat, reqs, skipped, results, shown, allow)
 	}
 	// The baseline's bodies the comparison did not read are checked
 	// before anything of it is used.
@@ -440,6 +452,42 @@ func compareAll(reqs []catalog.Request, levels []compare.Level, base, cur *snaps
 		return err
 	})
 	return results, shown, err
+}
+
+// withNotSent adds the requests a read-only capture did not send to the
+// compared ones, as skipped, in catalog order. Their allowlist rules had
+// no chance (allowlist.List.Done): none is called stale for them.
+func withNotSent(cat *catalog.Catalog, reqs, skipped []catalog.Request, results, shown []report.Result, allow *allowlist.List) ([]catalog.Request, []report.Result, []report.Result) {
+	at := make(map[string]int, len(reqs))
+	for i, r := range reqs {
+		at[r.ID] = i
+	}
+	notSent := make(map[string]bool, len(skipped))
+	for _, r := range skipped {
+		notSent[r.ID] = true
+		allow.ForTarget(r.Target).ForRequest(r.ID).Done(r.ID, false, false)
+	}
+	var outReqs []catalog.Request
+	var outRes, outShown []report.Result
+	for _, r := range cat.Requests {
+		var res, sh report.Result
+		if i, ok := at[r.ID]; ok {
+			res = results[i]
+			if shown != nil {
+				sh = shown[i]
+			}
+		} else if notSent[r.ID] {
+			res = report.Result{ID: r.ID, Outcome: report.Skipped, Note: report.NoteNotSent}
+			sh = res
+		} else {
+			continue
+		}
+		outReqs, outRes = append(outReqs, r), append(outRes, res)
+		if shown != nil {
+			outShown = append(outShown, sh)
+		}
+	}
+	return outReqs, outRes, outShown
 }
 
 // timings reads the response times a capture keeps (timings.json, in ms

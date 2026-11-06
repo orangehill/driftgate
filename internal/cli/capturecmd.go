@@ -39,6 +39,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	skipFP := fs.Bool("skip-fingerprint-check", false, "")
 	quiet := fs.Bool("quiet", false, "")
 	calibrate := fs.Bool("calibrate", false, "")
+	readOnly := fs.Bool("read-only", false, "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -75,7 +76,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	defer unlock()
 	return captureSet(ctx, p, sel.requests(cat), allow, pos[0], captureOptions{only: *only, force: *force, allowRemote: *remote,
 		allowRemoteMutations: *remoteMut, noRestore: *noRestore, restore: *restore, repeat: *repeat, baseline: *baseline,
-		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate}, out, errOut)
+		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate, readOnly: *readOnly}, out, errOut)
 }
 
 // captureOptions are the flags of capture.
@@ -91,6 +92,7 @@ type captureOptions struct {
 	skipFingerprint      bool
 	quiet                bool
 	calibrate            bool // decide concurrency: auto (after the repeats agree)
+	readOnly             bool // send only the requests that do not change data
 	// first, when set, gets the summary of the first capture (run makes
 	// the baseline from it).
 	first func(*capture.Summary)
@@ -131,8 +133,12 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		return 0, err
 	}
 
-	byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
-	literalIDNote(out, cat, o.only)
+	if o.readOnly {
+		readOnlyNote(out, cat, o.only)
+	} else {
+		byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+		literalIDNote(out, cat, o.only)
+	}
 
 	tags := []string{tag}
 	for i := 2; i <= o.repeat; i++ {
@@ -158,7 +164,7 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		if len(tags) > 1 {
 			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
 		}
-		opt := capture.Options{Tag: tag, Only: o.only, Force: o.force || i > 0, AllowRemote: o.allowRemote,
+		opt := capture.Options{Tag: tag, Only: o.only, ReadOnly: o.readOnly, Force: o.force || i > 0, AllowRemote: o.allowRemote,
 			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
 			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used, NotBefore: notBefore}
 		sum, err := capture.Run(ctx, p, cat, opt)
@@ -284,6 +290,20 @@ func byMethodNote(out io.Writer, ids []string, restore string) {
 		"  say mutates: false for those that only read (a search sent as POST), mutates: true for the others,\n"+
 		"  under requests: in driftgate.yaml (match: the request ID), then driftgate generate --write; an entry written by hand says it in the catalog\n",
 		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
+}
+
+// readOnlyNote says how many selected requests a read-only capture
+// leaves out.
+func readOnlyNote(out io.Writer, cat *catalog.Catalog, only string) {
+	n := 0
+	for id := range cat.ReadOnlySkips() {
+		if only == "" || glob.Match(only, id) {
+			n++
+		}
+	}
+	if n > 0 {
+		fmt.Fprintf(out, "--read-only: %d %s that change data (or share a sequence with one) not sent\n", n, plural(n, "request", "requests"))
+	}
 }
 
 // literalIDNote warns, one line per request, of a request that changes

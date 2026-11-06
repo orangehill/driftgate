@@ -68,6 +68,7 @@ var commands = []commandHelp{
 		{name: "baseline", arg: "<name>", text: "baseline to make or compare with (default local)"},
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-private", text: "accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3)"},
+		{name: "read-only", text: "capture only the requests that do not change data, as capture --read-only"},
 		{name: "target", arg: "<service>", text: targetText + "; the check is then reported as partial"},
 	}},
 	{name: "discover", summary: "finds the routes of the application and compares them with the route inventory (exit 1 when they changed)", flags: []flagHelp{
@@ -108,6 +109,7 @@ var commands = []commandHelp{
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-fingerprint-check", text: "do not check the state fingerprint (diagnostics only; the capture is marked unreliable)"},
 		{name: "calibrate", text: "decide concurrency: auto: measure, compare a capture at the chosen setting with a sequential one, record it in the baseline (implies --repeat 2)"},
+		{name: "read-only", text: "send only the requests that do not change data (GET, HEAD, OPTIONS and mutates: false); a comparison skips the others"},
 		{name: "quiet", text: "no progress output"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},

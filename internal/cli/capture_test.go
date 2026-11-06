@@ -380,3 +380,72 @@ func TestMarkWriters(t *testing.T) {
 		t.Errorf("advice:\n%s\nwant\n%s", out.String(), want)
 	}
 }
+
+// TestReadOnlyCapture: --read-only sends only what leaves data unchanged,
+// also without state:; a comparison of such a capture skips the others,
+// lists them as not covered, and calls none of their rules stale.
+func TestReadOnlyCapture(t *testing.T) {
+	var mu sync.Mutex
+	writes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mu.Lock()
+			writes++
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1,"token":"abc"}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"news","method":"GET","path":"/news","storage":"public"},
+		{"id":"search","method":"POST","path":"/search","body":{},"mutates":false,"storage":"public"},
+		{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"},
+		{"id":"seq-login","method":"POST","path":"/login","body":{},"mutates":true,"storage":"public"},
+		{"id":"seq-me","method":"GET","path":"/me","storage":"public"},
+		{"id":"cmd","command":["true"],"storage":"public"}],
+		"sequences":[{"id":"s","requests":["seq-login","seq-me"]}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nbody:\n  - request: post-user\n    path: $.token\n    format: '[a-z]+'\n    reason: new token\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+
+	if code, out, errOut := runCLI(t, "capture", "full", "--config", cfg, "--allow-mutating-without-restore"); code != ExitClean {
+		t.Fatalf("full: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	writes = 0
+	mu.Unlock()
+	code, out, errOut := runCLI(t, "capture", "ro", "--config", cfg, "--read-only")
+	if code != ExitClean || !strings.Contains(out, "--read-only: 4 requests that change data") {
+		t.Fatalf("read-only: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	sent := writes
+	mu.Unlock()
+	if sent != 1 { // the search, marked mutates: false
+		t.Fatalf("%d requests other than GET sent", sent)
+	}
+	code, r := compareJSON(t, cfg, "ro", "capture:full")
+	got := map[string]string{}
+	for _, res := range r.Results {
+		got[res.ID] = res.Outcome + " " + res.Note
+	}
+	want := map[string]string{"news": "pass ", "search": "pass ", "post-user": "skipped " + report.NoteNotSent,
+		"seq-login": "skipped " + report.NoteNotSent, "seq-me": "skipped " + report.NoteNotSent, "cmd": "skipped " + report.NoteNotSent}
+	if code != ExitClean || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("exit %d: %v", code, got)
+	}
+	if r.NotCovered == nil || r.NotCovered.MutatingSkipped == nil || r.NotCovered.MutatingSkipped.Count != 3 {
+		t.Errorf("not covered: %+v", r.NotCovered)
+	}
+	if len(r.UnusedRules) != 0 {
+		t.Errorf("a rule of a request not sent is called stale: %+v", r.UnusedRules)
+	}
+	// A capture that sent everything compared with a read-only one as
+	// its baseline: the requests it lacks have no baseline.
+	if code, r := compareJSON(t, cfg, "full", "capture:ro"); code != ExitClean || r.Skipped != 4 {
+		t.Errorf("against a read-only capture: exit %d, %d skipped", code, r.Skipped)
+	}
+}

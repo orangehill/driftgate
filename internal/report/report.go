@@ -37,6 +37,11 @@ const NoteNoBaseline = "no baseline"
 // repository, and it is never compared by its ref alone.
 const NotePrivateMissing = "private body not on this machine"
 
+// NoteNotSent is the note of a request a read-only capture (capture
+// --read-only) did not send: it changes data, or shares a sequence with
+// a request that does.
+const NoteNotSent = "not sent: capture --read-only"
+
 // Result is the outcome for one request.
 type Result struct {
 	ID      string          `json:"id"`

@@ -42,7 +42,7 @@ func Probe(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Pro
 	if opt.Log == nil {
 		opt.Log = io.Discard
 	}
-	readonly, _ := plan(cat, "")
+	readonly, _ := plan(cat, "", nil)
 	wanted := map[string]bool{}
 	for _, s := range opt.Services {
 		wanted[s] = true
