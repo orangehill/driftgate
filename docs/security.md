@@ -121,7 +121,8 @@ needs `--allow-non-loopback`.
 - It answers only for its own address. A request whose `Host` is not the listen address gets 421: `127.0.0.1`, `[::1]` or `localhost` with its port, or with `--allow-non-loopback` that host exactly.
 - So a web page cannot point its own name at 127.0.0.1 (DNS rebinding) to read the application through the proxy, or plant requests in the catalog.
 - A redirect is pointed back at the address the client used, never at a `Host` it sent.
-- Pages of other sites are refused (403): every browser request marked `Sec-Fetch-Site: cross-site`, except a plain navigation (next), and a request that changes data or opens a websocket with an `Origin` that is not the proxy or another local address.
+- Pages of other sites are refused (403). That is every browser request marked `Sec-Fetch-Site: cross-site`, except a plain navigation (next).
+- So is a request that changes data or opens a websocket with an `Origin` that is not the proxy or another local address.
 - A plain cross-site navigation, such as a link or a sign-in provider sending the browser back, is forwarded and not recorded.
 - On an address that is not loopback, a browser sends no `Sec-Fetch-Site` over plain HTTP, so a link or an image on another site's page looks like the developer's own request.
 - There a request is recorded only when it carries `Sec-Fetch-Site: same-origin` or `none`, or an `Origin` or `Referer` of the proxy's own address. Any other, such as a page of another site, a typed URL, `curl` or an API test suite, is forwarded but not recorded. The summary counts them.
