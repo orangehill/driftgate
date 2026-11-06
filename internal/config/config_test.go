@@ -324,3 +324,31 @@ func TestRequestBody(t *testing.T) {
 		t.Errorf("an unknown key of an entry: %v", err)
 	}
 }
+
+// TestUploadsRelativeToProject: in the local layout, where driftgate.yaml
+// is in .driftgate/, a relative uploads.dir is relative to the project
+// folder, not to the folder of driftgate.yaml.
+func TestUploadsRelativeToProject(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "shop")
+	if err := os.MkdirAll(filepath.Join(root, ".driftgate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, ".driftgate", FileName)
+	if err := os.WriteFile(cfg, []byte("version: 1\nproject: shop\ntarget:\n  base_url: http://localhost:8000\nuploads:\n  dir: ../shop-uploads\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvUploads, "")
+	p, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.UploadsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(base)
+	if g, _ := filepath.EvalSymlinks(filepath.Dir(got)); g != want || filepath.Base(got) != "shop-uploads" {
+		t.Errorf("uploads.dir ../shop-uploads in the local layout is %s, want %s", got, filepath.Join(base, "shop-uploads"))
+	}
+}

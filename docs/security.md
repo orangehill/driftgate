@@ -62,6 +62,7 @@ query. The boundary is the DSN user
 - An SQLite file has no users. The query runs on the pristine file opened read-only, on a connection that lets only reads compile ([queries on SQLite](reference/databases/sqlite.md#queries-for-params)).
 - On SQL Server, a read-only database still runs `EXEC xp_cmdshell` and `OPENROWSET`, so more is refused there ([queries on SQL Server](reference/databases/sql-server.md#queries-for-params)).
 - The SQL Server login's rights reach further than one database: `dbcreator`, or the narrower grant, can restore any backup file the server can read ([what the login needs](reference/databases/sql-server.md#what-the-login-needs)).
+- `dbcreator` can also take offline, restore over or drop any database of the server; the narrower grant reaches only the databases the login owns.
 - The optional `VIEW SERVER STATE` (2017, 2019) and `VIEW SERVER PERFORMANCE STATE` (2022) let the login read the SQL text of every session.
 
 ### Protect the baselines
@@ -80,7 +81,7 @@ Requests go only to hosts in the service's `allow_hosts`; by default,
 `localhost` and the local and private addresses
 ([target and targets](reference/driftgate-yaml.md#target-and-targets)).
 
-- DriftGate checks the address it actually connects to, with no second DNS lookup, and every redirect.
+- DriftGate checks the address it really connects to, with no second DNS lookup, and every redirect.
 - A service outside the list needs `capture --allow-remote`.
 - Requests that change data on it, and repeated requests (`repeat:`), need `--allow-remote-mutations` as well, and its `rate_limits` hold for every send.
 - Against production, DriftGate sends no request that changes data without these two separate flags. It is meant for a copy of the data: CI, staging, a developer machine.
@@ -96,7 +97,7 @@ or a socket), or on a host some service's `allow_hosts` names.
 - A private address alone is not enough, as it may be production.
 - Every host the driver may connect to is checked: PostgreSQL `host=`, several hosts, `PG*` variables.
 - SQL Server takes one host over TCP. A named instance without its port, a failover partner, named pipes and shared memory are refused.
-- Every connection is checked again on the address it actually goes to. A name that resolves elsewhere after the check (DNS rebinding) is not reached.
+- Every connection is checked again on the address it really goes to. A name that resolves elsewhere after the check (DNS rebinding) is not reached.
 - A database elsewhere needs `allow_remote: true` on that component, so a wrong DSN cannot reach a production server.
 - The data module's target database follows the same rule (`data.allow_remote`).
 - An SQLite database is a file inside the project, also past symbolic links. A file outside it, on a network share (`\\server\share`) or in memory is refused, and `allow_remote` does not apply ([the file must be on this machine](reference/databases/sqlite.md#the-file-must-be-on-this-machine)).
@@ -110,23 +111,23 @@ forwards requests with no sign-in of its own, so whoever reaches it acts
 as the developer. It listens on a loopback address only; another one
 needs `--allow-non-loopback`.
 
-What it forwards to:
+#### What it forwards to
 
 - It is a reverse proxy to `target.base_url` and nothing else: no `CONNECT`, and an absolute URL still goes to the service.
 - It connects only to `allow_hosts`, and refuses to start for a service outside them.
 
-Who it answers:
+#### Who it answers
 
 - It answers only for its own address. A request whose `Host` is not the listen address gets 421: `127.0.0.1`, `[::1]` or `localhost` with its port, or with `--allow-non-loopback` that host exactly.
 - So a web page cannot point its own name at 127.0.0.1 (DNS rebinding) to read the application through the proxy, or plant requests in the catalog.
 - A redirect is pointed back at the address the client used, never at a `Host` it sent.
-- Pages of other sites are refused (403): every browser request marked `Sec-Fetch-Site: cross-site`, and a request that changes data or opens a websocket with an `Origin` that is not the proxy or another local address.
+- Pages of other sites are refused (403): every browser request marked `Sec-Fetch-Site: cross-site`, except a plain navigation (next), and a request that changes data or opens a websocket with an `Origin` that is not the proxy or another local address.
 - A plain cross-site navigation, such as a link or a sign-in provider sending the browser back, is forwarded and not recorded.
 - On an address that is not loopback, a browser sends no `Sec-Fetch-Site` over plain HTTP, so a link or an image on another site's page looks like the developer's own request.
 - There a request is recorded only when it carries `Sec-Fetch-Site: same-origin` or `none`, or an `Origin` or `Referer` of the proxy's own address. Any other, such as a page of another site, a typed URL, `curl` or an API test suite, is forwarded but not recorded. The summary counts them.
 - It serves plain HTTP on purpose. HTTPS from the client would need a local certificate authority to install and trust, a larger risk than the feature is worth.
 
-What it keeps:
+#### What it keeps
 
 - Nothing it sees is written but the proposed requests.
 - `Authorization`, `Cookie` and tokens are only compared in memory with the configured identities.
@@ -210,7 +211,7 @@ store of the machine that captured it, which git never holds
 
 - This holds for baselines too. The committed baseline names a private body only by a keyed hash (HMAC-SHA256, under a key derived from the project key). The repository does not even hold a plain hash of personal data.
 - The [project key](reference/driftgate-yaml.md#key) comes from `key:`, `DRIFTGATE_KEY`, or what `driftgate key create` makes. Treat it like a production password; changing it is not supported.
-- With `baselines: local`, the key, the store and the baselines are in `.driftgate/`. Before DriftGate writes the store or the key there, it checks that git ignores the folder ([baselines](reference/driftgate-yaml.md#baselines)).
+- With `baselines: local`, the key, the store and the baselines are in `.driftgate/`. Before DriftGate writes the store or the key there, it checks that git ignores the folder, and stops (exit 2) when git does not ([baselines](reference/driftgate-yaml.md#baselines)).
 - `driftgate baselines git` checks what would enter the repository as `verify` does, and never copies the key file into it.
 
 Where a private body is not available, as in CI or on another machine,
