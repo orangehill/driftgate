@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/orangehill/driftgate/internal/dbx"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
@@ -184,7 +186,7 @@ func performanceSchemaOff(ctx context.Context, c *sql.Conn, db string) (string, 
 		}
 		var off sql.NullBool
 		if err := c.QueryRowContext(ctx, ch.query, args...).Scan(&off); err != nil {
-			return "performance_schema is not readable: " + err.Error(), nil
+			return "performance_schema is not readable (it needs SELECT on performance_schema.*): " + err.Error(), nil
 		}
 		if off.Valid && off.Bool {
 			return ch.why, nil
@@ -401,20 +403,34 @@ func (m *MySQL) forget() { m.last, m.writes, m.tables, m.dirty = nil, nil, nil, 
 
 // keep makes f, without the dirty items, the fingerprint the next one starts
 // from, when no other connection holds uncommitted changes. Without
-// per-table counters the write check alone decides, as it always has.
-func (m *MySQL) keep(ctx context.Context, c *sql.Conn, f Fingerprint, writes map[string]int64, tables *tableState, dirty []string) {
+// per-table counters the write check alone decides, as it always has. When
+// the open transactions cannot be read, the per-table counters are not
+// kept either: why says so ("" when they are, or there were none).
+func (m *MySQL) keep(ctx context.Context, c *sql.Conn, f Fingerprint, writes map[string]int64, tables *tableState, dirty []string) (why string) {
 	m.forget()
 	if writes == nil {
-		return
+		return ""
 	}
 	open, err := openWrites(ctx, c)
 	switch {
 	case err == nil && open:
-		return
-	case err != nil:
+		return ""
+	case err != nil && tables != nil:
 		tables = nil // the per-table path needs to know
+		why = openWritesWhy(err)
 	}
 	m.last, m.writes, m.tables, m.dirty = maps.Clone(f), writes, tables, dirty
+	return why
+}
+
+// openWritesWhy says why the per-table counters are off when openWrites
+// failed with err.
+func openWritesWhy(err error) string {
+	why := "uncommitted writes cannot be told apart, SHOW ENGINE INNODB STATUS failed: " + err.Error()
+	if me := (*mysql.MySQLError)(nil); errors.As(err, &me) && me.Number == 1227 {
+		why += "; it needs the PROCESS privilege"
+	}
+	return why
 }
 
 // refresh reads the per-table signals again when nothing was written since

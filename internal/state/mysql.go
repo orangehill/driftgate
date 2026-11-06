@@ -425,15 +425,16 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 	// Both kinds of counters are read before any table, so a write after
 	// them shows at the next fingerprint.
 	var tables *tableState
+	var mode string // said once the fingerprint is kept (keep may turn the counters off)
 	if writes != nil {
 		var why string
 		if tables, why, err = m.tableCounters(ctx, c, m.o.Working); err != nil {
 			tables, why = nil, err.Error()
 		}
 		if tables != nil {
-			m.setMode("fingerprint " + m.counterSource())
+			mode = "fingerprint " + m.counterSource()
 		} else {
-			m.setMode("fingerprint of every table after any write (no per-table counters: " + why + ")")
+			mode = noCountersMode(why)
 		}
 	}
 	if writes != nil && tables != nil && m.last != nil && m.tables != nil && onlyRowWrites(m.writes, writes) {
@@ -442,7 +443,10 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 			return nil, err
 		}
 		if ok {
-			m.keep(ctx, c, f, writes, tables, nil)
+			if why := m.keep(ctx, c, f, writes, tables, nil); why != "" {
+				mode = noCountersMode(why)
+			}
+			m.setMode(mode)
 			return f, nil
 		}
 	}
@@ -453,10 +457,18 @@ func (m *MySQL) Fingerprint(ctx context.Context, items []string) (Fingerprint, e
 	m.forget()
 	if writes != nil {
 		if m.always, err = uncounted(ctx, c, m.o.Working); err == nil {
-			m.keep(ctx, c, f, writes, tables, nil)
+			if why := m.keep(ctx, c, f, writes, tables, nil); why != "" {
+				mode = noCountersMode(why)
+			}
 		}
+		m.setMode(mode)
 	}
 	return f, nil
+}
+
+// noCountersMode is the mode of fingerprints without per-table counters.
+func noCountersMode(why string) string {
+	return "fingerprint of every table after any write (no per-table counters: " + why + ")"
 }
 
 // Reused reports whether the last fingerprint came from the write check.
