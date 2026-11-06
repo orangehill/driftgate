@@ -217,14 +217,25 @@ func TestCaptureRefusals(t *testing.T) {
 		t.Fatalf("remote repeat: exit %d %s", code, errOut)
 	}
 
-	// A failing guard stops before any request is sent, and before the
-	// state is restored.
+	// A failing guard stops before any request is sent.
 	p = newDemoProject(t, "")
 	raw, _ = os.ReadFile(p.cfg)
 	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["false"]`, 1))
 	if code, out, _ := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitEnv || strings.Contains(out, "faq-create") ||
-		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) || strings.Contains(out, "restoring") {
+		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) {
 		t.Fatalf("failing guard: exit %d\n%s", code, out)
+	}
+
+	// A guard checks what restore and prepare set up (prepare writes the
+	// file the guard reads): it runs after them.
+	p = newDemoProject(t, "")
+	raw, _ = os.ReadFile(p.cfg)
+	env := filepath.Join(t.TempDir(), "env")
+	conf := strings.Replace(string(raw), `["true"]`, `["grep", "-q", "MAIL_MAILER=log", "`+env+`"]`, 1)
+	conf = strings.Replace(conf, "guards:", "prepare:\n  - [\"sh\", \"-c\", \"echo MAIL_MAILER=log > '"+env+"'\"]\nguards:", 1)
+	write(t, p.cfg, conf)
+	if code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("a guard of what prepare sets up: exit %d\n%s\n%s", code, out, errOut)
 	}
 
 	// Missing token for an identity.

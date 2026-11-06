@@ -234,15 +234,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := checkAllCommands(p, readonly, units); err != nil {
 		return nil, err
 	}
-	// The guards are checked before anything is restored or sent, so one
-	// that fails stops the capture at once, not after the read-only
-	// requests; again right before the requests that change data.
-	if len(units) > 0 {
-		if err := checkGuards(ctx, p, opt, true); err != nil {
-			return nil, err
-		}
-	}
-
 	set, err := p.Capture(opt.Tag)
 	if err != nil {
 		return nil, err // config.ErrInvalid for a tag, else the store's
@@ -391,6 +382,17 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
+	}
+	// The guards are checked once restore and prepare have set up the
+	// environment they check, before the first request, so one that fails
+	// stops the capture in seconds, not after the read-only requests; and
+	// again right before the requests that change data, which they guard:
+	// the read-only phase may take long, and the environment may change
+	// during it.
+	if len(units) > 0 {
+		if err := checkGuards(ctx, p, opt, true); err != nil {
+			return nil, err
+		}
 	}
 
 	r.base = opt.Baseline
