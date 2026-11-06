@@ -62,24 +62,27 @@ const (
 	KindSideEffect    = "side-effect"
 )
 
-// Kinds lists every drift kind with what it means, in one line each: the
-// text of driftgate help kinds. The docs test checks it against the Kind
-// constants and docs/reference/drift-kinds.md.
-var Kinds = []struct{ Name, Text string }{
+// KindInfo is a drift kind and what it means, in one line.
+type KindInfo struct{ Name, Text string }
+
+// kinds lists every drift kind with what it means: the text of driftgate
+// help kinds and the Meaning column of docs/reference/drift-kinds.md, which
+// the docs test checks against it and the Kind constants.
+var kinds = []KindInfo{
 	{KindStatus, "the HTTP status changed, or the request got no answer"},
 	{KindHeaderMissing, "a header of the baseline is gone"},
 	{KindHeaderExtra, "a header is new"},
 	{KindHeaderValue, "a header's value changed"},
-	{KindKeyMissing, "a JSON key is gone, or an array item paired by key"},
-	{KindKeyExtra, "a JSON key is new, or an array item paired by key"},
+	{KindKeyMissing, "a JSON key, or an array item paired by key, is gone"},
+	{KindKeyExtra, "a JSON key, or an array item paired by key, is new"},
 	{KindKeyOrder, "the same keys in another order"},
 	{KindArrayLength, "an array has more or fewer items"},
 	{KindItemOrder, "the same items of an array in another order"},
-	{KindType, "a value's type changed (JSON, or a spreadsheet cell)"},
-	{KindNumberLiteral, "the same number written differently (1.0 for 1)"},
+	{KindType, "a value's type changed, in JSON or in a spreadsheet cell"},
+	{KindNumberLiteral, "the same number written differently, such as 1.0 for 1"},
 	{KindValue, "a JSON value changed"},
 	{KindFormat, "a value an allowlist rule covers no longer matches its format"},
-	{KindEncoding, "the same values written with other bytes (layout, escapes, byte order mark, charset)"},
+	{KindEncoding, "the same values in other bytes: layout, escapes, byte order mark, charset"},
 	{KindBody, "a body that is not JSON changed, or JSON became non-JSON"},
 	{KindElementMissing, "an HTML element is gone"},
 	{KindElementExtra, "an HTML element is new"},
@@ -100,6 +103,9 @@ var Kinds = []struct{ Name, Text string }{
 	{KindSideEffect, "the request changed other data than in the baseline"},
 	{KindNotCaptured, "the baseline has a response, the capture has none"},
 }
+
+// Kinds returns a copy of the list of drift kinds.
+func Kinds() []KindInfo { return slices.Clone(kinds) }
 
 // Drift is one difference.
 type Drift struct {

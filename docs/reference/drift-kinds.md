@@ -39,16 +39,16 @@ means nothing beyond the list above.
 
 | Kind | Meaning | Typical cause | Typical fix |
 |---|---|---|---|
-| `key-missing` | a key, or an array item paired by key, is gone | serializer or resource change | — |
-| `key-extra` | a key, or an array item paired by key, is new | serializer or resource change | — |
+| `key-missing` | a JSON key, or an array item paired by key, is gone | serializer or resource change | — |
+| `key-extra` | a JSON key, or an array item paired by key, is new | serializer or resource change | — |
 | `key-order` | the same keys in another order | serializer change | — |
 | `array-length` | an array has more or fewer items | data or query change | an `any_length` rule for a list that changes by itself |
 | `item-order` | the same items of an array in another order | another database server or ORM; no `ORDER BY` | add `ORDER BY`; an `any_order` array rule if order does not matter |
 | `type` | a value's type changed, in JSON or in a spreadsheet cell | a driver returns native numbers now | cast the value in the code |
-| `number-literal` | the same number written differently, such as `1.0` for `1` | encoder or driver change | fix the encoder |
+| `number-literal` | the same number written differently, such as 1.0 for 1 | encoder or driver change | fix the encoder |
 | `value` | a JSON value changed | a real change, a time, a random ID | a body rule for a value that changes by itself |
 | `format` | a value an allowlist rule covers no longer matches its format | the value's format changed | fix, or update the rule |
-| `encoding` | the same values written with other bytes | pretty printing, `\/`, a byte order mark, another charset | fix the encoder |
+| `encoding` | the same values in other bytes: layout, escapes, byte order mark, charset | pretty printing, `\/`, a byte order mark, another charset | fix the encoder |
 | `body` | a body that is not JSON changed, or JSON became non-JSON | an error page, a text line, CSV quoting | a `$raw` rule for a whole page that changes by itself |
 
 An array rule's `key` only pairs the items: a changed order is still an
@@ -61,18 +61,18 @@ covers: a header, a JSON value, an HTML text or attribute, or a cell.
 |---|---|---|---|
 | `element-missing` | an HTML element is gone | template change | — |
 | `element-extra` | an HTML element is new | template change | — |
-| `element-order` | the same elements in another order | template change | — |
-| `attribute-missing` | an attribute of an element is gone | template change | — |
-| `attribute-extra` | an attribute of an element is new | template change | — |
+| `element-order` | the same HTML elements in another order | template change | — |
+| `attribute-missing` | an attribute of an HTML element is gone | template change | — |
+| `attribute-extra` | an attribute of an HTML element is new | template change | — |
 | `attribute-value` | an attribute's value changed | template change, a nonce, an asset hash | a body rule with `parts` for a hash that changes by itself |
-| `text` | the text of an element changed | content or template change | — |
+| `text` | the text of an HTML element changed | content or template change | — |
 | `doctype` | the document type declaration came, went or changed | template change | — |
 
 ## Spreadsheets and CSV files
 
 | Kind | Meaning | Typical cause | Typical fix |
 |---|---|---|---|
-| `cell` | a cell's value changed | export change | a body rule for the cell (`xlsx:<sheet>!<cell>`) if it changes by itself |
+| `cell` | a spreadsheet or CSV cell's value changed | export change | a body rule for the cell (`xlsx:<sheet>!<cell>`) if it changes by itself |
 | `cell-format` | a cell's number format or style changed | export library change | — |
 | `cell-formula` | a cell's formula changed | export library change | — |
 | `sheet-missing` | a worksheet is gone | export change | — |
@@ -93,7 +93,7 @@ in a workbook outside its cells is a `body` drift.
 
 | Kind | Meaning | Typical cause | Typical fix |
 |---|---|---|---|
-| `side-effect` | the request changed other data than in the baseline | a new write, or a `GET` that writes | fix, or accept: it cannot be expected |
+| `side-effect` | the request changed other data than in the baseline | a new write, or a `GET` that writes | — |
 
 A side effect names what changed, not the values, so it cannot be
 expected. Side effects are compared only when both captures took

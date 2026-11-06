@@ -151,9 +151,10 @@ func tableFlags(d *docscheck.Doc, line int) []string {
 }
 
 // TestDriftKinds: the drift kinds of internal/compare (its constants named
-// Kind…), compare.Kinds (the text of driftgate help kinds), the kinds
+// Kind…), compare.Kinds() (the text of driftgate help kinds), the kinds
 // docs/reference/drift-kinds.md describes (the first column of its kind
-// tables) and the output of driftgate help kinds are one set.
+// tables) and the output of driftgate help kinds are one set; the page's
+// Meaning of each kind is its text in compare.Kinds().
 func TestDriftKinds(t *testing.T) {
 	root, err := docscheck.Root()
 	if err != nil {
@@ -168,10 +169,14 @@ func TestDriftKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	var listed []string
-	for _, k := range compare.Kinds {
+	page, meanings := tableKinds(d)
+	for _, k := range compare.Kinds() {
 		listed = append(listed, k.Name)
 		if k.Text == "" {
-			t.Errorf("compare.Kinds: %s has no text", k.Name)
+			t.Errorf("compare.Kinds(): %s has no text", k.Name)
+		}
+		if m, ok := meanings[k.Name]; ok && m != k.Text {
+			t.Errorf("docs/reference/drift-kinds.md: the meaning of %s is %q, compare.Kinds() has %q", k.Name, m, k.Text)
 		}
 	}
 	_, out, _ := runCLI(t, "help", "kinds")
@@ -184,7 +189,7 @@ func TestDriftKinds(t *testing.T) {
 	for _, c := range []struct {
 		where string
 		kinds []string
-	}{{"compare.Kinds", listed}, {"docs/reference/drift-kinds.md", tableKinds(d)}, {"driftgate help kinds", help}} {
+	}{{"compare.Kinds()", listed}, {"docs/reference/drift-kinds.md", page}, {"driftgate help kinds", help}} {
 		for _, k := range code {
 			if !slices.Contains(c.kinds, k) {
 				t.Errorf("%s does not list the drift kind %s", c.where, k)
@@ -249,8 +254,9 @@ var codeWord = regexp.MustCompile("^`([a-z-]+)`$")
 
 // tableKinds lists the kinds in the first column of the kind tables of a
 // page, those whose header row starts with "| Kind |", outside fenced
-// blocks: one kind, a code span, per row.
-func tableKinds(d *docscheck.Doc) []string {
+// blocks: one kind, a code span, per row; and the second column of each
+// (its meaning), without the backquotes of code spans.
+func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
 	code := map[int]bool{}
 	for _, b := range d.Blocks {
 		for n := b.Line; n <= b.End; n++ {
@@ -258,6 +264,7 @@ func tableKinds(d *docscheck.Doc) []string {
 		}
 	}
 	var out []string
+	meanings := map[string]string{}
 	inTable := false
 	for i, l := range d.Lines {
 		if code[i+1] || !strings.HasPrefix(l, "|") {
@@ -271,10 +278,13 @@ func tableKinds(d *docscheck.Doc) []string {
 		if !inTable {
 			continue
 		}
-		first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
-		if m := codeWord.FindStringSubmatch(strings.TrimSpace(first)); m != nil {
+		cells := strings.Split(strings.TrimPrefix(l, "|"), "|")
+		if m := codeWord.FindStringSubmatch(strings.TrimSpace(cells[0])); m != nil {
 			out = append(out, m[1])
+			if len(cells) > 1 {
+				meanings[m[1]] = strings.ReplaceAll(strings.TrimSpace(cells[1]), "`", "")
+			}
 		}
 	}
-	return out
+	return out, meanings
 }

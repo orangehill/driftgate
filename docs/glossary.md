@@ -1,6 +1,7 @@
 # Glossary
 
-Each term has one meaning in these pages. A definition is one or two sentences; "More" links the full description.
+Each term has one meaning in these pages. A definition is one or two
+sentences; "More" links the full description.
 
 ## The check
 
@@ -14,10 +15,7 @@ One run of the catalog against the application, stored under a tag in the local 
 The list of requests that every capture sends, in `catalog.json`. More: [catalog.json](configuration.md#catalogjson).
 
 ### Request
-One entry of the catalog, named by its request ID. More: [catalog.json](configuration.md#catalogjson).
-
-### Request ID
-The unique name of a request. Reports, `--only` and globs in the other files use it. More: [catalog.json](configuration.md#catalogjson).
+One entry of the catalog, named by its unique request ID, which reports, `--only` and globs use. More: [catalog.json](configuration.md#catalogjson).
 
 ### Route
 A method and path the application serves, such as `GET /api/orders/{id}`. More: [driftgate discover](commands.md#discover).
@@ -190,6 +188,7 @@ Sending a read-only request again after it failed under load. The report always 
 A check of what the application does besides answering, such as its schema, files, Redis keys or mail, in the same gate. More: [side checks](guides/side-checks.md).
 
 ## Words we do not use
+
 - "local mode": say "the local layout", or "the baseline `local`" for the name.
 - "target" for a running application: say "service". `target` and `targets:` are only keys.
 - "snapshot", "golden file" or "recording" for a baseline: say "baseline". "Record" is only the `record` command.

@@ -74,10 +74,11 @@ var topics = []topic{
 		doc: "reference/drift-kinds.md", fields: kindFields()},
 }
 
-// kindFields are the drift kinds of compare.Kinds, one line each.
+// kindFields are the drift kinds of compare.Kinds(), one line each.
 func kindFields() [][2]string {
-	out := make([][2]string, len(compare.Kinds))
-	for i, k := range compare.Kinds {
+	all := compare.Kinds()
+	out := make([][2]string, len(all))
+	for i, k := range all {
 		out[i] = [2]string{k.Name, k.Text}
 	}
 	return out
