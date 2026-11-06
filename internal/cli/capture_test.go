@@ -311,6 +311,23 @@ func TestByMethodNote(t *testing.T) {
 	}
 }
 
+// TestLiteralIDWarning: a request that changes data with a fixed id in
+// its path is warned of, one line per request; one whose id is a
+// parameter, or that only reads, is not.
+func TestLiteralIDWarning(t *testing.T) {
+	p := newDemoProject(t, "")
+	write(t, filepath.Join(filepath.Dir(p.cfg), "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"get-user","method":"GET","path":"/api/users/17","storage":"public"},
+		{"id":"put-user","method":"PUT","path":"/api/users/17?x=5","body":{},"mutates":true,"storage":"public"},
+		{"id":"put-param","method":"PUT","path":"/api/users/{id}","params":{"id":"17"},"body":{},"mutates":true,"storage":"public"},
+		{"id":"search","method":"POST","path":"/api/search/2","body":{},"mutates":false,"storage":"public"}]}`)
+	code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg)
+	if code == ExitConfig || code == ExitEnv || strings.Count(out, "fixed id") != 1 ||
+		!strings.Contains(out, "warning: put-user (PUT /api/users/17?x=5) changes data with the fixed id 17 in its path") || !strings.Contains(out, "params_from") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
 // TestRepeatedRunsInOtherSeconds: a run of a repeated capture writes at
 // least a second after the run before it ended, so a timestamp of the
 // second the application wrote (updated_at) differs between the runs and

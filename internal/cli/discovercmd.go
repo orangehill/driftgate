@@ -301,6 +301,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		printSkipped(out, res.Skipped, rel(p.Root, p.Layout.Config))
 	}
 	jsonErrorsNote(p, out, o.check)
+	literalIDNote(out, res.Catalog, "")
 	for _, u := range res.Unused {
 		fmt.Fprintf(out, "note: %s in %s names no generated request (an entry written by hand says mutates and body in the catalog)\n", u, rel(p.Root, p.Layout.Config))
 	}

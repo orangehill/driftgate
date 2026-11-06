@@ -661,6 +661,12 @@ Restores the state, sends the catalog and stores the responses under a tag.
   [`requests`](configuration.md#requests) in `driftgate.yaml`, then
   `driftgate generate --write` (a later `generate` would write the catalog
   entry again); for entries written by hand in the catalog.
+- A request that changes data with a fixed id in its path (`PUT
+  /api/users/17`, an id neither a `{parameter}` nor from `params_from`) is
+  warned of, one line per request, before the capture (and by
+  `generate`): on another copy of the data that id may be a real record,
+  and the status would not show it. Take the id from a response with
+  [`params_from`](configuration.md#templates-generate-params) instead. The exit code stays.
 - A read-only request that changed data is recorded with its side
   effects, and the capture prints the `requests:` entries that mark it
   `mutates: true`.

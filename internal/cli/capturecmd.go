@@ -18,6 +18,7 @@ import (
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/generate"
+	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
@@ -131,6 +132,7 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 	}
 
 	byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+	literalIDNote(out, cat, o.only)
 
 	tags := []string{tag}
 	for i := 2; i <= o.repeat; i++ {
@@ -282,6 +284,22 @@ func byMethodNote(out io.Writer, ids []string, restore string) {
 		"  say mutates: false for those that only read (a search sent as POST), mutates: true for the others,\n"+
 		"  under requests: in driftgate.yaml (match: the request ID), then driftgate generate --write; an entry written by hand says it in the catalog\n",
 		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
+}
+
+// literalIDNote warns, one line per request, of a request that changes
+// data with a fixed id in its path (PUT /api/users/17): on another copy
+// of the data that id may be a real record, and the status would not
+// show it. An id from params_from or a parameter is not warned of.
+func literalIDNote(out io.Writer, cat *catalog.Catalog, only string) {
+	for _, r := range cat.Requests {
+		if r.Command != nil || !r.Mutating() || (only != "" && !glob.Match(only, r.ID)) {
+			continue
+		}
+		if id := catalog.LiteralID(r.Path); id != "" {
+			fmt.Fprintf(out, "warning: %s (%s %s) changes data with the fixed id %s in its path; on another copy of the data it may be a real record: take it from a response with params_from\n",
+				r.ID, r.Method, r.Path, id)
+		}
+	}
 }
 
 // markWriters says how to mark read-only requests that changed data as
