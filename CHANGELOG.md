@@ -12,6 +12,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 - Read-only requests that time out or hit a load error are now sent again. Set `target.retry: 0` to keep the old behaviour. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - Guards now run after the restore and `prepare`, before the first request. A guard that needs the read-only requests to run first must move into `prepare`. ([#19](https://github.com/orangehill/driftgate/pull/19))
+- `seed` now records the pristine copy's own fingerprint. If a capture says the state differs after you update, run `driftgate seed` once. ([#13](https://github.com/orangehill/driftgate/pull/13))
 - MySQL 8: a pristine copy seeded by an earlier release may fail its restore. Re-create the working database, then run `driftgate seed`. ([#14](https://github.com/orangehill/driftgate/pull/14))
 - A baseline whose failed requests leave routes uncovered now makes `run` exit 1. The baseline is kept. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - Drift group numbers start at `[1]`. Tools that read `groups[].n` see other numbers. ([#15](https://github.com/orangehill/driftgate/pull/15))
@@ -23,14 +24,15 @@ versioning. Read **Upgrading** before you update an existing project.
 ### Added
 
 - SQLite state support: seed, restore and fingerprint, as for MySQL and PostgreSQL. ([#15](https://github.com/orangehill/driftgate/pull/15))
-- SQL Server 2017 and later state support, with an SQL login. ([#15](https://github.com/orangehill/driftgate/pull/15))
+- SQL Server 2017 and later state support, with an SQL login. After a restore of the whole database, the first read-only request on each dead application connection is sent once more, and the report says so. ([#15](https://github.com/orangehill/driftgate/pull/15))
+- The data commands (`classify`, `anonymize`, `subset`, `verify`) do not support SQLite and SQL Server yet. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - `restore_only` and `restore_empty` for tables the application writes on its own, such as caches, sessions and queues. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - `target.retry` (0–3, on by default) sends a failed read-only request again. A request that passed only after a retry is shown as such. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - `driftgate expect` reports a drift a ticket expects as expected, not hidden. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - `--read-only` on `capture` and `run` sends only requests that do not change data, for a server that must not change. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `target.connect_to` sends requests to a fixed address and keeps the host name, like `curl --connect-to`. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `driftgate clean` removes the pristine copies that `seed` made. It never touches a working database. ([#19](https://github.com/orangehill/driftgate/pull/19))
-- `baselines rebase --skip-fingerprint-check` makes a capture the baseline after an intended data change. ([#17](https://github.com/orangehill/driftgate/pull/17))
+- `baselines rebase` makes a capture the baseline's content after an intended data change (capture it with `--skip-fingerprint-check`). ([#17](https://github.com/orangehill/driftgate/pull/17))
 - The result says what it does not cover, such as routes without a request. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - Reports count drifts per kind. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - Warnings when `prepare:` changed the restored state, and when a request that changes data has a fixed numeric id in its path. ([#17](https://github.com/orangehill/driftgate/pull/17), [#19](https://github.com/orangehill/driftgate/pull/19))
