@@ -630,8 +630,15 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 		}
 	}
 	out = withMultipart(route, out)
-	if slices.Contains(templates, routes.JSONErrors) {
-		out = g.jsonErrors(route, out)
+	if slices.Contains(templates, routes.JSONErrors) && (bindings != nil || slices.Contains(templates, "not-found") || slices.Contains(templates, "invalid-param")) {
+		if slices.ContainsFunc(out, func(r catalog.Request) bool { return slices.Contains(routes.ErrorTemplates, r.Source.Template) }) {
+			out = g.jsonErrors(route, out)
+		} else {
+			// None of not-found, invalid-param, anonymous and empty-body
+			// made a request here (no required parameter, no auth, no
+			// body): json-errors has nothing to follow.
+			g.skip(route, routes.JSONErrors, "no error request to follow (%s made none for this route)", strings.Join(slices.DeleteFunc(slices.Clone(routes.ErrorTemplates), func(t string) bool { return !slices.Contains(templates, t) }), ", "))
+		}
 	}
 	return out, nil
 }

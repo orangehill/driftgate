@@ -428,3 +428,22 @@ func TestJSONErrorsWithoutTwins(t *testing.T) {
 		t.Errorf("skipped %v, want %v; requests %v", skipped, want, res.Catalog.Requests)
 	}
 }
+
+// TestJSONErrorsNothingToFollow: a route where no error template makes a
+// request (no required parameter, no auth, no body) lists json-errors as
+// skipped, with the reason.
+func TestJSONErrorsNothingToFollow(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template+": "+s.Reason)
+	}
+	if want := []string{"json-errors: no error request to follow (not-found made none for this route)"}; !reflect.DeepEqual(skipped, want) || len(res.Catalog.Requests) != 1 {
+		t.Errorf("skipped %v, want %v; requests %d", skipped, want, len(res.Catalog.Requests))
+	}
+}
