@@ -31,6 +31,22 @@ func TestMySQLDropPristine(t *testing.T) {
 			if err := m.Seed(ctx); err != nil {
 				t.Fatal(err)
 			}
+			// Another project's working database with the same pristine
+			// name: the copy is not its own.
+			other, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: "dgt_clean_other", Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer other.Close()
+			if _, err := other.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "not marked as the copy of dgt_clean_other") {
+				t.Fatalf("another project's copy: %v", err)
+			}
+			// A mark of an earlier release names no working database.
+			mustExec(t, root, "UPDATE "+pristine+"."+pristineTable+" SET note = 'DriftGate pristine copy, made by driftgate seed and replaced by the next one'")
+			if _, err := m.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "earlier release") {
+				t.Fatalf("an earlier release's mark: %v", err)
+			}
+			mustExec(t, root, "UPDATE "+pristine+"."+pristineTable+" SET note = '"+mysqlMarkNote(work)+"'")
 			if was, err := m.DropPristine(ctx); !was || err != nil {
 				t.Fatalf("drop: %v %v", was, err)
 			}
@@ -70,6 +86,14 @@ func TestPostgresDropPristine(t *testing.T) {
 	}
 	if err := p.Seed(ctx); err != nil {
 		t.Fatal(err)
+	}
+	other, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: "dgt_clean_other", Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "not marked as the copy of dgt_clean_other") {
+		t.Fatalf("another project's copy: %v", err)
 	}
 	if was, err := p.DropPristine(ctx); !was || err != nil {
 		t.Fatalf("drop: %v %v", was, err)

@@ -345,12 +345,15 @@ store.
 - Only the pristine copies the configuration names, on the server its DSN
   names now; never a working database. A name that is not a database
   component under `state:` is refused (exit 2).
-- A copy is removed only when `seed` made it: MySQL and MariaDB by its
+- A copy is removed only when `seed` made it as the copy of this
+  project's working database: MySQL and MariaDB by the note of its
   `driftgate_pristine` table, PostgreSQL by its comment, SQL Server by its
-  mark (and as the copy of this working database), SQLite by its
-  `driftgate_pristine` table. Any other database or file of that name is
-  left as it is (exit 3), with its record. A pristine copy an earlier
-  release made without the mark is refused too: remove it yourself.
+  mark, each naming the working database; SQLite by its
+  `driftgate_pristine` table. Any other database or file of that name
+  (another project's copy that shares the name) is left as it is (exit 3),
+  with its record. A MySQL or MariaDB copy made by an earlier release,
+  whose mark names no working database, is refused too: remove it
+  yourself, or run `seed` once to mark it.
 - SQL Server: the backup of the pristine copy in the server's backup folder
   is not removed.
 - Commands of the project's own (test users, a cache) are not run; the

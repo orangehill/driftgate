@@ -1119,6 +1119,11 @@ func (m *MySQL) Restore(ctx context.Context, items []string) error {
 // never fingerprinted, restored or copied.
 const pristineTable = "driftgate_pristine"
 
+// mysqlMarkNote is the note of the mark of a pristine copy of working.
+func mysqlMarkNote(working string) string {
+	return pristineComment + " of " + working + ", made by driftgate seed and replaced by the next one"
+}
+
 // Seed copies the working database into a new pristine database. Excluded
 // and restore_empty tables are copied without rows, so views that use them still work. The
 // mark (pristineTable) is made first, so a seed that stops halfway leaves a
@@ -1155,12 +1160,18 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		"DROP DATABASE IF EXISTS " + qi(m.o.Pristine),
 		"CREATE DATABASE " + qi(m.o.Pristine) + " CHARACTER SET " + charset + " COLLATE " + collation,
 		"CREATE TABLE " + mark + " (id TINYINT NOT NULL PRIMARY KEY, note VARCHAR(200) NOT NULL)",
-		"INSERT INTO " + mark + " VALUES (1, 'DriftGate pristine copy, made by driftgate seed and replaced by the next one')",
-		"USE " + qi(m.o.Pristine),
 	} {
 		if _, err := c.ExecContext(ctx, q); err != nil {
 			return err
 		}
+	}
+	// The note names the working database: clean drops only a copy of
+	// this one.
+	if _, err := c.ExecContext(ctx, "INSERT INTO "+mark+" VALUES (1, ?)", mysqlMarkNote(m.o.Working)); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, "USE "+qi(m.o.Pristine)); err != nil {
+		return err
 	}
 	copied := append([]string{}, objs.tables...)
 	empty := append([]string{}, objs.excludedTables...)

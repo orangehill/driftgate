@@ -20,7 +20,7 @@ type Dropper interface {
 
 // notSeeded is the refusal of a pristine copy seed did not make.
 func notSeeded(name, what, db, why string) error {
-	return fmt.Errorf("state %s: %s %s, named as the pristine copy, %s, so it is not removed; remove it yourself if it is one", name, what, db, why)
+	return fmt.Errorf("state %s: %s %s, named as the pristine copy, %s, so it is not removed; if it is this project's copy made by an earlier release, remove it yourself", name, what, db, why)
 }
 
 // sameAsWorking refuses a pristine copy named as the working database (the
@@ -55,6 +55,16 @@ func (m *MySQL) DropPristine(ctx context.Context) (bool, error) {
 	case marked == 0:
 		return false, notSeeded(m.o.Name, "database", db, "has no "+pristineTable+" table (driftgate seed makes it)")
 	}
+	// The mark names the working database it is a copy of (since this
+	// release): a copy of another project's database of the same name is
+	// not dropped, nor one an earlier release made.
+	var note sql.NullString
+	if err := c.QueryRowContext(ctx, "SELECT note FROM "+qi(db)+"."+qi(pristineTable)+" WHERE id = 1").Scan(&note); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if note.String != mysqlMarkNote(m.o.Working) {
+		return false, notSeeded(m.o.Name, "database", db, "is not marked as the copy of "+m.o.Working+" (another project's, or made by an earlier release)")
+	}
 	_, err = c.ExecContext(ctx, "DROP DATABASE "+qi(db))
 	return err == nil, err
 }
@@ -73,8 +83,8 @@ func (p *Postgres) DropPristine(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !strings.HasPrefix(comment.String, pristineComment) {
-		return false, notSeeded(p.o.Name, "database", db, "has no comment "+pgLiteral(pristineComment+" …")+" (driftgate seed writes it)")
+	if !strings.HasPrefix(comment.String, pristineComment+" of "+p.o.Working+",") {
+		return false, notSeeded(p.o.Name, "database", db, "is not marked as the copy of "+p.o.Working+" (its comment; another project's, or not made by driftgate seed)")
 	}
 	_, err = p.admin.ExecContext(ctx, "DROP DATABASE "+qp(db)+" WITH (FORCE)")
 	return err == nil, err
