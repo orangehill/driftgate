@@ -76,6 +76,7 @@ type SchemaRule struct {
 }
 
 func (c *SchemaRule) UnmarshalYAML(n *yaml.Node) error {
+	n = resolve(n)
 	if n.Kind == yaml.SequenceNode {
 		*c = SchemaRule{}
 		return n.Decode(&c.Kinds)
@@ -134,6 +135,7 @@ type ColumnRule struct {
 }
 
 func (c *ColumnRule) UnmarshalYAML(n *yaml.Node) error {
+	n = resolve(n)
 	if n.Kind == yaml.ScalarNode {
 		switch n.Value {
 		case "":
@@ -158,7 +160,7 @@ func (c *ColumnRule) UnmarshalYAML(n *yaml.Node) error {
 	// default, it would drop every row. Only a missing action is the default.
 	if n.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			if k, v := n.Content[i], n.Content[i+1]; k.Value == "action" && v.Kind == yaml.ScalarNode {
+			if k, v := n.Content[i], resolve(n.Content[i+1]); k.Value == "action" && v.Kind == yaml.ScalarNode {
 				switch {
 				case v.Tag == "!!null" && v.Value != "":
 					c.Action = SerializedNull
@@ -192,7 +194,7 @@ func (t *TableRule) UnmarshalYAML(n *yaml.Node) error {
 		t.Columns = map[string]*ColumnRule{}
 	}
 	for name, v := range p.Columns {
-		v := v
+		v := *resolve(&v)
 		if v.Kind == yaml.ScalarNode && v.Tag == "!!null" && v.Value != "" {
 			t.Columns[name] = &ColumnRule{Kind: KindPersonal, Strategy: StrategyNull}
 			continue
@@ -209,6 +211,7 @@ func (t *TableRule) UnmarshalYAML(n *yaml.Node) error {
 // strictDecode decodes a mapping and rejects keys the struct does not have
 // (Node.Decode alone ignores them).
 func strictDecode(n *yaml.Node, v any) error {
+	n = resolve(n)
 	if n.Kind == yaml.MappingNode {
 		known := map[string]bool{}
 		rt := reflect.TypeOf(v).Elem()
@@ -695,4 +698,14 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// resolve follows an alias (*name) to the node it names, so that a check of
+// a node's kind or tag sees the value written at the anchor: an alias of a
+// bare null is that null, not a node of another kind.
+func resolve(n *yaml.Node) *yaml.Node {
+	for n != nil && n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	return n
 }
