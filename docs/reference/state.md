@@ -71,7 +71,7 @@ on SQL Server.
 often may not. Without these rights `seed` stops with the server's
 refusal.
 
-- MySQL and MariaDB need `CREATE` and `DROP` on the pristine database: `GRANT ALL ON shop_pristine.* TO 'shop'@'%'`, or `CREATE` on `*.*`.
+- MySQL and MariaDB need `CREATE` and `DROP` on the pristine database: `GRANT ALL ON shop_pristine.* TO 'shop'@'%'`, or `CREATE` on `*.*`. Triggers and views whose `DEFINER` is another account need more ([which](databases/mysql-mariadb.md#triggers-and-views-with-a-definer)).
 - PostgreSQL needs `CREATEDB`: `ALTER ROLE shop CREATEDB`.
 - SQL Server needs a login with `dbcreator` and `db_owner` in the working database, not `sysadmin` ([what the login needs](databases/sql-server.md#what-the-login-needs)).
 

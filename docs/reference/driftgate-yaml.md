@@ -623,6 +623,8 @@ Its request IDs end in `-json`.
 - An `Accept` header the variant has is replaced.
 - With `[ok, not-found, json, json-errors]` it adds one request per route method with a required path parameter. That is at most a third more requests, when every route has one; `generate` says how many (`… (N of them json-errors)`).
 - Frameworks that always answer JSON (FastAPI, NestJS, ASP.NET) gain nothing from it.
+- Without `not-found`, `invalid-param`, `anonymous` or `empty-body` in `templates:`, `json-errors` makes nothing, and `generate` says so in one note.
+- For a route without a parameter value, `not-found` and `invalid-param` still make their requests, and `json-errors` their JSON twins; it is not listed as skipped there.
 
 To adopt it in an existing project, see
 [keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses).

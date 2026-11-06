@@ -42,6 +42,13 @@ record, and the status would not show it. Take the id from a response
 with [`params_from`](driftgate-yaml.md#templates-generate-params)
 instead. The exit code stays.
 
+Two kinds of number are not taken for an id:
+
+- an API version: one or two digits right after a segment `api` or `v`, followed by a segment that is not a number (`/api/2/users`);
+- a full date: a year from 1900 to 2099, a month `01` to `12` and a day `01` to `31`, as in `/posts/2024/05/17`.
+
+Any other number is taken for an id: `/api/17`, `/stats/2024`, `/users/2024/5`.
+
 ### A read-only request that changed data
 
 A read-only request that changed data is recorded with its side effects,

@@ -9,6 +9,48 @@ database. What every driver shares is in [State](../state.md).
 - `seed` marks the pristine database it makes with a table `driftgate_pristine`, which is never fingerprinted or restored ([how seed and restore work](../state.md#how-seed-and-restore-work)).
 - `seed` needs `CREATE` and `DROP` on the pristine database ([what the database user needs](../state.md#what-the-database-user-needs)).
 - Triggers and views are fingerprinted with the collation they were made with, which a restore keeps.
+- Triggers and views are made again with their `DEFINER`, which needs rights of its own ([below](#triggers-and-views-with-a-definer)).
+
+## Triggers and views with a DEFINER
+
+A seed and a restore make triggers and views again with their
+`DEFINER`, which DriftGate never drops or changes. A trigger, and a view
+with `SQL SECURITY DEFINER`, run with their definer's rights, and the
+`DEFINER` is part of the fingerprint.
+
+A login may name another account as `DEFINER` only with one of:
+
+- `SET_ANY_DEFINER` (MySQL 8.2 and later), or `SET_USER_ID` before 8.2;
+- `SYSTEM_USER` too, for a definer account that has it, such as root (MySQL);
+- `SET USER` (MariaDB);
+- `SUPER`.
+
+With the binary log on, a login without `SUPER` may create a trigger
+only when `log_bin_trust_function_creators` is on. A Galera node checks
+as if it were on.
+
+Each `DEFINER` is first tried on a short-lived probe object.
+
+- A restore the login may not create a trigger or view for stops before it drops anything, and names the object.
+- A seed stops before it drops the old pristine copy.
+
+A probe cannot be tried in two cases. There the refusal comes from the
+real `CREATE`, after the drops, and the message names what is missing.
+
+- A seed tries the probe in the working database, where the login may not create the view at all.
+- A trigger's probe needs a table to sit on. A login with `TRIGGER` on some tables only does not have one in a database without those tables.
+
+The server may still refuse a drop: on MySQL, an object whose `DEFINER`
+has `SYSTEM_USER`, such as root. The objects dropped before it are then
+made again from the pristine copy. The message names any that could not
+be, and the next successful restore makes them again.
+
+Best: create the triggers and views with the application's login as
+their `DEFINER` (run the migrations as it), and seed again.
+
+The prefix `dgt_probe_` is reserved for those probes. An object named
+`dgt_probe_` and 16 lowercase hexadecimal digits is never fingerprinted,
+copied or restored, and a seed or restore drops it.
 
 ## The binary log and replicas
 
