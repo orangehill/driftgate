@@ -108,6 +108,8 @@ func TestRulesReject(t *testing.T) {
 		"version: 1\ntables: {t: {columns: {c: {kind: serialized-php, action: \"\"}}}}\n",
 		"version: 1\ntables:\n  t:\n    columns:\n      c:\n        kind: serialized-php\n        action:\n",
 		"version: 1\ntables:\n  t:\n    reason: &e \"\"\n    columns:\n      c: {kind: serialized-php, action: *e}\n",
+		"version: 1\ntables:\n  t:\n    reason: &kind action\n    columns:\n      c: {reason: x, kind: serialized-php, *kind: \"\"}\n",
+		"version: 1\ntables:\n  t:\n    reason: &reason action2\n    columns:\n      c: {kind: serialized-php, *reason: x}\n",
 		"version: 1\ntables: {}\nextra: 1\n",
 	} {
 		if _, err := ParseRules([]byte(bad)); err == nil {

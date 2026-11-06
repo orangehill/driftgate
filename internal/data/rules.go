@@ -220,6 +220,11 @@ func strictDecode(n *yaml.Node, v any) error {
 			known[name] = true
 		}
 		for i := 0; i+1 < len(n.Content); i += 2 {
+			// A key written as an alias (*a) would be checked by its anchor's
+			// name but decoded as its value, so no check would see it.
+			if n.Content[i].Kind == yaml.AliasNode {
+				return fmt.Errorf("line %d: a key may not be an alias", n.Content[i].Line)
+			}
 			if k := n.Content[i].Value; !known[k] {
 				return fmt.Errorf("line %d: unknown key %q", n.Content[i].Line, k)
 			}
