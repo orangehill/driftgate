@@ -409,16 +409,28 @@ func MySQLObjects(ctx context.Context, q Querier, db string) ([]MySQLObject, err
 	return out, rows.Err()
 }
 
+// MySQLProbe reports a name of the short-lived objects the state module
+// makes to try whether a login may use a DEFINER: dgt_probe_ and 16
+// lower-case hexadecimal digits. Such an object is never the application's.
+func MySQLProbe(name string) bool {
+	const prefix = "dgt_probe_"
+	if len(name) != len(prefix)+16 || !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	return strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
+}
+
 // MySQLTrigger is a trigger and its place among the triggers of its table.
 type MySQLTrigger struct {
 	Name, Table, Timing, Event string
 	Order                      int
+	Definer                    string // user@host, as CURRENT_USER() writes it
 }
 
 // MySQLTriggers lists the triggers of a database in firing order per
 // table, the order they are created again in.
 func MySQLTriggers(ctx context.Context, q Querier, db string) ([]MySQLTrigger, error) {
-	rows, err := q.QueryContext(ctx, `SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER
+	rows, err := q.QueryContext(ctx, `SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER, DEFINER
 		FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?
 		ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER`, db)
 	if err != nil {
@@ -428,7 +440,7 @@ func MySQLTriggers(ctx context.Context, q Querier, db string) ([]MySQLTrigger, e
 	var out []MySQLTrigger
 	for rows.Next() {
 		var t MySQLTrigger
-		if err := rows.Scan(&t.Name, &t.Table, &t.Timing, &t.Event, &t.Order); err != nil {
+		if err := rows.Scan(&t.Name, &t.Table, &t.Timing, &t.Event, &t.Order, &t.Definer); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

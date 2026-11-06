@@ -25,29 +25,21 @@ func (e *SyntaxError) Error() string { return fmt.Sprintf("json: %s at offset %d
 // with its defaults (strict strings, NaN/Infinity accepted, encoding detected
 // from the first bytes), because that is the reference implementation.
 func Parse(raw []byte) (*Value, error) {
-	v, _, err := ParseKeys(raw)
-	return v, err
-}
-
-// ParseKeys is Parse that also returns the keys written with an escape
-// ("\u0061" for "a"), as they are written, in the order they stand: the
-// same keys to every reader, and so in no Value.
-func ParseKeys(raw []byte) (*Value, []string, error) {
 	text, err := decodeText(raw)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	p := &parser{s: text}
 	p.skipSpace()
 	v, err := p.value(0)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	p.skipSpace()
 	if p.i != len(p.s) {
-		return nil, nil, p.fail("extra data")
+		return nil, p.fail("extra data")
 	}
-	return v, p.escapedKeys, nil
+	return v, nil
 }
 
 var (
@@ -194,10 +186,6 @@ type parser struct {
 	items   []*Value
 	buf     []byte
 	view    bool // texts share s (Walk) instead of being copied out of it
-	// escaped: the last string read had an escape; escapedKeys are the
-	// keys that had one, as written.
-	escaped     bool
-	escapedKeys []string
 }
 
 // text is s[i:j] as a string: a view of s for Walk, else a copy.
@@ -359,10 +347,8 @@ func (p *parser) str() (string, error) {
 	if end := p.plainEnd(); end >= 0 {
 		s := p.text(p.i+1, end)
 		p.i = end + 1
-		p.escaped = false
 		return s, nil
 	}
-	p.escaped = true
 	p.i++ // opening quote
 	out := p.buf[:0]
 	for {
@@ -465,13 +451,9 @@ func (p *parser) object(depth int) (*Value, error) {
 		if p.i >= len(p.s) || p.s[p.i] != '"' {
 			return nil, p.fail("expecting property name enclosed in double quotes")
 		}
-		start := p.i
 		key, err := p.str()
 		if err != nil {
 			return nil, err
-		}
-		if p.escaped {
-			p.escapedKeys = append(p.escapedKeys, string(p.s[start:p.i]))
 		}
 		p.skipSpace()
 		if p.i >= len(p.s) || p.s[p.i] != ':' {

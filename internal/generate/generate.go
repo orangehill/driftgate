@@ -57,6 +57,8 @@ type Result struct {
 	// Unused are the entries of requests: in the configuration that name
 	// no generated request (requests 2: match …).
 	Unused []string
+	// Notes are remarks on the configuration, once per run.
+	Notes []string
 }
 
 // ErrSetting is an entry of requests: in the configuration that generate
@@ -85,6 +87,10 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		templates = []string{"ok"}
 	}
 	g := &generator{o: o, res: &Result{}, ids: map[string]bool{}, values: map[string][]string{}}
+	if slices.Contains(templates, routes.JSONErrors) && !slices.ContainsFunc(routes.ErrorTemplates, func(t string) bool { return slices.Contains(templates, t) }) {
+		g.res.Notes = append(g.res.Notes, fmt.Sprintf("json-errors repeats the requests of %s with Accept: application/json, and templates: has none of them, so it makes nothing; add not-found (as init does) or remove json-errors",
+			strings.Join(routes.ErrorTemplates, ", ")))
+	}
 	for _, r := range manual.Requests {
 		g.ids[r.ID] = true
 	}
@@ -580,7 +586,11 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 		return b, any
 	}
 	for _, tpl := range templates {
-		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" {
+		// Without a value, not-found and invalid-param still make their
+		// requests, and json-errors (added below) makes the twins of those
+		// when one of them is a template.
+		twins := slices.Contains(templates, "not-found") || slices.Contains(templates, "invalid-param")
+		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" && (tpl != routes.JSONErrors || !twins) {
 			g.skip(route, tpl, "%s", missing)
 			continue
 		}
@@ -627,6 +637,9 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 	}
 	out = withMultipart(route, out)
 	if slices.Contains(templates, routes.JSONErrors) {
+		// A route none of the error templates makes a request for (no
+		// required parameter, no auth, no body) gets no twin, as it gets
+		// no not-found: nothing to list.
 		out = g.jsonErrors(route, out)
 	}
 	return out, nil

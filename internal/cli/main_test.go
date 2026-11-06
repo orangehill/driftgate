@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"net/http"
 	"os"
 	"testing"
 )
@@ -12,4 +13,15 @@ import (
 func TestMain(m *testing.M) {
 	runGap = 0
 	os.Exit(m.Run())
+}
+
+// noDate serves h without a Date header. Two captures of one state may fall
+// in two seconds, and their Date headers then differ: a test that makes a
+// baseline from two captures, without a date rule in its allowlist, would
+// fail now and then on a drift it is not about.
+func noDate(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Date"] = nil
+		h.ServeHTTP(w, r)
+	})
 }

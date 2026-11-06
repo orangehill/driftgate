@@ -130,6 +130,14 @@ type MySQL struct {
 	binlogMu      sync.Mutex
 	binlogDecided bool
 	unlog         bool
+	// probed holds the DEFINERs definerProbe found the login may use;
+	// login is CURRENT_USER(), once read (dropFirstOthers).
+	probeMu    sync.Mutex
+	probed     map[string]bool
+	probeNoted map[string]bool // probes left behind already logged (noteProbe)
+	hooks      *mysqlHooks     // tests only
+	lockNote   sync.Once       // the note that GET_LOCK is not supported
+	login      string
 }
 
 // checksumConns is how many connections share the CHECKSUM TABLE work.
@@ -300,6 +308,13 @@ type mysqlObjects struct {
 	restoreOnly              []string           // tables restored but not fingerprinted (Options.RestoreOnly)
 	kind                     map[string]string  // name → table, view or sequence
 	triggers                 []dbx.MySQLTrigger // by table, timing, event and firing order
+	probes                   map[string]string  // probe objects left behind (probeName): name → table, view or trigger
+}
+
+// allTables lists every table of the database, also those restored only
+// or excluded: any of them may hold a trigger probe (definerProbe).
+func (o *mysqlObjects) allTables() []string {
+	return slices.Concat(o.tables, o.restoreOnly, o.excludedTables)
 }
 
 func (o *mysqlObjects) trigger(name string) (dbx.MySQLTrigger, bool) {
@@ -322,6 +337,16 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		switch {
 		case name == pristineTable && typ == "BASE TABLE":
 			continue // Seed's mark of a pristine database, not the application's
+		case probeName(name):
+			// A probe left behind (definerProbe): never part of the state.
+			m.noteProbe(db, name)
+			if o.probes == nil {
+				o.probes = map[string]string{}
+			}
+			o.probes[name] = "table"
+			if typ == "VIEW" {
+				o.probes[name] = "view"
+			}
 		case typ == "VIEW":
 			if !m.o.excluded(name) {
 				o.views = append(o.views, name)
@@ -352,7 +377,16 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 		return nil, err
 	}
 	for _, t := range trs {
-		if !m.o.excluded(t.Table) {
+		if probeName(t.Name) && !probeName(t.Table) {
+			// A probe on a table of the application (definerProbe).
+			m.noteProbe(db, t.Name)
+			if o.probes == nil {
+				o.probes = map[string]string{}
+			}
+			o.probes[t.Name] = "trigger"
+			continue
+		}
+		if !m.o.excluded(t.Table) && !probeName(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
 	}
@@ -954,6 +988,11 @@ func columns(ctx context.Context, c *sql.Conn, db, table string, generated bool)
 
 func dropObject(ctx context.Context, c *sql.Conn, db, name, kind string) error {
 	_, err := c.ExecContext(ctx, "DROP "+strings.ToUpper(kind)+" IF EXISTS "+qi(db)+"."+qi(name))
+	if me := (*mysql.MySQLError)(nil); errors.As(err, &me) && me.Number == 1227 {
+		// MySQL: a view whose DEFINER has SYSTEM_USER (root) may be dropped
+		// only by a login that has it too.
+		return fmt.Errorf("%s %s cannot be dropped from %s to be made again: the server asks for a privilege this login lacks, one its DEFINER has (on MySQL SYSTEM_USER, which root has). Create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again (%w)", kind, name, db, me)
+	}
 	return err
 }
 
@@ -964,7 +1003,10 @@ func dropObject(ctx context.Context, c *sql.Conn, db, name, kind string) error {
 // created again afterwards, in their firing order and with their SQL mode, so
 // the copy does not fire them. The tables are copied by copyTables, whose
 // count of its other connections' statements is returned.
-func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, tables, views, sequences, triggers []string) (map[string]int64, error) {
+//
+// known holds definitions of src already read (Seed), which are not read
+// again.
+func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, tables, views, sequences, triggers []string, known map[showReq]map[string]string) (map[string]int64, error) {
 	if _, err := c.ExecContext(ctx, "USE "+qi(dst)); err != nil {
 		return nil, err
 	}
@@ -1005,17 +1047,23 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 	var trigs []dbx.MySQLTrigger // srcObjs.triggers is in firing order per table
+	var defReqs []showReq        // of trigs, then srcViews
 	for _, tr := range srcObjs.triggers {
 		if trigTables[tr.Table] || contains(triggers, tr.Name) {
 			trigs = append(trigs, tr)
-			reqs = append(reqs, showReq{"TRIGGER", src, tr.Name})
+			defReqs = append(defReqs, showReq{"TRIGGER", src, tr.Name})
 		}
 	}
 	var srcViews []string
 	for _, v := range views {
 		if srcObjs.kind[v] == "view" {
 			srcViews = append(srcViews, v)
-			reqs = append(reqs, showReq{"VIEW", src, v})
+			defReqs = append(defReqs, showReq{"VIEW", src, v})
+		}
+	}
+	for _, r := range defReqs {
+		if _, ok := known[r]; !ok {
+			reqs = append(reqs, r)
 		}
 	}
 	shown, err := m.showAll(ctx, c, reqs)
@@ -1045,61 +1093,40 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			jobs[i].ddef = ""
 		}
 	}
+	defShown := make([]map[string]string, len(defReqs))
+	for i, r := range defReqs {
+		if d, ok := known[r]; ok {
+			defShown[i] = d
+		} else {
+			defShown[i], shown = shown[0], shown[1:]
+		}
+	}
+	trigShown, viewShown := defShown[:len(trigs)], defShown[len(trigs):]
+	var trigDefs []map[string]string // in firing order per table
+	for i, tr := range trigs {
+		if r := trigShown[i]; r != nil {
+			r["name"], r["table"], r["timing"], r["event"] = tr.Name, tr.Table, tr.Timing, tr.Event
+			trigDefs = append(trigDefs, r)
+		}
+	}
+	pending := map[string]viewDef{}
+	for i, v := range srcViews {
+		if r := viewShown[i]; r != nil {
+			pending[v] = viewDef{localView(r["Create View"], src), r["collation_connection"]}
+		}
+	}
 
-	// Views first: they are created last, once their tables exist. An object
-	// that changed kind (a view that became a table) is dropped as what it is.
-	for _, name := range append(append([]string{}, views...), sequences...) {
-		if k := dstObjs.kind[name]; k != "" {
-			if err := dropObject(ctx, c, dst, name, k); err != nil {
-				return nil, err
-			}
-		}
+	// The login is first tried on each DEFINER of what is made again
+	// (definerProbe), so a refusal leaves dst as it was.
+	var probes []probeItem
+	for _, r := range trigDefs {
+		probes = append(probes, probeItem{"trigger", r["name"], r["SQL Original Statement"], r["table"]})
 	}
-	for _, t := range tables {
-		if k := dstObjs.kind[t]; k != "" && k != "table" {
-			if err := dropObject(ctx, c, dst, t, k); err != nil {
-				return nil, err
-			}
-		}
+	for name, v := range pending {
+		probes = append(probes, probeItem{kind: "view", name: name, stmt: v.def})
 	}
-	for _, tr := range dstObjs.triggers {
-		if trigTables[tr.Table] || contains(triggers, tr.Name) {
-			if _, err := c.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+qi(dst)+"."+qi(tr.Name)); err != nil {
-				return nil, err
-			}
-		}
-	}
-	for _, t := range tables {
-		if srcObjs.kind[t] != "table" && dstObjs.kind[t] == "table" {
-			if err := dropObject(ctx, c, dst, t, "table"); err != nil {
-				return nil, err
-			}
-		}
-	}
-	trigShown, viewShown := shown[:len(trigs)], shown[len(trigs):]
-	extra, err := m.copyTables(ctx, c, src, dst, jobs)
-	if err != nil {
+	if err := m.definerProbe(ctx, c, dst, dst, dstObjs.allTables(), dstObjs.probes, probes); err != nil {
 		return nil, err
-	}
-
-	for _, s := range sequences {
-		if srcObjs.kind[s] != "sequence" {
-			continue
-		}
-		def, err := showCreate(ctx, c, "SEQUENCE", src, s)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := c.ExecContext(ctx, def); err != nil {
-			return nil, fmt.Errorf("sequence %s: %w", s, err)
-		}
-		var next int64
-		if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(s)).Scan(&next); err != nil {
-			return nil, err
-		}
-		if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(s), next)); err != nil {
-			return nil, fmt.Errorf("sequence %s: %w", s, err)
-		}
 	}
 
 	// Triggers and views are made with the collation of the connection
@@ -1126,43 +1153,405 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		return err
 	}
 
-	for i, tr := range trigs {
-		r := trigShown[i]
-		if r == nil {
-			continue
+	// Views first: they are created last, once their tables exist. An object
+	// that changed kind (a view that became a table) is dropped as what it is.
+	var drops []dropItem
+	for _, name := range append(append([]string{}, views...), sequences...) {
+		if k := dstObjs.kind[name]; k != "" {
+			drops = append(drops, dropItem{kind: k, name: name})
 		}
+	}
+	for _, t := range tables {
+		if k := dstObjs.kind[t]; k != "" && k != "table" {
+			drops = append(drops, dropItem{kind: k, name: t})
+		}
+	}
+	for _, tr := range dstObjs.triggers {
+		if trigTables[tr.Table] || contains(triggers, tr.Name) {
+			drops = append(drops, dropItem{kind: "trigger", name: tr.Name, definer: tr.Definer})
+		}
+	}
+	for _, t := range tables { // tables src no longer has
+		if srcObjs.kind[t] != "table" && dstObjs.kind[t] == "table" {
+			drops = append(drops, dropItem{kind: "table", name: t})
+		}
+	}
+	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
+		return nil, err
+	}
+	// The sequences made below, in order: those src has.
+	var seqs []string
+	for _, q := range sequences {
+		if srcObjs.kind[q] == "sequence" {
+			seqs = append(seqs, q)
+		}
+	}
+	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
+	// What makes again what a failure leaves missing: a restore of the
+	// working database, or a seed of the pristine copy.
+	recovery := "the next successful restore"
+	if dst == m.o.Pristine {
+		recovery = "driftgate seed runs again"
+	}
+	var dropped []dropItem
+	for _, d := range drops {
+		var err error
+		if m.hooks != nil && m.hooks.dropRefused != nil && m.hooks.dropRefused(d.kind, d.name) {
+			err = &mysql.MySQLError{Number: 1227, Message: "refused by a test"}
+		} else {
+			err = dropObject(ctx, c, dst, d.name, d.kind)
+		}
+		if err != nil {
+			if lost != nil {
+				return nil, lost
+			}
+			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
+		}
+		dropped = append(dropped, d)
+	}
+	// From here on every sequence of seqs, trigger of trigDefs and view of
+	// pending is missing from dst until it is made: a failure names them
+	// (notMade).
+	var extra map[string]int64
+	if m.hooks != nil && m.hooks.copyFails != nil {
+		err = m.hooks.copyFails()
+	} else {
+		extra, err = m.copyTables(ctx, c, src, dst, jobs)
+	}
+	if err != nil {
+		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
+	}
+	for i, q := range seqs {
+		if err := makeSeq(q); err != nil {
+			return nil, notMade(dst, recovery, err, lost, seqs[i:], trigDefs, pending)
+		}
+	}
+
+	// trigDefs are in firing order per table.
+	for i, r := range trigDefs {
 		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
-			return nil, fmt.Errorf("trigger %s: %w", tr.Name, err)
+			if lost == nil {
+				err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
+			}
+			return nil, notMade(dst, recovery, err, lost, nil, trigDefs[i:], pending)
 		}
 	}
 
 	// A view may use another view: create them until no more succeed.
-	type view struct{ def, collation string }
-	pending := map[string]view{}
-	for i, v := range srcViews {
-		if r := viewShown[i]; r != nil {
-			pending[v] = view{localView(r["Create View"], src), r["collation_connection"]}
-		}
-	}
 	for len(pending) > 0 {
 		before := len(pending)
 		var lastErr error
 		for name, v := range pending {
 			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
 				if lost != nil {
-					return nil, lost
+					return nil, notMade(dst, recovery, lost, lost, nil, nil, pending)
 				}
-				lastErr = fmt.Errorf("view %s: %w", name, err)
+				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
 				continue
 			}
 			delete(pending, name)
 		}
-		if len(pending) == before {
-			return nil, lastErr // no view could be created in this pass
+		if len(pending) == before { // no view could be created in this pass
+			return nil, notMade(dst, recovery, lastErr, nil, nil, nil, pending)
 		}
 	}
 	return extra, nil
 }
+
+// definerClause reads the account of a DEFINER clause as SHOW CREATE
+// writes it (DEFINER=`app`@`%`).
+var definerClause = lazy.Regexp("DEFINER=`((?:[^`]|``)*)`@`((?:[^`]|``)*)`")
+
+// createRefused explains why the server refused to create the trigger or
+// view kind name in db as stmt defines it, when that is a privilege: a
+// restore and a seed make them with their DEFINER, as SHOW CREATE gives it.
+// A login may name another account as DEFINER only with SET_ANY_DEFINER
+// (MySQL 8.2 and later; SET_USER_ID before; and SYSTEM_USER for an account
+// that has it), SET USER (MariaDB) or SUPER: error 1227. With the binary
+// log on, a login without SUPER may create no trigger at all unless
+// log_bin_trust_function_creators is set (MySQL and MariaDB): error 1419. The DEFINER is never dropped or changed to make the object
+// fit the login: a trigger, and a view with SQL SECURITY DEFINER, run with
+// their definer's rights, so the copy would run under another account
+// than the original, and the DEFINER is part of the fingerprint, so the
+// copy would not be the one checked. login is the login's account,
+// CURRENT_USER(), read only on such an error.
+func createRefused(ctx context.Context, c *sql.Conn, kind, name, db, stmt string, err error) error {
+	var me *mysql.MySQLError
+	if !errors.As(err, &me) || me.Number != 1227 && me.Number != 1419 {
+		return fmt.Errorf("%s %s: %w", kind, name, err)
+	}
+	var login string
+	if c.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&login) != nil {
+		login = ""
+	}
+	return refusedText(kind, name, db, stmt, login, me)
+}
+
+// refusedText is the error of createRefused.
+func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error {
+	// other is the DEFINER when it is not the login's account.
+	other := ""
+	if m := definerClause().FindStringSubmatch(stmt); m != nil && login != "" {
+		user, host := strings.ReplaceAll(m[1], "``", "`"), strings.ReplaceAll(m[2], "``", "`")
+		if !strings.Contains(login, "@") || !sameAccount(user+"@"+host, login) {
+			other = m[0][len("DEFINER="):]
+		}
+	}
+	const setDefiner = "naming another account as DEFINER needs SET_ANY_DEFINER (MySQL 8.2 and later; SET_USER_ID before; and SYSTEM_USER when that account has it, as root does), SET USER (MariaDB) or SUPER"
+	const why = "DriftGate creates triggers and views with their DEFINER and does not change it: a trigger, and a view with SQL SECURITY DEFINER, run with their definer's rights, and the DEFINER is part of the fingerprint"
+	switch {
+	case me.Number == 1419:
+		msg := fmt.Sprintf("%s %s cannot be created in %s: the server writes a binary log (or is a Galera node) and log_bin_trust_function_creators is off, so a login without SUPER may create no trigger; set it on the server (as an administrator: SET PERSIST log_bin_trust_function_creators = 1) or give the login SUPER", kind, name, db)
+		if other != "" {
+			msg += fmt.Sprintf(". Its DEFINER %s is not this login (%s) either: %s; grant it, or create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again", other, login, setDefiner)
+		}
+		return fmt.Errorf("%s. %s (%w)", msg, why, me)
+	case other != "":
+		return fmt.Errorf("%s %s cannot be created in %s: its DEFINER is %s, this login is %s, and %s. Grant it to this login, or create the triggers and views with this login as their DEFINER (run the migrations as it) and seed again. %s (%w)",
+			kind, name, db, other, login, setDefiner, why, me)
+	}
+	return fmt.Errorf("%s %s: %w", kind, name, me)
+}
+
+// mysqlHooks, set by tests on a MySQL, make a restore fail where a server
+// would: dropRefused refuses the drops it names (1227) without sending
+// them, and copyFails replaces the copy of the tables with its error.
+type mysqlHooks struct {
+	dropRefused func(kind, name string) bool
+	copyFails   func() error
+}
+
+// copySequence makes sequence q of dst as src has it, where it goes on.
+func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
+	def, err := showCreate(ctx, c, "SEQUENCE", src, q)
+	if err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, def); err != nil {
+		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	var next int64
+	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(q)).Scan(&next); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(q), next)); err != nil {
+		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	return nil
+}
+
+// undoDrops answers a drop the server refused (refused) after the drops
+// of dropped succeeded: the sequences, triggers and views among them that
+// the pristine copy has (srcKind; trigDefs, in firing order per table;
+// views) are made again from it, which definerProbe showed the login may
+// do for the triggers and views. A trigger is made again next to its
+// pristine neighbour that dst still has (FOLLOWS or PRECEDES; dstTriggers
+// are dst's before the drops); when the working copy's triggers of that
+// table were reordered, or others stand between, the order may still
+// differ from the pristine one, which the message says. It names what was
+// made again; what is missing and the next successful restore makes again
+// (its creation failed, or it is of another kind in the pristine copy);
+// and what is gone, which no restore makes again (the pristine copy has
+// nothing of that name).
+func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]string, srcTriggers, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
+	create func(stmt, mode, collation string) error, makeSeq func(string) error, refused error) error {
+	var again, missing, gone []string
+	isDropped := map[string]bool{}
+	inTrigDefs := func(name string) bool {
+		return slices.ContainsFunc(trigDefs, func(r map[string]string) bool { return r["name"] == name })
+	}
+	// The table of each trigger, in the pristine copy and in dst: a
+	// trigger may be on another table in one of them (a renamed table).
+	srcTable, dstTable := map[string]string{}, map[string]string{}
+	for _, tr := range srcTriggers {
+		srcTable[tr.Name] = tr.Table
+	}
+	for _, tr := range dstTriggers {
+		dstTable[tr.Name] = tr.Table
+	}
+	for _, d := range dropped {
+		isDropped[d.kind+" "+d.name] = true
+		switch {
+		case d.kind == "trigger" && inTrigDefs(d.name):
+		case d.kind == "trigger" && srcTable[d.name] != "":
+			missing = append(missing, fmt.Sprintf("trigger %s (on table %s here, on %s in the pristine copy)", d.name, dstTable[d.name], srcTable[d.name]))
+		case d.kind == "trigger":
+			gone = append(gone, "trigger "+d.name)
+		case srcKind[d.name] == "":
+			gone = append(gone, d.kind+" "+d.name)
+		case d.kind == "view" && views[d.name].def != "":
+		case d.kind == "sequence" && srcKind[d.name] == "sequence":
+			if err := makeSeq(d.name); err != nil {
+				missing = append(missing, fmt.Sprintf("sequence %s (%v)", d.name, err))
+			} else {
+				again = append(again, "sequence "+d.name)
+			}
+		default: // another kind in the pristine copy: made by a restore
+			missing = append(missing, fmt.Sprintf("%s %s (a %s in the pristine copy)", d.kind, d.name, srcKind[d.name]))
+		}
+	}
+	// present: the triggers dst has now, by name, with their place.
+	present := map[string]dbx.MySQLTrigger{}
+	for _, tr := range dstTriggers {
+		if !isDropped["trigger "+tr.Name] {
+			present[tr.Name] = tr
+		}
+	}
+	same := func(r map[string]string, tr dbx.MySQLTrigger) bool {
+		return tr.Table == r["table"] && tr.Timing == r["timing"] && tr.Event == r["event"]
+	}
+	triggersAgain := false
+	for i, r := range trigDefs {
+		if !isDropped["trigger "+r["name"]] {
+			continue
+		}
+		anchor := ""
+		for j := i - 1; j >= 0 && anchor == ""; j-- {
+			if tr, ok := present[trigDefs[j]["name"]]; ok && same(trigDefs[j], tr) && same(r, tr) {
+				anchor = "FOLLOWS " + qi(tr.Name)
+			}
+		}
+		for j := i + 1; j < len(trigDefs) && anchor == ""; j++ {
+			if tr, ok := present[trigDefs[j]["name"]]; ok && same(trigDefs[j], tr) && same(r, tr) {
+				anchor = "PRECEDES " + qi(tr.Name)
+			}
+		}
+		if err := create(anchored(r["SQL Original Statement"], anchor), r["sql_mode"], r["collation_connection"]); err != nil {
+			missing = append(missing, fmt.Sprintf("trigger %s (%v)", r["name"], err))
+			continue
+		}
+		if t := dstTable[r["name"]]; t != "" && t != r["table"] {
+			again = append(again, fmt.Sprintf("trigger %s (on table %s, as in the pristine copy; it was on %s)", r["name"], r["table"], t))
+		} else {
+			again = append(again, "trigger "+r["name"])
+		}
+		triggersAgain = true
+		present[r["name"]] = dbx.MySQLTrigger{Name: r["name"], Table: r["table"], Timing: r["timing"], Event: r["event"]}
+	}
+	// A view may use another view: create them until no more succeed.
+	left := map[string]error{}
+	for _, d := range dropped {
+		if d.kind == "view" && views[d.name].def != "" {
+			left[d.name] = nil
+		}
+	}
+	for progress := true; progress && len(left) > 0; {
+		progress = false
+		for name := range left {
+			v := views[name]
+			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
+				left[name] = err
+				continue
+			}
+			delete(left, name)
+			again = append(again, "view "+name)
+			progress = true
+		}
+	}
+	for name, err := range left {
+		missing = append(missing, fmt.Sprintf("view %s (%v)", name, err))
+	}
+	sort.Strings(again)
+	sort.Strings(missing)
+	sort.Strings(gone)
+	more := ""
+	if len(again) > 0 {
+		more += fmt.Sprintf(". Dropped before the refusal and made again from the pristine copy: %s", strings.Join(again, ", "))
+		if triggersAgain {
+			more += " (each trigger next to its pristine neighbour; where the working copy's triggers of a table were reordered, or others stand between, the firing order may differ from the pristine one until " + recovery + ")"
+		}
+	}
+	if len(missing) > 0 {
+		more += fmt.Sprintf(". Now missing from %s until %s: %s", dst, recovery, strings.Join(missing, "; "))
+	}
+	if len(gone) > 0 {
+		more += fmt.Sprintf(". Dropped from %s, as the pristine copy has nothing of that name, which no restore makes again: %s", dst, strings.Join(gone, ", "))
+	}
+	return fmt.Errorf("%w%s", refused, more)
+}
+
+// notMade adds to err, a failure after the drops, the sequences (seqs),
+// triggers and views that are not made yet: missing from dst until
+// recovery (the next successful restore, or a new seed). A lost session (lost) is returned in err's
+// place, with them.
+func notMade(dst, recovery string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
+	if lost != nil {
+		err = lost
+	}
+	var names []string
+	for _, q := range seqs {
+		names = append(names, "sequence "+q)
+	}
+	for _, r := range trigDefs {
+		names = append(names, "trigger "+r["name"])
+	}
+	var vs []string
+	for name := range views {
+		vs = append(vs, "view "+name)
+	}
+	sort.Strings(vs)
+	names = append(names, vs...)
+	if len(names) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w. Not made, so missing from %s until %s: %s", err, dst, recovery, strings.Join(names, ", "))
+}
+
+// forEachRow and firingOrder match, at the start of the text, FOR EACH ROW
+// and the firing order that may follow it.
+var (
+	forEachRow  = lazy.Regexp(`(?i)^FOR\s+EACH\s+ROW\s+`)
+	firingOrder = lazy.Regexp("(?i)^(?:FOLLOWS|PRECEDES)\\s+(?:`(?:[^`]|``)*`|[^\\s`]+)\\s+")
+)
+
+// anchored is a trigger's CREATE statement with its firing order set to
+// anchor (FOLLOWS x, PRECEDES x), or with none when anchor is empty. The
+// clause goes after FOR EACH ROW, found outside quoted names and strings:
+// a name before it may hold those words in backticks, and the body comes
+// after it.
+func anchored(stmt, anchor string) string {
+	for i := 0; i < len(stmt); i++ {
+		if q := stmt[i]; q == '`' || q == '\'' || q == '"' {
+			for i++; i < len(stmt); i++ {
+				if stmt[i] == '\\' && q != '`' {
+					i++
+				} else if stmt[i] == q {
+					if i+1 < len(stmt) && stmt[i+1] == q { // doubled
+						i++
+						continue
+					}
+					break
+				}
+			}
+			continue
+		}
+		if i > 0 && isWordByte(stmt[i-1]) {
+			continue
+		}
+		m := forEachRow().FindStringIndex(stmt[i:])
+		if m == nil {
+			continue
+		}
+		j := i + m[1]
+		k := j
+		if o := firingOrder().FindStringIndex(stmt[j:]); o != nil {
+			k = j + o[1]
+		}
+		if anchor != "" {
+			anchor += " "
+		}
+		return stmt[:j] + anchor + stmt[k:]
+	}
+	return stmt
+}
+
+// isWordByte reports a byte of an unquoted name or keyword.
+func isWordByte(b byte) bool {
+	return b == '_' || b == '$' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || b >= 0x80
+}
+
+// viewDef is a view's CREATE statement and the collation it was made with.
+type viewDef struct{ def, collation string }
 
 // setBack records that c's session could not be set back after a SET
 // failed with err: the session may be half changed, so c is closed instead
@@ -1224,7 +1613,7 @@ func (m *MySQL) Restore(ctx context.Context, items []string) error {
 		sess0, _ = sessionWrites(ctx, c)
 	}
 	tables, views, sequences, triggers := splitItems(items)
-	extra, err := m.copyObjects(ctx, c, m.o.Pristine, m.o.Working, tables, views, sequences, triggers)
+	extra, err := m.copyObjects(ctx, c, m.o.Pristine, m.o.Working, tables, views, sequences, triggers, nil)
 	if err != nil {
 		m.forget()
 		return err
@@ -1266,6 +1655,37 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		return err
 	}
 	if err := m.checkPristine(ctx, c); err != nil {
+		return err
+	}
+	// The triggers and views are made again in the pristine copy: the
+	// login is tried on their DEFINERs before the old copy is dropped, in
+	// the working database (the privileges tried are global ones). Their
+	// definitions are read once, for the probe and the copy (known).
+	var defReqs []showReq
+	var items []probeItem
+	for _, tr := range objs.triggers {
+		defReqs, items = append(defReqs, showReq{"TRIGGER", m.o.Working, tr.Name}), append(items, probeItem{kind: "trigger", name: tr.Name, table: tr.Table})
+	}
+	for _, v := range objs.views {
+		defReqs, items = append(defReqs, showReq{"VIEW", m.o.Working, v}), append(items, probeItem{kind: "view", name: v})
+	}
+	defs, err := m.showAll(ctx, c, defReqs)
+	if err != nil {
+		return err
+	}
+	known := map[showReq]map[string]string{}
+	var probes []probeItem
+	for i, it := range items {
+		known[defReqs[i]] = defs[i]
+		if r := defs[i]; r != nil {
+			it.stmt = r["SQL Original Statement"]
+			if it.kind == "view" {
+				it.stmt = r["Create View"]
+			}
+			probes = append(probes, it)
+		}
+	}
+	if err := m.definerProbe(ctx, c, m.o.Working, m.o.Pristine, objs.allTables(), objs.probes, probes); err != nil {
 		return err
 	}
 	if m.o.Replacing != nil {
@@ -1321,7 +1741,7 @@ func (m *MySQL) Seed(ctx context.Context) error {
 	for _, tr := range objs.triggers {
 		trigs = append(trigs, tr.Name)
 	}
-	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, copied, objs.views, objs.sequences, trigs)
+	_, err = m.copyObjects(ctx, c, m.o.Working, m.o.Pristine, copied, objs.views, objs.sequences, trigs, known)
 	return err
 }
 

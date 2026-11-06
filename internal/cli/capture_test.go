@@ -403,9 +403,7 @@ func TestMarkWriters(t *testing.T) {
 func TestReadOnlyCapture(t *testing.T) {
 	var mu sync.Mutex
 	writes := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No Date header: the captures compared may fall in two seconds.
-		w.Header()["Date"] = nil
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			mu.Lock()
 			writes++
@@ -413,7 +411,7 @@ func TestReadOnlyCapture(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":1,"token":"abc"}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")
@@ -559,10 +557,10 @@ func TestReadOnlyCalibrate(t *testing.T) {
 // prepare: (which may write) is refused, and a tokens.command, which runs
 // as configured, is warned of.
 func TestReadOnlyProjectCommands(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":1}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")
