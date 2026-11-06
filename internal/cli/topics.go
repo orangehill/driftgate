@@ -40,7 +40,7 @@ var topics = []topic{
 			{"version", "1"},
 			{"requests", "the requests, in order; each has the keys below"},
 			{"id", "the request's name, unique; reports, --only and globs use it"},
-			{"target", "the service, with several targets"},
+			{"target", "the service, with several services"},
 			{"method, path", "HTTP method and path, with {param} placeholders"},
 			{"params", "values of the placeholders"},
 			{"params_from", "a placeholder's value from an earlier response: {request, path}"},
