@@ -409,3 +409,22 @@ func TestJSONErrorsWithoutValue(t *testing.T) {
 		t.Errorf("ids\n got %v\nwant %v", ids, want)
 	}
 }
+
+// TestJSONErrorsWithoutTwins: without a parameter value and without
+// not-found or invalid-param, json-errors makes nothing, and is listed as
+// skipped, with the reason.
+func TestJSONErrorsWithoutTwins(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template+": "+s.Reason)
+	}
+	if want := []string{"ok: no value for {id}", "json-errors: no value for {id}"}; !reflect.DeepEqual(skipped, want) || len(res.Catalog.Requests) != 0 {
+		t.Errorf("skipped %v, want %v; requests %v", skipped, want, res.Catalog.Requests)
+	}
+}
