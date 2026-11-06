@@ -20,14 +20,13 @@ with `SQL SECURITY DEFINER`, run with their definer's rights, and the
 
 A login may name another account as `DEFINER` only with one of:
 
-- `SET_ANY_DEFINER` (MySQL 8.2 and later), or `SET_USER_ID` before 8.2;
-- `SYSTEM_USER` too, for a definer account that has it, such as root (MySQL);
+- `SET_ANY_DEFINER` (MySQL 8.2 and later; `SET_USER_ID` before), plus `SYSTEM_USER` when the definer account has it, such as root;
 - `SET USER` (MariaDB);
 - `SUPER`.
 
 With the binary log on, a login without `SUPER` may create a trigger
 only when `log_bin_trust_function_creators` is on. A Galera node checks
-as if it were on.
+as if the binary log were on, also with `log_bin=0`.
 
 Each `DEFINER` is first tried on a short-lived probe object.
 

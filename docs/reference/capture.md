@@ -44,7 +44,7 @@ instead. The exit code stays.
 
 Two kinds of number are not taken for an id:
 
-- an API version: one or two digits right after a segment `api` or `v`, followed by a segment that is not a number (`/api/2/users`);
+- an API version: one or two digits right after a segment `api` or `v` in any letter case, followed by a non-empty segment that is not a number (`/api/2/users`; `/api/2/` is an id);
 - a full date: a year from 1900 to 2099, a month `01` to `12` and a day `01` to `31`, as in `/posts/2024/05/17`.
 
 Any other number is taken for an id: `/api/17`, `/stats/2024`, `/users/2024/5`.

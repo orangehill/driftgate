@@ -102,8 +102,16 @@ func withoutKey(keys []string, key string) []string {
 // TestHelpNamesTopics: driftgate help names every help topic.
 func TestHelpNamesTopics(t *testing.T) {
 	_, out, _ := runCLI(t, "help")
-	line := out[strings.Index(out, "driftgate help <topic>"):]
-	line = strings.Join(strings.Fields(line[:strings.Index(line, ".\n")]), " ")
+	at := strings.Index(out, "driftgate help <topic>")
+	if at < 0 {
+		t.Fatalf("driftgate help has no line on the help topics:\n%s", out)
+	}
+	line := out[at:]
+	end := strings.Index(line, ".\n")
+	if end < 0 {
+		t.Fatalf("the line on the help topics does not end:\n%s", line)
+	}
+	line = strings.Join(strings.Fields(line[:end]), " ")
 	for _, tp := range topics {
 		if !strings.Contains(line, " "+tp.name+",") && !strings.HasSuffix(line, " "+tp.name) {
 			t.Errorf("driftgate help does not name the topic %s: %s", tp.name, line)
