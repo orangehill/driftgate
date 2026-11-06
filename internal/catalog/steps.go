@@ -1,11 +1,11 @@
 package catalog
 
 import (
-	"slices"
 	"errors"
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/snapshot"

@@ -23,9 +23,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/orangehill/driftgate/internal/compare"
-	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/discover"
 	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
@@ -440,12 +440,12 @@ func (pr Param) validate() error {
 
 // Target is where requests go.
 type Target struct {
-	BaseURL         string      `yaml:"base_url,omitempty"`
-	AllowHosts      []string    `yaml:"allow_hosts,omitempty"` // host names or CIDR ranges; default: local and private
+	BaseURL    string   `yaml:"base_url,omitempty"`
+	AllowHosts []string `yaml:"allow_hosts,omitempty"` // host names or CIDR ranges; default: local and private
 	// ConnectTo sends the requests to this host or IP address (with an
 	// optional port) while they keep base_url's host name for the Host
 	// header and TLS, as curl --connect-to: DNS may name another server.
-	ConnectTo string `yaml:"connect_to,omitempty"`
+	ConnectTo       string      `yaml:"connect_to,omitempty"`
 	UserAgent       string      `yaml:"user_agent,omitempty"`
 	Timeout         Duration    `yaml:"timeout,omitempty"`
 	Concurrency     Concurrency `yaml:"concurrency,omitempty"`

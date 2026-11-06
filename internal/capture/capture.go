@@ -64,14 +64,14 @@ func envErr(format string, a ...any) error {
 
 // Options of one capture.
 type Options struct {
-	Tag                         string
-	Only                        string // glob over request IDs
+	Tag  string
+	Only string // glob over request IDs
 	// ReadOnly sends only the requests that do not change data
 	// (catalog.ReadOnlySkips leaves the others out).
-	ReadOnly bool
-	Force                       bool   // replace an existing capture with this tag
-	AllowRemote                 bool   // allow a target outside allow_hosts
-	AllowRemoteMutations        bool   // and send requests that change data to it
+	ReadOnly                    bool
+	Force                       bool // replace an existing capture with this tag
+	AllowRemote                 bool // allow a target outside allow_hosts
+	AllowRemoteMutations        bool // and send requests that change data to it
 	AllowMutatingWithoutRestore bool
 	Restore                     string        // once (default): before the run and before the requests that change data; each: also before every sequence
 	Baseline                    *snapshot.Set // the state must match the one this baseline was captured from

@@ -262,7 +262,7 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		}
 		return 0, err
 	}
-	unreliable := false // the capture compared was made with --skip-fingerprint-check
+	unreliable := false         // the capture compared was made with --skip-fingerprint-check
 	var notSent map[string]bool // requests a read-only capture did not send
 	for _, s := range []struct {
 		set  *snapshot.Set
