@@ -6,6 +6,8 @@ same requests and reports every difference. Its primary use is local:
 checking each step of a framework upgrade before the pull request; CI is
 optional. Start with the [README](../README.md) (install and a 5-minute
 quick start). This documentation describes DriftGate 1.0.
+What each release adds and changes is in the
+[changelog](../CHANGELOG.md).
 
 ## Reference
 
