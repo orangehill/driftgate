@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/compare"
@@ -20,19 +21,32 @@ type topic struct {
 // releaseTag is the Version of a release build.
 var releaseTag = lazy.Regexp(`^v\d+\.\d+\.\d+$`)
 
-// docsBase is where the documentation is read: the pages of this build's
-// release tag, so that a link names a section the release has; development
-// for a development build (dev, dev-…), whose pages are there first; main
-// for any other build, such as the action's source build.
+// docsBase is where the documentation is read: the pages of the git ref
+// docsRef picks for this build.
 func docsBase() string {
-	ref := "main"
-	switch {
-	case releaseTag().MatchString(Version):
-		ref = Version
-	case Version == "dev" || strings.HasPrefix(Version, "dev-"):
-		ref = "development"
+	module := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		module = info.Main.Version
 	}
-	return "https://github.com/orangehill/driftgate/blob/" + ref + "/docs/"
+	return "https://github.com/orangehill/driftgate/blob/" + docsRef(Version, module) + "/docs/"
+}
+
+// docsRef is the git ref whose pages a build links, from its Version and
+// the module version Go recorded: a release tag in either (a release, or
+// go install …@v1.2.3) links that tag, so a link names a section the
+// release has; a build of a commit (dev-…, or dev from a checkout, whose
+// module version is "(devel)") links development, where the pages of
+// unreleased commands are first; any other build links main.
+func docsRef(version, module string) string {
+	switch {
+	case releaseTag().MatchString(version):
+		return version
+	case releaseTag().MatchString(module):
+		return module
+	case strings.HasPrefix(version, "dev-"), version == "dev" && module == "(devel)":
+		return "development"
+	}
+	return "main"
 }
 
 // tasksDoc is the table of what to use for a task, under docsBase.

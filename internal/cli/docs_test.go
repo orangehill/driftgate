@@ -49,24 +49,31 @@ func TestHelpDocLinks(t *testing.T) {
 	}
 }
 
-// TestDocsBase: a release links the pages of its own tag, a development
-// build those of development, any other build those of main.
+// TestDocsBase: a release links the pages of its own tag, also when only
+// the module version names it (go install …@v1.2.3); a build of a commit
+// links development; any other build main.
 func TestDocsBase(t *testing.T) {
 	defer func(v string) { Version = v }(Version)
-	for v, want := range map[string]string{
-		"v9.9.9":     "https://github.com/orangehill/driftgate/blob/v9.9.9/docs/",
-		"v1.2.3":     "https://github.com/orangehill/driftgate/blob/v1.2.3/docs/",
-		"dev":        "https://github.com/orangehill/driftgate/blob/development/docs/",
-		"dev-1a2b3c": "https://github.com/orangehill/driftgate/blob/development/docs/",
-		"source":     "https://github.com/orangehill/driftgate/blob/main/docs/",
-		"v1.2.3-rc1": "https://github.com/orangehill/driftgate/blob/main/docs/",
+	for _, c := range []struct{ version, module, want string }{
+		{"v9.9.9", "(devel)", "v9.9.9"},
+		{"v1.2.3", "", "v1.2.3"},
+		{"dev", "v1.2.3", "v1.2.3"},
+		{"dev", "(devel)", "development"},
+		{"dev-1a2b3c4d5e6f", "(devel)", "development"},
+		{"dev-1a2b3c4d5e6f", "", "development"},
+		{"dev", "v0.0.0-20261105120000-1a2b3c4d5e6f", "main"},
+		{"dev", "", "main"},
+		{"source", "(devel)", "main"},
+		{"v1.2.3-rc1", "(devel)", "main"},
 	} {
-		Version = v
-		if got := docsBase(); got != want {
-			t.Errorf("Version %s: docsBase() = %s, want %s", v, got, want)
+		if got := docsRef(c.version, c.module); got != c.want {
+			t.Errorf("docsRef(%q, %q) = %s, want %s", c.version, c.module, got, c.want)
 		}
 	}
 	Version = "v9.9.9"
+	if got := docsBase(); got != "https://github.com/orangehill/driftgate/blob/v9.9.9/docs/" {
+		t.Errorf("docsBase() of v9.9.9 = %s", got)
+	}
 	if _, out, _ := runCLI(t, "help", "run"); !strings.Contains(out, "/blob/v9.9.9/docs/reference/commands/check.md#driftgate-run") {
 		t.Errorf("help run of v9.9.9:\n%s", out)
 	}

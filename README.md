@@ -101,7 +101,9 @@ go install github.com/orangehill/driftgate/cmd/driftgate@latest
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o driftgate ./cmd/driftgate
 ```
 
-A source build reports its version as `dev`.
+A source build reports its version as `dev`. Its help links the docs of the
+release it was installed at (`go install …@<tag>`), or of the `development`
+branch when built from a checkout.
 
 **Docker image**, built from the [`Dockerfile`](Dockerfile) (no image is
 published yet):
