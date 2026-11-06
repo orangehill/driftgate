@@ -420,7 +420,9 @@ same host name goes there too; one to another host is not changed.
 naming `shop.example` there does not allow `connect_to` to reach an
 address outside the list, and such a target needs `--allow-remote` (and
 `--allow-remote-mutations` for requests that change data) like any
-remote one. `record`, `discover` and `setup` connect the same way. A
+remote one. `record`, `discover` and `setup` connect the same way; the
+project's own commands (`prepare`, `tokens.command`, `seed`, guards)
+do not: they reach whatever their own settings and DNS name. A
 capture records the setting per service in its `meta.json`
 (`connect_to`).
 

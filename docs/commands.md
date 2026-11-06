@@ -764,6 +764,13 @@ capture:<tag>`), the requests it left out were never checked: they are
 listed as such and the result is incomplete (exit 3), not new requests to
 accept.
 
+`--read-only` selects requests; the project's own commands (`prepare`,
+`tokens.command`, `seed`, guards, restore commands) run as configured,
+may write, and do not go through `connect_to`. So `--read-only` is
+refused when `prepare:` is configured, and a `tokens.command` gets a
+warning; leave those out of the configuration for a server that must not
+change.
+
 With a configuration without `state:` nothing is restored, seeded or
 fingerprinted, so this checks a server that must not change (a
 production, a new server before the switch) without writing to it:

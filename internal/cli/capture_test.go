@@ -540,3 +540,28 @@ func TestReadOnlyCalibrate(t *testing.T) {
 		t.Fatalf("exit %d, %d requests that change data sent\n%s\n%s", code, writes, out, errOut)
 	}
 }
+
+// TestReadOnlyProjectCommands: --read-only selects requests only, so a
+// prepare: (which may write) is refused, and a tokens.command, which runs
+// as configured, is warned of.
+func TestReadOnlyProjectCommands(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	base := fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"news","method":"GET","path":"/news","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+
+	write(t, cfg, base+"prepare:\n  - [\"true\"]\n")
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg, "--read-only"); code != ExitConfig || !strings.Contains(errOut, "prepare: runs after every restore and may write") {
+		t.Fatalf("prepare: exit %d\n%s\n%s", code, out, errOut)
+	}
+	write(t, cfg, base+"tokens:\n  command: [\"echo\", \"{}\"]\n")
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg, "--read-only"); code != ExitClean || strings.Count(errOut, "tokens.command runs as configured") != 1 {
+		t.Fatalf("tokens: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
