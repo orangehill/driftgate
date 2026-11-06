@@ -125,3 +125,14 @@ func TestMethodDecidesMutates(t *testing.T) {
 		}
 	}
 }
+
+// LiteralID: a number written as a segment of the path, not a parameter
+// nor a part of a segment, and not in the query.
+func TestLiteralID(t *testing.T) {
+	for path, want := range map[string]string{"/api/users/17": "17", "/api/users/17/edit": "17", "/api/v2/users": "", "/api/users/{id}": "",
+		"/reports?year=2024": "", "/a/0": "0", "/2fa": "", "/": ""} {
+		if got := LiteralID(path); got != want {
+			t.Errorf("%s: %q", path, got)
+		}
+	}
+}

@@ -64,10 +64,14 @@ var commands = []commandHelp{
 	{name: "seed", summary: "runs the seed: commands and keeps a pristine copy of every state database", flags: []flagHelp{
 		{name: "skip-commands", text: "take the data already loaded as pristine, without the seed: commands (a database cache in CI)"},
 	}},
+	{name: "clean", args: "[<component>…]", summary: "removes the pristine copies driftgate seed made (of every database component under state:, or of those named) and their records in the local store; never a working database, nor a copy seed did not make", flags: []flagHelp{
+		{name: "yes", text: "remove without asking (needed without a terminal)"},
+	}},
 	{name: "run", summary: "routes, catalog, capture and compare in one command; the first run makes the baseline from two equal captures", flags: []flagHelp{
 		{name: "baseline", arg: "<name>", text: "baseline to make or compare with (default local)"},
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-private", text: "accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3)"},
+		{name: "read-only", text: "capture only the requests that do not change data, as capture --read-only"},
 		{name: "target", arg: "<service>", text: targetText + "; the check is then reported as partial"},
 	}},
 	{name: "discover", summary: "finds the routes of the application and compares them with the route inventory (exit 1 when they changed)", flags: []flagHelp{
@@ -108,6 +112,7 @@ var commands = []commandHelp{
 		{name: "allow-mutating-without-restore", text: "send requests that change data even without a state restore"},
 		{name: "skip-fingerprint-check", text: "do not check the state fingerprint (diagnostics only; the capture is marked unreliable)"},
 		{name: "calibrate", text: "decide concurrency: auto: measure, compare a capture at the chosen setting with a sequential one, record it in the baseline (implies --repeat 2)"},
+		{name: "read-only", text: "send only the requests that do not change data (GET, HEAD, OPTIONS and mutates: false); a comparison skips the others"},
 		{name: "quiet", text: "no progress output"},
 		{name: "target", arg: "<service>", text: targetText},
 	}},

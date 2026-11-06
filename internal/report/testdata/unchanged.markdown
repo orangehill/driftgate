@@ -8,6 +8,8 @@
 
 > 1 request without a baseline, not compared: new; new requests join the baseline with driftgate accept
 
+> kinds: header-missing 2, header-value 2, type 2, value 2
+
 #### What changed
 
 1. 2 drifts in 2 requests: header x-total is missing

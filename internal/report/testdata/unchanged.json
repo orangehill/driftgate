@@ -146,6 +146,12 @@
    "explanation": "2 drifts in 2 requests: $.title changed value (for example \"Notes\" → \"Notes news-0\")"
   }
  ],
+ "kinds": {
+  "header-missing": 2,
+  "header-value": 2,
+  "type": 2,
+  "value": 2
+ },
  "level": "values",
  "mode": "evolve",
  "created": "2026-10-30T10:00:00Z",

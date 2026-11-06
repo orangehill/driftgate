@@ -142,7 +142,7 @@ observe:
 | [`state`](#state) | map of name → component | | what is restored before captures |
 | [`seed`](#seed-prepare-guards) | list of commands | | load the data; `driftgate seed` then keeps the pristine copy |
 | [`prepare`](#seed-prepare-guards) | list of commands | | run after every restore |
-| [`guards`](#seed-prepare-guards) | list | | must succeed before any request that changes data |
+| [`guards`](#seed-prepare-guards) | list | | must succeed before the first request and before any request that changes data |
 | [`discover`](#discover) | list of adapters | | where the routes come from |
 | [`templates`](#templates-generate-params) | list | `[ok]` | request variants `generate` makes per route |
 | [`generate`](#templates-generate-params) | `{identity}` | | identity for routes that need authentication |
@@ -261,6 +261,27 @@ capturing or comparing private bodies stops with exit 3.
 Changing the key is not supported: bodies encrypted with the old key become
 unreadable.
 
+#### Handing a capture to another developer
+
+To let someone else compare a capture (or check a result) on their
+machine, copy, in the same project:
+
+- the capture's folder, `captures/<tag>/` of the local store, into theirs;
+- the baseline, `baselines/<name>/` (with `baselines: git` it is in the
+  repository already);
+- the store's `private/` folder, which holds the private bodies of the
+  captures and baselines, encrypted with the project key; without it their
+  requests are compared without the body (exit 3, or `--skip-private`).
+
+The private bodies can be read only with the project key: give it as
+`DRIFTGATE_KEY` (or `key:`) on the other machine. Send the key through a
+secure channel (a password manager's shared vault, `key: { op: … }`),
+never with the files and never in the same message, chat or archive.
+Private bodies hold personal data: copy them only to someone who may see
+that data, keep them out of shared drives and tickets, and remove the
+copy when it is no longer needed. Public bodies were scanned for personal
+data, but a scan is not a proof.
+
 ### target and targets
 
 `target:` describes the application. With several services (an API, a
@@ -271,6 +292,7 @@ instead; see [several services](guides/multi-service.md).
 |---|---|---|---|
 | `base_url` | URL | | where requests go; the request path is appended |
 | `allow_hosts` | list of host names, IPs or CIDR ranges | `localhost` and local and private addresses (`127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) | hosts requests may go to. A list replaces the default. A host name in the list may resolve anywhere; any other name must resolve only to allowed addresses. Redirects are checked too |
+| `connect_to` | host or IP, optional `:port` | | send the requests to this address instead of the one DNS gives for `base_url`'s host, as `curl --connect-to`; see [below](#connect_to) |
 | `user_agent` | string | `driftgate/1` | the `User-Agent` header of every request |
 | `timeout` | duration (`30s`) | `60s` | per request; `0` is the default, a negative one is refused |
 | `concurrency` | int, or `auto` | `1` | read-only requests sent in parallel; `auto`: measured once and recorded in the baseline (see [capture](commands.md#capture), `--calibrate`) |
@@ -374,6 +396,40 @@ the capture it takes bodies from to the baseline's.
 
 A target outside `allow_hosts` needs `capture --allow-remote`; requests that
 change data need `--allow-remote-mutations` as well.
+
+#### connect_to
+
+When DNS names another server for the target's host than the one under
+test (the host name still points to the old production while the new
+server is being prepared), `connect_to` sends every request to a fixed
+address, as `curl --connect-to` or `--resolve` does:
+
+<!-- check: config-fragment -->
+```yaml
+target:
+  base_url: https://shop.example
+  connect_to: 203.0.113.10        # or 203.0.113.10:8443, [2001:db8::1]:443
+  allow_hosts: [203.0.113.10]
+```
+
+The requests keep `base_url`'s host name in the `Host` header, the TLS
+server name and the certificate check; only the connection goes to
+`connect_to`. The host name never goes where DNS says: without a port in
+`connect_to`, every port of it goes to that host on the same port (a
+redirect from `http` to `https` of the name goes to `203.0.113.10:443`);
+with a port, `base_url`'s port goes to it and any other port of the name
+is refused (`connect_to covers shop.example:443 only`), so a redirect
+there fails rather than reach the server DNS names. A redirect to another
+host is not changed.
+`allow_hosts` applies to the address connected to, not to the host name:
+naming `shop.example` there does not allow `connect_to` to reach an
+address outside the list, and such a target needs `--allow-remote` (and
+`--allow-remote-mutations` for requests that change data) like any
+remote one. `record`, `discover` and `setup` connect the same way; the
+project's own commands (`prepare`, `tokens.command`, `seed`, guards)
+do not: they reach whatever their own settings and DNS name. A
+capture records the setting per service in its `meta.json`
+(`connect_to`).
 
 #### Retries
 
@@ -541,6 +597,12 @@ takes the keys of [SQLite](#sqlite); SQL Server's own notes are under
   Every host the driver may connect to is checked (PostgreSQL `host=`,
   several hosts, `PG*` variables), and every connection on the address it
   goes to. Otherwise set `allow_remote: true`.
+- `seed` creates the pristine database, which an application's own login
+  often may not: MySQL/MariaDB need `CREATE` and `DROP` on the pristine
+  database (`GRANT ALL ON shop_pristine.* TO 'shop'@'%'`, or `CREATE` on
+  `*.*`), PostgreSQL `CREATEDB` (`ALTER ROLE shop CREATEDB`), SQL Server
+  the grants [below](#sql-server). Without them `seed` stops with the
+  server's refusal.
 - Give the DSN a user limited to the working and pristine databases (for
   PostgreSQL with `CREATEDB`), not a superuser and not one with MySQL's
   `FILE` privilege. The one exception is a disposable database in a local
@@ -690,7 +752,12 @@ and change its responses.
 
 The DSNs of `state:` and `data:` hold the password, so they come from the
 environment, 1Password or the project's own settings file, and no error
-message shows them. Percent-encode
+message shows them. A DSN is read only by a command that works with the
+database (`seed`, `capture`, `run`, `setup`, and the commands that run
+or query it); `compare`, `report`, `review`, `accept` and `expect`
+read captures only, so on a machine where the variable is not set or the
+settings file is not there they still run (the YAML itself is checked).
+Percent-encode
 special characters (`@ : / ? # %`) in the user name and password. The
 database named in the URL is ignored (`working`, `pristine` and
 `database` name it). A `mysql://` (or `mariadb://`) URL takes these
@@ -796,7 +863,13 @@ state:
 
 **Anything else** (Redis, files, a search index): `restore` (required) and
 optionally `fingerprint`, a command whose output must be the same after
-every restore ([recipes](guides/side-checks.md#files-on-disk-and-redis)). `dsn`, `working`, `pristine`, `exclude`, `restore_only`,
+every restore ([recipes](guides/side-checks.md#files-on-disk-and-redis)).
+A cache emptied on every restore (`FLUSHALL`) means every request runs
+on a cold cache: behaviour that only shows with a warm cache (a value
+read from the cache instead of the database) is never checked, and a
+server that answers from a warm cache may differ from the capture for
+that reason alone. Compare a live server's answer twice, or empty its
+cache first, before you take such a difference for a change. `dsn`, `working`, `pristine`, `exclude`, `restore_only`,
 `restore_empty` and `row_tracking` need a driver.
 
 <!-- check: config-fragment -->
@@ -1543,7 +1616,7 @@ or logins (`sp_…`, `xp_…`, `fn_…`, `dm_…`, `OPENROWSET`,
 |---|---|
 | `seed` | commands that load the data into the working databases (migrations and seeders, a dump import). `driftgate seed` runs them and keeps the pristine copy; `seed --skip-commands` takes the data already loaded |
 | `prepare` | commands run after every restore |
-| `guards` | `{name, command}`: each must succeed before the first request that changes data, or the capture stops before it (e.g. mail goes to a log, not to people) |
+| `guards` | `{name, command}`: when the capture has requests that change data (or command steps, repeated requests), each must succeed after the restore and `prepare`, before the first request (so one that fails stops the capture in seconds), and again right before the first request that changes data when read-only requests ran in between (they may take long); a guard that fails stops the capture there (e.g. mail goes to a log, not to people). A guard only checks: it must not write to the databases under `state:` (a command that logs itself to a table writes). If one does, its write becomes part of the state the read-only requests start from (a restore removes it before the requests that change data), it may be reported as a change `prepare` made, and a later search for read-only requests that wrote may report prepare as not repeatable |
 
 <!-- check: config-fragment -->
 ```yaml

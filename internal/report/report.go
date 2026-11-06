@@ -37,6 +37,16 @@ const NoteNoBaseline = "no baseline"
 // repository, and it is never compared by its ref alone.
 const NotePrivateMissing = "private body not on this machine"
 
+// NoteReadOnlyBaseline is the note of a request the set compared against
+// has no response for because it was captured with --read-only: never
+// checked, so the result is incomplete.
+const NoteReadOnlyBaseline = "not in the read-only set compared against (captured with --read-only)"
+
+// NoteNotSent is the note of a request a read-only capture (capture
+// --read-only) did not send: it changes data, or shares a sequence with
+// a request that does.
+const NoteNotSent = "not sent: capture --read-only"
+
 // Result is the outcome for one request.
 type Result struct {
 	ID      string          `json:"id"`
@@ -92,6 +102,9 @@ type Report struct {
 	Observed int      `json:"observed"`
 	Results  []Result `json:"results"`
 	Groups   []Group  `json:"groups"`
+	// Kinds counts the drifts of all results by their kind (status,
+	// header-extra, type, …); nil without drift.
+	Kinds map[string]int `json:"kinds,omitempty"`
 	// The status changes shared by requests, the most common first: one
 	// cause, whatever drifts follow from it.
 	StatusChanges []StatusGroup `json:"status_changes,omitempty"`
@@ -116,6 +129,9 @@ type Report struct {
 	SkipPrivate    bool     `json:"skip_private,omitempty"`
 	// Requests skipped because the baseline has no response for them.
 	NoBaseline []string `json:"no_baseline,omitempty"`
+	// ReadOnlyBaseline are the requests the set compared against left out
+	// as a read-only capture: the result is incomplete.
+	ReadOnlyBaseline []string `json:"read_only_baseline,omitempty"`
 	// Requests the baseline's or the compared capture sent again after a
 	// restore ended the application's database sessions (each result's
 	// notes say which side and what the first answer was).
@@ -157,7 +173,18 @@ type Report struct {
 // private or observed): a green result would mean nothing was checked.
 // compare and run then exit 3.
 func (r *Report) Incomplete() bool {
-	return r.Compared == 0 || len(r.PrivateMissing) > 0 && !r.SkipPrivate
+	return r.Compared == 0 || len(r.PrivateMissing) > 0 && !r.SkipPrivate || len(r.ReadOnlyBaseline) > 0
+}
+
+// ReadOnlyBaselineNote says which requests were never checked because the
+// set compared against was captured with --read-only; empty when none.
+func (r *Report) ReadOnlyBaselineNote() string {
+	n := len(r.ReadOnlyBaseline)
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("incomplete: %s not checked: %s was captured with --read-only and has no response for %s: %s; make the baseline again from every request (move it away; the next driftgate run makes it)",
+		plural(n, "request"), r.Against, word(n, "it", "them"), listIDs(r.ReadOnlyBaseline))
 }
 
 // NothingNote says why nothing was compared; empty when something was.
@@ -331,10 +358,17 @@ func Build(tag, against string, results []Result) *Report {
 		if res.Outcome == Skipped && res.Note == NoteNoBaseline {
 			r.NoBaseline = append(r.NoBaseline, res.ID)
 		}
+		if res.Outcome == Skipped && res.Note == NoteReadOnlyBaseline {
+			r.ReadOnlyBaseline = append(r.ReadOnlyBaseline, res.ID)
+		}
 		if res.Resent {
 			r.Resent = append(r.Resent, res.ID)
 		}
 		for _, d := range res.Drifts {
+			if r.Kinds == nil {
+				r.Kinds = map[string]int{}
+			}
+			r.Kinds[d.Kind]++
 			sig := d.Signature()
 			a := groups[sig]
 			if a == nil {
@@ -551,7 +585,7 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		}
 	}
 	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %s, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.driftedText(), r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.DominantNote()} {
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.KindsNote(), r.DominantNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}

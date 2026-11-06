@@ -124,3 +124,17 @@ func TestDominantNoteWithoutAccept(t *testing.T) {
 		t.Errorf("unreliable capture: %s", n)
 	}
 }
+
+// TestKindsNote: drifts counted by kind, the most first, then by name.
+func TestKindsNote(t *testing.T) {
+	r := Build("c", "baseline:local", []Result{
+		{ID: "a", Outcome: Drift, Drifts: []compare.Drift{{Kind: "header-extra", Where: "header:x"}, {Kind: "status", Where: "status"}}},
+		{ID: "b", Outcome: Drift, Drifts: []compare.Drift{{Kind: "header-extra", Where: "header:x"}, {Kind: "type", Where: "$.a"}}},
+		{ID: "c", Outcome: Pass}})
+	if got := r.KindsNote(); got != "kinds: header-extra 2, status 1, type 1" {
+		t.Errorf("%q", got)
+	}
+	if n := Build("c", "baseline:local", []Result{{ID: "c", Outcome: Pass}}).KindsNote(); n != "" {
+		t.Errorf("without drift: %q", n)
+	}
+}

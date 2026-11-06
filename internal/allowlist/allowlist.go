@@ -718,7 +718,10 @@ type Usage struct {
 	headers, body []use
 }
 
-type use struct{ requests, used atomic.Int64 }
+// use counts, per rule, the requests it matched (matched), those of them
+// compared far enough for it to apply (requests), and those it applied to
+// a change of (used).
+type use struct{ matched, requests, used atomic.Int64 }
 
 // Track returns the list with a new Usage and its rules numbered: lists
 // made from it (ForTarget, ForRequest) count into it.
@@ -747,8 +750,12 @@ func (l *List) Done(request string, values, bodies bool) {
 	}
 	for i := range l.Headers {
 		r := &l.Headers[i]
-		if r.n > 0 && values && (r.Request == "" || glob.Match(r.Request, request)) {
+		if r.n > 0 && (r.Request == "" || glob.Match(r.Request, request)) {
 			u := &l.usage.headers[r.n-1]
+			u.matched.Add(1)
+			if !values {
+				continue
+			}
 			u.requests.Add(1)
 			if r.used {
 				u.used.Add(1)
@@ -757,8 +764,12 @@ func (l *List) Done(request string, values, bodies bool) {
 	}
 	for i := range l.Body {
 		r := &l.Body[i]
-		if r.n > 0 && bodies && (values || r.AnyLength) && l.applies(r, request) {
+		if r.n > 0 && l.applies(r, request) {
 			u := &l.usage.body[r.n-1]
+			u.matched.Add(1)
+			if !bodies || !(values || r.AnyLength) {
+				continue
+			}
 			u.requests.Add(1)
 			if r.used {
 				u.used.Add(1)
@@ -816,7 +827,8 @@ type Unused struct {
 // Unused lists the rules of a tracked list (Track) that applied to no
 // change in the comparison; with selected, only those that apply to a
 // compared request (a comparison of some requests says nothing about the
-// rules of the others).
+// rules of the others). A rule whose requests were not compared far
+// enough for it (a value rule at --level shape) is not listed.
 func (l *List) Unused(selected bool) []Unused {
 	if l.usage == nil {
 		return nil
@@ -827,7 +839,10 @@ func (l *List) Unused(selected bool) []Unused {
 		case n.used.Load() > 0:
 			return
 		case n.requests.Load() == 0:
-			if selected {
+			// A rule its requests had no chance to use (a level looser
+			// than the rule needs, bodies not on this machine) is not
+			// called stale: removing it would drop a good rule.
+			if selected || n.matched.Load() > 0 {
 				return
 			}
 			u.Why = "no request"

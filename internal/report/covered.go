@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -159,6 +160,29 @@ type Dominant struct {
 	// --skip-fingerprint-check. accept and expect take neither.
 	Captures   bool `json:"captures,omitempty"`
 	Unreliable bool `json:"unreliable,omitempty"`
+}
+
+// KindsNote counts the drifts by kind, the most first ("kinds:
+// header-extra 622, array-length 188, status 6"); empty without drift.
+func (r *Report) KindsNote() string {
+	if len(r.Kinds) == 0 {
+		return ""
+	}
+	kinds := make([]string, 0, len(r.Kinds))
+	for k := range r.Kinds {
+		kinds = append(kinds, k)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		if a, b := r.Kinds[kinds[i]], r.Kinds[kinds[j]]; a != b {
+			return a > b
+		}
+		return kinds[i] < kinds[j]
+	})
+	parts := make([]string, len(kinds))
+	for i, k := range kinds {
+		parts[i] = fmt.Sprintf("%s %d", k, r.Kinds[k])
+	}
+	return "kinds: " + strings.Join(parts, ", ")
 }
 
 // DominantNote says it; empty without one.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/snapshot"
@@ -35,6 +36,43 @@ type File struct {
 
 // IsCommand reports an entry that runs a command instead of sending a request.
 func (r Request) IsCommand() bool { return len(r.Command) > 0 }
+
+// ReadOnly reports an entry a read-only capture (--read-only) sends: a
+// request that does not change data, and a command step only when it
+// says mutates: false.
+func (r Request) ReadOnly() bool {
+	if r.IsCommand() {
+		return r.Mutates != nil && !*r.Mutates
+	}
+	return !r.Mutating()
+}
+
+// ReadOnlySkips are the IDs a read-only capture leaves out: the entries
+// that are not ReadOnly, and every request of a sequence that holds one
+// (its later requests may take values from the earlier ones). nil when
+// it leaves out none.
+func (c *Catalog) ReadOnlySkips() map[string]bool {
+	var skip map[string]bool
+	add := func(id string) {
+		if skip == nil {
+			skip = map[string]bool{}
+		}
+		skip[id] = true
+	}
+	for _, r := range c.Requests {
+		if !r.ReadOnly() {
+			add(r.ID)
+		}
+	}
+	for _, s := range c.Sequences {
+		if slices.ContainsFunc(s.Requests, func(id string) bool { return skip[id] }) {
+			for _, id := range s.Requests {
+				add(id)
+			}
+		}
+	}
+	return skip
+}
 
 // Sequential reports an entry that runs one at a time after the read-only
 // requests, like a request that changes data: a command, a request sent

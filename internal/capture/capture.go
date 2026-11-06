@@ -64,11 +64,14 @@ func envErr(format string, a ...any) error {
 
 // Options of one capture.
 type Options struct {
-	Tag                         string
-	Only                        string // glob over request IDs
-	Force                       bool   // replace an existing capture with this tag
-	AllowRemote                 bool   // allow a target outside allow_hosts
-	AllowRemoteMutations        bool   // and send requests that change data to it
+	Tag  string
+	Only string // glob over request IDs
+	// ReadOnly sends only the requests that do not change data
+	// (catalog.ReadOnlySkips leaves the others out).
+	ReadOnly                    bool
+	Force                       bool // replace an existing capture with this tag
+	AllowRemote                 bool // allow a target outside allow_hosts
+	AllowRemoteMutations        bool // and send requests that change data to it
 	AllowMutatingWithoutRestore bool
 	Restore                     string        // once (default): before the run and before the requests that change data; each: also before every sequence
 	Baseline                    *snapshot.Set // the state must match the one this baseline was captured from
@@ -123,11 +126,12 @@ type unit struct {
 	reqs []catalog.Request
 }
 
-// plan splits the selected requests into read-only requests and units.
-func plan(cat *catalog.Catalog, only string) (readonly []catalog.Request, units []unit) {
+// plan splits the selected requests into read-only requests and units;
+// skip are requests left out (a read-only capture's).
+func plan(cat *catalog.Catalog, only string, skip map[string]bool) (readonly []catalog.Request, units []unit) {
 	selected := map[string]catalog.Request{}
 	for _, r := range cat.Requests {
-		if only == "" || glob.Match(only, r.ID) {
+		if (only == "" || glob.Match(only, r.ID)) && !skip[r.ID] {
 			selected[r.ID] = r
 		}
 	}
@@ -180,8 +184,20 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	default:
 		return nil, configErr("--restore must be once or each")
 	}
-	readonly, units := plan(cat, opt.Only)
+	var skip map[string]bool
+	if opt.ReadOnly {
+		// --read-only selects requests; the project's own commands run as
+		// configured, and connect_to does not apply to them.
+		if err := CheckReadOnly(p); err != nil {
+			return nil, err
+		}
+		skip = cat.ReadOnlySkips()
+	}
+	readonly, units := plan(cat, opt.Only, skip)
 	if len(readonly)+len(units) == 0 {
+		if opt.ReadOnly {
+			return nil, configErr("no catalog request that leaves data unchanged is selected (--read-only)")
+		}
 		if opt.Only != "" {
 			return nil, configErr("no catalog request matches --only %s", opt.Only)
 		}
@@ -190,7 +206,10 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	var mutating, repeats []catalog.Request
 	for _, u := range units {
 		for _, r := range u.reqs {
-			if r.Mutating() || r.IsCommand() {
+			// A command step changes data unless it says mutates: false,
+			// which only a read-only capture takes at its word (it sends
+			// no other step).
+			if r.Mutating() || r.IsCommand() && !opt.ReadOnly {
 				mutating = append(mutating, r)
 			} else if r.Repeat > 1 {
 				repeats = append(repeats, r)
@@ -218,7 +237,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := checkAllCommands(p, readonly, units); err != nil {
 		return nil, err
 	}
-
 	set, err := p.Capture(opt.Tag)
 	if err != nil {
 		return nil, err // config.ErrInvalid for a tag, else the store's
@@ -353,6 +371,17 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := r.reloadTokens(ctx); err != nil {
 		return nil, err
 	}
+	// The guards are checked once restore and prepare have set up the
+	// environment they check, before the first request, so one that fails
+	// stops the capture in seconds, not after the read-only requests; and
+	// before the fingerprint the read-only phase starts from, so a write
+	// of one (guards only check, but a command may log itself) is part of
+	// that state and never taken for a request's.
+	if len(units) > 0 {
+		if err := checkGuards(ctx, p, opt, true); err != nil {
+			return nil, err
+		}
+	}
 	before, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -368,7 +397,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
 	}
-
 	r.base = opt.Baseline
 	r.retry = newRetrying(readonly)
 	if err := r.byService(ctx, readonly, true); err != nil {
@@ -392,11 +420,13 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	if len(units) > 0 {
-		for _, g := range p.Guards {
-			if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
-				return nil, envErr("guard %q failed: %v", g.Name, err)
+		// Again right before the requests that change data, which they
+		// guard, when read-only requests ran since the first check: that
+		// phase may take long, and the environment may change during it.
+		if len(readonly) > 0 {
+			if err := checkGuards(ctx, p, opt, false); err != nil {
+				return nil, err
 			}
-			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
 		}
 		prev, err := r.reset(ctx)
 		if err != nil {
@@ -426,7 +456,18 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
-		RowTracking: rowTrackingItems(p)}
+		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
+	if opt.ReadOnly {
+		// What it left out, as the catalog was: a comparison reads the
+		// list, not the catalog of its own time.
+		meta.ReadOnlySkipped = []string{}
+		for id := range skip {
+			if opt.Only == "" || glob.Match(opt.Only, id) {
+				meta.ReadOnlySkipped = append(meta.ReadOnlySkipped, id)
+			}
+		}
+		sort.Strings(meta.ReadOnlySkipped)
+	}
 	if r.sum.Tracked {
 		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
 	}
@@ -437,6 +478,12 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 				meta.Origins = map[string]string{}
 			}
 			meta.Origins[name] = o
+		}
+		if t.ConnectTo != "" {
+			if meta.ConnectTo == nil {
+				meta.ConnectTo = map[string]string{}
+			}
+			meta.ConnectTo[name] = t.ConnectTo
 		}
 	}
 	// The meta without Incomplete marks the capture whole: it is written last.
@@ -658,6 +705,29 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 	return ids
 }
 
+// CheckReadOnly refuses a configuration a read-only capture cannot keep
+// from writing: --read-only selects requests, and prepare: runs after
+// every restore as configured.
+func CheckReadOnly(p *config.Project) error {
+	if len(p.Prepare) > 0 {
+		return configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
+	}
+	return nil
+}
+
+// checkGuards runs the guards; say prints each that succeeded.
+func checkGuards(ctx context.Context, p *config.Project, opt Options, say bool) error {
+	for _, g := range p.Guards {
+		if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
+			return envErr("guard %q failed: %v", g.Name, err)
+		}
+		if say {
+			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
+		}
+	}
+	return nil
+}
+
 func unitRequests(units []unit) []catalog.Request {
 	var out []catalog.Request
 	for _, u := range units {
@@ -690,7 +760,7 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 	if t.BaseURL == "" {
 		return nil, configErr("%s: the target has no base_url", req.ID)
 	}
-	allow, err := httpx.NewAllow(t.AllowHosts, allowRemote)
+	allow, err := t.Allow(allowRemote)
 	if err != nil {
 		return nil, configErr("%v", err)
 	}
@@ -702,7 +772,7 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 	}
 	remote := false
 	if allowRemote {
-		strict, err := httpx.NewAllow(t.AllowHosts, false)
+		strict, err := t.Allow(false)
 		if err != nil {
 			return nil, configErr("%v", err)
 		}

@@ -39,6 +39,7 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	baseline := fs.String("baseline", "local", "")
 	noRestore := fs.Bool("allow-mutating-without-restore", false, "")
 	skipPrivate := fs.Bool("skip-private", false, "")
+	readOnly := fs.Bool("read-only", false, "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -99,6 +100,15 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Before anything runs (the seed, routes, a capture).
+	if *readOnly {
+		if err := capture.CheckReadOnly(p); err != nil {
+			return 0, failed(err)
+		}
+	}
+	if first && *readOnly {
+		return 0, configErr("there is no baseline yet: the first run makes it from every request, so it takes no --read-only (a read-only baseline would leave the requests that change data unchecked)")
+	}
 	if first && sel != nil {
 		return 0, configErr("there is no baseline yet: the first run makes it for every service, so it takes no --target")
 	}
@@ -141,7 +151,7 @@ func runCmd(args []string, out, errOut io.Writer) (int, error) {
 
 	step("capture")
 	var retried []string // of the capture a first run makes the baseline from
-	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore,
+	opts := captureOptions{force: true, quiet: true, baseline: *baseline, restore: "once", repeat: 1, noRestore: *noRestore, readOnly: *readOnly,
 		first: func(sum *capture.Summary) { retried = retriedIDs(sum) }}
 	if first {
 		// Two sequential captures that agree, then concurrency: auto is

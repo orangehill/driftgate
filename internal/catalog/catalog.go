@@ -104,6 +104,22 @@ func (r Request) Mutating() bool {
 	return !SafeMethod(r.Method)
 }
 
+// LiteralID is the first segment of a request path that is a number
+// written in the path itself (17 of /api/users/17), not a {parameter}:
+// on another copy of the data that id may be a real record. Empty when
+// there is none; the query is not read.
+func LiteralID(path string) string {
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if seg != "" && strings.Trim(seg, "0123456789") == "" {
+			return seg
+		}
+	}
+	return ""
+}
+
 // MutatingByMethod reports a request that changes data only because of its
 // method: the catalog does not say mutates. A search sent as POST is one
 // until it is written mutates: false.

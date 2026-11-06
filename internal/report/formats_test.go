@@ -70,3 +70,35 @@ func TestEveryClassInEveryFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestJUnitIncomplete: an incomplete result (exit 3) is an error in the
+// JUnit file, with why, so a CI that reads only the file does not see it
+// green; a complete one has none.
+func TestJUnitIncomplete(t *testing.T) {
+	for name, c := range map[string]struct {
+		results []Result
+		want    string
+	}{
+		"private":   {[]Result{{ID: "a", Outcome: Pass}, {ID: "me", Outcome: Skipped, Note: NotePrivateMissing}}, "the result is incomplete: 1 private request could not be compared here"},
+		"read-only": {[]Result{{ID: "a", Outcome: Pass}, {ID: "post", Outcome: Skipped, Note: NoteReadOnlyBaseline}}, "incomplete: 1 request not checked: capture:ro was captured with --read-only"},
+		"nothing":   {[]Result{{ID: "a", Outcome: Skipped, Note: NoteNoBaseline}}, "nothing was compared"},
+		"complete":  {[]Result{{ID: "a", Outcome: Pass}}, ""},
+	} {
+		r := Build("cur", "capture:ro", c.results)
+		var b strings.Builder
+		if err := r.JUnit(&b, DefaultDrifts); err != nil {
+			t.Fatal(err)
+		}
+		out := b.String()
+		if c.want == "" {
+			if !strings.Contains(out, `errors="0"`) || strings.Contains(out, "<error") {
+				t.Errorf("%s: %s", name, out)
+			}
+			continue
+		}
+		if strings.Count(out, `errors="1"`) != 2 || !strings.Contains(out, `<testcase name="incomplete"`) ||
+			!strings.Contains(out, `type="incomplete"`) || !strings.Contains(out, c.want) {
+			t.Errorf("%s: %s", name, out)
+		}
+	}
+}

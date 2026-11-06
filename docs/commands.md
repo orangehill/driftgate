@@ -15,7 +15,7 @@ An unknown command or help topic names the table of
 [what to use for what](configuration.md#what-to-use-for-what).
 
 Contents: [common flags](#common-flags) · [exit codes](#exit-codes) ·
-[init](#init) · [setup](#setup) · [seed](#seed) · [run](#run) · [discover](#discover) ·
+[init](#init) · [setup](#setup) · [seed](#seed) · [clean](#clean) · [run](#run) · [discover](#discover) ·
 [generate](#generate) · [coverage](#coverage) · [har import](#har-import) ·
 [record](#record) · [capture](#capture) · [compare](#compare) · [report](#report) ·
 [allowlist check](#allowlist-check) · [review](#review) · [accept](#accept) · [expect](#expect) · [verify](#verify) ·
@@ -325,11 +325,54 @@ file.
 driftgate seed
 ```
 
+## clean
+
+```
+driftgate clean [<component>…] [--yes]
+```
+
+Removes what `seed` made: the pristine copy of every database component
+under `state:` (or of the components named) and its record in the local
+store.
+
+| Flag | Meaning |
+|---|---|
+| `--yes` | remove without asking (needed without a terminal) |
+
+- It lists what it would remove (`state db: database shop_pristine
+  (mysql, tcp(127.0.0.1:3306))`, an SQLite pristine file) and asks; without
+  a terminal to ask on it stops (exit 2) unless `--yes`.
+- Only the pristine copies the configuration names, on the server its DSN
+  names now; never a working database. A name that is not a database
+  component under `state:` is refused (exit 2).
+- A copy is removed only when `seed` made it as the copy of this
+  project's working database: MySQL and MariaDB by the note of its
+  `driftgate_pristine` table, PostgreSQL by its comment, SQL Server by its
+  mark, each naming the working database; SQLite by its
+  `driftgate_pristine` table. Any other database or file of that name
+  (another project's copy that shares the name) is left as it is (exit 3),
+  with its record. A MySQL or MariaDB copy made by an earlier release,
+  whose mark names no working database, is refused too: remove it
+  yourself, or run `seed` once to mark it.
+- SQL Server: the backup of the pristine copy in the server's backup folder
+  is not removed.
+- SQLite: the working file need not be there (a worktree git did not give
+  it): the copy is found by its record in the local store. Without the
+  file and without a record, clean stops (exit 2) and names the folder of
+  the store's copies.
+- Commands of the project's own (test users, a cache) are not run; the
+  next capture needs `driftgate seed` again (`run` seeds by itself).
+
+```sh
+driftgate clean            # asks first
+driftgate clean db --yes
+```
+
 ## run
 
 ```
 driftgate run [--baseline <name>] [--allow-mutating-without-restore]
-    [--skip-private] [--target <service>]
+    [--skip-private] [--read-only] [--target <service>]
 ```
 
 Routes, catalog, capture and compare in one command; the first run makes the
@@ -340,6 +383,7 @@ baseline from two equal captures.
 | `--baseline <name>` | baseline to make or compare with (default `local`) |
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-private` | accept that private bodies not on this machine are not compared (their status, headers and side effects are); without it the result is incomplete (exit 3) |
+| `--read-only` | capture only the requests that do not change data, as `capture --read-only`; only with a baseline (the first run makes it from every request) |
 | `--target <service>` | work on this service only (repeatable or comma-separated); the check is then reported as partial |
 
 - Steps: `discover` (routes), `generate` (catalog), `coverage`, `seed` when
@@ -607,7 +651,8 @@ driftgate record --write --exclude '/admin/*'     # add it to the catalog on Ctr
 driftgate capture <tag> [--only <glob>] [--force] [--restore once|each]
     [--repeat N] [--baseline <name>] [--allow-remote]
     [--allow-remote-mutations] [--allow-mutating-without-restore]
-    [--skip-fingerprint-check] [--calibrate] [--quiet] [--target <service>]
+    [--skip-fingerprint-check] [--calibrate] [--read-only] [--quiet]
+    [--target <service>]
 ```
 
 Restores the state, sends the catalog and stores the responses under a tag.
@@ -624,6 +669,7 @@ Restores the state, sends the catalog and stores the responses under a tag.
 | `--allow-mutating-without-restore` | send requests that change data even without a state restore (not uploads of real files) |
 | `--skip-fingerprint-check` | do not check the state fingerprint (diagnostics only; the capture is marked unreliable) |
 | `--calibrate` | decide `concurrency: auto`: measure, compare a capture at the chosen setting with a sequential one, record it in the baseline (implies `--repeat 2`; not with `--only`) |
+| `--read-only` | send only the requests that do not change data; see [below](#read-only-check-of-a-live-server) |
 | `--quiet` | no progress output |
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
@@ -661,9 +707,17 @@ Restores the state, sends the catalog and stores the responses under a tag.
   [`requests`](configuration.md#requests) in `driftgate.yaml`, then
   `driftgate generate --write` (a later `generate` would write the catalog
   entry again); for entries written by hand in the catalog.
+- A request that changes data with a fixed id in its path (`PUT
+  /api/users/17`, an id neither a `{parameter}` nor from `params_from`) is
+  warned of, one line per request, before the capture (and by
+  `generate`): on another copy of the data that id may be a real record,
+  and the status would not show it. Take the id from a response with
+  [`params_from`](configuration.md#templates-generate-params) instead. The exit code stays.
 - A read-only request that changed data is recorded with its side
   effects, and the capture prints the `requests:` entries that mark it
-  `mutates: true`.
+  `mutates: true`. On a server that is not isolated (shared with other
+  developers, users or background jobs), such a side effect may be their
+  traffic, not the request's: check it before marking the request.
 - When the restored state differs from the state the baseline was captured
   from, the capture stops with exit 3 and lists the tables that differ: the
   pristine copy holds other data (a seed since, other seed data or
@@ -675,6 +729,15 @@ Restores the state, sends the catalog and stores the responses under a tag.
   with [`driftgate baselines rebase`](#baselines-rebase). When the items that
   differ are tables made `restore_only` since, it says that the
   configuration changed: make the baseline again.
+- The [guards](configuration.md#seed-prepare-guards) are checked (when
+  requests change data) after the restore and `prepare`, which may set up
+  what they check, before the first request, and again right before the
+  first request that changes data when read-only requests ran in between:
+  one that fails stops the capture there (exit 3), in seconds rather than
+  after the read-only requests. Guards only check; a write of one becomes
+  part of the state the read-only requests start from (a restore removes
+  it before the requests that change data), and may be reported as a
+  change `prepare` made.
 - When `prepare` changed the restored state, the capture warns and lists
   what it changed ([seed, prepare,
   guards](configuration.md#seed-prepare-guards)); the exit code stays.
@@ -690,6 +753,81 @@ restoring api …
 ...
 2 runs on the same state gave the same responses ✓
 ```
+
+### Read-only check of a live server
+
+`--read-only` sends only the requests that do not change data: `GET`,
+`HEAD` and `OPTIONS`, and those marked `mutates: false` (a search sent as
+`POST`). It leaves out the requests that change data, command steps (but
+those marked `mutates: false`) and every request of a sequence that holds
+one of them, as its later requests may need the earlier ones. The capture
+says how many it left out and records `read_only` and the IDs it left
+out (`read_only_skipped`) in its `meta.json`. A comparison of it skips
+those, whatever the catalog says by then (`not sent: capture
+--read-only`), and lists those that change data under what the result
+does not cover. A request
+missing from it for any other reason still drifts.
+
+A read-only capture is never a baseline for the requests it left out:
+the first `run` makes the baseline from every request and refuses
+`--read-only`, and `baselines rebase --from` refuses a read-only
+capture. Compared against a read-only capture (`--against
+capture:<tag>`), the requests it left out were never checked: they are
+listed as such and the result is incomplete (exit 3), not new requests to
+accept.
+
+`--read-only` selects requests; the project's own commands (`prepare`,
+`tokens.command`, `seed`, guards, restore commands) run as configured,
+may write, and do not go through `connect_to`. So `--read-only` is
+refused when `prepare:` is configured, and a `tokens.command` gets a
+warning; leave those out of the configuration for a server that must not
+change.
+
+With a configuration without `state:` nothing is restored, seeded or
+fingerprinted, so this checks a server that must not change (a
+production, a new server before the switch) without writing to it:
+
+<!-- check: config-fragment -->
+```yaml
+version: 1
+project: shop
+target:
+  base_url: https://shop.example
+  connect_to: 203.0.113.10        # the new server, whatever DNS says
+  allow_hosts: [203.0.113.10]
+```
+
+```sh
+driftgate capture live-before --read-only
+# … the change on the server …
+driftgate capture live-after --read-only
+driftgate compare live-after --against capture:live-before
+```
+
+`allow_hosts` names the server's address, which is outside the local and
+private ranges; without it, the captures need `--allow-remote`. Requests
+that change data are never sent, so `--allow-remote-mutations` is not
+needed. Another developer's traffic on a shared server shows as drift in the data
+the responses hold; a side effect is not recorded without `state:`.
+
+**Requests that need a login.** A login usually writes (a last-login
+time, a session row), so do not let DriftGate log in on such a server:
+give each identity a token issued beforehand (an API or personal access
+token), from the environment or a password manager, under
+[`identities:`](configuration.md#identities-and-tokens):
+
+<!-- check: config-fragment -->
+```yaml
+identities:
+  admin: { env: DG_TOKEN_ADMIN }
+```
+
+**Requests the frontend sends itself.** A page that loads data with its
+own requests (a filter, a search, a panel's widgets) is checked only if
+those requests are in the catalog. Use the frontend once through
+[`driftgate record`](#record) on a copy where writes are allowed, and
+add what it proposes to the catalog: a green result says nothing about a
+request the catalog does not have.
 
 ## compare
 
@@ -719,6 +857,13 @@ baseline or capture is named `run`).
 
 The comparison is kept as the last comparison, which `report`, `review`,
 `accept`, `expect` and `bisect` read.
+
+In JUnit every request is a test case (a drifted one fails, a skipped or
+observed one is skipped); an incomplete result (exit 3: private bodies not
+on this machine, requests a read-only set left out, nothing compared) adds
+a test case `incomplete` with an `<error>` that says why, so the suite's
+`errors` count is not 0 and a CI that reads only the file does not see it
+pass.
 
 Against a baseline with [expectations](#expect), a drift an expectation
 names exactly is expected, and a request every drift of which is expected
@@ -798,7 +943,9 @@ failure): a rule whose requests are all gone or renamed (`no request`),
 or one whose values did not change this time (`no change`). A rule listed
 comparison after comparison is probably stale: the value it names was
 renamed or removed. With `--only` or `--target`, rules of the requests
-not compared are not listed. A rule `init` wrote for the framework (a
+not compared are not listed, and neither is a rule its requests were
+not compared far enough for: below `--level values` a header or
+value rule never applies, so it is not called stale. A rule `init` wrote for the framework (a
 throttle's `x-ratelimit-*`) is not listed, in the text nor in the JSON
 (`unused_rules`), while it is as `init` wrote it: the same header or
 path, request, format and its options, and reason; one you changed is.
@@ -830,6 +977,11 @@ with `catalog` (`requests`, `reads`, `mutating`, `commands`, and
 `known_failures` (each `count` and up to ten `names`: request IDs or
 routes; left out when empty); markdown: a short list; JUnit: the lines in
 the suite's `system-out`.
+
+With drift, one line counts the drifts by kind, the most first, status
+included: `kinds: header-extra 622, array-length 188, type 154,
+side-effect 6` (text and markdown; JSON: `kinds`, a count per kind). It
+stands right before the line below.
 
 When one change is in nine of ten requests with an unexpected drift or
 more (at least five; expected drifts do not count), a line says so and how

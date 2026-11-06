@@ -224,8 +224,11 @@ func TestLoadRefuses(t *testing.T) {
 		base + "target:\n  retry: 4\n":                 "target.retry must be from 0 (no retry) to 3",
 		base + "targets:\n  api:\n    retry: -1\n":     "targets.api.retry must be from 0",
 		base + "target:\n  retry: 0\n":                 "",
-		base + "requests:\n  - match: get-news\n":      "requests 1: needs mutates or body",
-		base + "requests:\n  - mutates: true\n":        "requests 1: needs match",
+		base + "target:\n  connect_to: 203.0.113.10\n": "target.connect_to needs base_url",
+		base + "target:\n  base_url: https://shop.example\n  connect_to: 203.0.113.10:8443\n":                      "",
+		base + "targets:\n  api:\n    base_url: https://shop.example\n    connect_to: https://x\n":                 "targets.api: connect_to",
+		base + "requests:\n  - match: get-news\n":                                                                  "requests 1: needs mutates or body",
+		base + "requests:\n  - mutates: true\n":                                                                    "requests 1: needs match",
 		base + "requests:\n  - match: \"GET /news\"\n    target: web\n    mutates: true\n":                         "requests 1: ",
 		base + "requests:\n  - match: \"POST /search\"\n    mutates: false\n    body: { q: news, tags: [a, b] }\n": "",
 	} {

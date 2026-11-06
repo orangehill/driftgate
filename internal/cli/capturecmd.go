@@ -18,6 +18,7 @@ import (
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/generate"
+	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
@@ -38,6 +39,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	skipFP := fs.Bool("skip-fingerprint-check", false, "")
 	quiet := fs.Bool("quiet", false, "")
 	calibrate := fs.Bool("calibrate", false, "")
+	readOnly := fs.Bool("read-only", false, "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -74,7 +76,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	defer unlock()
 	return captureSet(ctx, p, sel.requests(cat), allow, pos[0], captureOptions{only: *only, force: *force, allowRemote: *remote,
 		allowRemoteMutations: *remoteMut, noRestore: *noRestore, restore: *restore, repeat: *repeat, baseline: *baseline,
-		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate}, out, errOut)
+		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate, readOnly: *readOnly}, out, errOut)
 }
 
 // captureOptions are the flags of capture.
@@ -90,9 +92,19 @@ type captureOptions struct {
 	skipFingerprint      bool
 	quiet                bool
 	calibrate            bool // decide concurrency: auto (after the repeats agree)
+	readOnly             bool // send only the requests that do not change data
 	// first, when set, gets the summary of the first capture (run makes
 	// the baseline from it).
 	first func(*capture.Summary)
+}
+
+// runOptions are the options of every capture.Run of a capture command:
+// what the flags select (--only, --read-only) and allow goes into each,
+// so no run of it (a repeat, the calibrated one) sends more than asked.
+func (o captureOptions) runOptions(tag string, base *snapshot.Set, out, log io.Writer) capture.Options {
+	return capture.Options{Tag: tag, Only: o.only, ReadOnly: o.readOnly, AllowRemote: o.allowRemote,
+		AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
+		Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: out, Log: log}
 }
 
 // runGap is the least time between the end of a run of a repeated capture
@@ -130,7 +142,16 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		return 0, err
 	}
 
-	byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+	if o.readOnly {
+		// Once per command, however many runs it makes (--repeat).
+		if len(p.Tokens.Command) > 0 {
+			fmt.Fprintln(errOut, "warning: --read-only covers the requests only: tokens.command runs as configured and may write (a login), and connect_to does not apply to it")
+		}
+		readOnlyNote(out, cat, o.only)
+	} else {
+		byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+		literalIDNote(out, cat, o.only)
+	}
 
 	tags := []string{tag}
 	for i := 2; i <= o.repeat; i++ {
@@ -156,9 +177,8 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		if len(tags) > 1 {
 			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
 		}
-		opt := capture.Options{Tag: tag, Only: o.only, Force: o.force || i > 0, AllowRemote: o.allowRemote,
-			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used, NotBefore: notBefore}
+		opt := o.runOptions(tag, base, progress, errOut)
+		opt.Force, opt.Concurrency, opt.NotBefore = o.force || i > 0, used, notBefore
 		sum, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return 0, failed(err)
@@ -282,6 +302,36 @@ func byMethodNote(out io.Writer, ids []string, restore string) {
 		"  say mutates: false for those that only read (a search sent as POST), mutates: true for the others,\n"+
 		"  under requests: in driftgate.yaml (match: the request ID), then driftgate generate --write; an entry written by hand says it in the catalog\n",
 		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
+}
+
+// readOnlyNote says how many selected requests a read-only capture
+// leaves out.
+func readOnlyNote(out io.Writer, cat *catalog.Catalog, only string) {
+	n := 0
+	for id := range cat.ReadOnlySkips() {
+		if only == "" || glob.Match(only, id) {
+			n++
+		}
+	}
+	if n > 0 {
+		fmt.Fprintf(out, "--read-only: %d %s that change data (or share a sequence with one) not sent\n", n, plural(n, "request", "requests"))
+	}
+}
+
+// literalIDNote warns, one line per request, of a request that changes
+// data with a fixed id in its path (PUT /api/users/17): on another copy
+// of the data that id may be a real record, and the status would not
+// show it. An id from params_from or a parameter is not warned of.
+func literalIDNote(out io.Writer, cat *catalog.Catalog, only string) {
+	for _, r := range cat.Requests {
+		if r.Command != nil || !r.Mutating() || (only != "" && !glob.Match(only, r.ID)) {
+			continue
+		}
+		if id := catalog.LiteralID(r.Path); id != "" {
+			fmt.Fprintf(out, "warning: %s (%s %s) changes data with the fixed id %s in its path; on another copy of the data it may be a real record: take it from a response with params_from\n",
+				r.ID, r.Method, r.Path, id)
+		}
+	}
 }
 
 // markWriters says how to mark read-only requests that changed data as

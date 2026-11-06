@@ -675,6 +675,20 @@
    "explanation": "2 drifts in 2 requests: $.status changed value (\"ok\" → \"error\")"
   }
  ],
+ "kinds": {
+  "element-extra": 12,
+  "element-missing": 4,
+  "encoding": 2,
+  "header-extra": 4,
+  "header-missing": 7,
+  "header-value": 3,
+  "key-extra": 4,
+  "key-missing": 2,
+  "status": 6,
+  "text": 8,
+  "type": 1,
+  "value": 3
+ },
  "status_changes": [
   {
    "from": "200",

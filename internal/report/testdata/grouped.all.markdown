@@ -6,6 +6,8 @@
 |---:|---:|---:|---:|---:|
 | 7 | 0 | 7 | 0 | 0 |
 
+> kinds: element-extra 12, text 8, header-missing 7, status 6, element-missing 4, header-extra 4, key-extra 4, header-value 3, value 3, encoding 2, key-missing 2, type 1
+
 #### What changed
 
 1. 6 drifts in 6 requests: status changed (for example 200 → 302)
