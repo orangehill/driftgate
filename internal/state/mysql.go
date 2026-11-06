@@ -962,8 +962,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			trigDefs = append(trigDefs, r)
 		}
 	}
-	type view struct{ def, collation string }
-	pending := map[string]view{}
+	pending := map[string]viewDef{}
 	for _, v := range views {
 		if srcObjs.kind[v] != "view" {
 			continue
@@ -973,7 +972,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			return nil, err
 		}
 		if r != nil {
-			pending[v] = view{localView(r["Create View"], src), r["collation_connection"]}
+			pending[v] = viewDef{localView(r["Create View"], src), r["collation_connection"]}
 		}
 	}
 	for name, kind := range dstObjs.probes {
@@ -1010,13 +1009,33 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			drops = append(drops, dropItem{kind: "trigger", name: tr.Name, definer: tr.Definer})
 		}
 	}
+	// Triggers and views are made with the collation of the connection
+	// that made them (their string literals have it), as mysqldump does;
+	// the session's own is set back after each.
+	var own string
+	if err := c.QueryRowContext(ctx, "SELECT @@collation_connection").Scan(&own); err != nil {
+		return nil, err
+	}
+	create := func(stmt, mode, collation string) error {
+		if _, err := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mode, collation); err != nil {
+			return err
+		}
+		_, err := c.ExecContext(ctx, stmt)
+		if _, err2 := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mysqlSession.SQLMode, own); err == nil {
+			err = err2
+		}
+		return err
+	}
+
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
 	}
+	var dropped []dropItem
 	for _, d := range drops {
 		if err := dropObject(ctx, c, dst, d.name, d.kind); err != nil {
-			return nil, err
+			return nil, undoDrops(dst, dropped, trigDefs, pending, create, err)
 		}
+		dropped = append(dropped, d)
 	}
 
 	var jobs []tableJob
@@ -1064,24 +1083,6 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(s), next)); err != nil {
 			return nil, fmt.Errorf("sequence %s: %w", s, err)
 		}
-	}
-
-	// Triggers and views are made with the collation of the connection
-	// that made them (their string literals have it), as mysqldump does;
-	// the session's own is set back after each.
-	var own string
-	if err := c.QueryRowContext(ctx, "SELECT @@collation_connection").Scan(&own); err != nil {
-		return nil, err
-	}
-	create := func(stmt, mode, collation string) error {
-		if _, err := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mode, collation); err != nil {
-			return err
-		}
-		_, err := c.ExecContext(ctx, stmt)
-		if _, err2 := c.ExecContext(ctx, "SET SESSION sql_mode = ?, collation_connection = ?", mysqlSession.SQLMode, own); err == nil {
-			err = err2
-		}
-		return err
 	}
 
 	// trigDefs are in firing order per table.
@@ -1163,6 +1164,78 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 	}
 	return fmt.Errorf("%s %s: %w", kind, name, me)
 }
+
+// undoDrops answers a drop the server refused (refused) after the drops
+// of dropped succeeded: the triggers and views among them are made again
+// from their definitions in the pristine copy (trigDefs, views), which
+// definerProbe showed the login may create, so dst keeps every trigger and
+// view, those in their pristine form. What cannot be made again (no such
+// object in the pristine copy, or its creation fails) is named as missing.
+func undoDrops(dst string, dropped []dropItem, trigDefs []map[string]string, views map[string]viewDef, create func(stmt, mode, collation string) error, refused error) error {
+	var missing []string
+	var again []string
+	for _, d := range dropped {
+		if d.kind != "trigger" {
+			continue
+		}
+		i := slices.IndexFunc(trigDefs, func(r map[string]string) bool { return r["name"] == d.name })
+		switch {
+		case i < 0:
+			missing = append(missing, "trigger "+d.name+" (not in the pristine copy)")
+		default:
+			r := trigDefs[i]
+			if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
+				missing = append(missing, fmt.Sprintf("trigger %s (%v)", d.name, err))
+			} else {
+				again = append(again, "trigger "+d.name)
+			}
+		}
+	}
+	// A view may use another view: create them until no more succeed.
+	left := map[string]error{}
+	for _, d := range dropped {
+		switch {
+		case d.kind == "trigger":
+		case d.kind != "view":
+			missing = append(missing, d.kind+" "+d.name+" (not made again)")
+		default:
+			if _, ok := views[d.name]; ok {
+				left[d.name] = nil
+			} else {
+				missing = append(missing, "view "+d.name+" (not in the pristine copy)")
+			}
+		}
+	}
+	for progress := true; progress && len(left) > 0; {
+		progress = false
+		for name := range left {
+			v := views[name]
+			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
+				left[name] = err
+				continue
+			}
+			delete(left, name)
+			again = append(again, "view "+name)
+			progress = true
+		}
+	}
+	for name, err := range left {
+		missing = append(missing, fmt.Sprintf("view %s (%v)", name, err))
+	}
+	sort.Strings(again)
+	sort.Strings(missing)
+	more := ""
+	if len(again) > 0 {
+		more += fmt.Sprintf(". Dropped before the refusal and made again from the pristine copy: %s", strings.Join(again, ", "))
+	}
+	if len(missing) > 0 {
+		more += fmt.Sprintf(". Now missing from %s: %s; the next successful restore makes them again", dst, strings.Join(missing, "; "))
+	}
+	return fmt.Errorf("%w%s", refused, more)
+}
+
+// viewDef is a view's CREATE statement and the collation it was made with.
+type viewDef struct{ def, collation string }
 
 func splitItems(items []string) (tables, views, sequences, triggers []string) {
 	for _, it := range items {

@@ -228,65 +228,91 @@ func definerObjects(t *testing.T, root *sql.DB, db string) string {
 }
 
 // TestMySQLDropOthersFirst: a restore drops the views whose DEFINER is not
-// the login first. A view of the working database that root made again
-// since the seed (MySQL: root has SYSTEM_USER, so the login may not drop
-// it), named after another view the restore drops, is refused before that
-// other view is dropped: both stay.
+// the login first, so a drop the server refuses (MySQL: root's view, as
+// root has SYSTEM_USER) comes before any other drop. When views of other
+// DEFINERs were dropped before it, they are made again from the pristine
+// copy, and only then does the restore stop; a view that cannot be made
+// again is named as missing.
 func TestMySQLDropOthersFirst(t *testing.T) {
 	for _, dsn := range mysqlServers(t) {
 		u, _ := url.Parse(dsn)
 		t.Run(u.Host, func(t *testing.T) {
-			ctx := context.Background()
-			root := mysqlAdmin(t, dsn, "")
-			work, pristine := "dgt_droporder", "dgt_droporder_pristine"
-			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_order'@'%'",
-				"CREATE DATABASE "+work, "CREATE USER 'dgt_order'@'%' IDENTIFIED BY 'x'",
-				"GRANT ALL ON "+work+".* TO 'dgt_order'@'%'", "GRANT ALL ON "+pristine+".* TO 'dgt_order'@'%'")
-			t.Cleanup(func() {
-				root.Exec("DROP DATABASE IF EXISTS " + work)
-				root.Exec("DROP DATABASE IF EXISTS " + pristine)
-				root.Exec("DROP USER IF EXISTS 'dgt_order'@'%'")
-			})
-			rootWork := mysqlAdmin(t, dsn, work)
-			mustExec(t, rootWork, "CREATE TABLE items (id INT PRIMARY KEY)",
-				"CREATE DEFINER = 'dgt_order'@'%' VIEW a_view AS SELECT id FROM items",
-				"CREATE DEFINER = 'dgt_order'@'%' VIEW b_view AS SELECT id FROM items")
-			seeder, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
-			if err != nil {
-				t.Fatal(err)
+			for _, c := range []struct {
+				name string
+				prep []string // in the working database after the seed
+				// MySQL's refusal: what it says, and the views after it
+				says, after string
+			}{
+				{"root's view", []string{"DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items"},
+					"view b_view cannot be dropped from dgt_droporder", "view a_view dgt_order@%, view b_view root@%"},
+				{"another account's view before root's", []string{"DROP VIEW a_view", "CREATE DEFINER = 'dgt_order_other'@'%' VIEW a_view AS SELECT id FROM items",
+					"DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items"},
+					"Dropped before the refusal and made again from the pristine copy: view a_view", "view a_view dgt_order@%, view b_view root@%"},
+				{"a view that cannot be made again", []string{"DROP VIEW a_view", "CREATE DEFINER = 'dgt_order_other'@'%' VIEW a_view AS SELECT id FROM items",
+					"DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items", "DROP TABLE items"},
+					"Now missing from dgt_droporder: view a_view (", "view b_view root@%"},
+			} {
+				t.Run(c.name, func(t *testing.T) { dropOthersFirst(t, dsn, c.prep, c.says, c.after) })
 			}
-			defer seeder.Close()
-			if err := seeder.Seed(ctx); err != nil {
-				t.Fatal(err)
-			}
-			// root makes b_view again, as its own.
-			mustExec(t, rootWork, "DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items")
-			before := definerObjects(t, root, work)
-			app := *u
-			app.User = url.UserPassword("dgt_order", "x")
-			m, err := NewMySQL(Options{Name: "db", DSN: app.String(), Working: work, Pristine: pristine})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer m.Close()
-			err = m.Restore(ctx, []string{"view:a_view", "view:b_view"})
-			after := definerObjects(t, root, work)
-			switch {
-			case err != nil:
-				// MySQL: b_view may not be dropped, and was tried first.
-				if !strings.Contains(err.Error(), "view b_view cannot be dropped from "+work) {
-					t.Fatalf("restore: %v", err)
-				}
-				if after != before {
-					t.Fatalf("after the refused restore: %s, was %s", after, before)
-				}
-			case after != "view a_view dgt_order@%, view b_view dgt_order@%":
-				// MariaDB: the drop is allowed, and the views are the
-				// pristine ones.
-				t.Fatalf("after the restore: %s", after)
-			}
-			t.Logf("%v: %s", err, after)
 		})
+	}
+}
+
+func dropOthersFirst(t *testing.T, dsn string, prep []string, says, want string) {
+	u, _ := url.Parse(dsn)
+	ctx := context.Background()
+	root := mysqlAdmin(t, dsn, "")
+	var version string
+	root.QueryRow("SELECT VERSION()").Scan(&version)
+	work, pristine := "dgt_droporder", "dgt_droporder_pristine"
+	mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_order'@'%'", "DROP USER IF EXISTS 'dgt_order_other'@'%'",
+		"CREATE DATABASE "+work, "CREATE USER 'dgt_order'@'%' IDENTIFIED BY 'x'", "CREATE USER 'dgt_order_other'@'%' IDENTIFIED BY 'x'",
+		"GRANT SELECT ON "+work+".* TO 'dgt_order_other'@'%'",
+		"GRANT ALL ON "+work+".* TO 'dgt_order'@'%'", "GRANT ALL ON "+pristine+".* TO 'dgt_order'@'%'")
+	t.Cleanup(func() {
+		root.Exec("DROP DATABASE IF EXISTS " + work)
+		root.Exec("DROP DATABASE IF EXISTS " + pristine)
+		root.Exec("DROP USER IF EXISTS 'dgt_order'@'%'")
+		root.Exec("DROP USER IF EXISTS 'dgt_order_other'@'%'")
+	})
+	rootWork := mysqlAdmin(t, dsn, work)
+	mustExec(t, rootWork, "CREATE TABLE items (id INT PRIMARY KEY)",
+		"CREATE DEFINER = 'dgt_order'@'%' VIEW a_view AS SELECT id FROM items",
+		"CREATE DEFINER = 'dgt_order'@'%' VIEW b_view AS SELECT id FROM items")
+	seeder, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seeder.Close()
+	if err := seeder.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, rootWork, prep...)
+	app := *u
+	app.User = url.UserPassword("dgt_order", "x")
+	m, err := NewMySQL(Options{Name: "db", DSN: app.String(), Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	err = m.Restore(ctx, []string{"view:a_view", "view:b_view"})
+	after := definerObjects(t, root, work)
+	t.Logf("%v: %s", err, after)
+	if strings.Contains(version, "MariaDB") {
+		// No SYSTEM_USER: the drops are allowed.
+		if !strings.Contains(strings.Join(prep, " "), "DROP TABLE") && (err != nil || after != "view a_view dgt_order@%, view b_view dgt_order@%") {
+			t.Fatalf("restore: %v: %s", err, after)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), says) || !strings.Contains(err.Error(), "view b_view cannot be dropped") {
+		t.Fatalf("restore: %v", err)
+	}
+	if strings.Contains(says, "missing") && !strings.Contains(err.Error(), "the next successful restore makes them again") {
+		t.Fatalf("restore: %v", err)
+	}
+	if after != want {
+		t.Fatalf("after the refused restore: %s, want %s", after, want)
 	}
 }
 
