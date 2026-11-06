@@ -98,6 +98,15 @@ type captureOptions struct {
 	first func(*capture.Summary)
 }
 
+// runOptions are the options of every capture.Run of a capture command:
+// what the flags select (--only, --read-only) and allow goes into each,
+// so no run of it (a repeat, the calibrated one) sends more than asked.
+func (o captureOptions) runOptions(tag string, base *snapshot.Set, out, log io.Writer) capture.Options {
+	return capture.Options{Tag: tag, Only: o.only, ReadOnly: o.readOnly, AllowRemote: o.allowRemote,
+		AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
+		Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: out, Log: log}
+}
+
 // runGap is the least time between the end of a run of a repeated capture
 // and the first write of the next (captureSet).
 var runGap = time.Second
@@ -164,9 +173,8 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		if len(tags) > 1 {
 			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
 		}
-		opt := capture.Options{Tag: tag, Only: o.only, ReadOnly: o.readOnly, Force: o.force || i > 0, AllowRemote: o.allowRemote,
-			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used, NotBefore: notBefore}
+		opt := o.runOptions(tag, base, progress, errOut)
+		opt.Force, opt.Concurrency, opt.NotBefore = o.force || i > 0, used, notBefore
 		sum, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return 0, failed(err)

@@ -210,9 +210,9 @@ func calibrate(ctx context.Context, p *config.Project, cat *catalog.Catalog, all
 			}
 		}()
 		fmt.Fprintf(progress, "\n— capture at the measured concurrency —\n")
-		par, err := capture.Run(ctx, p, cat, capture.Options{Tag: ptag, Force: true, AllowRemote: o.allowRemote,
-			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: tried})
+		opt := o.runOptions(ptag, base, progress, errOut)
+		opt.Force, opt.Concurrency = true, tried
+		par, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return failed(err)
 		}

@@ -454,3 +454,39 @@ func TestReadOnlyCapture(t *testing.T) {
 		t.Errorf("against a read-only capture: exit %d, %d skipped", code, r.Skipped)
 	}
 }
+
+// TestReadOnlyCalibrate: the capture at the measured concurrency of
+// --calibrate keeps --read-only: no request that changes data is sent.
+func TestReadOnlyCalibrate(t *testing.T) {
+	var mu sync.Mutex
+	writes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mu.Lock()
+			writes++
+			mu.Unlock()
+		} else {
+			time.Sleep(15 * time.Millisecond) // so more at once is faster
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n  concurrency: auto\nstate:\n  db:\n    restore: [\"true\"]\n", srv.URL))
+	var reqs []string
+	for i := 0; i < 20; i++ {
+		reqs = append(reqs, fmt.Sprintf(`{"id":"g%d","method":"GET","path":"/g%d","storage":"public"}`, i, i))
+	}
+	reqs = append(reqs, `{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"}`)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[`+strings.Join(reqs, ",")+`]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "ro", "--config", cfg, "--read-only", "--calibrate")
+	mu.Lock()
+	defer mu.Unlock()
+	if writes > 0 || !strings.Contains(out, "capture at the measured concurrency") {
+		t.Fatalf("exit %d, %d requests that change data sent\n%s\n%s", code, writes, out, errOut)
+	}
+}
