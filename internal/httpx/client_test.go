@@ -3,7 +3,11 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -258,5 +262,43 @@ func TestParseConnectTo(t *testing.T) {
 		if _, _, err := ParseConnectTo(in); err == nil {
 			t.Errorf("%q accepted", in)
 		}
+	}
+}
+
+// TestConnectToTLS: with connect_to the TLS server name and the
+// certificate check are of base_url's host name, not of the address
+// connected to: a certificate for the name passes, one for another name
+// fails.
+func TestConnectToTLS(t *testing.T) {
+	var sni, host string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sni, host = r.TLS.ServerName, r.Host
+	}))
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshake
+	srv.StartTLS()
+	defer srv.Close()
+	port := srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate()) // names example.com and 127.0.0.1
+	send := func(base string) Result {
+		a, err := NewAllow(nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.ConnectTo(base, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+		c, err := New(Options{BaseURL: base, Allow: a})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.http.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: roots}
+		return c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, "")
+	}
+	if res := send("https://example.com:" + port); res.Record.Error != "" || sni != "example.com" || host != "example.com:"+port {
+		t.Fatalf("the certificate's name: error %q, server name %q, host %q", res.Record.Error, sni, host)
+	}
+	if res := send("https://shop.example:" + port); !strings.Contains(res.Record.Error, "certificate") {
+		t.Fatalf("another name than the certificate's: %q", res.Record.Error)
 	}
 }
