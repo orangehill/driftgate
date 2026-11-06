@@ -27,10 +27,7 @@ import (
 // data is never sent twice.
 func TestRetriedPassNeverPlain(t *testing.T) {
 	var newsHits, postHits atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No Date header: the two captures of the baseline may fall in two
-		// seconds, and a flaky date is not what this test is about.
-		w.Header()["Date"] = nil
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/news":
 			// Every capture's first send fails: odd hits get 503.
@@ -43,7 +40,7 @@ func TestRetriedPassNeverPlain(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"ok":true}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")

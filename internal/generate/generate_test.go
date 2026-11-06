@@ -384,3 +384,68 @@ func TestJSONErrors(t *testing.T) {
 		t.Errorf("an error variant covers: %+v", c)
 	}
 }
+
+// TestJSONErrorsWithoutValue: a route without a parameter value skips the
+// templates that need one, but not json-errors, whose twins of not-found
+// and invalid-param are still made.
+func TestJSONErrorsWithoutValue(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "invalid-param", "json", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped, ids []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template)
+	}
+	for _, r := range res.Catalog.Requests {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"ok", "json"}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped %v, want %v", skipped, want)
+	}
+	if want := []string{"get-api-items-id-not-found", "get-api-items-id-not-found-json", "get-api-items-id-invalid-param", "get-api-items-id-invalid-param-json"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids\n got %v\nwant %v", ids, want)
+	}
+}
+
+// TestJSONErrorsWithoutTwins: without a parameter value and without
+// not-found or invalid-param, json-errors makes nothing, and is listed as
+// skipped, with the reason.
+func TestJSONErrorsWithoutTwins(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template+": "+s.Reason)
+	}
+	if want := []string{"ok: no value for {id}", "json-errors: no value for {id}"}; !reflect.DeepEqual(skipped, want) || len(res.Catalog.Requests) != 0 {
+		t.Errorf("skipped %v, want %v; requests %v", skipped, want, res.Catalog.Requests)
+	}
+}
+
+// TestJSONErrorsNothingToFollow: a route where no error template makes a
+// request (no parameter, as GET /api/news with init's templates) lists
+// nothing as skipped; json-errors without any error template is noted once,
+// for the configuration.
+func TestJSONErrorsNothingToFollow(t *testing.T) {
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/news"}, {Methods: []string{"GET"}, Path: "/api/items"}}}
+	for _, c := range []struct {
+		templates []string
+		notes     int
+	}{{[]string{"ok", "not-found", "json", "json-errors"}, 0}, {[]string{"ok", "json-errors"}, 1}} {
+		p := project(t, config.Config{Templates: c.templates})
+		res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Skipped) != 0 || len(res.Notes) != c.notes || c.notes == 1 && !strings.Contains(res.Notes[0], "json-errors repeats the requests of not-found, invalid-param, anonymous, empty-body") {
+			t.Errorf("%v: skipped %+v, notes %q", c.templates, res.Skipped, res.Notes)
+		}
+	}
+}

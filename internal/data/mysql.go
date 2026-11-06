@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/dbx"
@@ -68,6 +69,8 @@ func (d mysqlDialect) schema(ctx context.Context, c *sql.Conn, db string) (*Sche
 	if err != nil {
 		return nil, err
 	}
+	// A probe DriftGate's state module left behind is no object to copy.
+	objs = slices.DeleteFunc(objs, func(o dbx.MySQLObject) bool { return dbx.MySQLProbe(o.Name) })
 	if len(objs) == 0 {
 		ok, err := dbx.MySQLDatabaseExists(ctx, c, db)
 		if err != nil {
@@ -219,6 +222,9 @@ func (d mysqlDialect) schema(ctx context.Context, c *sql.Conn, db string) (*Sche
 		return nil, err
 	}
 	for _, tr := range trs {
+		if dbx.MySQLProbe(tr.Name) || dbx.MySQLProbe(tr.Table) {
+			continue
+		}
 		show, err := dbx.ShowCreate(ctx, c, "TRIGGER", db, tr.Name, false)
 		if err != nil {
 			return nil, err
