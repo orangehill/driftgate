@@ -21,7 +21,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `driftgate clean` refuses a MySQL/MariaDB pristine copy made by an earlier release, which lacks the new mark. Run `driftgate seed` once to mark it, or remove it by hand. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - Existing configurations and allowlists work as before. All new keys are optional. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The binary is about 6.3 MB larger, for the SQLite and SQL Server drivers. ([#15](https://github.com/orangehill/driftgate/pull/15))
-- MySQL/MariaDB: each database component holds one more connection (13 instead of 12), for reading many definitions in one query.
+- MySQL/MariaDB: each database component holds one more connection (13 instead of 12), for reading many definitions in one query. ([#22](https://github.com/orangehill/driftgate/pull/22))
 
 ### Added
 
@@ -47,7 +47,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
-- MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing.
+- MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing. ([#22](https://github.com/orangehill/driftgate/pull/22))
 - Allowlist proposals are narrower: enum values as the words seen, digit widths kept, a stable UUID kept literal. ([#10](https://github.com/orangehill/driftgate/pull/10), [#15](https://github.com/orangehill/driftgate/pull/15))
 - `key-extra` and `key-missing` drifts show the value, hidden for private bodies. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - An incomplete result (exit 3) is a JUnit error, so a CI that reads only JUnit does not show green. ([#19](https://github.com/orangehill/driftgate/pull/19))
