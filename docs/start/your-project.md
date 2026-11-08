@@ -92,5 +92,5 @@ To work on a change in a git worktree of its own, see
 [setup in a git worktree](../reference/commands/project.md#setup-in-a-git-worktree).
 
 ---
-**Next:** [Upgrade a framework](../guides/framework-upgrade.md): check each upgrade step against the baseline.
+**Next:** [Upgrade a framework](../guides/workflow/framework-upgrade.md): check each upgrade step against the baseline.
 **Related:** [driftgate setup](../reference/commands/project.md#driftgate-setup) · [How DriftGate works](../concepts/how-it-works.md)

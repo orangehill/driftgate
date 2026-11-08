@@ -141,32 +141,8 @@ configured, may write, and do not go through `connect_to`. So
 for a server that must not change.
 
 With a configuration without `state:`, nothing is restored, seeded or
-fingerprinted. That checks a server that must not change, such as a
-production server or a new server before the switch, without writing to
-it:
-
-<!-- check: config-fragment -->
-```yaml
-version: 1
-project: shop
-target:
-  base_url: https://shop.example
-  connect_to: 203.0.113.10        # the new server, whatever DNS says
-  allow_hosts: [203.0.113.10]
-```
-
-```sh
-driftgate capture live-before --read-only
-# then make the change on the server
-driftgate capture live-after --read-only
-driftgate compare live-after --against capture:live-before
-```
-
-- `allow_hosts` names the server's address, which is outside the local and private ranges. Without it, the captures need `--allow-remote`.
-- Requests that change data are never sent, so `--allow-remote-mutations` is not needed.
-- Another developer's traffic on a shared server shows as drift in the data the responses hold. A side effect is not recorded without `state:`.
-- A login usually writes (a last-login time, a session row), so do not let DriftGate log in on such a server. Give each identity a token issued beforehand (an API or personal access token) under [`identities:`](../driftgate-yaml.md#identities-and-tokens), such as `admin: { env: DG_TOKEN_ADMIN }`.
-- A page that loads data with its own requests (a filter, a search, a panel's widgets) is checked only if those requests are in the catalog. Use the frontend once through [`driftgate record`](catalog.md#driftgate-record) on a copy where writes are allowed, and add what it proposes.
+fingerprinted. The task, with `connect_to`, logins and the frontend's own
+requests, is in [Check a live server without writing to it](../../guides/workflow/live-server.md).
 
 ### Capture tags
 

@@ -22,7 +22,7 @@ keeps the old headings, so older links still work.
 | a queue worker, a command, an import or export, an admin path that changes the schema | a [command step](reference/catalog-json.md#command-steps), or a catalog request for the path; [side checks](guides/side-checks.md) |
 | measured, not compared (a value no rule can describe) | [`observe`](reference/driftgate-yaml.md#observe) |
 | what the gate does not check | `driftgate coverage`, and the [not-covered summary](reference/reports.md#what-the-result-does-not-cover) after every comparison |
-| two server stacks (database, PHP, web server) | [upgrading the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server) |
+| two server stacks (database, PHP, web server) | [upgrading the server](guides/workflow/server-upgrade.md) |
 
 The header rule's line names `server`, `x-powered-by` and `via` with the
 exact new value. Any other header that changed is fixed, accepted or
@@ -40,7 +40,7 @@ Moved to [store](reference/driftgate-yaml.md#store).
 ### key
 Moved to [key](reference/driftgate-yaml.md#key).
 #### Handing a capture to another developer
-Moved to [Hand a capture to another developer](reference/driftgate-yaml.md#hand-a-capture-to-another-developer).
+Moved to [Hand a capture to another developer](guides/workflow/share-baselines.md#hand-a-capture-to-another-developer).
 ### target and targets
 Moved to [target and targets](reference/driftgate-yaml.md#target-and-targets).
 #### connect_to

@@ -3,3 +3,5 @@
 # own pages links into a section of one; a link to the page itself is fine.
 docs/commands.md
 docs/configuration.md
+docs/guides/framework-upgrade.md
+docs/guides/bisect.md
