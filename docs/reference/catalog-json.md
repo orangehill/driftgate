@@ -104,7 +104,7 @@ What `mutates` does:
  "version": 1,
  "requests": [
   {"id": "post-api-auth-login", "method": "POST", "path": "/api/auth/login", "mutates": true, "storage": "private"},
-  {"id": "get-api-me", "method": "GET", "path": "/api/me", "storage": "private"}
+  {"id": "get-api-me", "method": "GET", "path": "/api/me", "identity": "admin", "storage": "private"}
  ],
  "sequences": [
   {"id": "login", "restore": "before", "requests": ["post-api-auth-login", "get-api-me"]}
@@ -116,6 +116,7 @@ Sequences run their requests in order, together.
 
 - `restore: "before"` restores the state before the sequence; `capture --restore each` does that for every sequence.
 - A request is in at most one sequence.
+- DriftGate keeps no cookies between requests: a later request signs in with its `identity`, not with the login's session ([logins](../guides/catalog/logins.md#sessions-with-cookies)).
 
 ## multipart
 
