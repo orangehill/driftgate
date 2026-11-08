@@ -57,7 +57,9 @@ Next.js and Nuxt).
 
 ```sh
 driftgate review
+# mode: evolve, the change is right: accept it into the baseline
 driftgate accept group:3 --reason "Dates are ISO 8601 since Laravel 7; clients updated in APP-512" --ref APP-512
+# or, mode: freeze, a ticket intends it: expect it, the baseline stays
 driftgate expect group:3 --ref APP-512 --reason "Dates are ISO 8601 since Laravel 7"
 ```
 
@@ -84,10 +86,16 @@ run it too:
 1. Move the baseline into git, and commit it ([share a baseline](share-baselines.md)).
 2. Run the [GitHub Action](../github-actions.md) on every pull request of the upgrade, with `--skip-private`.
 
-The job needs no key: private bodies are compared without their body
-(`--skip-private`). Never give a job that runs for pull requests the
-project key ([keep secrets out of pull-request jobs](../../security.md#keep-secrets-out-of-pull-request-jobs)).
-A later step then cannot bring back a difference an earlier step fixed.
+The job needs no key, and never gets the project key
+([keep secrets out of pull-request jobs](../../security.md#keep-secrets-out-of-pull-request-jobs)).
+With `--skip-private` it compares the status, headers, public bodies and
+side effects of every request. A later step then cannot bring back a
+difference there that an earlier step fixed.
+
+Private bodies, the default for generated requests, are compared only
+by `driftgate run` on a developer machine
+([private bodies](../../security.md#private-bodies)). So keep running it
+locally before each pull request.
 
 ## Upgrade the server too
 
