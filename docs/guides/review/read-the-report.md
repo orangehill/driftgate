@@ -13,7 +13,7 @@ $ driftgate run
 capture:run-b299c63a4c38 against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
 ```
 
-The summary counts the requests. The verdict line, `No drift ✓` or the
+The summary counts the requests. The verdict, `No drift ✓` or the
 drifted requests above it, matches the exit code:
 
 - `0`: clean;
@@ -76,7 +76,7 @@ Each line is explained in
 ## See every drift
 
 ```sh
-driftgate compare run --max-drifts 1000         # every drift, not the first 20 per request
+driftgate compare run --max-drifts 1000         # up to 1000 drifts per request, not 20
 driftgate report --format json > report.json    # every drift, for a script
 driftgate review --group 3                      # one group, with every request it touches
 ```

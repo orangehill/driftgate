@@ -82,12 +82,12 @@ Locally, `driftgate run` before each pull request is the check. To let CI
 run it too:
 
 1. Move the baseline into git, and commit it ([share a baseline](share-baselines.md)).
-2. Give the job the key in `DRIFTGATE_KEY`; the key file never enters git.
-3. Run the [GitHub Action](../github-actions.md) on every pull request of the upgrade, with `--skip-private`.
+2. Run the [GitHub Action](../github-actions.md) on every pull request of the upgrade, with `--skip-private`.
 
+The job needs no key: private bodies are compared without their body
+(`--skip-private`). Never give a job that runs for pull requests the
+project key ([keep secrets out of pull-request jobs](../../security.md#keep-secrets-out-of-pull-request-jobs)).
 A later step then cannot bring back a difference an earlier step fixed.
-Private bodies stay on the machine that captured them, so the job
-compares the rest.
 
 ## Upgrade the server too
 

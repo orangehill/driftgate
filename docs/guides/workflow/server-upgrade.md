@@ -88,7 +88,22 @@ difference in the data shows as drift. Make both sides run on the same
 data instead:
 
 1. Load the same dump on both stacks, as above.
-2. Or on one server: load a copy, `driftgate capture pre --skip-fingerprint-check`, deploy, load the same copy again, `driftgate capture post --skip-fingerprint-check`, then `driftgate compare post --against pre --skip-fingerprint-check`.
+2. Or capture one server before and after the deploy, both times on the same copy:
+
+```sh
+# load the copy into the working database
+driftgate seed --skip-commands                 # the copy becomes the pristine data
+driftgate capture pre --skip-fingerprint-check
+# deploy; load the same copy again, and run the deploy's migrations on it
+driftgate seed --skip-commands                 # the migrated copy becomes the pristine data
+driftgate capture post --skip-fingerprint-check
+driftgate compare post --against pre --skip-fingerprint-check
+```
+
+With `state:`, every capture restores the pristine copy, so `seed
+--skip-commands` after each load keeps the loaded copy, migrations
+included. Without `state:`, as for a [live server](live-server.md),
+leave out the two `seed` lines.
 
 When neither is possible, `any_length` rules per path let lists grow or
 shrink ([changing values](../review/changing-values.md)). A green result

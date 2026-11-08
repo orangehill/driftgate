@@ -17,7 +17,7 @@ git commit -m "DriftGate baseline"
 allowlist and the baselines into `driftgate.yaml` and `driftgate/`.
 
 - Before it writes anything, it checks what would enter the repository, as `verify` does.
-- The key file never enters git. Give each machine and job the key in `DRIFTGATE_KEY`, or `key:`.
+- The key file never enters git. Give each developer machine the key in `DRIFTGATE_KEY`, or `key:`; never a job that runs for pull requests, and the Action needs none ([why](../../security.md#keep-secrets-out-of-pull-request-jobs)).
 - Private bodies stay in each machine's local store; a job without them compares the rest with `--skip-private`.
 
 What the switch does exactly is under

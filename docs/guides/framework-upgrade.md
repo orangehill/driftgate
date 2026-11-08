@@ -21,4 +21,4 @@ Moved to [Keep the gate in CI](workflow/framework-upgrade.md#keep-the-gate-in-ci
 Moved to [Upgrade the server](workflow/server-upgrade.md).
 
 ## Notes
-Moved to [Upgrade the server too](workflow/framework-upgrade.md#upgrade-the-server-too).
+The notes moved. The same catalog before and after: the [guide's intro](workflow/framework-upgrade.md). Values that depend on timing: [upgrade the server too](workflow/framework-upgrade.md#upgrade-the-server-too). Fingerprints per server version: [fingerprints](../reference/state.md#fingerprints).

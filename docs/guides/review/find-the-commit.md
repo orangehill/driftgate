@@ -23,6 +23,8 @@ put the application on it:
 - `ready` is repeated until the application answers. When it does not in time, the commit is skipped.
 - `finish` runs once at the end.
 
+- The state is restored on the database the configuration names. So the application in the worktree must use that database: MySQL, PostgreSQL or SQL Server ([SQLite](#projects-on-sqlite) is refused).
+
 Every key and its default is under [bisect](../../reference/driftgate-yaml.md#bisect).
 
 ## Run bisect
