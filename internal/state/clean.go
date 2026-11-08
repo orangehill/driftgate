@@ -91,10 +91,26 @@ func (p *Postgres) DropPristine(ctx context.Context) (bool, error) {
 	return err == nil, err
 }
 
+// DropPristine runs again while another database of the server is in
+// transition (retryOthers): SQL Server 2019 and earlier fail its reads
+// of sys.databases and of the copy's mark, and its drop, with 927 or 952
+// about a database another seed or restore is restoring meanwhile. Each
+// step only reads until the drop, and a drop that stopped leaves the
+// copy for the next try to find.
 func (s *SQLServer) DropPristine(ctx context.Context) (bool, error) {
 	if err := sameAsWorking(s.o); err != nil {
 		return false, err
 	}
+	var was bool
+	err := s.retryOthers(ctx, func() error {
+		var err error
+		was, err = s.dropPristine(ctx)
+		return err
+	})
+	return was, err
+}
+
+func (s *SQLServer) dropPristine(ctx context.Context) (bool, error) {
 	db := s.o.Pristine
 	d, err := s.database(ctx, db)
 	if err != nil || d == nil {

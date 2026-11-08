@@ -1613,7 +1613,9 @@ func killSQLServerSaved(t *testing.T, s *SQLServer, older bool) {
 // earlier fail a statement of one database with 927 ("is in the middle of
 // a restore") or 952 ("is in transition") about the other one, also a
 // three-part name of its own database or a connection to it; DriftGate
-// tries such an operation again (retryOthers).
+// tries such an operation again (retryOthers). driftgate clean's
+// DropPristine too: its refusal of another working database's copy and
+// its drop of its own.
 func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 	s, db, log := newSQLServerSeeded(t, Options{Exclude: []string{"sessions"}},
 		"CREATE TABLE users (id int PRIMARY KEY, n int NOT NULL)", "INSERT INTO users VALUES (1, 1)",
@@ -1672,8 +1674,24 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 			<-done
 		}
 	}()
+	otherWork := s.o.Working + "_owork"
+	sqlServerExec(t, master, "CREATE DATABASE "+qms(otherWork))
+	t.Cleanup(func() { dropSQLServerDatabase(master, otherWork) })
+	other, err := NewSQLServer(Options{Name: "db", DSN: s.o.DSN, Working: otherWork, Pristine: s.o.Pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
 	for i := range 12 {
+		for range 5 {
+			if _, err := other.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "not removed") {
+				t.Fatalf("%d: clean of another working database's copy: %v", i, err)
+			}
+		}
 		if i%4 == 3 {
+			if was, err := s.DropPristine(ctx); !was || err != nil {
+				t.Fatalf("%d: clean: %v %v", i, was, err)
+			}
 			if err := s.Seed(ctx); err != nil {
 				t.Fatalf("%d: seed: %v", i, err)
 			}

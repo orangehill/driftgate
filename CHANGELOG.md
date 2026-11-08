@@ -69,6 +69,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - MySQL/MariaDB: a seed or restore whose login may not create a trigger or view with its `DEFINER` (or may create no trigger while the binary log is on) now stops before it drops anything (a seed: before it drops the old pristine copy), names the object and explains the privilege needed. When the server refuses a drop instead, the triggers and views dropped before it are made again from the pristine copy, and the message names any that could not be. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/posts/2024/05/17`. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value when it still makes the JSON twins of the `not-found` or `invalid-param` requests. Configured without any error template, `json-errors` gets one note instead of making nothing silently. ([#25](https://github.com/orangehill/driftgate/pull/25))
+- SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do.
 
 ### Security
 

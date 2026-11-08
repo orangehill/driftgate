@@ -462,9 +462,9 @@ func sqlServerAt(batch string, err error) string {
 	return fmt.Sprintf(" (at line %d of the batch: %s)", e.LineNo, l)
 }
 
-// sqlServerOthersWait bounds how long a seed, restore, fingerprint or read
-// of rows tries again while another database of the server is in
-// transition (retryOthers).
+// sqlServerOthersWait bounds how long a seed, restore, fingerprint, read
+// of rows or drop of the pristine copy (driftgate clean) tries again
+// while another database of the server is in transition (retryOthers).
 var sqlServerOthersWait = time.Minute
 
 // ssDatabaseNamed is the database a message of SQL Server names.
