@@ -161,3 +161,13 @@ func TestReportStatusChange(t *testing.T) {
 		t.Errorf("--max-drifts does not list every drift:\n%s", out)
 	}
 }
+
+// TestDriftLineAroundTheDifference: review and review --group show the
+// part of two long values where they differ.
+func TestDriftLineAroundTheDifference(t *testing.T) {
+	head, tail := strings.Repeat("a", 150), strings.Repeat("z", 150)
+	d := compare.Drift{Kind: compare.KindValue, Where: "$.body", Baseline: `"` + head + "OLD-WORD" + tail + `"`, Current: `"` + head + "NEW-WORD" + tail + `"`}
+	if l := driftLine(d); !strings.Contains(l, "OLD-WORD") || !strings.Contains(l, "NEW-WORD") {
+		t.Errorf("drift line %q", l)
+	}
+}

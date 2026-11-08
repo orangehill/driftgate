@@ -75,6 +75,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do. ([#30](https://github.com/orangehill/driftgate/pull/30))
 - A changed validation error no longer passes unseen. `init` writes the `empty-body` template for Laravel and FastAPI, whose discovery reads the rules request bodies are validated against, so each route with rules gets a request with an empty body. `coverage` lists the covered routes whose body is validated but that no request sends an invalid body, and `run` counts them under "Not covered by this result". The list never changes the exit code.
 - A read-only request that writes is found when the tokens command writes a new token on every run. The search for it compared every run with the state before the read-only requests and stopped with exit 3, "prepare is not repeatable", without naming the request. Each run is now compared with the state it started from. When the starting state is not repeatable and no single request explains a change, the capture still stops with exit 3, naming the change and what is not repeatable.
+- Two long values that differ in the middle show the difference. `run`, `compare`, `review`, `review --group` and the group explanations cut both values to the same window around the first character where they differ; they showed only the beginnings, which were equal.
 
 ### Security
 

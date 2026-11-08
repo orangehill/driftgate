@@ -472,7 +472,8 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		s += fmt.Sprintf("  %s → %s", Printable(short(d.Baseline)), Printable(short(d.Current)))
+		b, c := ShortPair(d.Baseline, d.Current, shortMax)
+		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
 }
@@ -512,6 +513,49 @@ func short(s string) string {
 		return string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+// shortMax is how many characters of a drift's values a line shows.
+const shortMax = 80
+
+// ShortPair shortens the two values of a drift alike. When either is
+// longer than max characters, both are cut to the same window around the
+// first character where they differ, with … where text is left out: two
+// long texts that differ in the middle show that difference, not two equal
+// beginnings.
+func ShortPair(a, b string, max int) (string, string) {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) <= max && len(rb) <= max {
+		return a, b
+	}
+	first := 0
+	for first < len(ra) && first < len(rb) && ra[first] == rb[first] {
+		first++
+	}
+	// A third of the window before the difference, the rest after it.
+	from := 0
+	if lead := max / 3; first > lead {
+		from = first - lead
+	}
+	cut := func(r []rune) string {
+		if len(r) <= max {
+			return string(r) // short enough as it is
+		}
+		start := min(from, len(r))
+		end := min(len(r), start+max-1)
+		if start > 0 {
+			end = min(len(r), start+max-2) // room for both marks
+		}
+		s := string(r[start:end])
+		if start > 0 {
+			s = "…" + s
+		}
+		if end < len(r) {
+			s += "…"
+		}
+		return s
+	}
+	return cut(ra), cut(rb)
 }
 
 // Text writes a readable report: every drifted request with up to maxDrifts

@@ -36,7 +36,8 @@ type StatusGroup struct {
 
 // text writes the change on one line: "200 → 302, redirects to /login".
 func (s StatusChange) text() string {
-	t := Printable(short(s.From)) + " → " + Printable(short(s.To))
+	from, to := ShortPair(s.From, s.To, shortMax)
+	t := Printable(from) + " → " + Printable(to)
 	if s.Location != "" {
 		t += ", redirects to " + Printable(short(s.Location))
 	}
@@ -246,7 +247,8 @@ func (r *Report) hiddenGroups() map[int]bool {
 // head writes a status change shared by requests:
 // "3 requests: 200 → 302 to /login".
 func (s StatusGroup) head() string {
-	t := Printable(short(s.From)) + " → " + Printable(short(s.To))
+	from, to := ShortPair(s.From, s.To, shortMax)
+	t := Printable(from) + " → " + Printable(to)
 	if s.Location != "" {
 		t += " to " + Printable(short(s.Location))
 	}

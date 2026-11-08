@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/compare"
@@ -351,5 +352,49 @@ func TestResentCounted(t *testing.T) {
 	}
 	if (&Report{}).ResentNote() != "" || !strings.Contains(Build("c", "b", results[:1]).ResentNote(), "1 request was sent again") {
 		t.Error("ResentNote")
+	}
+}
+
+// TestShortPairAroundTheDifference: two long values are cut alike around
+// the first character where they differ, so a change in the middle of a
+// long text shows in the drift line and in the group's explanation; short
+// values and a difference at the start are shown as before.
+func TestShortPairAroundTheDifference(t *testing.T) {
+	head, tail := strings.Repeat("a", 150), strings.Repeat("z", 150)
+	b, c := `"`+head+"OLD-WORD"+tail+`"`, `"`+head+"NEW-WORD"+tail+`"`
+	sb, sc := ShortPair(b, c, 80)
+	for _, s := range []string{sb, sc} {
+		if !strings.HasPrefix(s, "…") || !strings.HasSuffix(s, "…") || len([]rune(s)) > 80 {
+			t.Errorf("window %q (%d characters)", s, len([]rune(s)))
+		}
+	}
+	if !strings.Contains(sb, "OLD-WORD") || !strings.Contains(sc, "NEW-WORD") {
+		t.Errorf("the difference is not shown: %q → %q", sb, sc)
+	}
+	if x, y := ShortPair("short", "other", 80); x != "short" || y != "other" {
+		t.Errorf("short values changed: %q %q", x, y)
+	}
+	// A difference at the start: the beginnings, as before.
+	if x, _ := ShortPair("X"+head, "Y"+head, 80); x != "X"+head[:78]+"…" {
+		t.Errorf("start: %q", x)
+	}
+	// One value a prefix of the other: the window ends where the shorter does.
+	if x, y := ShortPair(head+head, head+head+"MORE", 80); !strings.HasSuffix(x, "a") || !strings.HasPrefix(x, "…") || !strings.Contains(y, "MORE") {
+		t.Errorf("prefix: %q → %q", x, y)
+	}
+	// Multibyte text is cut on characters.
+	if x, _ := ShortPair(strings.Repeat("é", 200)+"1", strings.Repeat("é", 200)+"2", 40); !utf8.ValidString(x) || !strings.HasSuffix(x, "1") {
+		t.Errorf("runes: %q", x)
+	}
+
+	d := compare.Drift{Request: "r", Kind: compare.KindValue, Where: "$.body", Baseline: b, Current: c}
+	r := Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{d}}})
+	var out bytes.Buffer
+	r.Text(&out, DefaultDrifts)
+	if lines := strings.Split(out.String(), "\n"); !strings.Contains(lines[1], "OLD-WORD") || !strings.Contains(lines[1], "NEW-WORD") {
+		t.Errorf("drift line:\n%s", out.String())
+	}
+	if e := r.Groups[0].Explanation; !strings.Contains(e, "OLD-WORD") || !strings.Contains(e, "NEW-WORD") {
+		t.Errorf("explanation %q", e)
 	}
 }

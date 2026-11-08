@@ -560,7 +560,8 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 	if len(other) > 0 {
 		fmt.Fprintf(out, "\nDifferences without a proposal (structure, types, side effects or a body that is neither JSON nor HTML):\n")
 		for _, d := range other {
-			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(short(d.Baseline)), report.Printable(short(d.Current)))
+			b, c := report.ShortPair(d.Baseline, d.Current, 100)
+			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(b), report.Printable(c))
 		}
 		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
 	}
@@ -641,14 +642,6 @@ func headerFormat(positions [][]string) string {
 		}
 	}
 	return strings.Join(parts, "|")
-}
-
-// short keeps long values readable in a list.
-func short(s string) string {
-	if len(s) <= 100 {
-		return s
-	}
-	return s[:60] + " … " + s[len(s)-30:]
 }
 
 var yamlQuote = compare.YAMLQuote

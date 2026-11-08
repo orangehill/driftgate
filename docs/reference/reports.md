@@ -23,6 +23,15 @@ requests whose status changed) come after the ones it lists, so the
 listed groups start at [1]. `review --group N` and `accept group:N` use
 the same numbers.
 
+## Long values
+
+A drift line shows at most 80 characters of each value; `review` and
+`review --group` show 100. When either value is longer, both are cut to
+the same window around the first character where they differ, with `…`
+where text is left out. Two long texts that differ in the middle show
+that difference. The group's explanation does the same with fewer
+characters.
+
 ## A request whose status changed
 
 When a request's status changes, what follows from it is summarized in

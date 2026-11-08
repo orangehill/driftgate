@@ -39,7 +39,8 @@ func what(d compare.Drift, same bool) string {
 		if d.Baseline == "" && d.Current == "" {
 			return ""
 		}
-		v := clip(d.Baseline, max) + " → " + clip(d.Current, max)
+		b, c := ShortPair(d.Baseline, d.Current, max)
+		v := b + " → " + c
 		if same {
 			return " (" + v + ")"
 		}
@@ -136,14 +137,6 @@ func what(d compare.Drift, same bool) string {
 		return d.Kind
 	}
 	return d.Kind + " at " + where
-}
-
-// clip shortens a value for an explanation.
-func clip(s string, max int) string {
-	if r := []rune(s); len(r) > max {
-		return string(r[:max-1]) + "…"
-	}
-	return s
 }
 
 // Locate attaches to every group the routes its drifts touch. find returns
