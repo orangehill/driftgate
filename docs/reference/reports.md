@@ -118,16 +118,8 @@ records it read already.
 
 ### What a green result does not prove
 
-A green result proves only that the responses and side effects of the
-requests in the catalog did not change. It does not exercise file uploads unless the
-catalog has [`multipart`](catalog-json.md#multipart) requests with
-fixtures. Nor does it reach admin paths that change the schema, or code
-that only background jobs, queue workers or commands reach.
-[Command steps](catalog-json.md#command-steps) with
-`"output": true` and state fingerprints bring the rest into the gate
-([side checks](../guides/side-checks.md)). The table of
-[what to use for what](../configuration.md) names
-the feature for each.
+What a pass covers, and what it does not, is in
+[What a green result proves](../concepts/what-a-pass-proves.md).
 
 ## Expected drifts in a report
 

@@ -237,10 +237,7 @@ output must be the same after every restore
 driver.
 
 A cache emptied on every restore (`FLUSHALL`) means every request runs on
-a cold cache.
-
-- Behaviour that only shows with a warm cache, such as a value read from the cache instead of the database, is never checked.
-- A server that answers from a warm cache may differ from the capture for that reason alone. Compare a live server's answer twice, or empty its cache first, before you take such a difference for a change.
+a cold cache ([what that leaves unchecked](../concepts/what-a-pass-proves.md#a-cache-emptied-at-every-restore)).
 
 A catalog with requests that change data needs at least one component
 with a restore. Otherwise `capture` and `run` refuse it (exit 2), unless

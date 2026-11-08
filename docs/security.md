@@ -322,20 +322,16 @@ The CI checks, which pull requests pass too, are:
 - `SHA256SUMS.sigstore.json`: a keyless Sigstore signature of `SHA256SUMS`. It is made with cosign and GitHub OIDC; the certificate names the release workflow and the tag, and the signature is in the public Rekor log.
 - SLSA build provenance for every file.
 
-Verify the signature first, then the checksum:
+The download and its verification, signature first and then the
+checksum, are step by step in
+[Install DriftGate](start/install.md#verify-the-download).
+The build provenance of a file is verified with:
 
 ```sh
-gh release download v1.0.2 --repo orangehill/driftgate \
-  --pattern driftgate-linux-amd64 --pattern 'SHA256SUMS*'
-cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 gh attestation verify driftgate-linux-amd64 --repo orangehill/driftgate
 ```
 
-The GitHub Action does the same for `version: v1.0.2` or
+The GitHub Action verifies the signature and the checksum for `version: v1.0.2` or
 `version: latest`.
 
 - It sets up a pinned cosign, and verifies the signature with the identity of the action's repository at that tag, and the checksum.
