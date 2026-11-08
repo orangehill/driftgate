@@ -152,7 +152,6 @@ func newLab(t *testing.T, n, concurrency int) (*lab, *config.Project, *catalog.C
 	l := &lab{dir: t.TempDir()}
 	srv := httptest.NewServer(l)
 	t.Cleanup(srv.Close)
-	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
 	comps := map[string]config.Component{}
 	for _, table := range []string{"t1", "t2", "t3"} {
 		comps[table] = config.Component{
@@ -161,7 +160,8 @@ func newLab(t *testing.T, n, concurrency int) (*lab, *config.Project, *catalog.C
 		}
 	}
 	cfg := config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
-		Target: config.Target{BaseURL: srv.URL, Concurrency: config.Concurrency(concurrency)}, State: comps}
+		Target: config.Target{BaseURL: srv.URL, Concurrency: config.Concurrency(concurrency)}, State: comps,
+		Store: filepath.Join(t.TempDir(), "store")}
 	p, err := config.New(cfg, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -176,12 +176,12 @@ func newLab(t *testing.T, n, concurrency int) (*lab, *config.Project, *catalog.C
 
 func (l *lab) capture(t *testing.T, p *config.Project, cat *catalog.Catalog, tag string, base *snapshot.Set, halving bool) labRun {
 	t.Helper()
+	opt := Options{Tag: tag, Baseline: base}
 	if halving {
-		writerSearch = (*runner).findWritersHalving
-		defer func() { writerSearch = (*runner).findWriters }()
+		opt.writerSearch = (*runner).findWritersHalving
 	}
 	l.hits.Store(0)
-	sum, err := Run(context.Background(), p, cat, Options{Tag: tag, Baseline: base})
+	sum, err := Run(context.Background(), p, cat, opt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +205,9 @@ func (l *lab) capture(t *testing.T, p *config.Project, cat *catalog.Catalog, tag
 // same scenarios: the same writers, side effects and unattributed items, and
 // far fewer requests once a baseline names the writers.
 func TestFindWritersSameAsHalving(t *testing.T) {
+	// Every lab has a store of its own (config store:), which
+	// DRIFTGATE_STORE would replace.
+	t.Setenv(config.EnvStore, "")
 	const n = 550
 	six := map[string]string{"r017": "t1", "r101": "t2", "r233": "t1", "r310": "t2", "r402": "t1", "r544": "t2"}
 	eight := map[string]string{"r050": "t1", "r470": "t2"}
@@ -240,6 +243,7 @@ func TestFindWritersSameAsHalving(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			l, p, cat := newLab(t, n, 4)
 			var base *snapshot.Set
 			if c.base != nil {

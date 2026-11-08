@@ -87,6 +87,11 @@ type Options struct {
 	// moment, not before (a capture repeated for the same baseline, whose
 	// timestamps must fall in other seconds than the last run's).
 	NotBefore time.Time
+
+	// writerSearch is the search for read-only requests that changed the
+	// state; nil: (*runner).findWriters. A test sets the previous search
+	// to compare the two.
+	writerSearch func(r *runner, ctx context.Context, reqs []catalog.Request, before states, changed map[string][]string) error
 }
 
 // Summary of a finished capture.
@@ -114,10 +119,6 @@ type Time struct {
 	Total, Fingerprint, Restore time.Duration
 	Fingerprints, Reused        int // fingerprints taken, and those a check of the write counters made unnecessary
 }
-
-// writerSearch is the search for read-only requests that changed the state;
-// a test swaps in the previous search to compare the two.
-var writerSearch = (*runner).findWriters
 
 // unit is a sequence, or a single request that changes data; units run one
 // after another, after the read-only requests.
@@ -301,7 +302,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	defer tr.close()
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
-		timings: map[string]int64{},
+		timings: map[string]int64{}, writerSearch: opt.writerSearch,
 		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
 			Retried: map[string]*snapshot.Retry{}}}
 	if r.uploads, err = prepareUploads(p, append(append([]catalog.Request{}, readonly...), unitRequests(units)...)); err != nil {
@@ -413,7 +414,11 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		}
 		if changed := diffStates(before, after); len(changed) > 0 {
 			tr.markDirty(changed)
-			if err := writerSearch(r, ctx, readonly, before, changed); err != nil {
+			search := r.writerSearch
+			if search == nil {
+				search = (*runner).findWriters
+			}
+			if err := search(r, ctx, readonly, before, changed); err != nil {
 				return nil, err
 			}
 		}
@@ -797,6 +802,8 @@ type runner struct {
 	retry    *retrying                // retries of the read-only phase; nil: none
 	out, log io.Writer
 	env      []string // added to the environment of the project's commands
+	// writerSearch is Options.writerSearch.
+	writerSearch func(r *runner, ctx context.Context, reqs []catalog.Request, before states, changed map[string][]string) error
 
 	mu      sync.Mutex
 	timings map[string]int64
