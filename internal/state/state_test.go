@@ -396,6 +396,18 @@ func TestRestoreSpeed(t *testing.T) {
 	}
 }
 
+// galeraSequence returns what a CREATE SEQUENCE needs on a Galera node to
+// keep MariaDB's default cache: an increment of 0 (auto_increment_increment),
+// as Galera creates no cached sequence with another one (1235).
+func galeraSequence(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var wsrep int
+	if db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+		return " INCREMENT BY 0"
+	}
+	return ""
+}
+
 // TestMySQLEdgeCases covers what a review found: columns with default
 // expressions, triggers during a restore, their SQL mode and firing order,
 // views on excluded tables, an object that changes kind, a dot in a table
@@ -436,7 +448,7 @@ func testMySQLEdgeCases(t *testing.T, dsn string) {
 		"INSERT INTO t (n) VALUES (1), (2)",
 	)
 	if mariadb {
-		mustExec(t, db, "CREATE SEQUENCE seq1")
+		mustExec(t, db, "CREATE SEQUENCE seq1"+galeraSequence(t, db))
 	}
 	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine, Exclude: []string{"excl*"}})
 	if err != nil {
@@ -1055,7 +1067,7 @@ func testMySQLWriteCheck(t *testing.T, dsn string, noTables bool) {
 			sql   string
 			read  []string
 			alone bool
-		}{"CREATE SEQUENCE s", nil, false}, struct {
+		}{"CREATE SEQUENCE s" + galeraSequence(t, db), nil, false}, struct {
 			sql   string
 			read  []string
 			alone bool
@@ -1431,5 +1443,79 @@ func TestRunErrorHidesSecrets(t *testing.T) {
 	err := Run(context.Background(), t.TempDir(), []string{"sh", "-c", "exit 3", "PGPASSWORD=S3cret", "-pS3cret"}, nil, nil)
 	if err == nil || strings.Contains(err.Error(), "S3cret") || !strings.Contains(err.Error(), "PGPASSWORD=***") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// TestMySQLGaleraSequences (MariaDB Galera): a sequence the node cannot
+// create (a cache with an increment other than 0, another engine than
+// InnoDB) is named before the pristine copy is dropped, not copied as
+// another object; a cached sequence with INCREMENT BY 0 and a NOCACHE one
+// are copied and restored as they were.
+func TestMySQLGaleraSequences(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			var wsrep int
+			if root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) != nil || wsrep == 0 {
+				t.Skip("not a Galera node")
+			}
+			work, pristine := "dgt_galseq", "dgt_galseq_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db, "CREATE SEQUENCE auto START WITH 5 INCREMENT BY 0 CACHE 10", "CREATE SEQUENCE plain START WITH 5 NOCACHE",
+				"CREATE TABLE t (id INT PRIMARY KEY)")
+			// Only a session without wsrep makes what the node refuses.
+			c, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []string{"SET SESSION wsrep_on = 0", "CREATE SEQUENCE cached CACHE 10", "CREATE SEQUENCE aria NOCACHE ENGINE=Aria", "SET SESSION wsrep_on = 1"} {
+				if _, err := c.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			c.Close()
+
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			err = m.Seed(ctx)
+			if err == nil || !strings.Contains(err.Error(), "cached (CACHE 10, INCREMENT BY 1)") || !strings.Contains(err.Error(), "aria (ENGINE=Aria)") ||
+				strings.Contains(err.Error(), "auto") || strings.Contains(err.Error(), "plain") {
+				t.Fatalf("seed: %v", err)
+			}
+			var n int
+			root.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", pristine).Scan(&n)
+			if n != 0 {
+				t.Fatal("a refused seed made the pristine copy")
+			}
+
+			mustExec(t, db, "DROP SEQUENCE cached", "DROP SEQUENCE aria")
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			fp0 := mustFingerprint(t, m)
+			mustExec(t, db, "SELECT NEXTVAL(auto)", "SELECT NEXTVAL(plain)", "SELECT NEXTVAL(plain)")
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if !contains(changed, "sequence:auto") || !contains(changed, "sequence:plain") {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			var next int64
+			db.QueryRow("SELECT NEXTVAL(plain)").Scan(&next)
+			if next != 5 {
+				t.Fatalf("plain goes on at %d, want 5", next)
+			}
+		})
 	}
 }

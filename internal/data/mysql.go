@@ -261,10 +261,15 @@ func (d mysqlDialect) schema(ctx context.Context, c *sql.Conn, db string) (*Sche
 			Stmt{SQL: defs[v], uses: uses, view: v},
 			Stmt{SQL: "SET NAMES utf8mb4", uses: uses})
 	}
+	// The increment and the cache are stated again, as they are: a Galera
+	// node checks an ALTER SEQUENCE against the cache of the statement and
+	// refuses a bare RESTART (1235).
 	for _, name := range sequences {
 		q := d.quote(name)
-		s.sequences = append(s.sequences, sequence{name: name, read: "SELECT next_not_cached_value FROM " + q,
-			set: func(v []string) string { return "ALTER SEQUENCE " + q + " RESTART WITH " + v[0] }})
+		s.sequences = append(s.sequences, sequence{name: name, read: "SELECT next_not_cached_value, increment, IF(cache_size = 0, 'NOCACHE', CONCAT('CACHE ', cache_size)) FROM " + q,
+			set: func(v []string) string {
+				return "ALTER SEQUENCE " + q + " INCREMENT BY " + v[1] + " " + v[2] + " RESTART WITH " + v[0]
+			}})
 	}
 	return s, nil
 }

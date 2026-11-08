@@ -1116,6 +1116,18 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 
+	// The sequences made below, in order: those src has. A Galera node
+	// refuses some of them; that is told before dst is changed.
+	var seqs []string
+	for _, q := range sequences {
+		if srcObjs.kind[q] == "sequence" {
+			seqs = append(seqs, q)
+		}
+	}
+	if err := m.galeraSequences(ctx, c, src, seqs); err != nil {
+		return nil, err
+	}
+
 	// The login is first tried on each DEFINER of what is made again
 	// (definerProbe), so a refusal leaves dst as it was.
 	var probes []probeItem
@@ -1178,13 +1190,6 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
-	}
-	// The sequences made below, in order: those src has.
-	var seqs []string
-	for _, q := range sequences {
-		if srcObjs.kind[q] == "sequence" {
-			seqs = append(seqs, q)
-		}
 	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
 	// What makes again what a failure leaves missing: a restore of the
@@ -1321,7 +1326,65 @@ type mysqlHooks struct {
 	copyFails   func() error
 }
 
+// galeraSequences refuses, on a Galera node, to copy a sequence of src the
+// node would refuse to create (1235): one with a cache and an increment
+// other than 0, or one not stored by InnoDB. Copied without its cache or
+// with another engine, it would be another object, so it is named instead.
+func (m *MySQL) galeraSequences(ctx context.Context, c *sql.Conn, src string, seqs []string) error {
+	if len(seqs) == 0 {
+		return nil
+	}
+	var name, value string
+	err := c.QueryRowContext(ctx, "SHOW SESSION VARIABLES LIKE 'wsrep_on'").Scan(&name, &value)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && !strings.EqualFold(value, "ON") {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// One query for all of them.
+	parts := make([]string, len(seqs))
+	var args []any
+	for i, q := range seqs {
+		parts[i] = "SELECT ?, increment, cache_size, (SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?) FROM " + qi(src) + "." + qi(q)
+		args = append(args, q, src, q)
+	}
+	rows, err := c.QueryContext(ctx, strings.Join(parts, " UNION ALL "), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var refused []string
+	for rows.Next() {
+		var q string
+		var increment int64
+		var cache uint64
+		var engine sql.NullString
+		if err := rows.Scan(&q, &increment, &cache, &engine); err != nil {
+			return err
+		}
+		switch {
+		case !strings.EqualFold(engine.String, "InnoDB"):
+			refused = append(refused, fmt.Sprintf("%s (ENGINE=%s)", q, engine.String))
+		case cache != 0 && increment != 0:
+			refused = append(refused, fmt.Sprintf("%s (CACHE %d, INCREMENT BY %d)", q, cache, increment))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("state %s: the server is a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of %s cannot be copied: %s; make them NOCACHE or INCREMENT BY 0 (ALTER SEQUENCE) and InnoDB (ALTER TABLE … ENGINE=InnoDB), or add them to exclude", m.o.Name, src, strings.Join(refused, ", "))
+}
+
 // copySequence makes sequence q of dst as src has it, where it goes on.
+//
+// The ALTER that sets where it goes on states the increment and the cache
+// again, as they are: a Galera node checks an ALTER SEQUENCE against the
+// cache of the statement, not the sequence's, and refuses a bare RESTART
+// (1235, "CACHE without INCREMENT BY 0").
 func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	def, err := showCreate(ctx, c, "SEQUENCE", src, q)
 	if err != nil {
@@ -1330,11 +1393,16 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	if _, err := c.ExecContext(ctx, def); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
 	}
-	var next int64
-	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(q)).Scan(&next); err != nil {
+	var next, increment int64
+	var cache uint64
+	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value, increment, cache_size FROM "+qi(src)+"."+qi(q)).Scan(&next, &increment, &cache); err != nil {
 		return err
 	}
-	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(q), next)); err != nil {
+	caching := "NOCACHE"
+	if cache != 0 {
+		caching = fmt.Sprintf("CACHE %d", cache)
+	}
+	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s INCREMENT BY %d %s RESTART WITH %d", qi(dst), qi(q), increment, caching, next)); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
 	}
 	return nil
@@ -1655,6 +1723,11 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		return err
 	}
 	if err := m.checkPristine(ctx, c); err != nil {
+		return err
+	}
+	// A sequence a Galera node cannot copy is told before the old copy is
+	// dropped (copyObjects checks again).
+	if err := m.galeraSequences(ctx, c, m.o.Working, objs.sequences); err != nil {
 		return err
 	}
 	// The triggers and views are made again in the pristine copy: the

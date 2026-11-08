@@ -9,6 +9,7 @@ database. What every driver shares is in [State](../state.md).
 - `seed` marks the pristine database it makes with a table `driftgate_pristine`, which is never fingerprinted or restored ([how seed and restore work](../state.md#how-seed-and-restore-work)).
 - `seed` needs `CREATE` and `DROP` on the pristine database ([what the database user needs](../state.md#what-the-database-user-needs)).
 - Triggers and views are fingerprinted with the collation they were made with, which a restore keeps.
+- On a Galera node, a seed or restore stops before it changes anything when a MariaDB sequence has a cache with an increment other than 0, or is not InnoDB, as the node cannot create it; make it `NOCACHE` or `INCREMENT BY 0`, or exclude it.
 - Triggers and views are made again with their `DEFINER`, which needs rights of its own ([below](#triggers-and-views-with-a-definer)).
 
 ## Triggers and views with a DEFINER

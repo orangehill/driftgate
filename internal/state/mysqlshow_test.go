@@ -377,7 +377,7 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		if _, err := m.showAll(ctx, c, bad); err == nil || err.Error() != alone.Error() {
 			t.Fatalf("%v, want %v", err, alone)
 		}
-		if m.multiRefused.Load() || log.Len() > 0 {
+		if m.multiRefused.Load() || strings.Contains(log.String(), "SHOW CREATE") {
 			t.Fatalf("refused %v, log %q", m.multiRefused.Load(), log.String())
 		}
 	})
