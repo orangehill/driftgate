@@ -73,6 +73,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value when it still makes the JSON twins of the `not-found` or `invalid-param` requests. Configured without any error template, `json-errors` gets one note instead of making nothing silently. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do. ([#30](https://github.com/orangehill/driftgate/pull/30))
 - SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` that another database's restore stopped is now tried again also when its first try took longer than a minute, such as the seed of a large database. The minute counts from the first such stop.
+- SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` is also tried again when another database of the same server is being set single-user (error 924) or taken offline (error 942), as another checkout's seed, restore or `clean` does. Before, the command failed at once.
 
 ### Security
 

@@ -1655,17 +1655,24 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 	done := make(chan int)
 	go func() {
 		n := 0
+		pause := time.Duration(0)
 		for {
 			select {
 			case <-stop:
 				done <- n
 				return
-			default:
+			case <-time.After(pause):
 			}
 			// A new database each time, as a seed's <pristine>_dgnew.
+			// Then a pause as long: another checkout seeds now and then,
+			// not without end. Restores back to back would keep the
+			// server in transition all the time, and any operation,
+			// retried for a minute, could find no moment to complete in.
+			start := time.Now()
 			if _, err := master.Exec(restore(again, "RECOVERY") + "; DROP DATABASE " + qms(again)); err == nil {
 				n++
 			}
+			pause = time.Since(start)
 		}
 	}()
 	defer func() {

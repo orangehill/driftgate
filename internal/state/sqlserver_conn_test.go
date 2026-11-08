@@ -378,6 +378,19 @@ func TestSQLServerOthersTransition(t *testing.T) {
 		{fmt.Errorf("state db: dropping Shop_pristine: %w", other), true},
 		{fmt.Errorf("state db: dropping Shop_pristine: %w", mssql.Error{Number: 927, Message: "Database 'Shop_pristine' cannot be opened. It is in the middle of a restore."}), false},
 		{mssql.Error{Number: 952, Message: "Database 'it''s' is in transition. Try the statement later."}, true},
+		// Another database set SINGLE_USER, as a parallel seed's
+		// <pristine>_dgnew before its rename or a drop: 924.
+		{mssql.Error{Number: 924, Message: "Database 'dgt_ss_791297a2_p_dgnew' is already open and can only have one user at a time."}, true},
+		{fmt.Errorf("state db: restore: %w", mssql.Error{Number: 924, Message: "Database 'other' is already open and can only have one user at a time."}), true},
+		{mssql.Error{Number: 924, Message: "Database 'Shop' is already open and can only have one user at a time."}, false},
+		{mssql.Error{Number: 924, Message: "Database 'Shop_pristine_dgnew' is already open and can only have one user at a time."}, false},
+		{errors.Join(other, mssql.Error{Number: 924, Message: "Database 'Shop_pristine' is already open and can only have one user at a time."}), false},
+		// Another database taken offline, as a restore of the whole
+		// database does with its working database: 942. The working
+		// database's own is not (workingOffline).
+		{mssql.Error{Number: 942, Message: "Database 'dgt_ss_c1e97d93' cannot be opened because it is offline."}, true},
+		{mssql.Error{Number: 942, Message: "Database 'Shop' cannot be opened because it is offline."}, false},
+		{mssql.Error{Number: 942, Message: "Database 'shop_pristine' cannot be opened because it is offline."}, false},
 		{mssql.Error{Number: 927, Message: "Database 'shop_pristine_dgnew' cannot be opened. It is in the middle of a restore."}, false},
 		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, false},
 		{mssql.Error{Number: 208, Message: "Database 'x'"}, false},

@@ -470,29 +470,29 @@ var sqlServerOthersWait = time.Minute
 // ssDatabaseNamed is the database a message of SQL Server names.
 var ssDatabaseNamed = lazy.Regexp(`Database '((?:[^']|'')+)'`)
 
-// othersTransition reports, for an error 927 ("Database '…' cannot be
-// opened. It is in the middle of a restore") or 952 ("is in transition"),
-// the database it names when that is not one of this component's
-// (working, pristine, <pristine>_dgnew, <pristine>_dgx). SQL Server 2019
-// and earlier fail a statement of one database so while another one is
-// restored, created or renamed: even a three-part name of its own
-// database (an item restore's INSERT … SELECT FROM [pristine].…) or a
-// connection to it, when the other's name comes up in the lookup.
+// othersTransition reports, for an error of a database in transition
+// (ssInTransition), the database it names when that is not one of this
+// component's (working, pristine, <pristine>_dgnew, <pristine>_dgx). SQL
+// Server 2019 and earlier fail a statement of one database so while
+// another one is restored, created, renamed, dropped or taken offline:
+// even a three-part name of its own database (an item restore's INSERT …
+// SELECT FROM [pristine].…) or a connection to it, when the other's name
+// comes up in the lookup.
 //
-// Every 927 and 952 the error carries (each message of a server error,
+// Every such error the error carries (each message of a server error,
 // each error wrapped or joined) must name another database: one that
 // names this component's, or names none, is not retried.
 func (s *SQLServer) othersTransition(err error) (string, bool) {
-	if n := sqlServerNumber(err); n != 927 && n != 952 {
+	if !ssInTransition(sqlServerNumber(err)) {
 		return "", false
 	}
 	other := ""
 	for _, e := range sqlServerErrors(err) {
-		if e.Number != 927 && e.Number != 952 {
+		if !ssInTransition(e.Number) {
 			continue
 		}
-		// The name in the message of the 927 or 952 itself, not another
-		// one of the error or of the text it is wrapped in.
+		// The name in the message of the 924, 927 or 952 itself, not
+		// another one of the error or of the text it is wrapped in.
 		m := ssDatabaseNamed().FindStringSubmatch(e.Message)
 		if m == nil {
 			return "", false
@@ -509,6 +509,17 @@ func (s *SQLServer) othersTransition(err error) (string, bool) {
 	}
 	return other, other != ""
 }
+
+// ssInTransition reports the errors SQL Server 2019 and earlier give a
+// statement while another database changes: 927 ("Database '…' cannot be
+// opened. It is in the middle of a restore"), 952 ("is in transition"),
+// 924 ("is already open and can only have one user at a time": a seed or
+// a drop sets a database SINGLE_USER first) and 942 ("cannot be opened
+// because it is offline": a restore of the whole database takes the
+// working database offline). Only othersTransition's check of the name
+// makes one a reason to try again: about this component's own database,
+// each means what it says.
+func ssInTransition(n int32) bool { return n == 924 || n == 927 || n == 942 || n == 952 }
 
 // sqlServerErrors are the messages of every server error in err: each
 // one's own and every message it carries (mssql.Error.All), in wrapped and
