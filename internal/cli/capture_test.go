@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -454,10 +455,24 @@ func TestReadOnlyCapture(t *testing.T) {
 	if code != ExitClean || fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("exit %d: %v", code, got)
 	}
-	// The command step is counted apart: it is not a request.
-	if r.NotCovered == nil || r.NotCovered.MutatingSkipped == nil || r.NotCovered.MutatingSkipped.Count != 2 ||
-		r.NotCovered.CommandsSkipped == nil || r.NotCovered.CommandsSkipped.Count != 1 || r.NotCovered.CommandsSkipped.Names[0] != "cmd" {
-		t.Errorf("not covered: %+v", r.NotCovered)
+	// Every request the result did not compare is named under "Not
+	// covered", with what it is and why it was skipped, in every format:
+	// the read in a sequence too (seq-me), and the command step apart.
+	notSent := "skipped (" + report.NoteNotSent + "): "
+	var named []string
+	for _, s := range r.NotCovered.Skipped {
+		named = append(named, fmt.Sprintf("%s/%s:%v", s.What, s.Reason, s.Names))
+	}
+	if want := []string{"mutating/" + report.NoteNotSent + ":[post-user seq-login]", "read/" + report.NoteNotSent + ":[seq-me]", "command/" + report.NoteNotSent + ":[cmd]"}; !reflect.DeepEqual(named, want) {
+		t.Errorf("json skipped %v, want %v", named, want)
+	}
+	for _, f := range []string{"text", "markdown", "junit"} {
+		_, out, _ := runCLI(t, "compare", "ro", "--against", "capture:full", "--config", cfg, "--format", f)
+		for _, w := range []string{"2 requests that change data " + notSent + "post-user, seq-login", "1 read " + notSent + "seq-me", "1 command step " + notSent + "cmd"} {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s lacks %q:\n%s", f, w, out)
+			}
+		}
 	}
 	if len(r.UnusedRules) != 0 {
 		t.Errorf("a rule of a request not sent is called stale: %+v", r.UnusedRules)

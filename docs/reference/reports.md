@@ -115,15 +115,14 @@ each gap:
 - route methods whose body is validated but whose validation errors no request checks (template `empty-body`), on the same terms;
 - requests meant to succeed whose answer in the set compared against is an error, which the comparison keeps green (`failed in baseline:local`, or the capture compared against);
 - requests observed: measured, not compared;
-- requests that change data that were skipped;
-- command steps that were skipped, counted apart: they are not requests;
+- every request that was skipped, not compared, by what it is: a request that changes data, a read, or a command step. Each line gives the reason, such as no baseline, or not sent by `capture --read-only` (also a read in a sequence with a write);
 - known failures (`known_failures:` in `exclusions.yaml`).
 
 There is no list when there is no gap. `run` uses the coverage its
 coverage step found; `compare` takes it once from `routes.json` and the
 records it read already.
 
-- JSON: `not_covered`, with `catalog` (`requests`, `reads`, `mutating`, `commands`, and `multipart` among them), `only`, `against` and `routes_checked`. Then `no_request`, `no_invalid_body`, `failed_in_baseline`, `observed`, `mutating_skipped`, `commands_skipped` and `known_failures`, each with a `count` and up to ten `names` (request IDs or routes), left out when empty.
+- JSON: `not_covered`, with `catalog` (`requests`, `reads`, `mutating`, `commands`, and `multipart` among them), `only`, `against` and `routes_checked`. Then `no_request`, `no_invalid_body`, `failed_in_baseline`, `observed` and `known_failures`, each with a `count` and up to ten `names` (request IDs or routes), left out when empty. `skipped` is a list of the same, each with `what` (`mutating`, `read` or `command`) and `reason`.
 - Markdown: a short list.
 - JUnit: the lines in the suite's `system-out`.
 

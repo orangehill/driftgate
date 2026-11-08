@@ -33,10 +33,9 @@ type NotCovered struct {
 	FailedInBaseline *Gap `json:"failed_in_baseline,omitempty"`
 	// Requests measured and never compared (observe: true).
 	Observed *Gap `json:"observed,omitempty"`
-	// Requests that change data that were skipped.
-	MutatingSkipped *Gap `json:"mutating_skipped,omitempty"`
-	// Command steps that were skipped: they are not requests.
-	CommandsSkipped *Gap `json:"commands_skipped,omitempty"`
+	// Every request the comparison skipped (not compared), by what it is
+	// and why: none is left unnamed.
+	Skipped []SkippedGap `json:"skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
 }
@@ -58,6 +57,21 @@ type Gap struct {
 	Names []string `json:"names"`
 }
 
+// What a skipped request is, for SkippedGap.What.
+const (
+	SkippedRead     = "read"
+	SkippedMutating = "mutating"
+	SkippedCommand  = "command"
+)
+
+// SkippedGap is the skipped requests of one kind with one reason (the
+// result's note: no baseline, not sent by a read-only capture …).
+type SkippedGap struct {
+	What   string `json:"what"` // read, mutating or command
+	Reason string `json:"reason"`
+	Gap
+}
+
 // gapNames is how many names a Gap keeps; text shows fewer.
 const gapNames = 10
 
@@ -71,7 +85,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.CommandsSkipped == nil && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -130,8 +144,17 @@ func (n *NotCovered) NotCoveredLines() []string {
 	add(n.NoInvalidBody, "route method whose validation error no request checks (template empty-body)", "route methods whose validation errors no request checks (template empty-body)")
 	add(n.FailedInBaseline, "request meant to succeed that failed in "+against, "requests meant to succeed that failed in "+against)
 	add(n.Observed, "request observed (measured, not compared)", "requests observed (measured, not compared)")
-	add(n.MutatingSkipped, "request that changes data skipped", "requests that change data skipped")
-	add(n.CommandsSkipped, "command step skipped", "command steps skipped")
+	for _, s := range n.Skipped {
+		one, many := "read", "reads"
+		switch s.What {
+		case SkippedMutating:
+			one, many = "request that changes data", "requests that change data"
+		case SkippedCommand:
+			one, many = "command step", "command steps"
+		}
+		g := s.Gap
+		add(&g, one+" skipped ("+s.Reason+")", many+" skipped ("+s.Reason+")")
+	}
 	add(n.KnownFailures, "known failure (exclusions.yaml)", "known failures (exclusions.yaml)")
 	return out
 }

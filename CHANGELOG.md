@@ -59,7 +59,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - Each side's project folder in responses, such as in stack traces, compares as one neutral folder. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The two baseline captures are one second apart, so timestamps differ as in later runs. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The route count of `discover` and `run` reads `13 routes (13 from laravel)`; `laravel 13` read as a framework version.
-- Skipped command steps are counted apart under "Not covered by this result" (`N command steps skipped`), not as requests that change data. The report's `not_covered.mutating_skipped` no longer holds command steps; they are in the new `commands_skipped`.
+- "Not covered by this result" names every request the comparison skipped, in every format, by what it is (request that changes data, read, command step) and why (no baseline, not sent by `capture --read-only`, private body not on this machine …). A read in a sequence that a read-only capture did not send was named nowhere, and command steps were counted as requests that change data. The report's `not_covered.mutating_skipped` is replaced by `not_covered.skipped`, a list with `what`, `reason`, `count` and `names`.
 
 ### Fixed
 
