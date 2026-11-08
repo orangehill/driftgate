@@ -1,58 +1,49 @@
 # DriftGate documentation
 
-DriftGate is a regression gate for HTTP APIs: it records how a running
-application responds, restores the same data after every change, sends the
-same requests and reports every difference. Its primary use is local:
-checking each step of a framework upgrade before the pull request; CI is
-optional. Start with the [README](../README.md) (install and a 5-minute
-quick start). This documentation describes DriftGate 1.0.
-What each release adds and changes is in the
-[changelog](../CHANGELOG.md).
+DriftGate is a regression gate for HTTP APIs: it checks after every change
+that a running application still answers the same way. These pages
+describe the release they are tagged with; what each release changes is
+in the [changelog](../CHANGELOG.md).
 
-## Reference
+## New to DriftGate
 
-- [Reference](reference/README.md): every reference page, one line each: commands, files,
-  how it works in detail, databases
-- [Commands](commands.md): every command and flag, exit codes, environment
-  variables, interrupts and the store lock; among them
-  [`allowlist check`](reference/commands/review.md#driftgate-allowlist-check) and
-  [`verify`](reference/commands/review.md#driftgate-verify) with `--migrate-state` and
-  `--migrate-private`
-- [What to use for what](configuration.md): a task
-  or symptom (an upload, rows in another order, a command, a gap) and the
-  feature for it
-- [Configuration](configuration.md): `driftgate.yaml`, `allowlist.yaml`,
-  `exclusions.yaml`, `catalog.json`, `classify.yaml`
-- [Security model](security.md): what a pull request can run, secrets,
-  personal data, allowed hosts, release verification
+1. [Install DriftGate](start/install.md) (5 minutes)
+2. [Tutorial: your first baseline](start/tutorial.md) (15 minutes)
+3. [How DriftGate works](concepts/how-it-works.md) (10 minutes)
+4. [Set up your own project](start/your-project.md) (20 minutes)
+5. [Upgrade a framework step by step](guides/framework-upgrade.md)
+
+Two more concepts: [what a green result proves](concepts/what-a-pass-proves.md),
+and [where DriftGate keeps its files](concepts/project-layout.md).
+
+## I have a task
+
+- [Upgrade a framework or a language version](guides/framework-upgrade.md), or [the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server)
+- [Find the commit that introduced a drift](guides/bisect.md)
+- [Build the catalog by recording through a proxy](guides/record.md)
+- [Check more than responses](guides/side-checks.md): a schema dump, the stack's settings, files, Redis, mail
+- Your framework: [Laravel](guides/laravel.md) · [ASP.NET Core](guides/aspnet-core.md) · [Next.js and Nuxt](guides/nextjs-nuxt.md) · [OpenAPI frameworks](guides/openapi.md) · [several services](guides/multi-service.md)
+- CI: [the GitHub Action](guides/github-actions.md) · [anonymized test data](guides/test-data.md)
+
+## What it can do
+
+[What to use for what](configuration.md) names the feature for a task or
+a symptom: an upload, rows in another order, a command, a value that may
+change, a gap in the check.
+
+## Look something up
+
+- [Reference](reference/README.md): every command, file and key, and how a capture, a comparison and a report work
 - [Drift kinds](reference/drift-kinds.md): what each kind of drift means
-  and how it is usually fixed
-- [Glossary](glossary.md): every term these pages use, with one definition
+- [Glossary](glossary.md): every term these pages use
+- [Security model](security.md): what a pull request can run, secrets, personal data, release verification
 
-## Guides
+## Principles
 
-- [Laravel](guides/laravel.md), with Herd, Docker / Sail and SQLite
-- [ASP.NET Core and EF Core on SQL Server](guides/aspnet-core.md)
-- [Next.js and Nuxt pages](guides/nextjs-nuxt.md)
-- [Frameworks with an OpenAPI description](guides/openapi.md): Spring Boot,
-  ASP.NET, FastAPI, NestJS, Quarkus, Micronaut, Magento and others
-- [Several services and monorepos](guides/multi-service.md)
-- [CI with the GitHub Action](guides/github-actions.md): keys, private
-  bodies, `--skip-private`, the pristine database cache
-- [Anonymized test data for CI](guides/test-data.md): the data module end to
-  end
-- [Upgrading a framework or language version](guides/framework-upgrade.md),
-  and [the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server):
-  database, PHP, web server, two stacks compared
-- [Finding the commit that introduced a drift](guides/bisect.md)
-- [Building the catalog by recording through a proxy](guides/record.md)
-- [Side checks in the same gate](guides/side-checks.md): a schema dump and a compiler
-  output, the settings of the stack, files and Redis, mail, the production install
+- [Never a false pass](concepts/how-it-works.md#never-a-false-pass): a result that cannot be trusted is never green.
+- [Local first, CI second](concepts/how-it-works.md#local-first-ci-second): check each step on your machine before the pull request.
+- [One upgrade step at a time](concepts/how-it-works.md#one-upgrade-step-at-a-time): small steps give few drifts with one cause.
 
-Every `yaml` and `json` example in these pages carries a
-`<!-- check: … -->` marker in its source, and the docs test
-(`go test ./internal/docscheck/`) loads each one with DriftGate's own
-parsers on every change; the examples in another tool's format (a GitHub
-workflow, a compose file, an OpenAPI description) are checked as plain YAML
-or JSON.
-The same test checks every link and anchor between the pages.
+Every `yaml` and `json` example in these pages is loaded with
+DriftGate's own parsers by the docs test (`go test ./internal/docscheck/`),
+which also checks every link and anchor.

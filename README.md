@@ -11,20 +11,20 @@ same response after a framework upgrade, a refactoring or a new feature.
 
 ![DriftGate records a baseline, then reports drift after the API changes](docs/demo.gif)
 
-DriftGate records how a running application responds (the baseline). After
-every change (a framework or language upgrade, a refactoring, a new feature)
-it restores the same data, sends the same requests and compares the responses
-with the baseline: status, headers and body, literally. Every difference (a
-drift) is reported with the request, the path in the response, its kind, and
-what it was and is now. It also records what each request changed in the
-database and reports a change of that behaviour as drift.
+## What DriftGate does
 
-It is one static binary, works from the outside over HTTP against any
-backend, and needs nothing added to the application. Its primary use is
-local: checking each step of a framework upgrade on your machine before the
-pull request. Running it in CI is optional.
+DriftGate records how a running application responds: the baseline.
+After every change, it restores the same data, sends the same requests,
+and compares the responses with the baseline: status, headers and body,
+literally. Every difference, a drift, is reported with the request, the
+place in the response, its kind, and what it was and is now. It also
+records what each request changed in the database, and reports a change
+of that as drift.
 
-User documentation: [`docs/`](docs/README.md).
+It is one static binary that works from the outside, over HTTP, against
+any backend. Its main use is local: checking each step of a framework
+upgrade on your machine before the pull request
+([how it works](docs/concepts/how-it-works.md)).
 
 ## Why DriftGate
 
@@ -67,274 +67,30 @@ User documentation: [`docs/`](docs/README.md).
 - SQL Server 2022 in Docker, emulated on an Apple M4: a fingerprint
   0.76 ms when nothing changed, 33 ms after a change to one table of 100,
   0.51 s for a full read of 57.8 MB; a restore of a small table 16–18 ms.
-- CI tests the database code on MariaDB 10.3, 10.6 and 11.4, MySQL 8.0 and 8.4,
-  PostgreSQL 13, 16 and 17, SQL Server 2017, 2019, 2022 and 2025, and SQLite
-  (built in, on Linux, macOS and Windows), and runs the tests on Windows
-  too.
+- CI tests the database code on MariaDB, MySQL, PostgreSQL, SQL Server and SQLite, on Linux, macOS and Windows ([supported versions](docs/reference/state.md#supported-database-versions)).
 - Releases are signed with cosign
   ([release verification](docs/security.md#release-verification)).
 
 ## Install
 
-**Release binaries** (linux, darwin and windows on amd64 and arm64). Verify
-the signature of `SHA256SUMS` first, then the binary against it:
+Download a signed release binary for Linux, macOS or Windows, verify it,
+and put it on your `PATH`. Or build it from source with
+`go install github.com/orangehill/driftgate/cmd/driftgate@latest`.
+Every way, with the verification commands: [Install DriftGate](docs/start/install.md).
 
-```sh
-gh release download v1.0.2 --repo orangehill/driftgate \
-  --pattern driftgate-linux-amd64 --pattern 'SHA256SUMS*'
-cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
-install -m 0755 driftgate-linux-amd64 /usr/local/bin/driftgate
-```
+## Get started
 
-SBOMs, provenance and reproducible builds:
-[security, release verification](docs/security.md#release-verification).
+- [Tutorial: your first baseline](docs/start/tutorial.md): a demo API, its baseline, a change, and its drift, in 15 minutes.
+- [Set up your own project](docs/start/your-project.md): `driftgate setup` on your application.
+- [Upgrade a framework step by step](docs/guides/framework-upgrade.md): the check after every upgrade step.
 
-**From source** (the Go version in `go.mod`):
-
-```sh
-go install github.com/orangehill/driftgate/cmd/driftgate@latest
-# or, in a checkout:
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o driftgate ./cmd/driftgate
-```
-
-A source build reports its version as `dev`. Its help links the docs of the
-release it was installed at (`go install …@<tag>`), or of the `development`
-branch when built from a checkout.
-
-**Docker image**, built from the [`Dockerfile`](Dockerfile) (no image is
-published yet):
-
-```sh
-docker build -t driftgate .
-docker run --rm -v "$PWD:/work" --network host driftgate run
-```
-
-The image holds only the binary (non-root, no shell). Commands that
-`driftgate.yaml` runs (seed, restore, `php artisan` …) must exist where
-DriftGate runs; for those, copy the binary into the application's image:
-`COPY --from=driftgate /usr/local/bin/driftgate /usr/local/bin/`.
-
-## Quick start
-
-**A new project: `driftgate setup`.** In the project's folder, with the
-application running, it recognises the framework, reads the database and
-the address from the project's own settings (`.env`, `appsettings.json`,
-compose…), writes `.driftgate/`, makes the key and, after asking, the
-pristine copy of the database (MySQL, MariaDB, PostgreSQL,
-[SQL Server](docs/reference/databases/sql-server.md) 2017 and later, or an SQLite file such as a new Laravel application's
-[`database/database.sqlite`](docs/guides/laravel.md#sqlite)), then the
-first baseline, and says what to
-check by hand ([setup](docs/reference/commands/project.md#driftgate-setup)). After every upgrade
-step, `driftgate run` compares with that baseline.
-
-**A worktree per change.** `.driftgate/` is not in git, so a worktree
-added with `git worktree add` starts without it: `driftgate setup` there
-takes the main worktree's project with its baseline and key, switches
-`working:` to the database and `base_url` to the address the worktree's
-`.env` names (after asking; `--yes` says yes), and makes no
-baseline of its own; `driftgate run` then compares the worktree's code
-with the main worktree's baseline
-([baselines](docs/reference/driftgate-yaml.md#baselines)).
-
-`driftgate init` writes only the configuration (with the database found
-commented out), for the steps one by one.
-The steps below use the demo API in this repository, so every output
-shown is real.
-
-```sh
-go build -o /tmp/demoserver ./tools/demoserver     # in a checkout of this repository
-/tmp/demoserver -addr 127.0.0.1:8920 -version v1 &  # the application
-mkdir shop && cd shop
-driftgate init --project shop
-driftgate key create   # the key, in .driftgate/key
-```
-
-```
-$ driftgate init --project shop
-created .driftgate/driftgate.yaml, .driftgate/catalog.json and .driftgate/allowlist.yaml
-no known project type found; add routes under discover: or write the catalog by hand
-...
-Everything DriftGate keeps is in .driftgate/, which git ignores (.gitignore).
-```
-
-Everything is in the project's `.driftgate/` folder, which `init` adds to
-`.gitignore` (with `--baselines git`, `driftgate.yaml` and `driftgate/`
-go into the repository instead, and the key into the macOS Keychain; see
-[baselines](docs/reference/driftgate-yaml.md#baselines)). The demo is not a
-framework `init` knows, so tell DriftGate its address, its routes and how
-to reset its data. In `.driftgate/driftgate.yaml` set `base_url:
-http://127.0.0.1:8920` and `mode: evolve` (so that changes can be
-accepted), and add:
-
-<!-- check: config-fragment -->
-```yaml
-state:
-  api:                       # the demo keeps its data in memory; its reset is the restore
-    restore: ["curl", "-sf", "-X", "POST", "http://127.0.0.1:8920/admin/reset"]
-discover:
-  - adapter: command         # any command that prints the routes as JSON
-    command: ["cat", "routes-src.json"]
-params:
-  - name: id
-    value: "12"
-```
-
-and `routes-src.json` in the project folder (`shop/`, where you run the
-commands; the `command` adapter runs there):
-
-<!-- check: routes-json -->
-```json
-[
- {"method":"GET","path":"/api/news"},
- {"method":"GET","path":"/api/news/{id}"},
- {"method":"POST","path":"/api/faq","body":{"q":"?"}}
-]
-```
-
-**The first run makes the baseline.** `run` finds the routes, generates the
-catalog, captures twice on the same restored state, and makes the baseline
-only when both captures agree:
-
-```
-$ driftgate run
-== discover ==
-3 routes (command 3)
-  route-added   GET /api/news
-  route-added   GET /api/news/{id}
-  route-added   POST /api/faq
-wrote …/shop/.driftgate/routes.json
-...
-== capture ==
-
-captured 3 requests into run-5729dc0359a3
-...
-2 runs on the same state gave the same responses ✓
-
-== baseline ==
-baseline local made from two equal captures: …/shop/.driftgate/baselines/local
-```
-
-The capture is named after the checkout (`run-<id>`), so two worktrees of
-one project never share it. With `--baselines git` the last line also
-says to commit `driftgate/`.
-
-**Change something.** Restart the demo as `v2`, which plants changes, and
-run again (exit code 1):
-
-```
-$ kill %1; /tmp/demoserver -addr 127.0.0.1:8920 -version v2 &
-$ driftgate run
-...
-DRIFT  get-api-news-id
-         header-extra    header:x-powered-by   → ["demo"]
-         key-extra       $.entry.meta   → (private)
-         type            $.entry.id  string → int
-         value           $.entry.published_at  (private) → (private)
-
-Groups:
-  [1] 3 drifts in 3 requests: header x-powered-by is new
-      GET /api/news  (+2 more routes)
-...
-capture:run-5729dc0359a3 against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
-```
-
-Values show as `(private)` because generated requests are stored as private
-by default; `driftgate compare run --show-private` shows them on your own
-machine.
-
-**Review and accept.** `review` lists the drift groups with the exact
-`accept` command. Accepting updates the baseline and appends the reason to
-`.driftgate/baselines/local/acceptances.jsonl`:
-
-```
-$ driftgate review
-...
-$ driftgate accept 'get-api-*' post-api-faq --reason "v2 returns numeric ids and a meta object" --ref DEMO-1
-accepted 3 requests into baseline local: get-api-news, get-api-news-id, post-api-faq
-  header-extra header:x-powered-by
-  ...
-logged in .driftgate/baselines/local/acceptances.jsonl
-```
-
-The next run still reports one drift: v2 stamps a new FAQ entry with the
-current time (`$.entry.created_at`). A value that changes by itself goes on
-the allowlist, with its format and a reason, in `.driftgate/allowlist.yaml`:
-
-<!-- check: allowlist -->
-```yaml
-body:
-  - request: post-api-faq
-    path: $.entry.created_at
-    format: '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
-    reason: Creation time of the new FAQ entry; v2 sets it to the current time.
-```
-
-```
-$ driftgate run
-...
-capture:run-5729dc0359a3 against baseline:local: 3 compared, 3 passed, 0 drifted, 0 skipped, 0 observed
-...
-No drift ✓
-```
-
-With `baselines: local` nothing of this goes into git: the baseline stays
-on this machine, for the checks before each pull request. To share it
-with a team or a CI job, `driftgate baselines git` moves it into the
-repository; then commit `driftgate.yaml` and `driftgate/`
-([baselines](docs/reference/commands/project.md#driftgate-baselines)). Exit codes: `0` clean,
-`1` drift, `2` configuration error, `3` environment error or an incomplete
-result.
-
-## GitHub Action
-
-<!-- check: yaml -->
-```yaml
-on: pull_request            # never pull_request_target
-permissions:
-  contents: read
-  pull-requests: write      # the report as a pull-request comment
-jobs:
-  driftgate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # … start the application and its database …
-      - uses: orangehill/driftgate@v1.0.2   # a release tag or a commit SHA
-        with:
-          version: v1.0.2   # download and verify the signed release binary; default: build from source
-          args: --skip-private
-```
-
-The action runs `driftgate run` against the committed baseline (it never
-makes one in CI), keeps the exit code, and leaves the report as one updated
-pull-request comment, in the job summary and as a JUnit file. Full guide:
-[CI with GitHub Actions](docs/guides/github-actions.md).
+In CI, the GitHub Action runs the same check on every pull request
+([CI with GitHub Actions](docs/guides/github-actions.md)).
 
 ## Documentation
 
-- [Commands](docs/commands.md): every command and flag, exit codes
-  (also `allowlist check`, which finds rules that cannot apply, and
-  `verify --migrate-state` / `--migrate-private` for baselines of an earlier
-  release)
-- [What to use for what](docs/configuration.md): an
-  upload, rows in another order, a command, a value that may change, a gap
-- [Configuration](docs/configuration.md): `driftgate.yaml`,
-  `allowlist.yaml`, `exclusions.yaml`, `classify.yaml`, `catalog.json`
-- [Security model](docs/security.md)
-- Guides: [Laravel](docs/guides/laravel.md) ·
-  [Next.js and Nuxt pages](docs/guides/nextjs-nuxt.md) ·
-  [OpenAPI frameworks](docs/guides/openapi.md) ·
-  [Several services](docs/guides/multi-service.md) ·
-  [CI with GitHub Actions](docs/guides/github-actions.md) ·
-  [Anonymized test data](docs/guides/test-data.md) ·
-  [Upgrading a framework](docs/guides/framework-upgrade.md) or
-  [the server](docs/guides/framework-upgrade.md#upgrading-the-server-database-php-web-server) ·
-  [Bisect](docs/guides/bisect.md) ·
-  [Recording through a proxy](docs/guides/record.md)
+Everything else, by task and by topic, is in the
+[documentation](docs/README.md).
 
 ## Contributing
 

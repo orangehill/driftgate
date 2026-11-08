@@ -43,14 +43,8 @@ folder. With `baselines: git`, the same files are in `driftgate/`,
 `driftgate.yaml` is at the project root, and the local store is in
 `~/.driftgate/<project>` ([baselines](driftgate-yaml.md#baselines)).
 
-Commands find the project from any folder inside it: the nearest folder
-that has `.driftgate/driftgate.yaml` or `driftgate.yaml`, up to the top of
-the git work tree. `--config <path>` names the file instead.
-
-A folder with both files is refused, with the commands that settle it.
-That happens after checking out a branch from before a switch of layouts.
-`.driftgate/` holds the store and the key, so it is moved aside, never
-deleted.
+Commands find the project from any folder inside it
+([how](../concepts/project-layout.md#how-commands-find-the-project)).
 
 ## Which baseline a command uses
 

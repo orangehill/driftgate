@@ -176,43 +176,9 @@ How far a comparison goes. Each level includes the ones before it.
 baselines: local
 ```
 
-Where the project's files are: `local` or `git`.
-
-| | `local` | `git` |
-|---|---|---|
-| `driftgate.yaml` | `.driftgate/driftgate.yaml` | `driftgate.yaml` at the project root |
-| catalog, allowlist, routes, exclusions, baselines | `.driftgate/` | `driftgate/`, committed |
-| local store | `.driftgate/store/` | `~/.driftgate/<project>/` |
-| key without `key:` | `DRIFTGATE_KEY`, then `.driftgate/key` | `DRIFTGATE_KEY`, then the macOS Keychain |
-| for | checks on this machine before a pull request | baselines shared through git, CI |
-
-A new project (`driftgate init`) keeps all its files in `.driftgate/`,
-which git ignores:
-
-```
-.driftgate/
-  driftgate.yaml               the configuration (this page)
-  routes.json                  route inventory, written by discover --write
-  catalog.json                 request catalog, written by generate, edited by hand
-  allowlist.yaml               values that may change, each with a format and a reason
-  exclusions.yaml              routes deliberately not checked, each with a reason
-  classify.yaml                column rules of the data module
-  baselines/<name>/            baselines; change only through driftgate accept
-  store/                       the local store: captures, private bodies, pristine metadata
-  key                          the project key (driftgate key create), open to its owner only
-```
-
-With `baselines: git`, the configuration and the files are committed,
-and the local store is outside the repository (`~/.driftgate/<project>/`,
-see [store](#store)). It is the layout of an earlier release, and of
-every `driftgate.yaml` at the project root without a `baselines:` key.
-
-```
-driftgate.yaml                 the configuration
-driftgate/
-  routes.json, catalog.json, allowlist.yaml, exclusions.yaml, classify.yaml
-  baselines/<name>/
-```
+Where the project's files are: `local` or `git`. The files of each
+layout, and which to choose, are in
+[Where DriftGate keeps its files](../concepts/project-layout.md).
 
 The place of `driftgate.yaml` decides the layout. Without the key, a
 file in `.driftgate/` is `local` and one at the project root is `git`, so
@@ -221,7 +187,6 @@ a configuration of an earlier release stays as it was.
 - A `baselines:` value that disagrees with the place of the file is refused (exit 2).
 - [`driftgate baselines local|git`](commands/project.md#driftgate-baselines) moves the files.
 - `driftgate init` makes a `local` project; `--baselines git` makes the other.
-- Scanning for personal data, encryption of private bodies and the state fingerprint work the same in both layouts.
 
 With `local`, nothing DriftGate writes leaves the project folder, and
 nothing of it enters git:
