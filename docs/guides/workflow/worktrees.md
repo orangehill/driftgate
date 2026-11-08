@@ -13,14 +13,11 @@ cd ../shop-api-7
 driftgate setup
 ```
 
-`.driftgate/` is not in git, so a new worktree starts without it.
-
-- `driftgate setup` there takes the main worktree's project: its configuration, catalog, allowlist, baseline and key.
-- It makes no baseline of its own. `driftgate run` compares the worktree's code with the main worktree's baseline.
-- Each worktree keeps its own captures and last comparison.
-
-This needs the local layout in the main worktree
-([setup in a git worktree](../../reference/commands/project.md#setup-in-a-git-worktree)).
+Setup in the new worktree takes the main worktree's project and
+baseline. `driftgate run` there then compares the worktree's code with
+the main worktree's baseline. This needs the local layout; what setup
+takes, and when it stops, is under
+[setup in a git worktree](../../reference/commands/project.md#setup-in-a-git-worktree).
 
 ## Give the worktree its own database and address
 
@@ -31,13 +28,9 @@ DB_DATABASE=shop_api7
 ```
 
 Give the worktree's application a database and an address of its own,
-in its own settings. Setup then offers to make that database `working:`
-and its address `base_url`; `--yes` says yes. It makes that database's
-pristine copy.
-
-Settings that name the main worktree's database, or none, stop setup
-before it takes anything (exit 2): its runs would restore the main
-worktree's database.
+in its own settings, before you run setup there. Setup then uses them,
+and makes that database's pristine copy. Without them it stops: its runs
+would restore the main worktree's database.
 
 ## Carry expectations to another worktree
 
@@ -56,11 +49,9 @@ worktree, after checking its chain, seal and baseline
 driftgate setup        # offers to copy the main worktree's pristine data into the new file
 ```
 
-Git does not carry an SQLite file, and the worktree's settings must name
-a file of its own. When the file is missing and the main worktree has a
-pristine copy, setup offers to make the file a copy of that data.
-Otherwise it says to copy the main worktree's file, or to run the
-migrations ([SQLite in setup](../../reference/commands/project.md#when-setup-finds-an-sqlite-file)).
+Git does not carry an SQLite file. Name a file of the worktree's own in
+its settings, and setup offers to fill it from the main worktree's
+pristine data ([SQLite in setup](../../reference/commands/project.md#when-setup-finds-an-sqlite-file)).
 
 ---
 **Next:** [Share a baseline with your team or CI](share-baselines.md): when more people check against it.

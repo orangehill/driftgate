@@ -65,22 +65,9 @@ the same way, by its ID.
 
 ## Keep a failing request without hiding it
 
-<!-- check: exclusions -->
-```yaml
-version: 1
-routes: []
-known_failures:
-  - request: post-api-tree-reorder
-    reason: Answers 500 since the move to nested sets; fixed in the Laravel 9 step.
-    ref: SHOP-412
-    status: 500
-```
-
-A request that already fails in the baseline would leave its route
-uncovered. A known failure in `exclusions.yaml` keeps the request in the
-catalog, still compared, and lists it instead of failing on its route.
-Remove it once the fix is accepted
-([acknowledge a request that fails](../../reference/exclusions-yaml.md#acknowledge-a-request-that-fails)).
+A request that already fails in the baseline can stay in the catalog,
+still compared, as a known failure in `exclusions.yaml`. How:
+[keep a request that fails in the baseline](../catalog/coverage.md#keep-a-request-that-fails-in-the-baseline).
 
 ---
 **Next:** [Make the catalog cover every route](../catalog/coverage.md): check what the gate does not see.

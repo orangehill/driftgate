@@ -75,13 +75,9 @@ refusal.
 - PostgreSQL needs `CREATEDB`: `ALTER ROLE shop CREATEDB`.
 - SQL Server needs a login with `dbcreator` and `db_owner` in the working database, not `sysadmin` ([what the login needs](databases/sql-server.md#what-the-login-needs)).
 
-Give the DSN a user limited to the working and pristine databases (for
-PostgreSQL, with `CREATEDB`). Do not use a superuser, nor a user with
-MySQL's `FILE` privilege.
-
-- The one exception is a disposable database in a local container, a compose service on this machine. Its root, `POSTGRES_USER` or `sa` may be used, as `driftgate setup` does when the application's setting names that service.
-- On a shared server, always use a limited user.
-- A PostgreSQL restore ends the application's sessions on the working database.
+Give the DSN a user limited to the working and pristine databases. Who
+may be the DSN user, and why, is in
+[the queries of params](../security.md#the-queries-of-params).
 
 Optional rights that make fingerprints faster are on the driver pages,
 such as [the optional PROCESS privilege](databases/mysql-mariadb.md#the-optional-process-privilege)
@@ -90,14 +86,9 @@ on MySQL and MariaDB.
 ## Where the database may be
 
 The database must be on this machine (a local address or a socket), or
-on a host that some service's `allow_hosts` names. A private address is
-not enough. Otherwise set `allow_remote: true` on the component.
-
-- Every host the driver may connect to is checked: PostgreSQL `host=`, several hosts, `PG*` variables.
-- Every connection is checked on the address it goes to.
-
-The rule and its reasons are in the
-[security model](../security.md#databases-must-be-copies).
+on a host that some service's `allow_hosts` names; otherwise set
+`allow_remote: true` on the component. What is checked, and why, is in
+[databases must be copies](../security.md#databases-must-be-copies).
 
 ## Fingerprints
 
@@ -108,6 +99,16 @@ on the same database server version.
 - On MySQL and MariaDB, triggers and views are covered with the collation they were made with, which a restore keeps.
 - PostgreSQL and SQL Server cover more objects: see [PostgreSQL](databases/postgresql.md#what-the-fingerprint-covers) and [SQL Server](databases/sql-server.md#what-the-fingerprint-covers).
 - A request that changes one of them is a side effect, and the next restore brings it back.
+- Values count by their own bytes or type, so NULL and `''` differ on SQLite and SQL Server; a computed or generated column counts by its definition.
+- Not covered: excluded tables, statistics and the mark of the pristine copy.
+
+A fingerprint is taken at the cheapest cost that is still exact. The
+first one of a command reads every table; the drivers' pages give the
+measured times.
+
+- **Reused:** nothing was written since the last one.
+- **Per table:** only the tables written to are read again, where the server tells which (write counters, page digests).
+- **Full:** every table is read, as when the server cannot tell which tables were written.
 
 A pristine copy or a baseline whose fingerprint has an older format
 keeps working while nothing it covers differs; what to do otherwise is in
