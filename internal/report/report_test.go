@@ -415,7 +415,7 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 			t.Errorf("mode %q: %q, want %q", mode, n, want)
 		}
 	}
-	r.NotCovered = &NotCovered{Only: true}
+	r.Mode, r.NotCovered = "freeze", &NotCovered{Only: true}
 	if n := r.NoBaselineNote(); !strings.Contains(n, "a capture of the whole catalog (run without --only, then driftgate baselines rebase local") {
 		t.Errorf("--only: %q", n)
 	}
