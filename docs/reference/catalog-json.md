@@ -229,7 +229,7 @@ queue worker inside a sequence.
 - `dir` is the folder the step runs in, and `stdin` a file given as its standard input. Both are relative to the project folder, as for [seed and prepare](driftgate-yaml.md#commands-with-a-folder-or-standard-input).
 - A missing `dir` or `stdin` stops the capture before anything is sent.
 - When a step fails, the log shows the last lines it wrote to standard error, never its standard output. That is its body: private, or public but not yet scanned for personal data.
-- [Side checks](../guides/side-checks.md) has recipes for a schema dump, compiler and mail output.
+- [Side checks](../guides/catalog/side-checks.md) has recipes for a schema dump, compiler and mail output.
 
 A release before `dir` and `stdin` refuses a catalog that uses them, as
 an unknown field ([keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses)).

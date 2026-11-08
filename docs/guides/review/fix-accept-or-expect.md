@@ -83,5 +83,5 @@ Remove it once the fix is accepted
 ([acknowledge a request that fails](../../reference/exclusions-yaml.md#acknowledge-a-request-that-fails)).
 
 ---
-**Next:** [Make the catalog cover every route](../../reference/commands/catalog.md#driftgate-coverage): check what the gate does not see.
+**Next:** [Make the catalog cover every route](../catalog/coverage.md): check what the gate does not see.
 **Related:** [driftgate accept](../../reference/commands/review.md#driftgate-accept) · [driftgate expect](../../reference/commands/review.md#driftgate-expect) · [mode](../../reference/driftgate-yaml.md#mode)

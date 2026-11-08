@@ -177,7 +177,7 @@ what it saw. Responses are never kept.
 - Recording only proposes requests: `capture` records their responses on a restored state.
 - Exit `0`; `2` for a non-loopback `--listen` without the flag, or a service outside `allow_hosts`.
 
-The task is in [the guide](../../guides/record.md).
+The task is in [the guide](../../guides/catalog/record.md).
 
 ```sh
 driftgate record                                  # list what the session adds

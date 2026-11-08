@@ -115,7 +115,7 @@ there proves nothing about behaviour that depends on the data
 Settings such as PHP's `memory_limit` or `upload_max_filesize`, database
 variables, and the web server's `client_max_body_size` change behaviour.
 No response shows it until a limit is hit. A
-[command step that prints the chosen settings](../side-checks.md#settings-of-the-stack)
+[command step that prints the chosen settings](../catalog/side-checks.md#check-the-settings-of-the-stack)
 makes a difference a drift you see in the comparison.
 
 ## Keep the new stack as the baseline

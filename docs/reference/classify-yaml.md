@@ -193,4 +193,4 @@ the copy has no dangling reference.
 - `when` limits a declared reference to rows whose columns have these values.
 
 ---
-**Related:** [Commands: the data module](commands/data.md) · [data](driftgate-yaml.md#data) · [Anonymized test data](../guides/test-data.md)
+**Related:** [Commands: the data module](commands/data.md) · [data](driftgate-yaml.md#data) · [Anonymized test data](../guides/ci/test-data.md)

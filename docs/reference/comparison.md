@@ -91,12 +91,16 @@ at paths such as `html>body>p@class`.
 
 - The document type declaration that came or went is structure; a changed one counts from `values` on.
 - Texts and attribute values are compared from `values` on.
-- JSON in a page, such as `script#__NEXT_DATA__` and the Next.js RSC payload, is compared as JSON.
+- One inserted element is one difference, not a change of everything after it.
+- JSON in a page is compared as JSON: `__NEXT_DATA__`, the app router payload (`self.__next_f`), the Nuxt payload (decoded, with key names), and `application/json` or `ld+json` scripts.
+- Whitespace between elements does not count, except in `pre`, `textarea`, `script` and `style`. A space next to an inline element does: `<b>a</b> <i>b</i>` reads "a b", unlike `<b>a</b><i>b</i>`.
+- Comments, `&amp;` against `&`, and the order of attributes do not count.
+- Paths into the app router payload follow the shape of the React tree, and references such as `$L3` stay text.
 - A page the parser refuses, nested deeper than 512 elements, is compared as bytes, and the drift says why.
 - Body rules reach a page with an `html` path ([body rules](allowlist-yaml.md#body-rules)).
 
 How Next.js and Nuxt pages are set up is in the
-[Next.js and Nuxt guide](../guides/nextjs-nuxt.md).
+[Next.js and Nuxt guide](../guides/frameworks/nextjs-nuxt.md).
 
 ## Spreadsheets and CSV files
 

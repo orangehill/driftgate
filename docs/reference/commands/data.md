@@ -3,7 +3,7 @@
 The commands that make anonymized test data from a source database. They
 need [`data:`](../driftgate-yaml.md#data) in `driftgate.yaml` and the
 rules of [classify.yaml](../classify-yaml.md). The task
-is in [anonymized test data](../../guides/test-data.md).
+is in [anonymized test data](../../guides/ci/test-data.md).
 
 ## driftgate data classify
 
@@ -101,4 +101,4 @@ driftgate data verify --dump out/shop-sample.sql
 ```
 
 ---
-**Related:** [data](../driftgate-yaml.md#data) · [classify.yaml](../classify-yaml.md) · [Anonymized test data](../../guides/test-data.md)
+**Related:** [data](../driftgate-yaml.md#data) · [classify.yaml](../classify-yaml.md) · [Anonymized test data](../../guides/ci/test-data.md)

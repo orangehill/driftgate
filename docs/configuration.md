@@ -19,7 +19,7 @@ keeps the old headings, so older links still work.
 | the same header differs on every request (another server stack) | a [header rule](reference/allowlist-yaml.md#header-rules); the [line on one change](reference/reports.md#one-change-in-almost-every-request) proposes it |
 | rows in another order (`item-order`; another database server or ORM) | an [array rule](reference/allowlist-yaml.md#array-rules): `key` pairs the items, `any_order` allows the order |
 | uploading a file | a [`multipart`](reference/catalog-json.md#multipart) catalog entry with a fixture from the uploads folder |
-| a queue worker, a command, an import or export, an admin path that changes the schema | a [command step](reference/catalog-json.md#command-steps), or a catalog request for the path; [side checks](guides/side-checks.md) |
+| a queue worker, a command, an import or export, an admin path that changes the schema | a [command step](reference/catalog-json.md#command-steps), or a catalog request for the path; [side checks](guides/catalog/side-checks.md) |
 | measured, not compared (a value no rule can describe) | [`observe`](reference/driftgate-yaml.md#observe) |
 | what the gate does not check | `driftgate coverage`, and the [not-covered summary](reference/reports.md#what-the-result-does-not-cover) after every comparison |
 | two server stacks (database, PHP, web server) | [upgrading the server](guides/workflow/server-upgrade.md) |

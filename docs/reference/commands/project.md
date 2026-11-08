@@ -32,7 +32,7 @@ driftgate init --project shop
 - For each it writes the matching `discover:` adapters, the framework's own routes as exclusions with reasons (`.driftgate/exclusions.yaml`), and allowlist entries for values the framework changes on every response.
 - The `Date` header is always allowed.
 - A framework DriftGate has not been checked on is marked as such.
-- In a monorepo it finds the services in the root, its subfolders, `apps/*`, `services/*` and `packages/*`. It reads their ports from `docker-compose.yml` ([several services](../../guides/multi-service.md)).
+- In a monorepo it finds the services in the root, its subfolders, `apps/*`, `services/*` and `packages/*`. It reads their ports from `docker-compose.yml` ([several services](../../guides/frameworks/multi-service.md)).
 - Without a known framework it writes a commented configuration, and says to add routes under `discover:` or to write the catalog by hand.
 
 ### How init writes the database settings

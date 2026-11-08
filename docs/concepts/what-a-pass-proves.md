@@ -20,10 +20,10 @@ A pass proves nothing about a request that is not in the catalog.
 - It does not exercise file uploads, unless the catalog has [`multipart`](../reference/catalog-json.md#multipart) requests with fixtures.
 - It does not reach admin paths that change the schema.
 - It does not reach code that only background jobs, queue workers or commands run.
-- It does not check requests a frontend sends by itself, unless you [record](../guides/record.md) them into the catalog.
+- It does not check requests a frontend sends by itself, unless you [record](../guides/catalog/record.md) them into the catalog.
 
 Command steps with `"output": true` and state fingerprints bring the rest
-into the gate ([side checks](../guides/side-checks.md)). The table of
+into the gate ([side checks](../guides/catalog/side-checks.md)). The table of
 [what to use for what](../configuration.md) names the feature for each.
 
 ## Why a result can be incomplete

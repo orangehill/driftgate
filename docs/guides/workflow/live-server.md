@@ -80,7 +80,7 @@ driftgate record --write        # on a copy where writes are allowed
 
 A page may load data with its own requests: a filter, a search, a
 panel's widgets. It is checked only if those requests are in the catalog. Use the frontend once through
-[`driftgate record`](../record.md) on a copy where writes are allowed, and
+[`driftgate record`](../catalog/record.md) on a copy where writes are allowed, and
 add what it proposes. A green result says nothing about a request the
 catalog does not have.
 

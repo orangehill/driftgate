@@ -20,10 +20,10 @@ and [where DriftGate keeps its files](concepts/project-layout.md).
 
 - [Upgrade a framework or a language version](guides/workflow/framework-upgrade.md), or [the server](guides/workflow/server-upgrade.md)
 - [Find the commit that introduced a drift](guides/review/find-the-commit.md)
-- [Build the catalog by recording through a proxy](guides/record.md)
-- [Check more than responses](guides/side-checks.md): a schema dump, the stack's settings, files, Redis, mail
-- Your framework: [Laravel](guides/laravel.md) · [ASP.NET Core](guides/aspnet-core.md) · [Next.js and Nuxt](guides/nextjs-nuxt.md) · [OpenAPI frameworks](guides/openapi.md) · [several services](guides/multi-service.md)
-- CI: [the GitHub Action](guides/github-actions.md) · [anonymized test data](guides/test-data.md)
+- [Build the catalog by recording through a proxy](guides/catalog/record.md)
+- [Check more than responses](guides/catalog/side-checks.md): a schema dump, the stack's settings, files, Redis, mail
+- Your framework: [Laravel](guides/frameworks/laravel.md) · [ASP.NET Core](guides/frameworks/aspnet-core.md) · [Next.js and Nuxt](guides/frameworks/nextjs-nuxt.md) · [OpenAPI frameworks](guides/frameworks/openapi.md) · [several services](guides/frameworks/multi-service.md)
+- CI: [the GitHub Action](guides/ci/github-actions.md) · [anonymized test data](guides/ci/test-data.md)
 
 ## What it can do
 
