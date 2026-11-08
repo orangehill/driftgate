@@ -155,10 +155,15 @@ request's test case.
 ## Requests without a baseline response
 
 Requests the baseline has no response for are skipped, and listed in
-every format: `no_baseline` in JSON, a line in text and markdown. A new
-request joins the baseline with `accept`. They do not make the result
-incomplete while other requests were compared, since every new request
-starts without a baseline.
+every format: `no_baseline` in JSON, a line in text and markdown. They
+do not make the result incomplete while other requests were compared,
+since every new request starts without a baseline.
+
+The line says how a new request joins the baseline, in the mode of the
+comparison, and `review` repeats it:
+
+- mode `evolve`: `driftgate accept <request>... --reason "…"`;
+- mode `freeze`, which refuses `accept`: `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`, with the baseline and capture of the comparison. The rebase takes the whole capture, its drifts too, so run it when nothing else drifts. After `run --only`, it first needs a capture of the whole catalog.
 
 ## Requests sent again after a restore
 

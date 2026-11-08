@@ -398,3 +398,31 @@ func TestShortPairAroundTheDifference(t *testing.T) {
 		t.Errorf("explanation %q", e)
 	}
 }
+
+// TestNoBaselineAdviceByMode: run tells how new requests join the baseline
+// with the command that works in the comparison's mode: accept in evolve,
+// a rebase with --allow-freeze in freeze, which refuses accept.
+func TestNoBaselineAdviceByMode(t *testing.T) {
+	r := Build("capture:run-1", "baseline:local", []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}, {ID: "old", Outcome: Pass}})
+	r.Baseline = "local"
+	for mode, want := range map[string]string{
+		"evolve": "1 request without a baseline, not compared: new; new requests join the baseline with driftgate accept",
+		"":       "new requests join the baseline with driftgate accept",
+		"freeze": `in mode freeze new requests join the baseline with driftgate baselines rebase local --from run-1 --reason "…" --allow-freeze, which takes the whole capture, its drifts too`,
+	} {
+		r.Mode = mode
+		if n := r.NoBaselineNote(); !strings.Contains(n, want) || mode == "freeze" && strings.Contains(n, "accept") {
+			t.Errorf("mode %q: %q, want %q", mode, n, want)
+		}
+	}
+	r.NotCovered = &NotCovered{Only: true}
+	if n := r.NoBaselineNote(); !strings.Contains(n, "a capture of the whole catalog (run without --only, then driftgate baselines rebase local") {
+		t.Errorf("--only: %q", n)
+	}
+	// Against a capture there is no baseline to join.
+	r = Build("capture:b", "capture:a", []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}})
+	r.Mode = "freeze"
+	if n := r.NoBaselineNote(); strings.Contains(n, "rebase") {
+		t.Errorf("against a capture: %q", n)
+	}
+}

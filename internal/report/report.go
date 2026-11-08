@@ -210,7 +210,22 @@ func (r *Report) NoBaselineNote() string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s without a baseline, not compared: %s; new requests join the baseline with driftgate accept", plural(n, "request"), listIDs(r.NoBaseline))
+	return fmt.Sprintf("%s without a baseline, not compared: %s; %s", plural(n, "request"), listIDs(r.NoBaseline), r.JoinAdvice())
+}
+
+// JoinAdvice says how new requests join the baseline in the comparison's
+// mode. Mode freeze refuses accept: there a rebase on the capture adds
+// them, with --allow-freeze; it takes the whole capture, its drifts too.
+func (r *Report) JoinAdvice() string {
+	capture, ok := strings.CutPrefix(r.Tag, "capture:")
+	if r.Mode != "freeze" || r.Baseline == "" || !ok {
+		return "new requests join the baseline with driftgate accept"
+	}
+	rebase := fmt.Sprintf(`driftgate baselines rebase %s --from %s --reason "…" --allow-freeze`, r.Baseline, capture)
+	if r.NotCovered != nil && r.NotCovered.Only {
+		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (run without --only, then " + rebase + "), which takes the whole capture, its drifts too"
+	}
+	return "in mode freeze new requests join the baseline with " + rebase + ", which takes the whole capture, its drifts too"
 }
 
 // ResentNote counts the requests sent again after a restore (Resent), so
