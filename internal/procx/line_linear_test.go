@@ -48,18 +48,33 @@ func TestLineLinear(t *testing.T) {
 
 // linearBest measures Line on the small and the large input in turns, and
 // returns the best time of each over several runs: a run slowed down by
-// the scheduler or the collector does not count.
+// the scheduler or the collector does not count. Each run calls Line as
+// many times as the small input needs to take 5 ms, the same count for
+// both sizes, so a coarse clock (Windows) never measures a run as zero.
 func linearBest(small, large []string) (time.Duration, time.Duration) {
-	bs, bl := time.Duration(1<<62), time.Duration(1<<62)
-	for range 7 {
+	reps := 1
+	for {
+		start := time.Now()
+		for range reps {
+			Line(small)
+		}
+		if time.Since(start) >= 5*time.Millisecond || reps >= 1<<16 {
+			break
+		}
+		reps *= 2
+	}
+	run := func(args []string) time.Duration {
 		runtime.GC()
 		start := time.Now()
-		Line(small)
-		bs = min(bs, time.Since(start))
-		runtime.GC()
-		start = time.Now()
-		Line(large)
-		bl = min(bl, time.Since(start))
+		for range reps {
+			Line(args)
+		}
+		return time.Since(start)
+	}
+	bs, bl := time.Duration(1<<62), time.Duration(1<<62)
+	for range 7 {
+		bs = min(bs, run(small))
+		bl = min(bl, run(large))
 	}
 	return bs, bl
 }
