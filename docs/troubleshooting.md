@@ -29,8 +29,12 @@ The private bodies are in another machine's local store. Pass `--skip-private`, 
 ### The restored state differs from the baseline's state
 The pristine copy holds other data than the baseline was made from. Seed that data again, or make a new baseline ([when the state does not match](reference/capture.md#when-the-state-does-not-match-the-baseline)).
 
-### "left 1 items different from the pristine copy" on MySQL 8
-A pristine copy from up to v1.0.2 named a column's collation. Re-create the working database, then seed ([column collations](reference/upgrading-driftgate.md#column-collations-after-v102-on-mysql-8)).
+### "restore of … left … items different from the fingerprint"
+The restored data does not match the pristine copy's fingerprint. The message says which cause it found:
+
+- The pristine copy changed since the seed, or the application wrote during the seed: run `driftgate seed` again while the application does not write.
+- The application wrote during the restore: stop its background writers, such as queue workers or schedulers, during the capture.
+- On MySQL 8, a pristine copy from up to v1.0.2 named a column's collation: re-create the working database, then seed ([column collations](reference/upgrading-driftgate.md#column-collations-after-v102-on-mysql-8)).
 
 ### A comparison compared nothing
 `--only` matched no request, or the baseline has none of the catalog's requests. Check the glob and the baseline ([the verdict line](reference/reports.md#the-verdict-line)).
@@ -82,7 +86,7 @@ A route has no request that succeeds. Add one, exclude the route, or acknowledge
 The committed catalog is not what `generate` writes. Run `driftgate generate --write` and commit ([keep the catalog current](guides/catalog/coverage.md#keep-the-catalog-current-in-ci)).
 
 ### verify reports changes after a checkout on Windows
-Git checked the baseline files out with CRLF line endings ([line endings on Windows](reference/commands/review.md#line-endings-on-windows)).
+Git checked the baseline files out with CRLF line endings. Check them out again with the two git commands under [line endings on Windows](reference/commands/review.md#line-endings-on-windows).
 
 ## Drift you did not expect
 
@@ -99,7 +103,7 @@ Another server stack answers. The report's line gives the header rule for the ne
 The application writes its own URLs under an origin DriftGate does not know, such as its `APP_URL`. List it under `aliases` ([your own URLs on another port](reference/comparison.md#your-own-urls-on-another-port)).
 
 ### Paths in error pages differ between checkouts
-A stack trace names the project's folder ([paths of the project folder](reference/comparison.md#paths-of-the-project-folder)).
+A stack trace names the project's folder. Capture both sides with the same release, which records the folder, so `compare` takes the two folders as one ([paths of the project folder](reference/comparison.md#paths-of-the-project-folder)).
 
 ### A 500 on the first request after a restore (SQL Server)
 A whole restore ended the application's pooled connections ([pooled connections](reference/databases/sql-server.md#pooled-connections-after-a-whole-restore)).
@@ -114,7 +118,7 @@ PHP's opcache keeps the old code for a while ([opcache](guides/frameworks/larave
 A warm cache answers differently from a cold one ([a cache emptied at every restore](concepts/what-a-pass-proves.md#a-cache-emptied-at-every-restore)).
 
 ### `rowversion` values differ on every capture
-SQL Server writes new `rowversion` values on every write ([allow rowversion values](guides/frameworks/aspnet-core.md#allow-rowversion-values)).
+SQL Server writes new `rowversion` values on every write. Add the allowlist rule for them ([allow rowversion values](guides/frameworks/aspnet-core.md#allow-rowversion-values)).
 
 ### prepare changed the restored state
 A `prepare` command writes data before every capture ([what belongs in prepare](reference/driftgate-yaml.md#what-belongs-in-prepare)).
@@ -139,13 +143,13 @@ DriftGate keeps no cookies between requests. Give the identity a token ([session
 The server looks up the name of every client. Start it with `--skip-name-resolve` ([run the server in a container](reference/databases/mysql-mariadb.md#run-the-server-in-a-container)).
 
 ### Fingerprints are slow on SQL Server
-The login lacks `VIEW SERVER PERFORMANCE STATE` ([fast fingerprints](reference/databases/sql-server.md#fast-fingerprints)).
+Grant the login `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later, or `VIEW SERVER STATE` on 2017 and 2019 ([fast fingerprints](reference/databases/sql-server.md#fast-fingerprints)).
 
 ### "database is locked" (SQLite)
 The application held a lock for longer than DriftGate waits, 10 seconds ([locks](reference/databases/sqlite.md#locks-and-the-applications-writers)).
 
 ### A command waits for another process
-Another command holds the lock on the local store ([when a command waits](reference/cli.md#when-a-command-waits-for-another-one)).
+Another command holds the lock on the local store. Wait for it, or stop it; Ctrl-C stops the wait ([when a command waits](reference/cli.md#when-a-command-waits-for-another-one)).
 
 ### Errors 927 or 952 on SQL Server
 On SQL Server 2019 and earlier, another database of the server was being restored, created or renamed at that moment ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).

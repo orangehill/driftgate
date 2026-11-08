@@ -35,8 +35,10 @@ does not do.
 | <!-- cap: sql-server --> SQL Server | your database is SQL Server 2017 or later | [guide](guides/frameworks/aspnet-core.md) | [reference](reference/databases/sql-server.md) |
 | <!-- cap: guards --> Guards | mail or payments must not reach people | [guide](guides/catalog/side-checks.md#check-the-mail-the-application-sends) | [reference](reference/driftgate-yaml.md#seed-prepare-guards) |
 | <!-- cap: prepare --> Prepare commands | something must run after every restore | [guide](guides/frameworks/laravel.md) | [reference](reference/driftgate-yaml.md#what-belongs-in-prepare) |
-| <!-- cap: data-module --> Anonymized data | CI needs data like production, without personal data | [guide](guides/ci/test-data.md) | [reference](reference/commands/data.md) |
-| <!-- cap: subset --> A sample of the data | a copy of everything is too large | [guide](guides/ci/test-data.md#make-the-copy) | [reference](reference/classify-yaml.md#subset) |
+| <!-- cap: data-module --> Anonymized data | CI needs data like production, without personal data | [guide](guides/ci/test-data.md) | [reference](reference/commands/data.md#driftgate-data-anonymize) |
+| <!-- cap: subset --> A sample of the data | a copy of everything is too large | [guide](guides/ci/test-data.md#make-the-copy) | [reference](reference/commands/data.md#driftgate-data-subset) |
+| <!-- cap: data-classify --> Classify every column | the data module needs a rule for each column | [guide](guides/ci/test-data.md#classify-every-column) | [reference](reference/commands/data.md#driftgate-data-classify) |
+| <!-- cap: data-verify --> Check an anonymized copy | an output must hold no personal data | [guide](guides/ci/test-data.md#make-the-copy) | [reference](reference/commands/data.md#driftgate-data-verify) |
 
 ## Routes and catalog
 
@@ -57,7 +59,7 @@ does not do.
 | <!-- cap: multipart --> Upload a file | a route takes a real or synthetic file | [guide](guides/catalog/hand-written-requests.md#upload-a-file) | [reference](reference/catalog-json.md#multipart) |
 | <!-- cap: uploads-dir --> The uploads folder | real upload files must stay outside git | [guide](guides/catalog/hand-written-requests.md#upload-a-file) | [reference](reference/driftgate-yaml.md#uploads) |
 | <!-- cap: repeat --> Repeat a request | you test a rate limit | [guide](guides/catalog/hand-written-requests.md#test-a-rate-limit) | [reference](reference/catalog-json.md#repeat) |
-| <!-- cap: command-steps --> Command steps | a queue worker, an import or a command must be checked | [guide](guides/catalog/hand-written-requests.md#run-a-queue-worker-or-another-command) | [reference](reference/catalog-json.md#command-steps) |
+| <!-- cap: command-steps --> Command steps | a worker, an import, a command or a schema-changing admin path | [guide](guides/catalog/hand-written-requests.md#run-a-queue-worker-or-another-command) | [reference](reference/catalog-json.md#command-steps) |
 | <!-- cap: mutates --> Read-only POST | a search sent as `POST` only reads | [guide](guides/catalog/hand-written-requests.md#mark-a-request-that-only-reads) | [reference](reference/driftgate-yaml.md#requests) |
 | <!-- cap: level-per-request --> A level per request | one request should be compared only so far | [guide](guides/catalog/hand-written-requests.md#compare-a-request-only-as-far-as-its-types) | [reference](reference/comparison.md#comparison-levels) |
 | <!-- cap: observe --> Observe | a value no rule can describe | [guide](guides/catalog/hand-written-requests.md#measure-a-request-without-comparing-it) | [reference](reference/driftgate-yaml.md#observe) |
@@ -127,7 +129,11 @@ does not do.
 
 - It compares only the requests in the catalog. What the catalog does not send is not checked ([what a pass proves](concepts/what-a-pass-proves.md)).
 - It keeps no cookies between requests. A session that lives in a cookie needs a token ([sessions with cookies](guides/catalog/logins.md#sessions-with-cookies)).
-- `params_from` fills only path parameters, not headers or bodies ([request fields](reference/catalog-json.md#request-fields)).
+- `params_from` fills a `{name}` in the path and its query string only, not headers or bodies ([request fields](reference/catalog-json.md#request-fields)).
+- An identity sends only `Authorization: Bearer <token>` ([identities and tokens](reference/driftgate-yaml.md#identities-and-tokens)).
+- Websockets and server-sent event streams are not recorded, and a capture compares plain HTTP responses only ([record](reference/commands/catalog.md#driftgate-record)).
+- `bisect` does not support an SQLite state ([projects on SQLite](guides/review/find-the-commit.md#projects-on-sqlite)).
+- SQL Server means SQL Server 2017 and later, not Azure SQL Database, Managed Instance or Synapse ([supported versions](reference/databases/sql-server.md#supported-versions)).
 - The data module covers MySQL, MariaDB and PostgreSQL only, not SQLite or SQL Server ([data](reference/driftgate-yaml.md#data)).
 - It compares data only on the same database server version: fingerprints differ across engines and versions ([fingerprints](reference/state.md#fingerprints)).
 - It does not exercise uploads, admin paths or background jobs unless the catalog has requests or command steps for them.

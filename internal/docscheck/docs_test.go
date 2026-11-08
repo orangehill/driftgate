@@ -617,36 +617,94 @@ func indexPages(t *testing.T) map[string]bool {
 	return index
 }
 
-// banned are the words the glossary's "Words we do not use" names, as they
-// would be written in prose.
-var banned = []string{"local mode", "golden file", "mutating request", "snapshot of the baseline"}
+// contextual are words of the glossary's "Words we do not use" that are
+// wrong only in one sense ("target" for a running application, "test" for
+// a request, "recording" for a baseline), and right elsewhere ("the data
+// module's target", "the docs test", "a recording proxy"): a reviewer checks
+// those, the test does not.
+var contextual = map[string]bool{"target": true, "test": true, "recording": true}
 
-// TestGlossaryWords: the prose of every page uses none of the words the
-// glossary lists under "Words we do not use", outside code and outside that
-// list itself.
+var quoted = regexp.MustCompile(`"([^"]+)"`)
+
+// bannedWords reads the words of the glossary's "Words we do not use": the
+// quoted words before the colon of each item, without the contextual ones.
+func bannedWords(t *testing.T, glossary *Doc) []string {
+	t.Helper()
+	var out []string
+	in := false
+	for _, line := range glossary.Lines {
+		if strings.HasPrefix(line, "#") {
+			in = strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
+			continue
+		}
+		if !in || !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		head, _, _ := strings.Cut(line, ":")
+		for _, m := range quoted.FindAllStringSubmatch(head, -1) {
+			if w := strings.ToLower(m[1]); !contextual[w] {
+				out = append(out, w)
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("the glossary lists no words not to use")
+	}
+	return out
+}
+
+// proseFindings lists the banned words in the prose of a page: outside
+// code blocks and code spans, and outside the glossary's own list.
+func proseFindings(d *Doc, banned []string) []string {
+	code := map[int]bool{}
+	for _, b := range d.Blocks {
+		for n := b.Line; n <= b.End; n++ {
+			code[n] = true
+		}
+	}
+	var out []string
+	inList := false
+	for i, line := range d.Lines {
+		if strings.HasPrefix(line, "#") {
+			inList = d.Path == "docs/glossary.md" && strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
+		}
+		if code[i+1] || inList {
+			continue
+		}
+		prose := strings.ToLower(codeSpan.ReplaceAllString(line, ""))
+		for _, w := range banned {
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(w) + `\b`).MatchString(prose) {
+				out = append(out, fmt.Sprintf("%s:%d: %q", d.Path, i+1, w))
+			}
+		}
+	}
+	return out
+}
+
+// TestGlossaryWords: the prose of every page of the documentation (docs/
+// and README.md) uses none of the words the glossary lists under "Words we
+// do not use", outside code and outside that list itself.
 func TestGlossaryWords(t *testing.T) {
-	_, all := docs(t)
+	p, all := docs(t)
+	g, err := p.Get("docs/glossary.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	banned := bannedWords(t, g)
 	for _, d := range all {
-		code := map[int]bool{}
-		for _, b := range d.Blocks {
-			for n := b.Line; n <= b.End; n++ {
-				code[n] = true
-			}
+		if !strings.HasPrefix(d.Path, "docs/") && d.Path != "README.md" {
+			continue
 		}
-		inList := false
-		for i, line := range d.Lines {
-			if strings.HasPrefix(line, "#") {
-				inList = d.Path == "docs/glossary.md" && strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
-			}
-			if code[i+1] || inList {
-				continue
-			}
-			prose := strings.ToLower(codeSpan.ReplaceAllString(line, ""))
-			for _, w := range banned {
-				if strings.Contains(prose, w) {
-					t.Errorf("%s:%d: %q is a word the glossary says not to use", d.Path, i+1, w)
-				}
-			}
+		for _, f := range proseFindings(d, banned) {
+			t.Errorf("%s is a word the glossary says not to use", f)
 		}
+	}
+	// The test finds them.
+	probe, err := ParseText("docs/probe.md", "A mutating GET and a snapshot.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := proseFindings(probe, banned); len(got) != 2 {
+		t.Errorf("the probe gives %v, want mutating and snapshot", got)
 	}
 }

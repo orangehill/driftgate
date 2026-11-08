@@ -194,6 +194,7 @@ A check of what the application does besides answering, such as its schema, file
 - "snapshot", "golden file" or "recording" for a baseline: say "baseline". "Record" is only the `record` command.
 - "test" for a catalog entry: say "request".
 - "mutating" in prose: say "a request that changes data".
+- "note that", "in order to", "basically", "simply", "as mentioned", "please", "actually", "of course": cut them; they carry nothing.
 
 ---
 **Related:** [Drift kinds](reference/drift-kinds.md) · [Commands](commands.md) · [What DriftGate can do](capabilities.md)

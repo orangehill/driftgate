@@ -309,9 +309,9 @@ var (
 
 // TestCapabilitiesParity: every row of docs/capabilities.md has a unique ID,
 // a reference link and a guide link (or none, "—") that resolve; every
-// command of driftgate help has a row whose reference is its section or
-// its page; and every key of driftgate.yaml and catalog.json is named in a
-// row or in a heading of the reference.
+// command of driftgate help has a row that links its own section; and every
+// key of driftgate.yaml and catalog.json is named in a heading or a table of
+// its own reference page.
 func TestCapabilitiesParity(t *testing.T) {
 	p := docPages(t)
 	d, err := p.Get("docs/capabilities.md")
@@ -319,14 +319,12 @@ func TestCapabilitiesParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	ids := map[string]bool{}
-	refs := map[string]bool{} // page#anchor and page of every reference link
-	var text strings.Builder
+	refs := map[string]bool{} // page#anchor of every reference link
 	for i, line := range d.Lines {
 		m := capRow.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		text.WriteString(line + "\n")
 		if ids[m[1]] {
 			t.Errorf("capabilities.md:%d: the ID %s is used twice", i+1, m[1])
 		}
@@ -339,7 +337,7 @@ func TestCapabilitiesParity(t *testing.T) {
 			}
 			if l[1] == "reference" {
 				rel, anchor, _ := docscheck.Local("docs/capabilities.md", l[2])
-				refs[rel+"#"+anchor] = true // a link to the whole page: rel+"#"
+				refs[rel+"#"+anchor] = true
 			}
 		}
 		if !kinds["reference"] {
@@ -353,48 +351,48 @@ func TestCapabilitiesParity(t *testing.T) {
 		t.Fatal("capabilities.md has no rows")
 	}
 	for _, c := range commands {
-		page, anchor, _ := strings.Cut(c.doc, "#")
-		page = "docs/" + page
-		if !refs[page+"#"+anchor] && !refs[page+"#"] {
-			t.Errorf("no capability row links the command %s (%s)", c.name, c.doc)
+		if !refs["docs/"+c.doc] {
+			t.Errorf("no capability row links the section of the command %s (%s)", c.name, c.doc)
 		}
 	}
-	// The keys of the files: named in a row, or in a heading or a table of
-	// the reference.
-	var reference strings.Builder
-	files, err := docscheck.Files(p.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range files {
-		if !strings.HasPrefix(f, "docs/reference/") {
-			continue
-		}
-		rd, err := p.Get(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, h := range rd.Headings {
-			reference.WriteString(h.Text + "\n")
-		}
-		for _, l := range rd.Lines {
-			if strings.HasPrefix(l, "| `") {
-				first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
-				reference.WriteString(first + "\n")
+	for _, c := range []struct {
+		page  string
+		types []reflect.Type
+		tag   string
+	}{
+		{"docs/reference/driftgate-yaml.md", []reflect.Type{reflect.TypeOf(config.Config{})}, "yaml"},
+		{"docs/reference/catalog-json.md", []reflect.Type{reflect.TypeOf(catalog.Request{}), reflect.TypeOf(catalog.Multipart{}), reflect.TypeOf(catalog.Catalog{})}, "json"},
+	} {
+		named := pageNames(t, p, c.page)
+		for _, ty := range c.types {
+			for _, k := range yamlKeys(ty, c.tag) {
+				if !strings.Contains(named, "`"+k+"`") && !regexp.MustCompile(`(?m)(^|[ ,])`+regexp.QuoteMeta(k)+`([ ,]|$)`).MatchString(named) {
+					t.Errorf("the key %s is named in no heading or table of %s", k, c.page)
+				}
 			}
 		}
 	}
-	named := text.String() + reference.String()
-	var keys []string
-	keys = append(keys, yamlKeys(reflect.TypeOf(config.Config{}), "yaml")...)
-	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Request{}), "json")...)
-	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Multipart{}), "json")...)
-	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Catalog{}), "json")...)
-	for _, k := range keys {
-		if !strings.Contains(named, "`"+k+"`") && !regexp.MustCompile(`(?m)(^|[ ,])`+regexp.QuoteMeta(k)+`([ ,]|$)`).MatchString(named) {
-			t.Errorf("the key %s is named in no capability row and no reference heading or table", k)
+}
+
+// pageNames are the headings of a page and the first column of its tables,
+// one per line.
+func pageNames(t *testing.T, p *docscheck.Pages, page string) string {
+	t.Helper()
+	d, err := p.Get(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, h := range d.Headings {
+		b.WriteString(h.Text + "\n")
+	}
+	for _, l := range d.Lines {
+		if strings.HasPrefix(l, "| `") || strings.HasPrefix(l, "| [`") {
+			first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
+			b.WriteString(first + "\n")
 		}
 	}
+	return b.String()
 }
 
 // yamlKeys are the names of the fields of a struct under a tag.
