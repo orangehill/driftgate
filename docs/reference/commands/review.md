@@ -218,9 +218,7 @@ acceptance log. It closes the expectations the new baseline holds.
 | `--allow-freeze` | rebase in mode freeze too (for changes reviewed elsewhere, such as a merge) |
 
 A baseline goes stale when changes reviewed in other pull requests are
-merged: every later comparison shows their drift. Capture the merged code
-(`driftgate capture main`), then
-`driftgate baselines rebase local --from main --reason "…"`.
+merged ([rebase the baseline after a merge](../../guides/workflow/share-baselines.md#rebase-the-baseline-after-a-merge)).
 
 - The responses, bodies, `timings.json` and the state fingerprint become the capture's.
 - The acceptance log is kept and gets one line: `"kind": "rebase"`, the capture, the requests that changed, are new or are no longer in the catalog, and the drift signatures.
@@ -450,7 +448,7 @@ Finds the first commit of each drift group of the last comparison
 
 It needs `bisect.checkout` in `driftgate.yaml`
 ([bisect](../driftgate-yaml.md#bisect)). The task is in the
-[bisect guide](../../guides/bisect.md).
+[bisect guide](../../guides/review/find-the-commit.md).
 
 ```sh
 driftgate run                    # at the bad commit: drift groups

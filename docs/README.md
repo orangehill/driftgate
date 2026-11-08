@@ -11,15 +11,15 @@ in the [changelog](../CHANGELOG.md).
 2. [Tutorial: your first baseline](start/tutorial.md) (15 minutes)
 3. [How DriftGate works](concepts/how-it-works.md) (10 minutes)
 4. [Set up your own project](start/your-project.md) (20 minutes)
-5. [Upgrade a framework step by step](guides/framework-upgrade.md)
+5. [Upgrade a framework step by step](guides/workflow/framework-upgrade.md)
 
 Two more concepts: [what a green result proves](concepts/what-a-pass-proves.md),
 and [where DriftGate keeps its files](concepts/project-layout.md).
 
 ## I have a task
 
-- [Upgrade a framework or a language version](guides/framework-upgrade.md), or [the server](guides/framework-upgrade.md#upgrading-the-server-database-php-web-server)
-- [Find the commit that introduced a drift](guides/bisect.md)
+- [Upgrade a framework or a language version](guides/workflow/framework-upgrade.md), or [the server](guides/workflow/server-upgrade.md)
+- [Find the commit that introduced a drift](guides/review/find-the-commit.md)
 - [Build the catalog by recording through a proxy](guides/record.md)
 - [Check more than responses](guides/side-checks.md): a schema dump, the stack's settings, files, Redis, mail
 - Your framework: [Laravel](guides/laravel.md) · [ASP.NET Core](guides/aspnet-core.md) · [Next.js and Nuxt](guides/nextjs-nuxt.md) · [OpenAPI frameworks](guides/openapi.md) · [several services](guides/multi-service.md)

@@ -249,22 +249,7 @@ and names them by a keyed hash (HMAC).
 - Windows has no such mode: there the check is not made, and the folder's access list protects the file.
 - Without a key, capturing or comparing private bodies stops with exit 3.
 - Changing the key is not supported: bodies encrypted with the old key become unreadable.
-
-### Hand a capture to another developer
-
-To let someone else compare a capture, or check a result, on their
-machine, copy into the same project on theirs:
-
-- the capture's folder, `captures/<tag>/` of the local store;
-- the baseline, `baselines/<name>/`; with `baselines: git` it is in the repository already;
-- the store's `private/` folder, which holds the private bodies of the captures and baselines, encrypted with the project key. Without it, their requests are compared without the body (exit 3, or `--skip-private`).
-
-The private bodies can be read only with the project key: give it as
-`DRIFTGATE_KEY` (or `key:`) on the other machine.
-
-- Send the key through a secure channel, such as a password manager's shared vault (`key: { op: … }`). Never send it with the files, nor in the same message, chat or archive.
-- Private bodies hold personal data. Copy them only to someone who may see that data, keep them out of shared drives and tickets, and remove the copy when it is no longer needed.
-- Public bodies were scanned for personal data, but a scan is not a proof.
+- To let another developer compare your capture, see [hand a capture to another developer](../guides/workflow/share-baselines.md#hand-a-capture-to-another-developer).
 
 ## target and targets
 

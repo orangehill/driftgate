@@ -82,7 +82,7 @@ Every way, with the verification commands: [Install DriftGate](docs/start/instal
 
 - [Tutorial: your first baseline](docs/start/tutorial.md): a demo API, its baseline, a change, and its drift, in 15 minutes.
 - [Set up your own project](docs/start/your-project.md): `driftgate setup` on your application.
-- [Upgrade a framework step by step](docs/guides/framework-upgrade.md): the check after every upgrade step.
+- [Upgrade a framework step by step](docs/guides/workflow/framework-upgrade.md): the check after every upgrade step.
 
 In CI, the GitHub Action runs the same check on every pull request
 ([CI with GitHub Actions](docs/guides/github-actions.md)).
