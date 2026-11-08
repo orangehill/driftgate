@@ -50,9 +50,9 @@ The [level](../reference/driftgate-yaml.md#level) says how far a
 comparison goes: `status`, `shape`, `types` or `values`.
 
 - Locally the data is identical on every capture, so `values` is the default, and should stay. Value bugs are the usual upgrade regressions: money, a status, a date, sorting, a wrong record, a translation, rounding, an empty name.
-- On data DriftGate does not control, such as a live server or newer data, use `types` for each request or run. Add allowlist rules for the fields that change by themselves.
+- On data DriftGate does not control, such as a live server or newer data, set `level: types` in `driftgate.yaml`, or `"level": "types"` on a catalog entry. Add allowlist rules for the fields that change by themselves.
 - A pass there means the contract is unchanged, not the behaviour.
-- The state fingerprint never produces drift. It proves the data was the same; when it was not, the capture stops.
+- The fingerprint check of the restored state never produces drift; side effects do. It proves the data was the same; when it was not, the capture stops.
 
 ## Why the first run captures twice
 

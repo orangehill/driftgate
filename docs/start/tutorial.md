@@ -2,20 +2,21 @@
 
 > **Before you start:** [install DriftGate](install.md), and have a checkout of this repository with Go. **Time:** 15 minutes.
 
-You make a baseline of a demo API, change the API, and see DriftGate
-report it. The output is real; long paths are shortened to `…`.
+You make a baseline of a demo API: its stored answers, which every later
+run is compared with. Then you change the API, and see DriftGate report
+it. The output is real; long paths are shortened to `…`.
 
 ## Start the demo application
 
 ```sh
 go build -o /tmp/demoserver ./tools/demoserver      # in the checkout of this repository
-/tmp/demoserver -addr 127.0.0.1:8920 -version v1 &  # the application, version 1
+/tmp/demoserver -addr 127.0.0.1:8920 -version v1 &  # any free port; use it in base_url and restore
 ```
 
 ## Create the project
 
 ```sh
-mkdir shop && cd shop
+mkdir ~/driftgate-demo && cd ~/driftgate-demo     # outside the checkout
 driftgate init --project shop
 driftgate key create
 ```
@@ -28,14 +29,14 @@ no known project type found; add routes under discover: or write the catalog by 
 Everything DriftGate keeps is in .driftgate/, which git ignores (.gitignore).
 ```
 
-`key create` makes the key that encrypts private bodies
+`key create` makes the key that encrypts [private bodies](../glossary.md#private-body)
 ([where the files are](../concepts/project-layout.md)).
 
 ## Tell DriftGate about the demo
 
 The demo is not a framework `init` knows. In `.driftgate/driftgate.yaml`,
-set `base_url: http://127.0.0.1:8920` and `mode: evolve`, so that changes
-can be accepted. Then add:
+set `base_url: http://127.0.0.1:8920` and `mode: evolve` (so changes can
+be accepted), and add:
 
 <!-- check: config-fragment -->
 ```yaml
@@ -50,7 +51,7 @@ params:
     value: "12"
 ```
 
-Save the routes as `shop/routes-src.json`, where you run the commands:
+Save the routes as `routes-src.json` in `~/driftgate-demo`, where you run the commands:
 
 <!-- check: routes-json -->
 ```json
@@ -61,7 +62,7 @@ Save the routes as `shop/routes-src.json`, where you run the commands:
 ]
 ```
 
-## Make the baseline
+## Try to make the baseline
 
 ```sh
 driftgate run
@@ -114,7 +115,7 @@ $ driftgate run
 2 runs on the same state gave the same responses ✓
 
 == baseline ==
-baseline local made from two equal captures: …/shop/.driftgate/baselines/local
+baseline local made from two equal captures: …/driftgate-demo/.driftgate/baselines/local
 ```
 
 ## Change the application and see the drift
@@ -132,7 +133,7 @@ DRIFT  get-api-news-id
          type            $.entry.id  string → int
          value           $.entry.published_at  (private) → (private)
 ...
-capture:run-40a0396aa83b against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
+capture:run-b299c63a4c38 against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
 values of private bodies are hidden as (private); driftgate review --show-private shows them on this machine
 ```
 
@@ -141,9 +142,8 @@ and the old and new value. Generated requests keep their bodies private.
 
 ## Accept an intended change
 
-Say version 2 is right. `review` lists the drift groups, with the exact
-`accept` command. `accept` takes the new answers into the baseline, with
-your reason:
+Say version 2 is right. `review` lists the drift groups and the `accept`
+command; `accept` takes the new answers into the baseline, with a reason:
 
 ```console
 $ driftgate accept 'get-api-*' post-api-faq --reason "v2 returns numeric ids and a meta object" --ref DEMO-1

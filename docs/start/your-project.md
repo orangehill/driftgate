@@ -8,7 +8,7 @@ it on the old version of your application, before you upgrade anything.
 ## Run setup
 
 ```sh
-cd shop
+cd <your application>
 driftgate setup
 ```
 
@@ -75,8 +75,9 @@ driftgate key create             # the key
 driftgate run                    # routes, catalog and the first baseline
 ```
 
-Uncomment `state:` first, or `run` captures without restoring the
-database. The [tutorial](tutorial.md) goes through these steps on the
+Uncomment `state:` first: `run` needs it to restore the database.
+Without it, `run` refuses requests that change data, unless
+`--allow-mutating-without-restore`. The [tutorial](tutorial.md) goes through these steps on the
 demo.
 
 ## Choose your framework guide

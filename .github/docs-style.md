@@ -35,7 +35,7 @@ This is the structure the documentation is moving to; until a folder exists, a p
 
 ## Tables
 
-- Only in reference pages and the three index pages.
+- Only in reference pages and the three index pages, and on concept pages for a side-by-side comparison.
 - Cells have at most 20 words. A longer explanation becomes an H3 under the table.
 - No tables in guides, except the framework list in the OpenAPI guide.
 

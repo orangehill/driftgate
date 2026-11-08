@@ -24,7 +24,7 @@ cosign verify-blob --bundle SHA256SUMS.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
-install -m 0755 driftgate-linux-amd64 /usr/local/bin/driftgate
+sudo install -m 0755 driftgate-linux-amd64 /usr/local/bin/driftgate   # /usr/local/bin usually needs sudo
 ```
 
 SBOMs, build provenance and reproducible builds are in
