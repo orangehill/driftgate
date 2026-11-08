@@ -90,7 +90,7 @@ Running the same check in CI is optional.
 Upgrade one version, or one dependency, per step, and run the check after
 each. A small step gives a few drifts with one cause, which you can fix
 or accept
-([upgrade a framework](../guides/framework-upgrade.md)).
+([upgrade a framework](../guides/workflow/framework-upgrade.md)).
 
 ---
 **Next:** [Set up your own project](../start/your-project.md): run setup on your application.
