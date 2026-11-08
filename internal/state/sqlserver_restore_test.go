@@ -1722,6 +1722,10 @@ func TestSQLServerOtherDatabaseRestoring(t *testing.T) {
 		t.Fatal("no RESTORE of the other database ran meanwhile")
 	}
 	t.Logf("%d RESTOREs of another database ran meanwhile", n)
+	// Whether SQL Server 2019 and earlier stopped a statement so (927,
+	// 952) depends on timing; TestSQLServerDropPristineRetried makes it
+	// happen.
+	t.Logf("run again %d times", s.retried.Load()+other.retried.Load())
 }
 
 // TestSQLServerAt: the error of a batch names the statement it came from.

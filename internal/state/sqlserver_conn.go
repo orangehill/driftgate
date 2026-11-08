@@ -554,6 +554,7 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 		if !ok || time.Now().After(deadline) || ctx.Err() != nil {
 			return err
 		}
+		s.retried.Add(1)
 		if !told {
 			fmt.Fprintf(s.o.Log, "state %s: database %s of the same server is being restored or changed, which stopped a statement on this one; trying again\n", s.o.Name, name)
 			told = true

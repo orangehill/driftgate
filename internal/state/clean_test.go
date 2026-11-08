@@ -2,10 +2,14 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // TestMySQLDropPristine: the copy seed made is dropped, the working
@@ -188,5 +192,59 @@ func TestSQLServerDropPristine(t *testing.T) {
 	sqlServerExec(t, sqlServerTestDB(t, s.o.DSN, s.o.Pristine), "CREATE TABLE orders (id INT PRIMARY KEY)")
 	if _, err := s.DropPristine(ctx); err == nil || !strings.Contains(err.Error(), "no mark") || !exists(s.o.Pristine) {
 		t.Fatalf("a database seed did not make: %v", err)
+	}
+}
+
+// TestSQLServerDropPristineRetried: a drop stopped by another database's
+// transition (927) is tried again (retryOthers). A copy the stopped try
+// dropped all the same is reported as removed; one the drop left
+// SINGLE_USER when it never succeeded gets MULTI_USER back.
+func TestSQLServerDropPristineRetried(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE news (id INT PRIMARY KEY)")
+	master := sqlServerTestDB(t, sqlServerTestDSN(t), "")
+	other := mssql.Error{Number: 927, Message: "Database 'dgt_other_dgnew' cannot be opened. It is in the middle of a restore."}
+	access := func() string {
+		var a string
+		if err := master.QueryRow("SELECT user_access_desc FROM sys.databases WHERE name = @p1", s.o.Pristine).Scan(&a); err != nil {
+			return err.Error()
+		}
+		return a
+	}
+
+	// Dropped, and then stopped: the next try finds it gone.
+	tries := 0
+	s.hooks = &ssHooks{drop: func(ctx context.Context, c *sql.Conn, q string) error {
+		if tries++; tries > 1 {
+			t.Errorf("drop sent %d times", tries)
+		}
+		if _, err := c.ExecContext(ctx, q); err != nil {
+			return err
+		}
+		return other
+	}}
+	if was, err := s.DropPristine(ctx); !was || err != nil || s.retried.Load() == 0 || access() != sql.ErrNoRows.Error() {
+		t.Fatalf("dropped, then stopped: %v %v, run again %d times", was, err, s.retried.Load())
+	}
+
+	// SINGLE_USER, and the drop stopped on every try: MULTI_USER again.
+	if err := s.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func(w time.Duration) { sqlServerOthersWait = w }(sqlServerOthersWait)
+	sqlServerOthersWait = 300 * time.Millisecond
+	s.retried.Store(0)
+	s.hooks = &ssHooks{drop: func(ctx context.Context, c *sql.Conn, q string) error {
+		if _, err := c.ExecContext(ctx, "ALTER DATABASE "+qms(s.o.Pristine)+" SET SINGLE_USER WITH ROLLBACK IMMEDIATE"); err != nil {
+			return err
+		}
+		return other
+	}}
+	if was, err := s.DropPristine(ctx); was || err == nil || s.retried.Load() == 0 || access() != "MULTI_USER" {
+		t.Fatalf("stopped on every try: %v %v, run again %d times, %s", was, err, s.retried.Load(), access())
+	}
+	s.hooks = nil
+	if was, err := s.DropPristine(ctx); !was || err != nil {
+		t.Fatalf("drop: %v %v", was, err)
 	}
 }

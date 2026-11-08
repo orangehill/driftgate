@@ -1036,8 +1036,19 @@ func (s *SQLServer) dropLeft(ctx context.Context, db string, family bool) error 
 	if d.State == "ONLINE" {
 		q = "ALTER DATABASE " + qms(db) + " SET SINGLE_USER WITH ROLLBACK IMMEDIATE; " + q
 	}
-	if _, err := m.ExecContext(ctx, q); err != nil {
+	if s.hooks != nil && s.hooks.drop != nil {
+		err = s.hooks.drop(ctx, m, q)
+	} else {
+		_, err = m.ExecContext(ctx, q)
+	}
+	if err != nil {
 		return fmt.Errorf("state %s: dropping %s: %w", s.o.Name, db, err)
 	}
 	return nil
+}
+
+// ssHooks, set by tests on an SQLServer, make a drop fail where a server
+// would: drop runs dropLeft's batch q on c in place of sending it.
+type ssHooks struct {
+	drop func(ctx context.Context, c *sql.Conn, q string) error
 }

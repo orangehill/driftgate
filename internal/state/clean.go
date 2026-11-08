@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Dropper is a database component that can remove its pristine copy
@@ -96,25 +97,39 @@ func (p *Postgres) DropPristine(ctx context.Context) (bool, error) {
 // of sys.databases and of the copy's mark, and its drop, with 927 or 952
 // about a database another seed or restore is restoring meanwhile. Each
 // step only reads until the drop, and a drop that stopped leaves the
-// copy for the next try to find.
+// copy for the next try to find. A copy gone after a try that reached
+// the drop was dropped by it; one left SINGLE_USER by a drop that never
+// succeeded is given back MULTI_USER.
 func (s *SQLServer) DropPristine(ctx context.Context) (bool, error) {
 	if err := sameAsWorking(s.o); err != nil {
 		return false, err
 	}
 	var was bool
+	var dropping *sqlServerDatabase // the copy as the first try that reached the drop found it
 	err := s.retryOthers(ctx, func() error {
 		var err error
-		was, err = s.dropPristine(ctx)
+		was, err = s.dropPristine(ctx, &dropping)
 		return err
 	})
+	if err != nil && dropping != nil && dropping.UserAccess == "MULTI_USER" {
+		if rerr := s.multiUserAgain(ctx, dropping.Name); rerr != nil {
+			err = fmt.Errorf("%w; it may be left SINGLE_USER (ALTER DATABASE %s SET MULTI_USER gives it back): %v", err, qms(dropping.Name), rerr)
+		}
+	}
 	return was, err
 }
 
-func (s *SQLServer) dropPristine(ctx context.Context) (bool, error) {
+// dropPristine is one try of DropPristine; dropping is set to the copy
+// the first time a try reaches the drop.
+func (s *SQLServer) dropPristine(ctx context.Context, dropping **sqlServerDatabase) (bool, error) {
 	db := s.o.Pristine
 	d, err := s.database(ctx, db)
-	if err != nil || d == nil {
+	if err != nil {
 		return false, err
+	}
+	if d == nil {
+		// Dropped by an earlier try whose drop reported an error after it.
+		return *dropping != nil, nil
 	}
 	if d.State != "ONLINE" {
 		return false, notSeeded(s.o.Name, "database", db, "is "+d.State+", so DriftGate cannot see whether it made it")
@@ -129,10 +144,28 @@ func (s *SQLServer) dropPristine(ctx context.Context) (bool, error) {
 	if !strings.EqualFold(m.Working, s.o.Working) {
 		return false, notSeeded(s.o.Name, "database", db, "is the pristine copy of "+m.Working+", not of "+s.o.Working)
 	}
+	if *dropping == nil {
+		*dropping = d
+	}
 	if err := s.dropLeft(ctx, db, false); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// multiUserAgain gives a copy whose drop failed back MULTI_USER when the
+// drop's ALTER DATABASE … SET SINGLE_USER left it so; also after ctx
+// ended, for up to ten seconds.
+func (s *SQLServer) multiUserAgain(ctx context.Context, db string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	c, err := s.conn(ctx, "")
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	_, err = c.ExecContext(ctx, "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @p1 AND user_access_desc = N'SINGLE_USER') ALTER DATABASE "+qms(db)+" SET MULTI_USER", db)
+	return err
 }
 
 func (s *SQLite) DropPristine(ctx context.Context) (bool, error) {
