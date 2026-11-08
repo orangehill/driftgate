@@ -97,7 +97,7 @@ not enough. Otherwise set `allow_remote: true` on the component.
 - Every connection is checked on the address it goes to.
 
 The rule and its reasons are in the
-[security model](../security.md#where-requests-and-connections-go).
+[security model](../security.md#databases-must-be-copies).
 
 ## Fingerprints
 

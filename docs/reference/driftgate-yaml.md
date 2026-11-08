@@ -298,7 +298,7 @@ service name ([several services](../guides/multi-service.md)).
 
 - The default `allow_hosts` is `localhost` and the local and private addresses: `127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`.
 - A list replaces the default. A host name in the list may resolve anywhere; any other name must resolve only to allowed addresses. Redirects are checked too.
-- A service outside `allow_hosts` needs `capture --allow-remote`; requests that change data need `--allow-remote-mutations` as well ([allowed hosts](../security.md#where-requests-and-connections-go)).
+- A service outside `allow_hosts` needs `capture --allow-remote`; requests that change data need `--allow-remote-mutations` as well ([allowed hosts](../security.md#allowed-hosts)).
 - With `follow_redirects`, a redirect from `https` to `http` is refused, and the request fails.
 - A redirect to another host or port keeps only `User-Agent`, `Accept`, `Accept-Encoding` and `Accept-Language`: not the identity's token, nor the catalog's headers.
 - How `aliases` and the origins are compared is in [Your own URLs on another port](comparison.md#your-own-urls-on-another-port).
@@ -624,7 +624,7 @@ that parameter), an optional `target`, and exactly one source:
 - `sql` runs on the pristine database; `state:` names the component when there are several.
 - It is one `SELECT` (or `WITH … SELECT`), checked before it is sent, and run in a read-only transaction.
 - `ORDER BY` is required, so the catalog is the same every time.
-- The `sql` check is a guard against mistakes, not a security boundary: the DSN user's privileges are ([security](../security.md#what-a-pull-request-can-run-in-ci)).
+- The `sql` check is a guard against mistakes, not a security boundary: the DSN user's privileges are ([security](../security.md#the-queries-of-params)).
 - With `from`, `generate` puts both requests in a sequence.
 
 ## storage and pii
@@ -643,7 +643,7 @@ local store, never in the repository. `storage.public` names those that
 are public, by a glob over the request ID; `storage.default: public`
 makes all of them public.
 
-- Every public body is scanned by the [personal-data detector](../security.md#personal-data). When it finds something, the body is stored as private, the finding is reported with a masked value, and the capture exits 2.
+- Every public body is scanned by the [personal-data detector](../security.md#the-personal-data-detector). When it finds something, the body is stored as private, the finding is reported with a masked value, and the capture exits 2.
 - `pii.allow` lists regular expressions of values that may appear in public bodies, such as a shared support address.
 - A catalog entry has its own `storage`.
 
@@ -707,7 +707,7 @@ A catalog request can upload a real file, named by its path in an
 uploads folder outside the repository
 ([multipart](catalog-json.md#multipart)).
 
-- `uploads.dir` or `DRIFTGATE_UPLOADS` names the folder. `~/` is the home folder; a relative path is relative to the folder of `driftgate.yaml`.
+- `uploads.dir` or `DRIFTGATE_UPLOADS` names the folder. `~/` is the home folder; a relative path is relative to the project folder, also in the local layout.
 - A folder anywhere inside the git repository of the project is refused, also through a symbolic link.
 
 ## bisect
