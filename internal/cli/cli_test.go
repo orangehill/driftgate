@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,9 +121,30 @@ body:
 
 func runCLI(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
-	var out, errOut bytes.Buffer
+	var out, errOut syncBuffer
 	code := Main(args, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+// syncBuffer is a bytes.Buffer that several goroutines may write: a
+// command's own lines and the note of the signal handler (signalContext)
+// can reach one writer at the same time. A terminal's file is safe for
+// that; a bytes.Buffer is not.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // TestCompareSets compares two captures with a baseline: drifts of public
