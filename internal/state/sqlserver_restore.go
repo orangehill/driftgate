@@ -62,10 +62,12 @@ func fallback(format string, args ...any) error {
 var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 
 // Restore brings the given items of the working database back to the
-// pristine copy; nil means every item that differs.
+// pristine copy; nil means every item that differs. It runs again while
+// another database of the server is in transition, or the working
+// database's own state stops a statement on another one (workingStopped).
 func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 	s.ended = nil // over the runs: each may end sessions, a run stopped before it ended them counts them again
-	return s.retryOthers(ctx, func() error { return s.restore(ctx, items) })
+	return s.retryWhile(ctx, s.workingStopped, func() error { return s.restore(ctx, items) })
 }
 
 func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {

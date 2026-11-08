@@ -483,31 +483,49 @@ var ssDatabaseNamed = lazy.Regexp(`Database '((?:[^']|'')+)'`)
 // each error wrapped or joined) must name another database: one that
 // names this component's, or names none, is not retried.
 func (s *SQLServer) othersTransition(err error) (string, bool) {
+	return s.transition(err, false)
+}
+
+// workingStopped is othersTransition for a restore, which also tries again
+// after a 942 or 927 that names the working database: the state a restore
+// of the whole database that stopped leaves it in (OFFLINE, RESTORING),
+// and the one this restore completes. Its lookup fails a statement of
+// another database so, as another database's does: the copy's mark read
+// from <pristine>_dgx (leftSave) while other databases of the server are
+// restored. Each try reads the working database's state anew first.
+func (s *SQLServer) workingStopped(err error) (string, bool) {
+	return s.transition(err, true)
+}
+
+// transition is othersTransition; working also takes a 942 or 927 about
+// the working database (workingStopped).
+func (s *SQLServer) transition(err error, working bool) (string, bool) {
 	if !ssInTransition(sqlServerNumber(err)) {
 		return "", false
 	}
-	other := ""
+	named := ""
 	for _, e := range sqlServerErrors(err) {
 		if !ssInTransition(e.Number) {
 			continue
 		}
-		// The name in the message of the 924, 927 or 952 itself, not
-		// another one of the error or of the text it is wrapped in.
+		// The name in the message of the error itself, not another one
+		// of the error or of the text it is wrapped in.
 		m := ssDatabaseNamed().FindStringSubmatch(e.Message)
 		if m == nil {
 			return "", false
 		}
 		name := strings.ReplaceAll(m[1], "''", "'")
+		stopped := working && (e.Number == 942 || e.Number == 927) && strings.EqualFold(name, s.o.Working)
 		for _, own := range []string{s.o.Working, s.o.Pristine, s.o.Pristine + "_dgnew", s.excludedDB()} {
-			if strings.EqualFold(name, own) {
+			if strings.EqualFold(name, own) && !stopped {
 				return "", false
 			}
 		}
-		if other == "" {
-			other = name
+		if named == "" {
+			named = name
 		}
 	}
-	return other, other != ""
+	return named, named != ""
 }
 
 // ssInTransition reports the errors SQL Server 2019 and earlier give a
@@ -559,12 +577,28 @@ func sqlServerErrors(err error) []mssql.Error {
 // start: a try that ran longer than the wait (a seed of a large database,
 // a statement slowed by a busy server) is still tried again.
 func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
+	return s.retryWhile(ctx, s.othersTransition, f)
+}
+
+// retryWhile is retryOthers with the errors that make f run again told by
+// stopped (othersTransition, workingStopped).
+func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string, bool), f func() error) error {
 	var deadline time.Time
 	wait := 20 * time.Millisecond
 	told := false
+	last := "" // the database whose transition stopped the last try
 	for {
 		err := f()
-		name, ok := s.othersTransition(err)
+		name, ok := stopped(err)
+		if !ok && last != "" && sqlServerNoReason(err) {
+			// A try after one another database stopped failed without a
+			// reason (a DONE token with its error flag and no error
+			// message): as SQL Server 2017 stopped an item restore while
+			// other databases were restored. Nothing tells it from the
+			// stop before, so it is waited out as that one, within the
+			// same wait.
+			name, ok = last, true
+		}
 		if deadline.IsZero() {
 			deadline = time.Now().Add(sqlServerOthersWait)
 		}
@@ -572,10 +606,14 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 			return err
 		}
 		s.retried.Add(1)
-		if !told {
+		switch {
+		case told:
+		case strings.EqualFold(name, s.o.Working):
+			fmt.Fprintf(s.o.Log, "state %s: working database %s, which a restore that stopped left offline or restoring, stopped a statement on another database while other databases of the server change; trying again\n", s.o.Name, name)
+		default:
 			fmt.Fprintf(s.o.Log, "state %s: database %s of the same server is being restored or changed, which stopped a statement on this one; trying again\n", s.o.Name, name)
-			told = true
 		}
+		told, last = true, name
 		select {
 		case <-ctx.Done():
 			return err
@@ -583,6 +621,18 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 		}
 		wait = min(2*wait, time.Second)
 	}
+}
+
+// sqlServerNoReason reports a request SQL Server failed without saying
+// why: the driver's error of a DONE token with its error flag and no error
+// message before it ("Request failed but didn't provide reason", number 0).
+func sqlServerNoReason(err error) bool {
+	for _, e := range sqlServerErrors(err) {
+		if e.Number == 0 && strings.HasPrefix(e.Message, "Request failed but didn't provide reason") {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryInTransition runs f again while it fails with SQL Server's error

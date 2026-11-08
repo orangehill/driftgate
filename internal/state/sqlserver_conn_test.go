@@ -420,7 +420,54 @@ func TestSQLServerOthersTransition(t *testing.T) {
 			t.Errorf("%v: %t", c.err, got)
 		}
 	}
+	// A restore also takes a 942 or 927 about the working database, which
+	// a stopped restore of the whole database left offline or restoring;
+	// never one about another database of this component, nor another
+	// error about the working database.
+	for i, c := range []struct {
+		err  error
+		want bool
+	}{
+		{other, true},
+		{mssql.Error{Number: 942, Message: "Database 'Shop' cannot be opened because it is offline."}, true},
+		{fmt.Errorf("x: %w", mssql.Error{Number: 927, Message: "Database 'shop' cannot be opened. It is in the middle of a restore."}), true},
+		{mssql.Error{Number: 924, Message: "Database 'Shop' is already open and can only have one user at a time."}, false},
+		{mssql.Error{Number: 952, Message: "Database 'Shop' is in transition. Try the statement later."}, false},
+		{mssql.Error{Number: 942, Message: "Database 'Shop_pristine' cannot be opened because it is offline."}, false},
+		{mssql.Error{Number: 927, Message: "Database 'Shop_pristine_dgnew' cannot be opened. It is in the middle of a restore."}, false},
+		{errors.Join(mssql.Error{Number: 942, Message: "Database 'Shop' cannot be opened because it is offline."}, mssql.Error{Number: 927, Message: "Database 'Shop_pristine_dgx' cannot be opened."}), false},
+	} {
+		if _, got := s.workingStopped(c.err); got != c.want {
+			t.Errorf("workingStopped %v: %t", c.err, got)
+		}
+		if _, got := s.othersTransition(c.err); got != (i == 0) {
+			t.Errorf("othersTransition %v: %t", c.err, got)
+		}
+	}
+	// A failure without a reason right after another database's
+	// transition is waited out as that one; on its own it is not.
+	noReason := mssql.Error{Message: "Request failed but didn't provide reason"}
+	if !sqlServerNoReason(fmt.Errorf("x: %w", noReason)) || sqlServerNoReason(other) || sqlServerNoReason(errors.New("Request failed but didn't provide reason")) {
+		t.Error("sqlServerNoReason")
+	}
 	calls := 0
+	err = s.retryOthers(context.Background(), func() error {
+		switch calls++; calls {
+		case 1:
+			return other
+		case 2:
+			return noReason
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Errorf("no reason after a transition: %d calls, %v", calls, err)
+	}
+	calls = 0
+	if err := s.retryOthers(context.Background(), func() error { calls++; return noReason }); err == nil || calls != 1 {
+		t.Errorf("no reason alone: %d calls, %v", calls, err)
+	}
+	calls = 0
 	err = s.retryOthers(context.Background(), func() error {
 		if calls++; calls < 3 {
 			return other
