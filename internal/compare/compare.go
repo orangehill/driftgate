@@ -79,7 +79,7 @@ var kinds = []KindInfo{
 	{KindArrayLength, "an array has more or fewer items"},
 	{KindItemOrder, "the same items of an array in another order"},
 	{KindType, "a value's type changed, in JSON or in a spreadsheet cell"},
-	{KindNumberLiteral, "the same number written differently, such as 1.0 for 1"},
+	{KindNumberLiteral, "the same number of the same type written differently, such as 1.00 for 1.0"},
 	{KindValue, "a JSON value changed"},
 	{KindFormat, "a value an allowlist rule covers no longer matches its format"},
 	{KindEncoding, "the same values in other bytes: layout, escapes, byte order mark, charset"},
