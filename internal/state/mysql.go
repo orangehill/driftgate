@@ -137,6 +137,7 @@ type MySQL struct {
 	probeNoted map[string]bool // probes left behind already logged (noteProbe)
 	hooks      *mysqlHooks     // tests only
 	lockNote   sync.Once       // the note that GET_LOCK is not supported
+	retryNote  sync.Once       // the note that a step stopped for a lock runs again
 	login      string
 }
 
@@ -607,8 +608,17 @@ func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items [
 }
 
 // fingerprintAs is fingerprint in a format: format 1 hashed views and
-// triggers without the collation they were made with.
-func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
+// triggers without the collation they were made with. A read the server
+// stops for a lock is read again in full (retryLocked).
+func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (f Fingerprint, err error) {
+	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
+		f, err = m.fingerprintOnce(ctx, c, db, items, format)
+		return err
+	})
+	return f, err
+}
+
+func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
 	objs, err := m.objects(ctx, c, db)
 	if err != nil {
 		return nil, err
@@ -727,7 +737,15 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
 // database, or of the pristine one (RestoreOnly). It leaves the last
 // fingerprint and its counters as they were.
-func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
+		f, err = m.restoreOnlyFingerprint(ctx, pristine)
+		return err
+	})
+	return f, err
+}
+
+func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -1324,6 +1342,7 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 type mysqlHooks struct {
 	dropRefused func(kind, name string) bool
 	copyFails   func() error
+	lockStop    func(what string) error // before each try of retryLocked
 }
 
 // galeraSequences refuses, on a Galera node, to copy a sequence of src the
@@ -1654,7 +1673,16 @@ func splitItems(items []string) (tables, views, sequences, triggers []string) {
 	return
 }
 
+// Restore makes the items of the working database as the pristine one has
+// them; with nil, every item that differs. A restore the server stops for
+// a lock runs again as a whole
+// (retryLocked): it copies the items from the pristine database whatever
+// the try before left.
 func (m *MySQL) Restore(ctx context.Context, items []string) error {
+	return m.retryLocked(ctx, "restore", func(ctx context.Context) error { return m.restore(ctx, items) })
+}
+
+func (m *MySQL) restore(ctx context.Context, items []string) error {
 	c, err := m.session(ctx)
 	if err != nil {
 		return err
@@ -1711,8 +1739,13 @@ func mysqlMarkNote(working string) string {
 // mark (pristineTable) is made first, so a seed that stops halfway leaves a
 // database the next seed may drop; DriftGate's record of the pristine
 // fingerprint is removed before a seed (capture.Seed), so such a database is
-// not taken for a pristine copy.
+// not taken for a pristine copy. A seed the server stops for a lock runs
+// again as a whole (retryLocked), as a second seed would.
 func (m *MySQL) Seed(ctx context.Context) error {
+	return m.retryLocked(ctx, "seed", m.seed)
+}
+
+func (m *MySQL) seed(ctx context.Context) error {
 	c, err := m.session(ctx)
 	if err != nil {
 		return err
@@ -1871,7 +1904,15 @@ func (m *MySQL) checkPristine(ctx context.Context, c *sql.Conn) error {
 	return fmt.Errorf("state %s: database %s, named as the pristine copy, was not made by driftgate seed and holds %d objects, so it is not dropped; drop it yourself or name another pristine database", m.o.Name, db, objects)
 }
 
-func (m *MySQL) Rows(ctx context.Context, items []string) (Rows, error) {
+func (m *MySQL) Rows(ctx context.Context, items []string) (out Rows, err error) {
+	err = m.retryLocked(ctx, "read of rows", func(ctx context.Context) error {
+		out, err = m.rows(ctx, items)
+		return err
+	})
+	return out, err
+}
+
+func (m *MySQL) rows(ctx context.Context, items []string) (Rows, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -1954,10 +1995,18 @@ func readRows(ctx context.Context, c *sql.Conn, query string, pk []string) (map[
 }
 
 // Query runs a read-only query (see CheckQuery) on the pristine database.
-func (m *MySQL) Query(ctx context.Context, query string) ([]string, error) {
+func (m *MySQL) Query(ctx context.Context, query string) (out []string, err error) {
 	if err := CheckQuery(query); err != nil {
 		return nil, err
 	}
+	err = m.retryLocked(ctx, "query", func(ctx context.Context) error {
+		out, err = m.query(ctx, query)
+		return err
+	})
+	return out, err
+}
+
+func (m *MySQL) query(ctx context.Context, query string) ([]string, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
