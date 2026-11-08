@@ -72,6 +72,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/posts/2024/05/17`. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value when it still makes the JSON twins of the `not-found` or `invalid-param` requests. Configured without any error template, `json-errors` gets one note instead of making nothing silently. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do. ([#30](https://github.com/orangehill/driftgate/pull/30))
+- SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` that another database's restore stopped is now tried again also when its first try took longer than a minute, such as the seed of a large database. The minute counts from the first such stop.
 
 ### Security
 

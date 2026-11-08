@@ -428,6 +428,19 @@ func TestSQLServerOthersTransition(t *testing.T) {
 	if err := s.retryOthers(context.Background(), func() error { calls++; return other }); err == nil || calls < 2 {
 		t.Errorf("past the wait: %d calls, %v", calls, err)
 	}
+	// A first try that runs longer than the wait is still tried again:
+	// the wait counts from the first failure.
+	calls = 0
+	err = s.retryOthers(context.Background(), func() error {
+		if calls++; calls == 1 {
+			time.Sleep(2 * sqlServerOthersWait)
+			return other
+		}
+		return nil
+	})
+	if err != nil || calls != 2 {
+		t.Errorf("a slow first try: %d calls, %v", calls, err)
+	}
 }
 
 // TestSQLServerWorkingOffline: a fingerprint takes the working database

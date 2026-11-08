@@ -542,15 +542,21 @@ func sqlServerErrors(err error) []mssql.Error {
 
 // retryOthers runs f again while it fails because another database of
 // the server is in transition (othersTransition), up to
-// sqlServerOthersWait: each of DriftGate's operations leaves the
-// databases as a stop at any point does, and the next run completes it.
+// sqlServerOthersWait after the first such failure: each of DriftGate's
+// operations leaves the databases as a stop at any point does, and the
+// next run completes it. The wait counts from that failure, not from the
+// start: a try that ran longer than the wait (a seed of a large database,
+// a statement slowed by a busy server) is still tried again.
 func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
-	deadline := time.Now().Add(sqlServerOthersWait)
+	var deadline time.Time
 	wait := 20 * time.Millisecond
 	told := false
 	for {
 		err := f()
 		name, ok := s.othersTransition(err)
+		if deadline.IsZero() {
+			deadline = time.Now().Add(sqlServerOthersWait)
+		}
 		if !ok || time.Now().After(deadline) || ctx.Err() != nil {
 			return err
 		}
