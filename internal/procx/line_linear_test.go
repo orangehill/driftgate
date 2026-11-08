@@ -1,6 +1,7 @@
 package procx
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func TestLineLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing")
 	}
-	const small, large = 10000, 40000
+	const small, large = 20000, 80000
 	for _, c := range []struct {
 		name string
 		make func(n int) []string
@@ -31,16 +32,16 @@ func TestLineLinear(t *testing.T) {
 		{"substitutions", func(n int) []string { return []string{"sh", "-c", strings.Repeat("$(a) ", n)} }},
 	} {
 		s, l := c.make(small), c.make(large)
-		var ratio float64
-		for attempt := 0; attempt < 3; attempt++ {
+		var ratios []string
+		linear := false
+		for attempt := 0; attempt < 3 && !linear; attempt++ {
 			ts, tl := linearBest(s, l)
-			ratio = float64(tl) / float64(ts)
-			if ratio < 9 { // linear: about 4; quadratic: about 16
-				break
-			}
+			ratio := float64(tl) / float64(ts)
+			ratios = append(ratios, fmt.Sprintf("%.1f (%v, %v)", ratio, ts, tl))
+			linear = ratio < 9 // linear: about 4; quadratic: about 16
 		}
-		if ratio >= 9 {
-			t.Errorf("%s: %d words take %.1f times as long as %d, in each of 3 attempts: not linear", c.name, large, ratio, small)
+		if !linear {
+			t.Errorf("%s: %d words take %s times as long as %d, in 3 attempts: not linear", c.name, large, strings.Join(ratios, ", "), small)
 		}
 	}
 }
