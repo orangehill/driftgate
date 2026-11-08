@@ -35,7 +35,7 @@ which `allow_hosts` allows by default, so only `base_url` changes.
 
 ### php artisan serve
 
-`php artisan serve` answers at `http://localhost:8000`, as setup writes it.
+`php artisan serve` answers at `http://localhost:8000`. Setup writes `base_url` from `APP_URL`, so set `APP_URL=http://localhost:8000` in `.env`, or pass `--url`.
 
 ### Docker Compose or Sail
 
@@ -89,6 +89,8 @@ Every capture restores `working`, so it must be a database you can rewrite.
 - `driftgate seed`, or the first `run`, runs the seed commands and keeps `shop_pristine`. To start from a dump: `["sh", "-c", "gunzip -c ~/Data/shop.sql.gz | mysql shop"]`, then `migrate --force`.
 - Exclude logs, sessions and queued jobs, and make the cache `restore_empty`; `setup` proposes them ([the framework's own tables](../../reference/state.md#the-frameworks-own-tables)). A large `failed_jobs` slows fingerprints: empty it in a seed command, or exclude it.
 - A Redis cache or session store is a component of its own: `redis: { restore: ["redis-cli", "FLUSHALL"] }`. A view counter in Redis that is not restored makes the second capture differ.
+- Laravel's default seeder writes `Hash::make()` and `now()`, which differ on every run. Seeding again then makes other data, and the next capture stops (exit 3): the state differs from the baseline's. Write a fixed password hash and a fixed time (`Carbon::setTestNow()`) in the seeder, or seed from a fixed dump with `driftgate seed --skip-commands`.
+- A migration you run on the working database is undone by the next restore: seed again after it.
 
 ### SQLite
 
@@ -157,10 +159,23 @@ generate:
 templates: [ok, not-found, json, anonymous, identities]
 ```
 
-An artisan command that prints the test users' tokens runs after every
-restore and `prepare`, so its tokens exist for the requests. DriftGate
-keeps no cookies, so a cookie-session application needs a token for
-DriftGate ([sessions with cookies](../catalog/logins.md#sessions-with-cookies)).
+The tokens command runs after every restore, and must leave the same
+state each time. One that issues new tokens writes new rows, so captures
+differ. Print tokens issued once, such as Sanctum tokens the seeder
+creates with fixed values, or use a [tokens file](../catalog/logins.md).
+A cookie-session application needs a token too
+([sessions with cookies](../catalog/logins.md#sessions-with-cookies)).
+
+<!-- check: config-fragment -->
+```yaml
+requests:
+  - match: post-api-login              # the login route, with a test user's real credentials
+    body: { email: admin@shop.example, password: secret }
+```
+
+The generated login sends sample values and answers 401 or 422, so its
+route counts as failed and `run` exits 1. Give it a real test user under
+[`requests`](../../reference/driftgate-yaml.md#requests).
 
 ## The first run
 
@@ -173,6 +188,7 @@ proposes allowlist entries: add a reason to each, and run again.
 
 - Routes that upload files get a synthetic file of a kind their rules accept (`file`, `image`, `mimes:`, `mimetypes:`). A real import needs a [real file](../catalog/hand-written-requests.md#upload-a-file).
 - A queued job runs as a [command step](../catalog/hand-written-requests.md#run-a-queue-worker-or-another-command): `["php", "artisan", "queue:work", "--stop-when-empty"]`.
+- Schema dumps, settings, files and mail are checked as [side checks](../catalog/side-checks.md).
 - With `baselines: git`, commit `driftgate.yaml` and `driftgate/`, and protect the baselines ([CODEOWNERS](../../security.md#protect-the-baselines)).
 
 ---

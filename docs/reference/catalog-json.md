@@ -246,7 +246,8 @@ an unknown field ([keys an earlier release refuses](upgrading-driftgate.md#keys-
 ## Entries generate writes and entries you write
 
 - `generate` writes entries with a `source.template`.
-- It never touches entries written by hand or imported, which have no template.
+- It never touches entries written by hand or imported, which have no template. It replaces its own entries on every run.
+- A hand-written entry for a route method takes that method's place: `generate` makes no entries for it any more, unless `--all` ([driftgate generate](commands/catalog.md#driftgate-generate)).
 - The catalog keeps no change by hand to a generated entry: mark it under [`requests`](driftgate-yaml.md#requests) in `driftgate.yaml` instead.
 
 ---
