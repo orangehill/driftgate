@@ -16,7 +16,10 @@ driftgate help config          # the top-level keys of driftgate.yaml
 driftgate help kinds           # every kind of drift, one line each
 ```
 
-The help of a command ends with a `Docs:` line. It links the command's
+`driftgate help` ends with links to the documentation, to
+[what DriftGate can do](../capabilities.md), and to
+[troubleshooting](../troubleshooting.md). The help of a command ends with
+a `Docs:` line. It links the command's
 section in the pages of the release you run, also after `go install …@<tag>`.
 A build from a checkout, or a `dev-…` build of a commit, links the
 `development` branch; the GitHub Action's build and a release candidate
