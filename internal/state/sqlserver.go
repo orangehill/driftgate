@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/microsoft/go-mssqldb/msdsn"
 
@@ -42,6 +43,10 @@ type SQLServer struct {
 	// last Restore ended (a restore of the whole database; EndedSessions),
 	// each once across the runs of a retried Restore.
 	ended map[ssSession]bool
+
+	// retried counts the times retryOthers ran an operation again.
+	retried atomic.Int64
+	hooks   *ssHooks // tests only
 
 	info    *sqlServerInfo // read once (server)
 	checked bool           // the working database passed checkWorking

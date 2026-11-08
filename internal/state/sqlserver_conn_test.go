@@ -373,6 +373,10 @@ func TestSQLServerOthersTransition(t *testing.T) {
 	}{
 		{other, true},
 		{fmt.Errorf("state db: restore: %w", other), true},
+		// DropPristine's: a read of the copy's mark, and dropLeft's drop.
+		{mssql.Error{Number: 927, Message: "Database 'dgt_cap_f36f692b_pristine_dgnew' cannot be opened. It is in the middle of a restore."}, true},
+		{fmt.Errorf("state db: dropping Shop_pristine: %w", other), true},
+		{fmt.Errorf("state db: dropping Shop_pristine: %w", mssql.Error{Number: 927, Message: "Database 'Shop_pristine' cannot be opened. It is in the middle of a restore."}), false},
 		{mssql.Error{Number: 952, Message: "Database 'it''s' is in transition. Try the statement later."}, true},
 		{mssql.Error{Number: 927, Message: "Database 'shop_pristine_dgnew' cannot be opened. It is in the middle of a restore."}, false},
 		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, false},
