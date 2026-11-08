@@ -135,6 +135,8 @@ jobs:
         run: go test -count=1 -run=Budget ./internal/compare/ ./internal/jsonx/
       - name: Fuzz the JSON parser
         run: go test -run='^$' -fuzz=FuzzParse -fuzztime=60s ./internal/jsonx/
+      - name: Fuzz the dump reader of data verify
+        run: go test -run='^$' -fuzz=FuzzStatements -fuzztime=60s ./internal/data/
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
