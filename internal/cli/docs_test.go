@@ -5,13 +5,16 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
+	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/docscheck"
 )
 
@@ -297,4 +300,110 @@ func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
 		}
 	}
 	return out, meanings
+}
+
+var (
+	capRow  = regexp.MustCompile(`^\|\s*<!-- cap: ([a-z0-9-]+) -->`)
+	rowLink = regexp.MustCompile(`\[(guide|reference)\]\(([^)\s]+)\)`)
+)
+
+// TestCapabilitiesParity: every row of docs/capabilities.md has a unique ID,
+// a reference link and a guide link (or none, "—") that resolve; every
+// command of driftgate help has a row whose reference is its section or
+// its page; and every key of driftgate.yaml and catalog.json is named in a
+// row or in a heading of the reference.
+func TestCapabilitiesParity(t *testing.T) {
+	p := docPages(t)
+	d, err := p.Get("docs/capabilities.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	refs := map[string]bool{} // page#anchor and page of every reference link
+	var text strings.Builder
+	for i, line := range d.Lines {
+		m := capRow.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		text.WriteString(line + "\n")
+		if ids[m[1]] {
+			t.Errorf("capabilities.md:%d: the ID %s is used twice", i+1, m[1])
+		}
+		ids[m[1]] = true
+		kinds := map[string]bool{}
+		for _, l := range rowLink.FindAllStringSubmatch(line, -1) {
+			kinds[l[1]] = true
+			if err := p.Resolve("docs/capabilities.md", l[2]); err != nil {
+				t.Errorf("capabilities.md:%d: %s link %s: %v", i+1, l[1], l[2], err)
+			}
+			if l[1] == "reference" {
+				rel, anchor, _ := docscheck.Local("docs/capabilities.md", l[2])
+				refs[rel+"#"+anchor] = true // a link to the whole page: rel+"#"
+			}
+		}
+		if !kinds["reference"] {
+			t.Errorf("capabilities.md:%d: %s has no reference link", i+1, m[1])
+		}
+		if !kinds["guide"] && !strings.Contains(line, "| — |") {
+			t.Errorf("capabilities.md:%d: %s has no guide link, nor —", i+1, m[1])
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("capabilities.md has no rows")
+	}
+	for _, c := range commands {
+		page, anchor, _ := strings.Cut(c.doc, "#")
+		page = "docs/" + page
+		if !refs[page+"#"+anchor] && !refs[page+"#"] {
+			t.Errorf("no capability row links the command %s (%s)", c.name, c.doc)
+		}
+	}
+	// The keys of the files: named in a row, or in a heading or a table of
+	// the reference.
+	var reference strings.Builder
+	files, err := docscheck.Files(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if !strings.HasPrefix(f, "docs/reference/") {
+			continue
+		}
+		rd, err := p.Get(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range rd.Headings {
+			reference.WriteString(h.Text + "\n")
+		}
+		for _, l := range rd.Lines {
+			if strings.HasPrefix(l, "| `") {
+				first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
+				reference.WriteString(first + "\n")
+			}
+		}
+	}
+	named := text.String() + reference.String()
+	var keys []string
+	keys = append(keys, yamlKeys(reflect.TypeOf(config.Config{}), "yaml")...)
+	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Request{}), "json")...)
+	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Multipart{}), "json")...)
+	keys = append(keys, yamlKeys(reflect.TypeOf(catalog.Catalog{}), "json")...)
+	for _, k := range keys {
+		if !strings.Contains(named, "`"+k+"`") && !regexp.MustCompile(`(?m)(^|[ ,])`+regexp.QuoteMeta(k)+`([ ,]|$)`).MatchString(named) {
+			t.Errorf("the key %s is named in no capability row and no reference heading or table", k)
+		}
+	}
+}
+
+// yamlKeys are the names of the fields of a struct under a tag.
+func yamlKeys(ty reflect.Type, tag string) []string {
+	var out []string
+	for i := range ty.NumField() {
+		if name, _, _ := strings.Cut(ty.Field(i).Tag.Get(tag), ","); name != "" && name != "-" {
+			out = append(out, name)
+		}
+	}
+	return out
 }

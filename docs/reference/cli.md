@@ -21,8 +21,8 @@ section in the pages of the release you run, also after `go install …@<tag>`.
 A build from a checkout, or a `dev-…` build of a commit, links the
 `development` branch; the GitHub Action's build and a release candidate
 link `main`. An unknown command or help
-topic names the table of
-[what to use for what](../configuration.md).
+topic names the page of
+[what DriftGate can do](../capabilities.md).
 
 ## Common flags
 
@@ -136,4 +136,4 @@ The commands that write the local store take a lock on it
 - With the lock, a command removes the temporary files that killed processes left in the store, before it ends. It removes only those older than a few seconds before it started.
 
 ---
-**Related:** [Commands](../commands.md) · [Glossary](../glossary.md) · [Configuration](../configuration.md)
+**Related:** [Commands](../commands.md) · [Glossary](../glossary.md) · [Troubleshooting](../troubleshooting.md)

@@ -24,7 +24,7 @@ A pass proves nothing about a request that is not in the catalog.
 
 Command steps with `"output": true` and state fingerprints bring the rest
 into the gate ([side checks](../guides/catalog/side-checks.md)). The table of
-[what to use for what](../configuration.md) names the feature for each.
+[what DriftGate can do](../capabilities.md) names the feature for each.
 
 ## Why a result can be incomplete
 

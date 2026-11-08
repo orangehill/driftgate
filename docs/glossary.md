@@ -196,4 +196,4 @@ A check of what the application does besides answering, such as its schema, file
 - "mutating" in prose: say "a request that changes data".
 
 ---
-**Related:** [Drift kinds](reference/drift-kinds.md) · [Commands](commands.md) · [Configuration](configuration.md)
+**Related:** [Drift kinds](reference/drift-kinds.md) · [Commands](commands.md) · [What DriftGate can do](capabilities.md)

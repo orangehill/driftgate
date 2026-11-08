@@ -94,9 +94,7 @@ func TestNoLinksIntoIndexes(t *testing.T) {
 }
 
 // TestNoCodeLinksIntoIndexes: no string of the program's code (help texts,
-// messages) names a section of an index page; it names the new home. The
-// one exception is the table of what to use for a task, which stays on the
-// configuration index until capabilities.md takes it.
+// messages) names a section of an index page; it names the new home.
 func TestNoCodeLinksIntoIndexes(t *testing.T) {
 	root, err := Root()
 	if err != nil {
@@ -106,7 +104,6 @@ func TestNoCodeLinksIntoIndexes(t *testing.T) {
 	for page := range indexPages(t) {
 		names = append(names, path.Base(page)+"#")
 	}
-	allowed := map[string]bool{"configuration.md#what-to-use-for-what": true}
 	fset := token.NewFileSet()
 	err = filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
@@ -131,7 +128,7 @@ func TestNoCodeLinksIntoIndexes(t *testing.T) {
 				return true
 			}
 			v, err := strconv.Unquote(lit.Value)
-			if err != nil || allowed[v] {
+			if err != nil {
 				return true
 			}
 			for _, name := range names {
@@ -618,4 +615,38 @@ func indexPages(t *testing.T) map[string]bool {
 		t.Fatal("testdata/index-pages.txt lists no page")
 	}
 	return index
+}
+
+// banned are the words the glossary's "Words we do not use" names, as they
+// would be written in prose.
+var banned = []string{"local mode", "golden file", "mutating request", "snapshot of the baseline"}
+
+// TestGlossaryWords: the prose of every page uses none of the words the
+// glossary lists under "Words we do not use", outside code and outside that
+// list itself.
+func TestGlossaryWords(t *testing.T) {
+	_, all := docs(t)
+	for _, d := range all {
+		code := map[int]bool{}
+		for _, b := range d.Blocks {
+			for n := b.Line; n <= b.End; n++ {
+				code[n] = true
+			}
+		}
+		inList := false
+		for i, line := range d.Lines {
+			if strings.HasPrefix(line, "#") {
+				inList = d.Path == "docs/glossary.md" && strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
+			}
+			if code[i+1] || inList {
+				continue
+			}
+			prose := strings.ToLower(codeSpan.ReplaceAllString(line, ""))
+			for _, w := range banned {
+				if strings.Contains(prose, w) {
+					t.Errorf("%s:%d: %q is a word the glossary says not to use", d.Path, i+1, w)
+				}
+			}
+		}
+	}
 }
