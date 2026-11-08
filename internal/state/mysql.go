@@ -1393,9 +1393,9 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	if _, err := c.ExecContext(ctx, def); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
 	}
-	var next, increment int64
+	var next, increment, cycles int64
 	var cache uint64
-	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value, increment, cache_size FROM "+qi(src)+"."+qi(q)).Scan(&next, &increment, &cache); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value, increment, cache_size, cycle_count FROM "+qi(src)+"."+qi(q)).Scan(&next, &increment, &cache, &cycles); err != nil {
 		return err
 	}
 	caching := "NOCACHE"
@@ -1404,6 +1404,13 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	}
 	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s INCREMENT BY %d %s RESTART WITH %d", qi(dst), qi(q), increment, caching, next)); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	// RESTART counts no cycle; one that has cycled gets its count back
+	// (SETVAL's round), at the same next value.
+	if cycles != 0 {
+		if _, err := c.ExecContext(ctx, fmt.Sprintf("SELECT SETVAL(%s.%s, %d, 0, %d)", qi(dst), qi(q), next, cycles)); err != nil {
+			return fmt.Errorf("sequence %s: %w", q, err)
+		}
 	}
 	return nil
 }

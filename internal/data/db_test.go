@@ -107,7 +107,9 @@ func seedStatements(driver string, ps []person, sequence string) []string {
 			"SET NAMES utf8mb4",
 		)
 		if sequence != "" {
-			st = append(st, sequence, "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)")
+			st = append(st, sequence, "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)",
+				// One that has cycled: its count of cycles is copied too.
+				"CREATE SEQUENCE rounds MINVALUE 1 MAXVALUE 2 NOCACHE CYCLE", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)")
 		}
 	} else {
 		st = append(st,
@@ -455,6 +457,10 @@ func testAnonymize(t *testing.T, s *server) {
 			// (next_not_cached_value): a gap, as after a server restart.
 			if n := count(tdb, "SELECT NEXTVAL(invoice_numbers)"); n != 1100 {
 				t.Errorf("sequence continues at %d", n)
+			}
+			var next, cycles int
+			if err := tdb.QueryRow("SELECT next_not_cached_value, cycle_count FROM rounds").Scan(&next, &cycles); err != nil || next != 2 || cycles != 1 {
+				t.Errorf("cycled sequence: next %d, cycles %d, %v; want 2, 1", next, cycles, err)
 			}
 		}
 	} else {

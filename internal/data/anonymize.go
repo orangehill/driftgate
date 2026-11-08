@@ -582,8 +582,10 @@ func (e *engine) copy(ctx context.Context, src *sql.Conn, schema *Schema, opt Op
 		if err != nil || len(rows) != 1 {
 			return nil, fmt.Errorf("sequence %s: %v", sq.name, err)
 		}
-		if err := out.exec(ctx, Stmt{SQL: sq.set(rows[0])}); err != nil {
-			return nil, err
+		for _, set := range sq.set(rows[0]) {
+			if err := out.exec(ctx, Stmt{SQL: set}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, st := range schema.after {

@@ -1519,3 +1519,100 @@ func TestMySQLGaleraSequences(t *testing.T) {
 		})
 	}
 }
+
+// TestMySQLSequenceCycles (MariaDB, Galera too): a sequence that has cycled
+// is seeded and restored with its count of cycles (cycle_count), which the
+// fingerprint reads: the pristine copy equals the working database, and a
+// restore makes it as it was, going on at the same value.
+func TestMySQLSequenceCycles(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			var version string
+			root.QueryRow("SELECT VERSION()").Scan(&version)
+			if !strings.Contains(version, "MariaDB") {
+				t.Skip("sequences are MariaDB's")
+			}
+			work, pristine := "dgt_seqcycle", "dgt_seqcycle_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db,
+				"CREATE SEQUENCE up MINVALUE 1 MAXVALUE 3 NOCACHE CYCLE",
+				"CREATE SEQUENCE down START WITH -1 MINVALUE -3 MAXVALUE -1 INCREMENT BY -1 NOCACHE CYCLE",
+				"CREATE SEQUENCE cached MINVALUE 1 MAXVALUE 30 CACHE 5 CYCLE"+galeraSequence(t, db))
+			nextvals := func(seq string, n int) {
+				for i := 0; i < n; i++ {
+					mustExec(t, db, "SELECT NEXTVAL("+seq+")")
+				}
+			}
+			state := func(database, seq string) (next, cycles int64) {
+				t.Helper()
+				if err := root.QueryRow("SELECT next_not_cached_value, cycle_count FROM "+database+"."+seq).Scan(&next, &cycles); err != nil {
+					t.Fatal(err)
+				}
+				return next, cycles
+			}
+			nextvals("up", 8)      // two cycles, next 3
+			nextvals("down", 4)    // one cycle
+			nextvals("cached", 40) // one cycle at least
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for _, seq := range []string{"up", "down", "cached"} {
+				wn, wc := state(work, seq)
+				pn, pc := state(pristine, seq)
+				if wc == 0 || wn != pn || wc != pc {
+					t.Errorf("%s: working %d/%d, pristine %d/%d", seq, wn, wc, pn, pc)
+				}
+			}
+			c, err := m.session(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			fp0, err := m.fingerprint(ctx, c, work, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fpPristine, err := m.fingerprint(ctx, c, pristine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, fpPristine); len(d) > 0 {
+				t.Fatalf("pristine copy differs: %v", d)
+			}
+			wantNext := map[string]int64{}
+			for _, seq := range []string{"up", "down"} {
+				wantNext[seq], _ = state(work, seq)
+			}
+			nextvals("up", 3)
+			nextvals("down", 1)
+			nextvals("cached", 30)
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if len(changed) != 3 {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			for seq, want := range wantNext {
+				var got int64
+				db.QueryRow("SELECT NEXTVAL(" + seq + ")").Scan(&got)
+				if got != want {
+					t.Errorf("%s goes on at %d, want %d", seq, got, want)
+				}
+			}
+		})
+	}
+}
