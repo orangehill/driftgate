@@ -47,6 +47,7 @@ requests do not cover.
 
 - It makes one request per route method and template (`templates:`; default `ok`).
 - Entries written by hand or imported stay untouched. A route method that a hand-written entry already reaches is skipped, unless `--all`.
+- `generate` and `run` name each route method skipped so in a `note:`, with the entries that reach it and the requests `generate` would make there, such as its error variants and JSON twins.
 - Parameter values come from `params:`. For routes it cannot make, it names every missing parameter, grouped by reason, with an example.
 - The same input always gives a byte-identical catalog.
 - The summary says how many generated requests `json-errors` made.

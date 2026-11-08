@@ -303,6 +303,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	for _, n := range res.Notes {
 		fmt.Fprintf(out, "\nnote: %s\n", n)
 	}
+	printReplaced(out, res.Replaced)
 	jsonErrorsNote(p, out, o.check)
 	literalIDNote(out, res.Catalog, "")
 	for _, u := range res.Unused {
@@ -326,6 +327,25 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		return ExitDrift, nil
 	}
 	return ExitClean, nil
+}
+
+// printReplaced names the route methods that entries written by hand
+// reach, whose generated requests they take the place of: a request the
+// generator would make there (an error variant, the JSON twin) is not in
+// the catalog, and generate --all adds them.
+func printReplaced(out io.Writer, replaced []generate.Replaced) {
+	if len(replaced) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\nnote: entries written by hand take the place of the generated requests of %d route %s (generate --all makes those too):\n",
+		len(replaced), plural(len(replaced), "method", "methods"))
+	for _, r := range replaced {
+		instead := "its generated requests"
+		if len(r.Generated) > 0 {
+			instead = strings.Join(r.Generated, ", ")
+		}
+		fmt.Fprintf(out, "  %s: %s instead of %s\n", report.Printable(r.Route), strings.Join(r.ByHand, ", "), instead)
+	}
 }
 
 // diffCatalogs lists request IDs added, removed and changed.

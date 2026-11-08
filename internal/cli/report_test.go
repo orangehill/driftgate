@@ -8,6 +8,7 @@ import (
 
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/generate"
 	"github.com/orangehill/driftgate/internal/report"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -169,5 +170,25 @@ func TestDriftLineAroundTheDifference(t *testing.T) {
 	d := compare.Drift{Kind: compare.KindValue, Where: "$.body", Baseline: `"` + head + "OLD-WORD" + tail + `"`, Current: `"` + head + "NEW-WORD" + tail + `"`}
 	if l := driftLine(d); !strings.Contains(l, "OLD-WORD") || !strings.Contains(l, "NEW-WORD") {
 		t.Errorf("drift line %q", l)
+	}
+}
+
+// TestPrintReplaced: generate and run name the generated requests that
+// entries written by hand take the place of.
+func TestPrintReplaced(t *testing.T) {
+	var b strings.Builder
+	printReplaced(&b, nil)
+	if b.Len() != 0 {
+		t.Errorf("nothing replaced: %q", b.String())
+	}
+	printReplaced(&b, []generate.Replaced{
+		{Route: "GET /api/limited", ByHand: []string{"limited-throttle", "limited-throttle-json"}, Generated: []string{"get-api-limited", "get-api-limited-json"}},
+		{Route: "POST /api/import", ByHand: []string{"import-real"}},
+	})
+	want := "\nnote: entries written by hand take the place of the generated requests of 2 route methods (generate --all makes those too):\n" +
+		"  GET /api/limited: limited-throttle, limited-throttle-json instead of get-api-limited, get-api-limited-json\n" +
+		"  POST /api/import: import-real instead of its generated requests\n"
+	if b.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", b.String(), want)
 	}
 }

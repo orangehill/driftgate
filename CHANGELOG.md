@@ -77,6 +77,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - A read-only request that writes is found when the tokens command writes a new token on every run. The search for it compared every run with the state before the read-only requests and stopped with exit 3, "prepare is not repeatable", without naming the request. Each run is now compared with the state it started from. When the starting state is not repeatable and no single request explains a change, the capture still stops with exit 3, naming the change and what is not repeatable.
 - Two long values that differ in the middle show the difference. `run`, `compare`, `review`, `review --group` and the group explanations cut both values to the same window around the first character where they differ; they showed only the beginnings, which were equal.
 - In mode `freeze`, `run` and `review` no longer tell you to `accept` new requests, which that mode refuses. They print the `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze` command that adds them, and say that it takes the whole capture. Mode `evolve` still names `accept`.
+- An entry written by hand no longer makes `generate` drop the generated requests of its route method silently. `generate` and `run` name each such route method in a note, with the entries written by hand and the generated requests they take the place of, such as error variants and JSON twins.
 
 ### Security
 
