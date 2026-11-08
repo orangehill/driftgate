@@ -131,7 +131,7 @@ changes again, is not expected.
 - A value an allowlist rule lets change, such as a `created_at` in a new item, is held to the rule, so the expectation still holds on the next capture. Any other value is exact, with its JSON type.
 - Where a new key, item or element stands counts. When two tickets add keys to one object, expect them where both are in.
 - Below the values level, only what that level compares counts. The origins of both sides are written as one, so an expectation holds in a worktree on another port.
-- How a JSON or CSV body is written counts too: its layout, escaping (`\/` or `/`), quotes and line ends. An expectation holds only for a response written the same way.
+- How a JSON or CSV body is written counts too: its layout, escaping (`\/` or `/`), quotes, line ends, blank lines and empty fields. An expectation holds only for a response written the same way.
 - Values a rule covers and lists that grow keep an expectation, with two exceptions where it fails when the length or quoting changes. One is a list an `any_length` rule lets grow, in a layout the comparison does not predict (Jackson's `[ 1, 2 ]`, Python 2's `", "`). The other is a CSV cell whose value needs quotes only now and then.
 
 ### What cannot be expected
@@ -146,10 +146,10 @@ Each ref has a file next to the baseline's folder:
 `.driftgate/baselines/local.expectations/API-7.jsonl`. Two pull requests
 with different tickets change different files, and do not conflict.
 
-- A ref that is not a plain file name of at most 60 characters is written with `_` for other characters, cut to 60, with 8 bytes of its SHA-256 after a `~`. A name another ref's file has is refused.
-- A line is added for each `expect` and `--drop`, and for each expectation `accept` or a [rebase](#driftgate-baselines-rebase) closes. It holds who, when, the ref, the reason, and the drift digests and signatures.
+- A ref that is not a plain file name of at most 60 characters is written with `_` for other characters, cut to 60, with 8 bytes of its SHA-256 after a `~`. A name another ref's file has is refused, never written over.
+- A line is added for each `expect` and `--drop`, and for each expectation `accept` or a [rebase](#driftgate-baselines-rebase) closes. It holds who, when, the ref, the reason, and the requests, each with its drift digests and signatures.
 - Values of a private response, or of a request built from one, are named by a keyed hash with the project key; nothing in the file reveals them.
-- Lines are chained by the hash of the line before, and sealed; each names the baseline and the ref. A file edited by hand, copied or renamed is refused (exit 3) by `compare`, `run` and `expect`, and fails `verify`. Restore or remove it. The chain shows accidents and edits; it is not a signature.
+- Lines are chained by the hash of the line before, and sealed; each names the baseline and the ref. A file edited by hand, copied or renamed is refused (exit 3) by `compare`, `run` and `expect`, and fails `verify`. Restore it, or remove it, which removes the expectations of its ref. The chain shows accidents and edits; it is not a signature.
 - With `baselines: git`, commit the file with the change; a reviewer sees each expected drift with its ticket and reason. With `baselines: local`, it stays on the developer's machine, and the pull request carries the report.
 
 ### Take expectations from another worktree
@@ -291,7 +291,8 @@ LF) is reported as such, with the git commands that check it out again
 ([line endings](../upgrading-driftgate.md#line-endings-of-baselines-checked-out-before-gitattributes)).
 `run`, `accept` and `verify` put a `.gitattributes` with `* -text` into
 the baselines folder when it is missing, as baselines are checked byte
-for byte. With `baselines: git`, commit it.
+for byte. Without it, git on Windows (`core.autocrlf`) checks their
+files out with CRLF line endings, which every check reports as a change. With `baselines: git`, commit it.
 
 ### Migrate a baseline of an earlier release
 

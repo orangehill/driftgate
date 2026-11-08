@@ -262,8 +262,8 @@ target:
   allow_hosts: [203.0.113.10]
 ```
 
-`connect_to` sends every request to a fixed address, as
-`curl --connect-to` does, such as while DNS still names the old server
+`connect_to` sends every request to a fixed address, like
+`curl --connect-to` or `--resolve`, such as while DNS still names the old server
 ([the task](../guides/workflow/live-server.md#reach-a-new-server-before-dns-points-to-it)).
 
 - The requests keep `base_url`'s host name in the `Host` header, the TLS server name and the certificate check; only the connection goes to `connect_to`.
@@ -489,7 +489,7 @@ replacing an `Accept` the variant has. Its request IDs end in `-json`.
 - With `[ok, not-found, json, json-errors]` that is one request per route method with a required path parameter: at most a third more. `generate` says how many (`… (N of them json-errors)`).
 - Frameworks that always answer JSON (FastAPI, NestJS, ASP.NET) gain nothing from it.
 - Without `not-found`, `invalid-param`, `anonymous` or `empty-body` in `templates:`, it makes nothing, and `generate` says so in one note.
-- For a route without a parameter value, `not-found` and `invalid-param` still make their requests, and `json-errors` their JSON twins; it is not listed as skipped there.
+- For a route without a parameter value, `not-found` and `invalid-param` still make their requests. When `not-found` or `invalid-param` is a template, `json-errors` makes their JSON twins there, and is not listed as skipped.
 - To adopt it in an existing project, see [keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses).
 
 ### Parameter values
