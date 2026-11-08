@@ -13,7 +13,7 @@ $ driftgate review
 
 The names are stable, so CI can rely on them: JSON reports carry each
 drift's `kind`. `driftgate help kinds` lists every kind in the terminal.
-The [level](../configuration.md#top-level-keys) of a comparison decides
+The [level](driftgate-yaml.md#level) of a comparison decides
 which kinds it can report.
 
 ## What to do with a drift
@@ -21,7 +21,7 @@ which kinds it can report.
 - Fix the code when the change is not intended.
 - [Accept](commands/review.md#driftgate-accept) the change when it is intended, in mode `evolve`.
 - [Expect](commands/review.md#driftgate-expect) the change for a ticket: the baseline stays as it is, also in mode `freeze`.
-- Add an [allowlist rule](../configuration.md#allowlistyaml) only for a value that changes by itself, such as a time or a token.
+- Add an [allowlist rule](allowlist-yaml.md) only for a value that changes by itself, such as a time or a token.
 
 The "Typical fix" column adds only what is specific to a kind. A dash
 means nothing beyond the list above.
@@ -97,7 +97,7 @@ in a workbook outside its cells is a `body` drift.
 
 A side effect names what changed, not the values, so it cannot be
 expected. Side effects are compared only when both captures took
-fingerprints of the [state](../configuration.md#state).
+fingerprints of the [state](state.md).
 
 ## Requests not captured
 
@@ -109,4 +109,4 @@ A request that was sent and got no answer is a `status` drift, not this
 one.
 
 ---
-**Related:** [Glossary: drift](../glossary.md#drift) · [allowlist.yaml](../configuration.md#allowlistyaml) · [accept](commands/review.md#driftgate-accept) · [expect](commands/review.md#driftgate-expect)
+**Related:** [Glossary: drift](../glossary.md#drift) · [allowlist.yaml](allowlist-yaml.md) · [accept](commands/review.md#driftgate-accept) · [expect](commands/review.md#driftgate-expect)

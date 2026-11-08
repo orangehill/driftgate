@@ -29,7 +29,7 @@ writes, and sees their data.
 Say `mutates: false` for those that only read, and `mutates: true` for
 the others:
 
-- for generated entries, under [`requests`](../configuration.md#requests) in `driftgate.yaml`, then run `driftgate generate --write`; a later `generate` would write the catalog entry again;
+- for generated entries, under [`requests`](driftgate-yaml.md#requests) in `driftgate.yaml`, then run `driftgate generate --write`; a later `generate` would write the catalog entry again;
 - for entries written by hand, in the catalog.
 
 ### A fixed id in a path that changes data
@@ -39,8 +39,15 @@ A request that changes data with a fixed id in its path, such as
 request; `generate` warns too. The id is neither a `{parameter}` nor
 from `params_from`. On another copy of the data that id may be a real
 record, and the status would not show it. Take the id from a response
-with [`params_from`](../configuration.md#templates-generate-params)
+with [`params_from`](driftgate-yaml.md#templates-generate-params)
 instead. The exit code stays.
+
+Two kinds of number are not taken for an id:
+
+- an API version: one or two digits right after a segment `api` or `v` in any letter case, followed by a non-empty segment that is not a number (`/api/2/users`; `/api/2/` is an id);
+- a full date: a year from 1900 to 2099, a month `01` to `12` and a day `01` to `31`, as in `/posts/2024/05/17`.
+
+Any other number is taken for an id: `/api/17`, `/stats/2024`, `/users/2024/5`.
 
 ### A read-only request that changed data
 
@@ -53,15 +60,22 @@ traffic, not the request's. Check it before you mark the request.
 ## Guards and prepare during a capture
 
 When requests change data, the
-[guards](../configuration.md#seed-prepare-guards) are checked after the
+[guards](driftgate-yaml.md#seed-prepare-guards) are checked after the
 restore and `prepare`, which may set up what they check.
 
 - They run before the first request, and again right before the first request that changes data when read-only requests ran in between.
 - A guard that fails stops the capture there (exit 3), in seconds rather than after the read-only requests.
-- Guards only check. A write of one becomes part of the state the read-only requests start from; a restore removes it before the requests that change data. It may be reported as a change `prepare` made.
+- Guards only check. A write of one becomes part of the state the read-only requests start from; a restore removes it before the requests that change data.
+- Such a write may be reported as a change `prepare` made. A later search for read-only requests that wrote may report `prepare` as not repeatable.
 
-When `prepare` changed the restored state, the capture warns and lists
-what it changed. The exit code stays.
+The capture fingerprints the state right after the restore and after
+`prepare`. When the two differ, it warns that the state changed between
+the restore and the end of `prepare`, and names the changed tables or
+components.
+
+- A `tokens.command` runs right after `prepare`. What it writes, such as the tokens of a login, is not taken for `prepare`'s.
+- With both configured, the first capture takes one more fingerprint between them. The later restores (before the requests that change data, `--restore each`) are checked only without a `tokens.command`.
+- Only components with a fingerprint are seen. The warning never changes the exit code.
 
 ## When the state does not match the baseline
 
@@ -96,24 +110,56 @@ capture runs again one request at a time.
 
 ## Retries of requests that failed under load
 
-A read-only `GET`, `HEAD` or `OPTIONS` request whose send times out,
-loses its connection or gets a `502`, `503` or `504` is sent again. By
-default that happens once, after the other read-only requests, one at a
-time ([`retry`](../configuration.md#retries)).
+A development server under the load of a capture now and then times
+out, drops a connection, or answers `502`, `503` or `504` once. A
+read-only request of a safe method (`GET`, `HEAD`, `OPTIONS`) whose send
+fails so is sent again, up to [`retry`](driftgate-yaml.md#retry) times
+(default once), within `rate_limits`.
 
-- Its record keeps the first send's outcome.
+- The resends wait until the other read-only requests are done, and go one at a time. Without the load, a resend that passes is evidence, not luck.
 - The capture lists such requests after its summary.
 - A capture at a measured `concurrency: auto` that needed a retry the sequential capture did not counts as different from it.
 
-How a report shows them is under
-[Requests that passed only after a retry](reports.md#requests-that-passed-only-after-a-retry).
+No retry is spent on what cannot recover. These keep their first
+response:
+
+- a request whose baseline response failed the same way: the same status, a failed request on both sides, or a retry in the baseline that did not recover;
+- the timeouts of a service, and its `504`s that took as long as `timeout`, once one of its resends, sent alone, timed out again;
+- the `502`, `503` and `504` answers of a service once two of its resends got one again. An application in maintenance mode answers `503` to everything.
+
+Not retried at all:
+
+- a `500`: an exception of the application, such as the first call after a restore on a cold cache, stays a drift;
+- any other method, also with `"mutates": false`;
+- requests that change data, also a `GET` the baseline knows writes (its response there has side effects);
+- sequences, and so no request that takes a parameter from another response;
+- command steps and repeated requests;
+- a refused connection: the application is not running.
+
+A request already sent again after a restore that ended the
+application's database sessions (SQL Server,
+[whole restore](databases/sql-server.md#restore-of-the-whole-database))
+is retried only when that second answer is a load failure. Its record
+then keeps both: `resent` with the first answer, `retry` with the second.
+A resend that fails in another way than load, such as a refused
+connection or an interrupt, did not recover.
+
+A retry never makes a failure pass unseen.
+
+- The record of the response keeps the first send's outcome, and whether a later send recovered: `"retry": {"sends": 2, "status": 503, "ms": 41, "recovered": true}`, or `"error": "timeout"`. It is never compared, but shown everywhere.
+- The capture names the requests answered only after a retry. `run` warns when it makes a baseline from such a response, and so does `accept`.
+- `compare` and `report` show a request that passed only after a retry as a class of its own in every format ([how](reports.md#requests-that-passed-only-after-a-retry)). It counts as passed: the exit code does not change.
+- A request that failed in every send is never counted as passed after a retry. It shows as failed in all its sends. When it passes anyway (the baseline failed the same way, or an expected drift), every format names it as such.
+
+A request that is retried in every run fails now and then for a reason
+of its own. Set `retry: 0` to see each failure as a drift.
 
 ## Personal data in a public response
 
 A public response in which the
-[personal-data detector](../configuration.md#storage-and-pii) finds
+[personal-data detector](driftgate-yaml.md#storage-and-pii) finds
 something is stored encrypted as private, and reported with a masked
 value. The capture exits 2.
 
 ---
-**Related:** [driftgate capture](commands/check.md#driftgate-capture) · [state](../configuration.md#state) · [Reading a report in detail](reports.md)
+**Related:** [driftgate capture](commands/check.md#driftgate-capture) · [state](state.md) · [Reading a report in detail](reports.md)

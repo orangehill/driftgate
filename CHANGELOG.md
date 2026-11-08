@@ -44,6 +44,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `--repeat` keeps the median response time of each request. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - `driftgate help <command>` ends with a link to its docs for the release you run. New help topics `catalog` and `allowlist`. ([#17](https://github.com/orangehill/driftgate/pull/17), [#20](https://github.com/orangehill/driftgate/pull/20))
 - `driftgate help kinds` lists every drift kind; the docs gain a glossary and a drift kinds reference. ([#23](https://github.com/orangehill/driftgate/pull/23))
+- `driftgate help exclusions`, `help classify` and `help config` list the keys of those files; every help topic links its own reference page, and `driftgate help` names them all. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - Detection reads NestJS/TypeORM `DB_TYPE`. Laravel closure routes with a FormRequest get a body from its rules. ([#15](https://github.com/orangehill/driftgate/pull/15), [#16](https://github.com/orangehill/driftgate/pull/16))
 
 ### Changed
@@ -59,6 +60,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `classify.yaml`: `action: null` written without quotes on a `serialized-php` column now sets the column to NULL. It was read as no action, the default `empty-table`, and the copy lost all rows of the table. `action:` with nothing after it, or an empty string, is now refused; only a missing `action` means `empty-table`. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - `seed` records the fingerprint of the pristine copy itself (MySQL, MariaDB, PostgreSQL). A write during the seed no longer stops every later capture. ([#13](https://github.com/orangehill/driftgate/pull/13))
 - MySQL 8: tables with a collation that is not the charset's default restore correctly. ([#14](https://github.com/orangehill/driftgate/pull/14))
 - MySQL: no reconnect on every cycle, which was slow on servers without `skip-name-resolve`. ([#14](https://github.com/orangehill/driftgate/pull/14))

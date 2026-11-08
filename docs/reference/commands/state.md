@@ -2,7 +2,7 @@
 
 The commands that make and remove the pristine copy that every capture
 restores. What a restore does is under
-[state](../../configuration.md#state).
+[state](../state.md).
 
 ## driftgate seed
 
@@ -19,8 +19,8 @@ database.
 
 - `seed` records the fingerprint of the pristine copy itself. Every capture restores the databases to the pristine copy and checks them against that fingerprint.
 - The fingerprint is kept in the local store per database server (from the DSN, without its credentials) and per database. Checkouts that share the store but use their own database server never take each other's.
-- A SQL Server pristine copy is a read-only database on the same server, made from a `COPY_ONLY` backup of the working database. Its own backup stays in the server's backup folder ([SQL Server](../../configuration.md#sql-server)).
-- An SQLite database is named by the real path of its working file. Its pristine copy is a file next to that record, unless `pristine:` names one; the seed only reads the working file ([SQLite](../../configuration.md#sqlite)).
+- A SQL Server pristine copy is a read-only database on the same server, made from a `COPY_ONLY` backup of the working database. Its own backup stays in the server's backup folder ([SQL Server](../databases/sql-server.md)).
+- An SQLite database is named by the real path of its working file. Its pristine copy is a file next to that record, unless `pristine:` names one; the seed only reads the working file ([SQLite](../databases/sqlite.md)).
 
 ```sh
 driftgate seed
@@ -80,4 +80,4 @@ driftgate clean db --yes
 - SQLite: the working file need not be there, as in a worktree that git did not give it. The copy is found by its record in the local store. Without the file and without a record, clean stops (exit 2) and names the folder of the store's copies.
 
 ---
-**Related:** [state](../../configuration.md#state) · [seed, prepare, guards](../../configuration.md#seed-prepare-guards) · [Command line basics](../cli.md)
+**Related:** [state](../state.md) · [seed, prepare, guards](../driftgate-yaml.md#seed-prepare-guards) · [Command line basics](../cli.md)

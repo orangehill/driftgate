@@ -27,7 +27,7 @@ Before the first step, make the catalog cover what clients use:
   one per identity;
 - add hand-written entries for flows `generate` cannot make: login
   sequences, uploads with real files, queued jobs as command steps,
-  throttling with `repeat` (see [catalog.json](../configuration.md#catalogjson)).
+  throttling with `repeat` (see [catalog.json](../reference/catalog-json.md)).
 
 Keep `mode: freeze` while nothing is meant to change. With `baselines:
 local` (the default) the baseline stays in `.driftgate/` on this machine,
@@ -56,7 +56,7 @@ upgrade:
 - `item-order`: the same rows in another order, typical when the database
   or the ORM changes (a list without `ORDER BY`, or one on a column with
   equal values). It is one drift per array, with a note that names the
-  [array rule](../configuration.md#allowlistyaml) to add: `key` pairs the
+  [array rule](../reference/allowlist-yaml.md) to add: `key` pairs the
   items by an id and still reports a changed item, `any_order` allows the
   order. Add it only where the order does not matter to clients;
 - `header-*`: cookies, cache headers, content types;

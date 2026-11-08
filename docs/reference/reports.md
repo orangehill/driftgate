@@ -120,13 +120,13 @@ records it read already.
 
 A green result proves only that the responses and side effects of the
 requests in the catalog did not change. It does not exercise file uploads unless the
-catalog has [`multipart`](../configuration.md#multipart) requests with
+catalog has [`multipart`](catalog-json.md#multipart) requests with
 fixtures. Nor does it reach admin paths that change the schema, or code
 that only background jobs, queue workers or commands reach.
-[Command steps](../configuration.md#command-steps) with
+[Command steps](catalog-json.md#command-steps) with
 `"output": true` and state fingerprints bring the rest into the gate
 ([side checks](../guides/side-checks.md)). The table of
-[what to use for what](../configuration.md#what-to-use-for-what) names
+[what to use for what](../configuration.md) names
 the feature for each.
 
 ## Expected drifts in a report
@@ -161,7 +161,7 @@ starts without a baseline.
 ## Requests sent again after a restore
 
 A restore of a whole SQL Server database ends the application's database
-sessions ([SQL Server](../configuration.md#sql-server)). A request the
+sessions ([SQL Server](databases/sql-server.md)). A request the
 capture or the baseline sent again after such a restore has a note with
 the first answer. Every format counts them in a line of its own, so the
 count shows when the notes are cut after ten:

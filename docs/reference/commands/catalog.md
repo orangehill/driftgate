@@ -2,8 +2,8 @@
 
 The commands that find the routes, write the catalog and show what it
 does not cover. The files they write are described under
-[catalog.json](../../configuration.md#catalogjson) and
-[exclusions.yaml](../../configuration.md#exclusionsyaml).
+[catalog.json](../catalog-json.md) and
+[exclusions.yaml](../exclusions-yaml.md).
 Paths are those of the local layout ([where the project's files are](../cli.md#where-the-projects-files-are)).
 
 ## driftgate discover
@@ -21,7 +21,7 @@ inventory (exit 1 when they changed).
 | `--target <service>` | work on this service only (repeatable or comma-separated) |
 
 Routes come from the adapters under
-[`discover:`](../../configuration.md#discover) in `driftgate.yaml`.
+[`discover:`](../driftgate-yaml.md#discover) in `driftgate.yaml`.
 
 ```console
 $ driftgate discover
@@ -50,7 +50,7 @@ requests do not cover.
 - Parameter values come from `params:`. For routes it cannot make, it names every missing parameter, grouped by reason, with an example.
 - The same input always gives a byte-identical catalog.
 - The summary says how many generated requests `json-errors` made.
-- A project whose `discover:` uses the `laravel`, `symfony`, `rails` or `spring` adapter, and whose `templates:` lack `json-errors`, gets a one-line `note:` to add it ([templates](../../configuration.md#templates-generate-params)). The note comes once per local store, from `generate` or `run`; `generate --check` without a store says nothing.
+- A project whose `discover:` uses the `laravel`, `symfony`, `rails` or `spring` adapter, and whose `templates:` lack `json-errors`, gets a one-line `note:` to add it ([templates](../driftgate-yaml.md#templates-generate-params)). The note comes once per local store, from `generate` or `run`; `generate --check` without a store says nothing.
 
 ```sh
 driftgate generate --check     # CI: is the committed catalog current?
@@ -109,8 +109,8 @@ it is listed as a route without a sample body.
 
 - Routes whose requests meant to succeed all failed in the baseline, with those requests and their statuses: not covered (exit 1). Fix the route and `accept` the new answer, or acknowledge it as a known failure.
 - Requests that failed in the baseline, also on routes another request covers (a warning).
-- Known failures (`known_failures:` in [exclusions.yaml](../../configuration.md#exclusionsyaml)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
-- Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../../configuration.md#exclusionsyaml) describes. A stale one also matches no request of any service.
+- Known failures (`known_failures:` in [exclusions.yaml](../exclusions-yaml.md)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
+- Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../exclusions-yaml.md) describes. A stale one also matches no request of any service.
 - Requests that reach no route, stale exclusions, and routes without a sample body.
 
 An exclusion that `init` wrote for the framework (Debugbar, Telescope,
@@ -211,4 +211,4 @@ The shape check is a heuristic: it misses a short or unusual token, so
 review what `--write` adds.
 
 ---
-**Related:** [catalog.json](../../configuration.md#catalogjson) · [exclusions.yaml](../../configuration.md#exclusionsyaml) · [Command line basics](../cli.md)
+**Related:** [catalog.json](../catalog-json.md) · [exclusions.yaml](../exclusions-yaml.md) · [Command line basics](../cli.md)
