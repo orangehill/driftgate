@@ -20,8 +20,7 @@ const DumpFormat = 1
 // FileValue is one value of a file column: the path the application stored.
 type FileValue struct {
 	Table, Column string
-	Path          string            // the original value of the column
-	Options       map[string]string // the rule's options from classify.yaml
+	Path          string // the original value of the column
 }
 
 // FilePlaceholder makes a placeholder for the file a file column names (same
@@ -274,7 +273,7 @@ func (e *engine) row(ctx context.Context, t *Table, plans []*plan, vals [][]byte
 			if e.files == nil {
 				return errors.New("file placeholders are not available")
 			}
-			out, err = e.files.Placeholder(ctx, FileValue{Table: t.Name, Column: p.col.Name, Path: s, Options: p.rule.Options})
+			out, err = e.files.Placeholder(ctx, FileValue{Table: t.Name, Column: p.col.Name, Path: s})
 		default:
 			var n int
 			switch p.rule.Strategy {
