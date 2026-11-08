@@ -454,7 +454,9 @@ func TestReadOnlyCapture(t *testing.T) {
 	if code != ExitClean || fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("exit %d: %v", code, got)
 	}
-	if r.NotCovered == nil || r.NotCovered.MutatingSkipped == nil || r.NotCovered.MutatingSkipped.Count != 3 {
+	// The command step is counted apart: it is not a request.
+	if r.NotCovered == nil || r.NotCovered.MutatingSkipped == nil || r.NotCovered.MutatingSkipped.Count != 2 ||
+		r.NotCovered.CommandsSkipped == nil || r.NotCovered.CommandsSkipped.Count != 1 || r.NotCovered.CommandsSkipped.Names[0] != "cmd" {
 		t.Errorf("not covered: %+v", r.NotCovered)
 	}
 	if len(r.UnusedRules) != 0 {

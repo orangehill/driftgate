@@ -19,6 +19,7 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/generate"
 	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
@@ -547,7 +548,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		if len(headerNames) > 0 {
 			fmt.Fprintln(out, "headers:")
 			for _, n := range headerNames {
-				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(headers[n]))), reason)
+				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(n, headers[n]))), reason)
 			}
 		}
 		if len(keys) > 0 {
@@ -628,20 +629,68 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 
 // headerFormat is one format for every value of a header: a pattern per
 // position, joined with | when they differ (one cookie name per position).
-func headerFormat(positions [][]string) string {
+// A header is recorded masked where it may carry a credential (letters
+// become x and X, digits 0: httpx.MaskHeader), and no format is derived
+// from what the mask left: a cookie's value is any text up to the first
+// ;, and a header masked whole is any text.
+func headerFormat(name string, positions [][]string) string {
 	var parts []string
 	seen := map[string]bool{}
 	for _, vals := range positions {
-		p := infer.Pattern(vals)
-		if p == "" {
-			p = regexp.QuoteMeta(vals[0]) // this one did not change
+		var ps []string
+		switch {
+		case name == "set-cookie":
+			ps = cookieFormats(vals)
+		case httpx.MasksWhole(name):
+			ps = []string{".+"}
+		default:
+			ps = []string{valuesFormat(vals)}
 		}
-		if !seen[p] {
-			seen[p] = true
-			parts = append(parts, p)
+		for _, p := range ps {
+			if !seen[p] {
+				seen[p] = true
+				parts = append(parts, p)
+			}
 		}
 	}
 	return strings.Join(parts, "|")
+}
+
+// valuesFormat is a pattern for values, or the value itself when it did
+// not change.
+func valuesFormat(vals []string) string {
+	if p := infer.Pattern(vals); p != "" {
+		return p
+	}
+	return regexp.QuoteMeta(vals[0])
+}
+
+// cookieFormats are the formats of Set-Cookie values, one per cookie name:
+// the name as it is, its value (masked when recorded) as any text without
+// a ;, and the attributes after it (expiry, path, flags), which are
+// recorded as sent, inferred as any other value.
+func cookieFormats(vals []string) []string {
+	var names []string
+	attrs := map[string][]string{}
+	for _, v := range vals {
+		first, rest, _ := strings.Cut(v, ";")
+		cookie, _, ok := strings.Cut(first, "=")
+		if !ok {
+			return []string{valuesFormat(vals)} // not a cookie: as recorded
+		}
+		if _, ok := attrs[cookie]; !ok {
+			names = append(names, cookie)
+		}
+		if strings.Contains(v, ";") {
+			rest = ";" + rest
+		}
+		attrs[cookie] = append(attrs[cookie], rest)
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, regexp.QuoteMeta(n)+"=[^;]*"+valuesFormat(attrs[n]))
+	}
+	return out
 }
 
 var yamlQuote = compare.YAMLQuote

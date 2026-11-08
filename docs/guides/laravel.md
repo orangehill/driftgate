@@ -231,9 +231,10 @@ driftgate run
 ```
 
 The first run captures twice. On a fresh Laravel application it refuses
-the baseline because of the session cookies and proposes allowlist entries
-with an exact format (cookie names and attributes literal; token, date and
-lifetime as classes); add a reason to each and run again.
+the baseline because of the session cookies, and proposes allowlist
+entries. Their formats are exact: cookie names and attributes literal,
+date and lifetime as classes. The cookie's value is recorded masked, so it is
+proposed as any text up to the `;`. Add a reason to each and run again.
 
 Routes that upload files get a synthetic file of a kind their rules accept
 (`file`, `image`, `mimes:`, `mimetypes:`). To check a real import, write a

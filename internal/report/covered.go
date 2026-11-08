@@ -33,8 +33,10 @@ type NotCovered struct {
 	FailedInBaseline *Gap `json:"failed_in_baseline,omitempty"`
 	// Requests measured and never compared (observe: true).
 	Observed *Gap `json:"observed,omitempty"`
-	// Requests that change data (or command steps) that were skipped.
+	// Requests that change data that were skipped.
 	MutatingSkipped *Gap `json:"mutating_skipped,omitempty"`
+	// Command steps that were skipped: they are not requests.
+	CommandsSkipped *Gap `json:"commands_skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
 }
@@ -69,7 +71,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.CommandsSkipped == nil && n.KnownFailures == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -129,6 +131,7 @@ func (n *NotCovered) NotCoveredLines() []string {
 	add(n.FailedInBaseline, "request meant to succeed that failed in "+against, "requests meant to succeed that failed in "+against)
 	add(n.Observed, "request observed (measured, not compared)", "requests observed (measured, not compared)")
 	add(n.MutatingSkipped, "request that changes data skipped", "requests that change data skipped")
+	add(n.CommandsSkipped, "command step skipped", "command steps skipped")
 	add(n.KnownFailures, "known failure (exclusions.yaml)", "known failures (exclusions.yaml)")
 	return out
 }

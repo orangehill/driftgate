@@ -25,7 +25,7 @@ Routes come from the adapters under
 
 ```console
 $ driftgate discover
-3 routes (command 3)
+3 routes (3 from command)
 routes unchanged ✓
 ```
 

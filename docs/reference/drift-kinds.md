@@ -54,6 +54,10 @@ means nothing beyond the list above.
 An array rule's `key` only pairs the items: a changed order is still an
 `item-order` drift. A `format` drift can come from any value a rule
 covers: a header, a JSON value, an HTML text or attribute, or a cell.
+A header rule lets the values change, not their number. A header value
+that came or went, such as a cookie no longer set, is a `format` drift
+whose explanation says so: `header:set-cookie has 1 value instead of 2:
+laravel-session removed`.
 
 ## HTML pages
 

@@ -88,17 +88,19 @@ func notCovered(p *config.Project, sel selection, cat *catalog.Catalog, reqs []c
 	if h != nil {
 		n.FailedInBaseline, n.KnownFailures = report.NewGap(ids(h.Failed)), report.NewGap(ids(h.Known))
 	}
-	var observed, skipped []string
+	var observed, skipped, commands []string
 	for _, res := range results {
 		req := byID[res.ID]
 		switch {
 		case res.Outcome == report.Observed:
 			observed = append(observed, res.ID)
-		case res.Outcome == report.Skipped && (req.Mutating() || req.IsCommand()):
+		case res.Outcome == report.Skipped && req.IsCommand():
+			commands = append(commands, res.ID)
+		case res.Outcome == report.Skipped && req.Mutating():
 			skipped = append(skipped, res.ID)
 		}
 	}
-	n.Observed, n.MutatingSkipped = report.NewGap(observed), report.NewGap(skipped)
+	n.Observed, n.MutatingSkipped, n.CommandsSkipped = report.NewGap(observed), report.NewGap(skipped), report.NewGap(commands)
 	return n
 }
 

@@ -97,14 +97,7 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 	for _, r := range inv.Routes {
 		bySource[r.Source]++
 	}
-	var counts []string
-	for _, a := range p.Discover {
-		if n, ok := bySource[a.Adapter]; ok {
-			counts = append(counts, fmt.Sprintf("%s %d", a.Adapter, n))
-			delete(bySource, a.Adapter)
-		}
-	}
-	fmt.Fprintf(out, "%d routes (%s)\n", len(inv.Routes), strings.Join(counts, ", "))
+	fmt.Fprintln(out, routeCount(len(inv.Routes), p.Discover, bySource))
 	changes := routes.DiffInventories(old, inv)
 	for _, c := range changes {
 		line := fmt.Sprintf("  %-13s %s", c.Kind, report.Printable(c.Route))
@@ -207,6 +200,24 @@ func withExclusions(p *config.Project, inv *routes.Inventory, source string) (*r
 		inv.Routes[i].Target = p.Canonical(inv.Routes[i].Target)
 	}
 	return inv, excl, nil
+}
+
+// routeCount says how many routes discover found, and how many each
+// adapter gave: "13 routes (13 from laravel)", never "laravel 13", which
+// reads as a version.
+func routeCount(total int, adapters []discover.Adapter, bySource map[string]int) string {
+	var counts []string
+	seen := map[string]bool{}
+	for _, a := range adapters {
+		if n, ok := bySource[a.Adapter]; ok && !seen[a.Adapter] {
+			seen[a.Adapter] = true
+			counts = append(counts, fmt.Sprintf("%d from %s", n, a.Adapter))
+		}
+	}
+	if len(counts) == 0 {
+		return fmt.Sprintf("%d routes", total)
+	}
+	return fmt.Sprintf("%d routes (%s)", total, strings.Join(counts, ", "))
 }
 
 func generateCmd(args []string, out, errOut io.Writer) (int, error) {

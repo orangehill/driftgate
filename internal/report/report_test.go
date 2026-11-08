@@ -426,3 +426,24 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 		t.Errorf("against a capture: %q", n)
 	}
 }
+
+// TestRemovedHeaderValueReads: a cookie no longer set reads as removed, a
+// new one as new, not as a value off its allowlist format.
+func TestRemovedHeaderValueReads(t *testing.T) {
+	d := compare.Drift{Request: "r", Kind: compare.KindFormat, Where: "header:set-cookie", Baseline: "(private)", Current: "(private)",
+		Values: [2][]string{{"XSRF-TOKEN=x; path=/", "laravel-session=x; path=/"}, {"XSRF-TOKEN=y; path=/"}}}
+	for _, c := range []struct {
+		d    compare.Drift
+		want string
+	}{
+		{d, "header:set-cookie has 1 value instead of 2: laravel-session removed"},
+		{compare.Drift{Kind: d.Kind, Where: d.Where, Values: [2][]string{d.Values[1], d.Values[0]}}, "header:set-cookie has 2 values instead of 1: laravel-session new"},
+		{compare.Drift{Kind: d.Kind, Where: "header:x-trace", Values: [2][]string{{"a"}, {"a", "b", "c"}}}, "header:x-trace has 3 values instead of 1: 2 values new"},
+		{compare.Drift{Kind: d.Kind, Where: "header:date", Baseline: `["a"]`, Current: `["b"]`}, "header:date no longer matches its allowlist format"},
+	} {
+		r := Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{c.d}}})
+		if e := r.Groups[0].Explanation; !strings.Contains(e, c.want) {
+			t.Errorf("explanation %q, want %q", e, c.want)
+		}
+	}
+}
