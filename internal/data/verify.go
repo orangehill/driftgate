@@ -1728,7 +1728,9 @@ func (st *statements) next() (string, error) {
 func parseRows(s string, ncols int, driver string, fn func(vals [][]byte)) error {
 	mysql := driver != Postgres
 	vals := make([][]byte, 0, ncols)
-	var b []byte
+	// Never nil, so that an empty string is never read as NULL (a value
+	// is a slice of b).
+	b := make([]byte, 0, 256)
 	i := 0
 	skip := func() {
 		for i < len(s) && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t') {
