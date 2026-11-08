@@ -22,7 +22,7 @@ Every request has an `id` and its `storage`: `public` or `private`.
 request is skipped until you `accept` its first answer
 ([request fields](../../reference/catalog-json.md#request-fields)).
 
-## Log in first, then use the session
+## Check the login itself
 
 <!-- check: catalog -->
 ```json
@@ -30,20 +30,16 @@ request is skipped until you `accept` its first answer
  "version": 1,
  "requests": [
   {"id": "post-api-auth-login", "method": "POST", "path": "/api/auth/login",
-   "body": {"email": "admin@shop.example", "password": "secret"}, "mutates": true, "storage": "private"},
-  {"id": "get-api-me", "method": "GET", "path": "/api/me", "storage": "private"}
- ],
- "sequences": [
-  {"id": "login", "restore": "before", "requests": ["post-api-auth-login", "get-api-me"]}
+   "body": {"email": "admin@shop.example", "password": "secret"}, "mutates": true, "storage": "private"}
  ]
 }
 ```
 
-A sequence runs its requests in order, together. `restore: "before"`
-starts it on restored data
-([sequences](../../reference/catalog-json.md#sequences)). DriftGate keeps
-no cookies between requests, so a session that lives in a cookie needs a
-token instead ([logins](logins.md)).
+A login request checks the login itself: its status, headers and body.
+Allow its new token by format ([changing values](../review/changing-values.md)).
+DriftGate keeps no cookies, and `params_from` fills only path parameters,
+so later requests do not use this session. They sign in with an
+identity's token ([logins](logins.md)).
 
 ## Use a value from an earlier response
 

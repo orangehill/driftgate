@@ -171,7 +171,7 @@ what it saw. Responses are never kept.
 
 - Every request goes to the service's `target.base_url` (http or https), which must be in `allow_hosts`.
 - The proxy itself is plain HTTP: point the browser, the frontend's API URL or the E2E suite's base URL at `http://127.0.0.1:8088`.
-- Static files, the noise of development servers, event streams and websockets pass through unrecorded.
+- Static files, event streams and websockets pass through unrecorded. So does the noise of development servers: `/_next/static`, `/_next/image`, `/_nuxt`, `/build`, Vite's own paths, `node_modules`, the favicon, `robots.txt` and the web manifest.
 - It answers only for its own address (`Host` `127.0.0.1`, `[::1]` or `localhost` with its port) and refuses requests from other sites ([security](../../security.md)).
 - It runs until Ctrl-C or SIGTERM. Then it lists the new entries, with the routes they reach and which of them were uncovered before.
 - Recording only proposes requests: `capture` records their responses on a restored state.

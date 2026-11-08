@@ -76,8 +76,8 @@ in with a session cookie needs a token for DriftGate:
 - an API or personal access token for each test user, from a token command or the environment;
 - or a route that accepts a bearer token, such as Laravel Sanctum's.
 
-A login request in a [sequence](hand-written-requests.md#log-in-first-then-use-the-session)
-still checks the login itself.
+A [login request](hand-written-requests.md#check-the-login-itself) in the
+catalog still checks the login itself.
 
 ---
 **Next:** [Add the requests a browser or frontend sends](record.md): record what the frontend uses.

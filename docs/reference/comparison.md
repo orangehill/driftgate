@@ -86,14 +86,18 @@ without the rule. The report notes it: `notes` of the request in JSON, a
 
 ## HTML pages
 
-When both responses are HTML, the pages are compared element by element,
-at paths such as `html>body>p@class`.
+When both responses are HTML, they are compared byte for byte first, then
+element by element, at paths such as `html>body>p@class`.
 
 - The document type declaration that came or went is structure; a changed one counts from `values` on.
 - Texts and attribute values are compared from `values` on.
 - One inserted element is one difference, not a change of everything after it.
+- A value in embedded JSON has a path into it: `html>body>script#__NEXT_DATA__$.props.pageProps.items[1].name: "Pear" → "Plum"`.
 - JSON in a page is compared as JSON: `__NEXT_DATA__`, the app router payload (`self.__next_f`), the Nuxt payload (decoded, with key names), and `application/json` or `ld+json` scripts.
-- Whitespace between elements does not count, except in `pre`, `textarea`, `script` and `style`. A space next to an inline element does: `<b>a</b> <i>b</i>` reads "a b", unlike `<b>a</b><i>b</i>`.
+- Whitespace between elements does not count, except in `pre`, `textarea`, `script` and `style`.
+- Whitespace next to an inline element, between it and a text or another inline element, does count: a browser shows it as a space. `<b>a</b> <i>b</i>` reads "a b", unlike `<b>a</b><i>b</i>`, and `a <b>x</b>` differs from `a<b>x</b>`.
+- Such a drift shows the element's content as it reads: `"a <b>"` → `"a<b>"`.
+- Inline elements are those a browser lays out in a line. Among them are `a`, `b`, `button`, `code`, `em`, `i`, `img`, `input`, `label`, `select`, `small`, `span`, `strong`, `sub`, `sup`, `svg` and `time`.
 - Comments, `&amp;` against `&`, and the order of attributes do not count.
 - Paths into the app router payload follow the shape of the React tree, and references such as `$L3` stay text.
 - A page the parser refuses, nested deeper than 512 elements, is compared as bytes, and the drift says why.
