@@ -22,6 +22,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - Existing configurations and allowlists work as before. All new keys are optional. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The binary is about 6.3 MB larger, for the SQLite and SQL Server drivers. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - MySQL/MariaDB: each database component holds one more connection (13 instead of 12), for reading many definitions in one query. ([#22](https://github.com/orangehill/driftgate/pull/22))
+- A project made by an earlier `init` keeps its `templates:` and its baseline. `coverage` and `run` now list its routes whose validation errors no request checks. To check them, add `empty-body` to `templates:`, run `driftgate generate --write` and `driftgate run`, and add the new requests to the baseline ([upgrading](docs/reference/upgrading-driftgate.md#validation-errors-in-a-project-made-before-empty-body)). The coverage JSON gains `routes_without_invalid_body`, and the report's `not_covered` gains `no_invalid_body`.
 
 ### Added
 
@@ -72,6 +73,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/posts/2024/05/17`. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value when it still makes the JSON twins of the `not-found` or `invalid-param` requests. Configured without any error template, `json-errors` gets one note instead of making nothing silently. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do. ([#30](https://github.com/orangehill/driftgate/pull/30))
+- A changed validation error no longer passes unseen. `init` writes the `empty-body` template for Laravel and FastAPI, whose discovery reads the rules request bodies are validated against, so each route with rules gets a request with an empty body. `coverage` lists the covered routes whose body is validated but that no request sends an invalid body, and `run` counts them under "Not covered by this result". The list never changes the exit code.
 
 ### Security
 

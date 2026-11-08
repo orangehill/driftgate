@@ -76,6 +76,7 @@ func notCovered(p *config.Project, sel selection, cat *catalog.Catalog, reqs []c
 			}
 		}
 		n.NoRequest = report.NewGap(none)
+		n.NoInvalidBody = report.NewGap(cov.NoInvalidBody)
 	}
 	ids := func(fs []routes.Failure) []string {
 		var out []string

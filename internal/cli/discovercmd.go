@@ -426,7 +426,7 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 			"only_error_cases": c.Negative, "unknown_requests": c.Unknown, "stale_exclusions": c.Stale, "routes_without_body": c.NoBody,
 			"baseline_checked": answers != nil, "failed_in_baseline": c.Failed, "requests_failed_in_baseline": h.Failed,
 			"known_failure_routes": c.Known, "known_failures": h.Known, "stale_known_failures": h.Stale, "broad_known_failures": h.Broad,
-			"only_error_answers": c.ErrorOnly,
+			"only_error_answers": c.ErrorOnly, "routes_without_invalid_body": c.NoInvalidBody,
 		})
 	}
 	known := ""
@@ -458,11 +458,16 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 	section(out, "Catalog requests that reach no route", c.Unknown)
 	section(out, "Exclusions that match no route", c.Stale)
 	section(out, "Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
+	section(out, noInvalidBodyTitle, c.NoInvalidBody)
 	if code == ExitClean {
 		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
 	}
 	return c, code, nil
 }
+
+// noInvalidBodyTitle heads the covered routes whose validation error no
+// request checks.
+const noInvalidBodyTitle = "Routes whose body is validated but no request sends an invalid one (a changed validation error passes unseen): add " + routes.EmptyBody + " to templates: and run driftgate generate --write"
 
 // coverageOf is the coverage of the selected services' routes by their
 // requests; answers are a baseline's by request ID (nil without one).

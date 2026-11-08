@@ -39,6 +39,22 @@ func meantToSucceed(r catalog.Request) bool {
 	return !takesBody(Route{Methods: []string{r.Method}}) || r.Multipart != nil || !emptyBody(r.Body)
 }
 
+// EmptyBody is the template whose request sends a route that validates its
+// body an empty one: a validation error.
+const EmptyBody = "empty-body"
+
+// sendsInvalidBody reports a request that checks the validation error of
+// its route: one of the empty-body template, or one written by hand or
+// imported whose answer in the baseline is 400 or 422 (a body the route
+// refused). Other error cases (not-found, anonymous) are answered before
+// the body is validated.
+func sendsInvalidBody(r catalog.Request, a Answer, answered bool) bool {
+	if r.Source != nil && r.Source.Template != "" {
+		return r.Source.Template == EmptyBody
+	}
+	return answered && (a.Status == 400 || a.Status == 422)
+}
+
 func emptyBody(b json.RawMessage) bool {
 	var c bytes.Buffer
 	return len(b) == 0 || (json.Compact(&c, b) == nil && (c.String() == "{}" || c.String() == "null"))
@@ -271,6 +287,10 @@ type Coverage struct {
 	Unknown   []string            // requests that reach no route
 	Stale     []string            // exclusions that match no route
 	NoBody    []string            // routes that take a body and have no sample
+	// NoInvalidBody are covered routes that take a body with a sample (the
+	// rules it is validated against) and that no request sends an invalid
+	// body (sendsInvalidBody): a changed validation error passes unseen.
+	NoInvalidBody []string
 	// With the answers of a baseline:
 	Failed    []FailedRoute // routes whose requests meant to succeed all failed; also in Uncovered
 	Known     []string      // routes whose requests failed, each acknowledged as a known failure: neither covered nor failed
@@ -308,6 +328,7 @@ func CheckWith(inv *Inventory, cat *catalog.Catalog, excl *Exclusions, answers m
 		acknowledged
 	)
 	reach := map[string]int{}
+	invalid := map[string]bool{} // route keys a request sends an invalid body
 	failures := map[string][]Failure{}
 	ackRoutes := map[int][]string{} // known failure → the routes of its requests
 	m := NewMatcher(inv)
@@ -322,10 +343,13 @@ func CheckWith(inv *Inventory, cat *catalog.Catalog, excl *Exclusions, answers m
 		}
 		k := unitKey(r, r.UnitOf(req.Method))
 		c.Requests[k] = append(c.Requests[k], req.ID)
+		a, ok := answers[req.ID]
+		if sendsInvalidBody(req, a, ok) {
+			invalid[k] = true
+		}
 		if expectsError(req) {
 			continue
 		}
-		a, ok := answers[req.ID]
 		switch f, bad := failed[req.ID]; {
 		case bad:
 			failures[k] = append(failures[k], f)
@@ -344,9 +368,13 @@ func CheckWith(inv *Inventory, cat *catalog.Catalog, excl *Exclusions, answers m
 		for _, unit := range r.Units() {
 			k := unitKey(r, unit)
 			noBody := takesBody(Route{Methods: []string{unit}}) && len(r.Body) == 0 && excl.ExcludedUnit(*r, unit) == nil
+			validated := takesBody(Route{Methods: []string{unit}}) && len(r.Body) > 0 && !invalid[k]
 			switch x := excl.ExcludedUnit(*r, unit); {
 			case reach[k]&succeeded != 0:
 				c.Covered = append(c.Covered, k)
+				if validated {
+					c.NoInvalidBody = append(c.NoInvalidBody, k)
+				}
 			case len(failures[k]) > 0:
 				c.Uncovered = append(c.Uncovered, k)
 				c.Failed = append(c.Failed, FailedRoute{Route: k, Requests: failures[k]})
@@ -354,6 +382,9 @@ func CheckWith(inv *Inventory, cat *catalog.Catalog, excl *Exclusions, answers m
 				c.Covered = append(c.Covered, k)
 				if !noBody {
 					c.ErrorOnly = append(c.ErrorOnly, k)
+				}
+				if validated {
+					c.NoInvalidBody = append(c.NoInvalidBody, k)
 				}
 			case reach[k]&acknowledged != 0:
 				c.Known = append(c.Known, k)

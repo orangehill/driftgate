@@ -112,6 +112,7 @@ it is listed as a route without a sample body.
 - Known failures (`known_failures:` in [exclusions.yaml](../exclusions-yaml.md)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
 - Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../exclusions-yaml.md) describes. A stale one also matches no request of any service.
 - Requests that reach no route, stale exclusions, and routes without a sample body.
+- Covered routes whose body is validated (they have a sample body, from validation rules or OpenAPI) but that no request sends an invalid body. Their validation errors are not compared, so a changed validation message passes. A request of the `empty-body` template counts, and so does one written by hand or imported that the baseline recorded as refused (400 or 422). Add `empty-body` to `templates:` and run `driftgate generate --write`. The list never changes the exit code.
 
 An exclusion that `init` wrote for the framework (Debugbar, Telescope,
 Horizon …) is not reported stale while it keeps `init`'s route and
@@ -126,6 +127,7 @@ reason: the project need not have that part.
 - `requests_failed_in_baseline`, with `known_status` when a known failure no longer matches;
 - `known_failures`, with `reason` and `ref`;
 - `known_failure_routes`, `stale_known_failures`, `broad_known_failures` and `only_error_answers`;
+- `routes_without_invalid_body`: the covered routes whose validation errors no request checks;
 - `stale_exclusions`, without the exclusions `init` wrote for the framework.
 
 ## driftgate har import

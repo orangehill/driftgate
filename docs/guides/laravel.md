@@ -18,7 +18,7 @@ driftgate init
 - a `laravel` adapter: routes from `php artisan route:list --json` (the
   table of Laravel before 8), and with `php: ["php"]` the validation rules of
   form request classes, from which `generate` builds request bodies;
-- `templates: [ok, not-found, json, json-errors]` (`json-errors`: the error variants once more as an API client asks for them, see [templates](../reference/driftgate-yaml.md#templates-generate-params));
+- `templates: [ok, not-found, json, empty-body, json-errors]`, see [templates](../reference/driftgate-yaml.md#templates-generate-params). `empty-body` sends an empty body to each route with validation rules, so a changed validation error (422) is compared. `json-errors` sends the error variants once more as an API client asks for them;
 - exclusions with reasons for Debugbar, Ignition, Telescope, Horizon and
   `/storage/*`;
 - allowlist entries for `Date` and the throttle headers that depend on time

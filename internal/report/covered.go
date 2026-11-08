@@ -24,6 +24,10 @@ type NotCovered struct {
 	// Route methods no request meant to succeed reaches, apart from those
 	// whose requests failed in the set compared against.
 	NoRequest *Gap `json:"no_request,omitempty"`
+	// Route methods whose body is validated (a sample from its rules) that
+	// no request sends an invalid body: their validation errors are not
+	// compared.
+	NoInvalidBody *Gap `json:"no_invalid_body,omitempty"`
 	// Requests meant to succeed whose answer in the set compared against is
 	// an error: the comparison keeps the error green.
 	FailedInBaseline *Gap `json:"failed_in_baseline,omitempty"`
@@ -65,7 +69,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.KnownFailures == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -121,6 +125,7 @@ func (n *NotCovered) NotCoveredLines() []string {
 		against = "the baseline"
 	}
 	add(n.NoRequest, "route method without a request meant to succeed", "route methods without a request meant to succeed")
+	add(n.NoInvalidBody, "route method whose validation error no request checks (template empty-body)", "route methods whose validation errors no request checks (template empty-body)")
 	add(n.FailedInBaseline, "request meant to succeed that failed in "+against, "requests meant to succeed that failed in "+against)
 	add(n.Observed, "request observed (measured, not compared)", "requests observed (measured, not compared)")
 	add(n.MutatingSkipped, "request that changes data skipped", "requests that change data skipped")

@@ -81,6 +81,22 @@ project whose `discover:` uses the `laravel`, `symfony`, `rails` or
 `spring` adapter. A project that finds its routes only through `openapi`
 gets no note.
 
+## Validation errors in a project made before empty-body
+
+`init` writes the `empty-body` template for Laravel and FastAPI. A
+project made before keeps its own `templates:` and its baseline: nothing
+changes by itself. Without `empty-body`, no request checks a validation
+error, and a changed validation message passes. `coverage` and `run` now
+list the routes whose body is validated but that no request sends an
+invalid body.
+
+To check them:
+
+1. Add `empty-body` to `templates:` (before `json-errors`, as `init` writes it).
+2. Run `driftgate generate --write`.
+3. Run `driftgate run`. The new requests have no baseline yet and are not compared; the output names them.
+4. Add them to the baseline. In mode `evolve`: `driftgate accept <request>... --reason "…"`. In mode `freeze`: `driftgate baselines rebase local --from <capture> --reason "…" --allow-freeze`, which takes the whole capture, so only when nothing else drifted.
+
 ## Line endings of baselines checked out before .gitattributes
 
 `run`, `accept` and `verify` put a `.gitattributes` with `* -text` into

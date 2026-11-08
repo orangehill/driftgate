@@ -37,7 +37,7 @@ discover:
   - adapter: nextjs
     target: web
     dir: apps/web
-templates: [ok, not-found, json, json-errors]
+templates: [ok, not-found, json, empty-body, json-errors]
 ```
 
 Every adapter, exclusion, allowlist entry and `observe` entry carries its

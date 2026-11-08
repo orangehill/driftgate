@@ -189,3 +189,54 @@ func TestLoadKnownFailures(t *testing.T) {
 		t.Fatalf("no reason: %v", err)
 	}
 }
+
+// TestNoInvalidBody: a covered route whose body is validated (it has a
+// sample, from its rules) is listed until a request sends it an invalid
+// body: an empty-body request, or one written by hand that the baseline
+// recorded as refused (400, 422). Other error cases do not count: they are
+// answered before the body is validated.
+func TestNoInvalidBody(t *testing.T) {
+	inv := &Inventory{Routes: []Route{
+		{Methods: []string{"POST"}, Path: "/posts", Body: json.RawMessage(`{"title":"a"}`)},
+		{Methods: []string{"POST"}, Path: "/login", Body: json.RawMessage(`{"email":"a"}`)},
+		{Methods: []string{"PUT"}, Path: "/notes/{id}", Body: json.RawMessage(`{"text":"a"}`)},
+		{Methods: []string{"POST"}, Path: "/upload"}, // no sample: listed under NoBody instead
+		{Methods: []string{"GET"}, Path: "/items"},
+		{Methods: []string{"POST"}, Path: "/orders", Body: json.RawMessage(`{"sku":"a"}`)},
+	}}
+	body := func(r catalog.Request, b string) catalog.Request { r.Body = json.RawMessage(b); return r }
+	cat := &catalog.Catalog{Requests: []catalog.Request{
+		body(generated("posts", "POST", "/posts", "ok", nil), `{"title":"a"}`),
+		body(generated("posts-anonymous", "POST", "/posts", "anonymous", nil), `{"title":"a"}`),
+		body(generated("login", "POST", "/login", "ok", nil), `{"email":"a"}`),
+		body(generated("login-empty-body", "POST", "/login", "empty-body", nil), `{}`),
+		body(generated("note", "PUT", "/notes/{id}", "ok", map[string]string{"id": "1"}), `{"text":"a"}`),
+		body(generated("note-not-found", "PUT", "/notes/{id}", "not-found", map[string]string{"id": "999999999"}), `{"text":"a"}`),
+		{ID: "note-too-long", Method: "PUT", Path: "/notes/1", Body: json.RawMessage(`{"text":"…"}`)}, // by hand
+		body(generated("upload", "POST", "/upload", "ok", nil), `{}`),
+		generated("items", "GET", "/items", "ok", nil),
+		body(generated("order", "POST", "/orders", "ok", nil), `{"sku":"a"}`),
+		{ID: "order-wrong", Method: "POST", Path: "/orders", Body: json.RawMessage(`{"sku":"x"}`)}, // by hand, a 401
+	}}
+	answers := map[string]Answer{
+		"posts": {Status: 201}, "posts-anonymous": {Status: 401}, "login": {Status: 200}, "login-empty-body": {Status: 422},
+		"note": {Status: 200}, "note-not-found": {Status: 404}, "note-too-long": {Status: 422}, "upload": {Status: 422},
+		"items": {Status: 200}, "order": {Status: 201}, "order-wrong": {Status: 401},
+	}
+	c := CheckWith(inv, cat, &Exclusions{}, answers)
+	if want := []string{"POST /posts", "POST /orders"}; !reflect.DeepEqual(c.NoInvalidBody, want) {
+		t.Errorf("no invalid body %v, want %v", c.NoInvalidBody, want)
+	}
+	// Without a baseline a request written by hand is not known to be
+	// refused: the route is listed.
+	c = CheckWith(inv, cat, &Exclusions{}, nil)
+	if want := []string{"POST /posts", "PUT /notes/{id}", "POST /orders"}; !reflect.DeepEqual(c.NoInvalidBody, want) {
+		t.Errorf("without a baseline: no invalid body %v, want %v", c.NoInvalidBody, want)
+	}
+	// An excluded or uncovered route is not listed: coverage says so already.
+	excl := &Exclusions{Routes: []Exclusion{{Route: "/posts", Reason: "x"}}}
+	cat.Requests = cat.Requests[2:]
+	if c := CheckWith(inv, cat, excl, answers); !reflect.DeepEqual(c.NoInvalidBody, []string{"POST /orders"}) {
+		t.Errorf("excluded: %v", c.NoInvalidBody)
+	}
+}
