@@ -42,8 +42,8 @@ The restored data does not match the pristine copy's fingerprint. The message sa
 ### A guard failed
 A guard's check did not succeed, such as mail not going to a log. Fix the setting it checks ([guards](reference/driftgate-yaml.md#seed-prepare-guards)).
 
-### The baseline changed outside accept
-`verify` found a hand edit, a deleted file or an edited log line. Restore the baseline from git ([driftgate verify](reference/commands/review.md#driftgate-verify)).
+### "baseline … changed outside driftgate accept …; run driftgate verify"
+`compare`, `run` or `accept` refuses a baseline whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git, or [rebase](reference/commands/review.md#driftgate-baselines-rebase) it on a new capture ([driftgate verify](reference/commands/review.md#driftgate-verify)).
 
 ### A command stops: a baseline is in `.tmp-old-*`
 An `accept` or a first `run` was killed while it replaced the baseline. Put `.tmp-old-*/baseline` back, or restore it from git ([Ctrl-C](reference/cli.md#what-happens-when-you-press-ctrl-c)).
@@ -86,7 +86,7 @@ A route has no request that succeeds. Add one, exclude the route, or acknowledge
 The committed catalog is not what `generate` writes. Run `driftgate generate --write` and commit ([keep the catalog current](guides/catalog/coverage.md#keep-the-catalog-current-in-ci)).
 
 ### verify reports changes after a checkout on Windows
-Git checked the baseline files out with CRLF line endings. Check them out again with the two git commands under [line endings on Windows](reference/commands/review.md#line-endings-on-windows).
+`verify` exits 1, naming files that differ only in their line endings. Git checked the baseline files out with CRLF line endings. Check them out again with the two git commands under [line endings on Windows](reference/commands/review.md#line-endings-on-windows).
 
 ## Drift you did not expect
 
