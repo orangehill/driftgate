@@ -159,28 +159,9 @@ generate:
 templates: [ok, not-found, json, empty-body, json-errors, anonymous, identities]
 ```
 
-The tokens command runs after every restore, and must leave the same
-state each time. One that issues new tokens writes rows with new values
-and times on every run, so a response that shows them differs. Print
-tokens issued once, such as Sanctum tokens (`php artisan install:api`) the
-seeder creates with fixed values, or use a [tokens file](../catalog/logins.md):
-
-```php
-// database/seeders/DatabaseSeeder.php, after the test users
-User::where('email', 'admin@shop.example')->first()->tokens()->create([
-    'name' => 'driftgate', 'token' => hash('sha256', 'dg-admin-token'), 'abilities' => ['*'],
-]);
-
-// routes/console.php
-Artisan::command('driftgate:tokens', function () {
-    $this->line(json_encode(['admin' => 'dg-admin-token', 'user' => 'dg-user-token']));
-});
-```
-
-Sanctum keeps only the hash, so the seeder writes the same row each time,
-and the command prints the plain text. A token without `id|` is looked up
-by its hash. Seed the `user` token the same way.
-
+The tokens command runs after every restore, and must print the same
+tokens without writing new rows each time
+([a repeatable tokens command](../catalog/logins.md#a-repeatable-tokens-command-for-laravel-sanctum)).
 A cookie-session application needs a token too
 ([sessions with cookies](../catalog/logins.md#sessions-with-cookies)).
 

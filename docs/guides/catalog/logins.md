@@ -49,6 +49,27 @@ The file holds the same JSON object. Keep it out of the repository; a
 relative path is relative to the project. `tokens` takes `command` or
 `file`, not both.
 
+## A repeatable tokens command for Laravel Sanctum
+
+```php
+// database/seeders/DatabaseSeeder.php, after the test users
+User::where('email', 'admin@shop.example')->first()->tokens()->create([
+    'name' => 'driftgate', 'token' => hash('sha256', 'dg-admin-token'), 'abilities' => ['*'],
+]);
+
+// routes/console.php
+Artisan::command('driftgate:tokens', function () {
+    $this->line(json_encode(['admin' => 'dg-admin-token', 'user' => 'dg-user-token']));
+});
+```
+
+The tokens command runs after every restore. One that issues new tokens
+writes rows with new values and times each time, so a response that
+shows them differs. Here the seeder writes the token once, with a fixed
+value. Sanctum keeps only its hash, and looks a token without `id|` up by
+that hash. The command prints the plain text. Seed the `user` token the
+same way; Sanctum comes with `php artisan install:api`.
+
 ## Generate requests for routes that need a login
 
 <!-- check: config-fragment -->
@@ -57,7 +78,7 @@ identities:
   admin: { env: DG_TOKEN_ADMIN }
 generate:
   identity: admin
-templates: [ok, not-found, json, anonymous, identities]
+templates: [ok, not-found, json, anonymous, identities]   # the list init wrote, plus the last two
 ```
 
 `generate.identity` sends the routes that need a login as that user.

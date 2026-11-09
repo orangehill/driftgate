@@ -25,13 +25,13 @@ docs/guides/workflow/live-server.md 100
 docs/guides/catalog/coverage.md 110
 docs/guides/catalog/record.md 110
 docs/guides/catalog/hand-written-requests.md 150
-docs/guides/catalog/logins.md 90
+docs/guides/catalog/logins.md 120
 docs/guides/catalog/side-checks.md 160
 docs/guides/review/read-the-report.md 100
 docs/guides/review/fix-accept-or-expect.md 90
 docs/guides/review/changing-values.md 130
 docs/guides/review/find-the-commit.md 80
-docs/guides/frameworks/laravel.md 260
+docs/guides/frameworks/laravel.md 220
 docs/guides/frameworks/aspnet-core.md 180
 docs/guides/frameworks/nextjs-nuxt.md 130
 docs/guides/frameworks/openapi.md 130
