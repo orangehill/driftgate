@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/capture"
@@ -666,20 +667,27 @@ func valuesFormat(vals []string) string {
 }
 
 // cookieFormats are the formats of Set-Cookie values, one per cookie name:
-// the name as it is, its value (masked when recorded) as any text without
-// a ;, and the attributes after it (expiry, path, flags), which are
-// recorded as sent, inferred as any other value.
+// the name as it is, its value (masked when recorded, which keeps its
+// length) as text without a ; of the lengths seen, and the attributes
+// after it (expiry, path, flags), which are recorded as sent, inferred as
+// any other value. A cookie that is emptied or set to "deleted" does not
+// match.
 func cookieFormats(vals []string) []string {
 	var names []string
 	attrs := map[string][]string{}
+	lengths := map[string][2]int{} // shortest and longest value, in characters
 	for _, v := range vals {
 		first, rest, _ := strings.Cut(v, ";")
-		cookie, _, ok := strings.Cut(first, "=")
+		cookie, value, ok := strings.Cut(first, "=")
 		if !ok {
 			return []string{valuesFormat(vals)} // not a cookie: as recorded
 		}
-		if _, ok := attrs[cookie]; !ok {
+		n := utf8.RuneCountInString(value)
+		if l, ok := lengths[cookie]; !ok {
 			names = append(names, cookie)
+			lengths[cookie] = [2]int{n, n}
+		} else {
+			lengths[cookie] = [2]int{min(l[0], n), max(l[1], n)}
 		}
 		if strings.Contains(v, ";") {
 			rest = ";" + rest
@@ -688,7 +696,14 @@ func cookieFormats(vals []string) []string {
 	}
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		out = append(out, regexp.QuoteMeta(n)+"=[^;]*"+valuesFormat(attrs[n]))
+		l, length := lengths[n], fmt.Sprintf("{%d}", lengths[n][0])
+		switch {
+		case l[1] == 0:
+			length = "{0}" // only ever empty
+		case l[0] != l[1]:
+			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
+		}
+		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+valuesFormat(attrs[n]))
 	}
 	return out
 }

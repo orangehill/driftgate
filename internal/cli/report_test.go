@@ -223,13 +223,14 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 	cookies := [][]string{
 		{mask("set-cookie", "XSRF-TOKEN=eyJpdiI6IkF%3D; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"),
 			mask("set-cookie", "XSRF-TOKEN=Qm9vbGVhbg%2F%3D; expires=Sun, 09 Nov 2026 01:23:47 GMT; Max-Age=7200; path=/")},
-		{mask("set-cookie", "laravel-session=abc123%3D; path=/; httponly"), mask("set-cookie", "laravel-session=Zz9%2B; path=/; httponly")},
+		{mask("set-cookie", "laravel-session="+strings.Repeat("aB3", 13)+"%3D; path=/; httponly"), mask("set-cookie", "laravel-session="+strings.Repeat("Zz9", 14)+"%2B; path=/; httponly")},
 	}
 	f := headerFormat("set-cookie", cookies)
 	if strings.Contains(f, "X") && !strings.Contains(f, "XSRF") || strings.Contains(f, `%\d`) || strings.Contains(f, "[x") {
 		t.Errorf("format derived from the mask: %s", f)
 	}
-	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]*; expires=`) || !strings.Contains(f, `|laravel-session=[^;]*; path=/; httponly`) {
+	// The value's length is kept by the mask: the lengths seen bound it.
+	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]{14,16}; expires=`) || !strings.Contains(f, `|laravel-session=[^;]{42,45}; path=/; httponly`) {
 		t.Errorf("format %s", f)
 	}
 	re := regexp.MustCompile(`^(?:` + f + `)$`)
@@ -238,6 +239,12 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 			if !re.MatchString(v) {
 				t.Errorf("%q does not match %s", v, f)
 			}
+		}
+	}
+	// A cookie emptied or set to "deleted" (a logout) fails the format.
+	for _, v := range []string{"laravel-session=deleted; path=/; httponly", "laravel-session=; path=/; httponly", "XSRF-TOKEN=; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"} {
+		if re.MatchString(v) {
+			t.Errorf("%q matches %s", v, f)
 		}
 	}
 	if f := headerFormat("authorization", [][]string{{mask("authorization", "Bearer abc"), mask("authorization", "Bearer xyz9")}}); f != ".+" {

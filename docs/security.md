@@ -195,8 +195,10 @@ masked too:
 - path segments shaped as one, as in a reset link.
 
 An allowlist format that a capture proposes takes nothing from a masked
-value. A cookie's value is proposed as any text up to the `;`
-(`[^;]*`), and a header masked whole as any text (`.+`).
+value. The mask keeps a value's length, so a cookie's value is proposed
+as text without a `;` of the lengths seen, such as `[^;]{40,44}`. A
+cookie emptied or set to `deleted` then fails the format. A header
+masked whole is proposed as any text (`.+`).
 
 ### Redirects and terminal output
 
