@@ -707,7 +707,7 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 
 // CheckReadOnly refuses a configuration a read-only capture cannot keep
 // from writing: --read-only selects requests, and prepare: runs as
-// configured. With state: it writes only to data the restore brings back.
+// configured. With state: it should write only to data the restore brings back.
 func CheckReadOnly(p *config.Project) error {
 	if len(p.Prepare) > 0 && len(p.State) == 0 {
 		return configErr("--read-only covers the requests only, not the project's commands: prepare: may write, and without state: nothing restores what it writes; leave it out of the configuration for a read-only check")

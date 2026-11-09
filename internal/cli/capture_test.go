@@ -596,7 +596,7 @@ func TestReadOnlyProjectCommands(t *testing.T) {
 }
 
 // TestRunReadOnlyPrepareWithState: with state:, run --read-only takes
-// prepare:, which writes only to data the restore brings back.
+// prepare:, which should write only to data the restore brings back.
 func TestRunReadOnlyPrepareWithState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

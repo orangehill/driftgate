@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
 	"github.com/orangehill/driftgate/internal/snapshot"
+	"github.com/orangehill/driftgate/internal/state"
 )
 
 // outsideApp is an sqliteApp with a migrations table (Laravel's), and
@@ -531,7 +534,7 @@ func TestChangedOutsideRecord(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "or delete "+record+" to accept that a restore undid it") || kept != nil {
+			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "seeding now, or deleting "+record+", accepts that it was undone") || kept != nil {
 				t.Fatalf("capture: %v; record kept: %v", err, kept == nil)
 			}
 		})
@@ -630,5 +633,59 @@ func TestChangedOutsideTwoComponents(t *testing.T) {
 	}
 	if n := app.count(t, "users WHERE email = 'kept@x'"); n != 1 {
 		t.Errorf("component a was restored before b was checked")
+	}
+}
+
+// TestChangedOutsidePreparedOtherwise: a migration by hand (slug) that
+// prepare makes otherwise (slug and another column of the same table)
+// stops the run after prepare; the next run, on what that prepare made,
+// stops the same way, not as a definition changed again since.
+func TestChangedOutsidePreparedOtherwise(t *testing.T) {
+	const slug, other = "ALTER TABLE users ADD COLUMN slug TEXT", "ALTER TABLE users ADD COLUMN other TEXT"
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	p := outsideProject(t, root, srv.URL, slug, other)
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	app.exec(t, slug)
+	for _, run := range []string{"first", "second"} {
+		_, err := Run(ctx, p, sqliteCatalog(), Options{Tag: run})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:users; the restore undid it, and prepare did not make it again, or made it otherwise") {
+			t.Fatalf("%s run: %v", run, err)
+		}
+	}
+}
+
+// TestExpect: the merge of an earlier run's record with the working and
+// pristine schemas, without a database.
+func TestExpect(t *testing.T) {
+	p := state.Fingerprint{"table:a": "p", "table:c": "pc"}
+	r := schemaRecord{Items: []string{"table:a"}, Working: state.Fingerprint{"table:a": "w"}, Prepared: state.Fingerprint{"table:a": "s"}}
+	for _, c := range []struct {
+		name  string
+		r     schemaRecord
+		w     state.Fingerprint
+		items []string
+		want  state.Fingerprint
+		again bool
+	}{
+		{"no record, no difference", schemaRecord{}, state.Fingerprint{"table:a": "p", "table:c": "pc"}, nil, state.Fingerprint{}, false},
+		{"no record, a difference", schemaRecord{}, state.Fingerprint{"table:a": "w", "table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"undone: as the pristine copy", r, state.Fingerprint{"table:a": "p", "table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"mirror: as recorded", r, state.Fingerprint{"table:a": "w", "table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"as the earlier prepare made it", r, state.Fingerprint{"table:a": "s", "table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"missing", r, state.Fingerprint{"table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"unreadable", r, nil, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, false},
+		{"changed again", r, state.Fingerprint{"table:a": "x", "table:c": "pc"}, []string{"table:a"}, state.Fingerprint{"table:a": "w"}, true},
+		{"a new difference besides", r, state.Fingerprint{"table:a": "p", "table:c": "pc", "table:n": "n"}, []string{"table:a", "table:n"}, state.Fingerprint{"table:a": "w", "table:n": "n"}, false},
+		{"one dropped besides", r, state.Fingerprint{"table:a": "p"}, []string{"table:a", "table:c"}, state.Fingerprint{"table:a": "w"}, false},
+	} {
+		rec, again := expect(c.r, c.w, p)
+		if !slices.Equal(rec.Items, c.items) || !maps.Equal(rec.Working, c.want) || (len(again) > 0) != c.again {
+			t.Errorf("%s: %+v, again %v", c.name, rec, again)
+		}
 	}
 }

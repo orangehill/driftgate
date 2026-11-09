@@ -127,21 +127,33 @@ func pristinePath(p *config.Project, name, server string) (string, error) {
 }
 
 // readPristine reads the record of a component's pristine copy on a server
-// (see pristinePath, which also takes over a record of an earlier release).
-func readPristine(p *config.Project, name, server string) (pristineFile, error) {
+// (see pristinePath, which also takes over a record of an earlier release),
+// and returns its path.
+func readPristine(p *config.Project, name, server string) (pristineFile, string, error) {
 	var pf pristineFile
 	path, err := pristinePath(p, name, server)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	if err := json.Unmarshal(raw, &pf); err != nil {
-		return pf, fmt.Errorf("%s: %w", path, err)
+		return pf, path, fmt.Errorf("%s: %w", path, err)
 	}
-	return pf, nil
+	return pf, path, nil
+}
+
+// removeRecords removes the record of a pristine copy (path) and the
+// schemaRecord beside it.
+func removeRecords(path string) error {
+	for _, f := range []string{path, schemaPath(path)} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // recorded reports whether DriftGate's record of a pristine copy names the
@@ -149,7 +161,7 @@ func readPristine(p *config.Project, name, server string) (pristineFile, error) 
 // even without the mark seeds now leave in it (state.Options.AdoptPristine).
 // A record of an earlier release is found too: pristinePath takes it over first.
 func recorded(p *config.Project, name, server string, sc config.Component) bool {
-	pf, err := readPristine(p, name, server)
+	pf, _, err := readPristine(p, name, server)
 	return err == nil && pf.Driver == sc.Driver && pf.Working == sc.Working && pf.Pristine == sc.Pristine
 }
 
@@ -241,14 +253,7 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 		if seed {
 			// A new pristine copy takes the working schema in: an earlier
 			// run's schemaRecord no longer applies.
-			o.Replacing = func() error {
-				for _, f := range []string{path, schemaPath(path)} {
-					if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
-						return err
-					}
-				}
-				return nil
-			}
+			o.Replacing = func() error { return removeRecords(path) }
 		}
 		// A restore rewrites the tables: the database must be on an allowed
 		// host, and every host the driver may connect to is checked, first
@@ -300,7 +305,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
 		}
-		pf, err := readPristine(p, c.Name(), servers[c.Name()])
+		pf, path, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
 			t.close()
 			return nil, envErr("state %s has no pristine copy yet; run driftgate seed", c.Name())
@@ -343,11 +348,6 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 				t.close()
 				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
 			}
-		}
-		path, err := pristinePath(p, c.Name(), servers[c.Name()])
-		if err != nil {
-			t.close()
-			return nil, err
 		}
 		t.records[c.Name()] = schemaPath(path)
 		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
