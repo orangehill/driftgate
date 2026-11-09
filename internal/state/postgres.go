@@ -235,7 +235,7 @@ func (p *Postgres) restoreEmpty(ctx context.Context, items []string) (ok bool, e
 		fmt.Fprintf(p.o.Log, "state %s: restore_empty tables not emptied (%v): the whole database is copied\n", p.o.Name, err)
 		return false, nil
 	}
-	got, err := p.fingerprint(ctx, p.o.Working, items, FingerprintFormat, true)
+	got, err := p.fingerprint(ctx, p.o.Working, items, FingerprintFormat, fpRestoreOnly)
 	if err != nil {
 		return false, err
 	}
@@ -284,16 +284,32 @@ func (p *Postgres) ownedSequences(ctx context.Context, d *sql.DB) (map[string]bo
 // database, or of the pristine one, with the sequences they own
 // (RestoreOnly).
 func (p *Postgres) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return orEmpty(p.read(ctx, pristine, nil, FingerprintFormat, fpRestoreOnly))
+}
+
+// read fingerprints items of the working database, or of the pristine one
+// while it accepts connections, as mode reads them. A working database
+// that does not exist has none: nil.
+func (p *Postgres) read(ctx context.Context, pristine bool, items []string, format int, mode fpMode) (Fingerprint, error) {
 	if pristine {
 		if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
 			return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
 		}
 		defer p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS false")
-		return p.fingerprint(ctx, p.o.Pristine, nil, FingerprintFormat, true)
+		return p.fingerprint(ctx, p.o.Pristine, items, format, mode)
 	}
-	f, err := p.fingerprint(ctx, p.o.Working, nil, FingerprintFormat, true)
+	f, err := p.fingerprint(ctx, p.o.Working, items, format, mode)
 	if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "3D000" { // invalid_catalog_name
-		return Fingerprint{}, nil
+		return nil, nil
+	}
+	return f, err
+}
+
+// orEmpty gives a working database that does not exist no items, so a
+// restore brings back every item of the pristine copy.
+func orEmpty(f Fingerprint, err error) (Fingerprint, error) {
+	if f == nil && err == nil {
+		f = Fingerprint{}
 	}
 	return f, err
 }
@@ -312,11 +328,7 @@ func (p *Postgres) Fingerprint(ctx context.Context, items []string) (Fingerprint
 // view's, only the last value of a sequence, and no functions, types,
 // schemas or materialized views.
 func (p *Postgres) FingerprintAs(ctx context.Context, format int, items []string) (Fingerprint, error) {
-	f, err := p.fingerprint(ctx, p.o.Working, items, format, false)
-	if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "3D000" { // invalid_catalog_name
-		return Fingerprint{}, nil
-	}
-	return f, err
+	return orEmpty(p.read(ctx, false, items, format, fpRows))
 }
 
 // schemaFilter keeps the schemas of the database itself
@@ -324,9 +336,9 @@ func (p *Postgres) FingerprintAs(ctx context.Context, format int, items []string
 // their rows can change, and a restore copies the whole database.
 func schemaFilter(col string) string { return dbx.PostgresUserSchema(col) }
 
-// fingerprint hashes items (nil: all) of db; with restoreOnly only the
+// fingerprint hashes items (nil: all) of db; with fpRestoreOnly only the
 // restore_only tables and their sequences, which it otherwise leaves out.
-func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int, restoreOnly bool) (Fingerprint, error) {
+func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	d, err := p.open(db)
 	if err != nil {
 		return nil, err
@@ -341,7 +353,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	// definitions are then read of them only (only), by their names (args).
 	only := func(string) string { return "" }
 	var args []any
-	if restoreOnly {
+	if mode == fpRestoreOnly {
 		var rels []string
 		for _, t := range tables {
 			if p.restoreOnlyQualified(t) && !p.excludedQualified(t) {
@@ -441,7 +453,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			}
 			continue
 		}
-		if p.restoreOnlyQualified(t) != restoreOnly || !want("table:"+t) {
+		if p.restoreOnlyQualified(t) != (mode == fpRestoreOnly) || !want("table:"+t) {
 			continue
 		}
 		schema, name, _ := strings.Cut(t, ".")
@@ -461,7 +473,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	if err != nil {
 		return nil, err
 	}
-	if restoreOnly {
+	if mode == fpRestoreOnly {
 		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format)
 		return f, err
 	}
@@ -1107,11 +1119,7 @@ func (p *Postgres) settings(ctx context.Context, db string, settings []pgSetting
 // working database's settings (see settings) and accepts connections only
 // while it is read.
 func (p *Postgres) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
-	if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
-		return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
-	}
-	defer p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS false")
-	return p.fingerprint(ctx, p.o.Pristine, nil, FingerprintFormat, false)
+	return p.read(ctx, true, nil, FingerprintFormat, fpRows)
 }
 
 // checkPristine refuses to replace a pristine database that Seed did not

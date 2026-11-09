@@ -49,6 +49,14 @@ type PristineFingerprinter interface {
 	PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error)
 }
 
+// fpMode is what a driver's fingerprint of a database reads.
+type fpMode int
+
+const (
+	fpRows        fpMode = iota // every item but the restore_only tables, with their rows
+	fpRestoreOnly               // the restore_only tables only, with their rows
+)
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string

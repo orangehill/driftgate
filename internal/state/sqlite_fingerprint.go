@@ -162,7 +162,7 @@ func (s *SQLite) Fingerprint(ctx context.Context, items []string) (_ Fingerprint
 	if s.sums == nil {
 		s.sums = map[string]sqliteSum{}
 	}
-	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums, false)
+	f, read, err := s.fingerprint(ctx, conns, "main", want, s.sums, fpRows)
 	s.scanned = read
 	if err != nil {
 		return nil, err
@@ -291,9 +291,9 @@ func (s *SQLite) end(conns []*sql.Conn) {
 // that want accepts (nil: all of them), read on conns, which share one
 // snapshot. With sums, a table whose pages did not change keeps its row
 // hash from there, and the row hashes read are kept in it. The
-// restore_only tables are left out; with restoreOnly they are all it
+// restore_only tables are left out; with fpRestoreOnly they are all it
 // hashes.
-func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum, restoreOnly bool) (Fingerprint, []string, error) {
+func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema string, want func(item string) bool, sums map[string]sqliteSum, mode fpMode) (Fingerprint, []string, error) {
 	objs, err := s.objects(ctx, conns[0], schema)
 	if err != nil {
 		return nil, nil, err
@@ -304,7 +304,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
-		if objs.tables[name].restoreOnly == restoreOnly && want("table:"+name) {
+		if objs.tables[name].restoreOnly == (mode == fpRestoreOnly) && want("table:"+name) {
 			tables = append(tables, objs.tables[name])
 		}
 	}
@@ -333,7 +333,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		h.Write(got[t.name].rows)
 		f["table:"+t.name] = hex.EncodeToString(h.Sum(nil))
 	}
-	if restoreOnly {
+	if mode == fpRestoreOnly {
 		sort.Strings(read)
 		return f, read, nil
 	}
@@ -903,7 +903,7 @@ func (s *SQLite) pristineFingerprint(ctx context.Context) (Fingerprint, error) {
 		return nil, fmt.Errorf("pristine file %s: %w", s.o.Pristine, err)
 	}
 	defer c.ExecContext(context.Background(), "ROLLBACK")
-	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, false)
+	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, fpRows)
 	if err != nil {
 		return nil, err
 	}
@@ -912,10 +912,15 @@ func (s *SQLite) pristineFingerprint(ctx context.Context) (Fingerprint, error) {
 }
 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
-// file, or of the pristine one (RestoreOnly), in a read transaction of a
-// connection of its own: the last fingerprint and the page digests stay as
-// they were.
-func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (_ Fingerprint, err error) {
+// file, or of the pristine one (RestoreOnly).
+func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return s.readFile(ctx, pristine, fpRestoreOnly)
+}
+
+// readFile fingerprints the working file, or the pristine one, as mode
+// reads it, in a read transaction of a connection of its own: the last
+// fingerprint and the page digests stay as they were.
+func (s *SQLite) readFile(ctx context.Context, pristine bool, mode fpMode) (_ Fingerprint, err error) {
 	defer s.busy(&err)
 	var db *sql.DB
 	if pristine {
@@ -952,7 +957,7 @@ func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (_ F
 		return nil, err
 	}
 	defer c.ExecContext(context.Background(), "ROLLBACK")
-	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, true)
+	f, _, err := s.fingerprint(ctx, []*sql.Conn{c}, "main", nil, nil, mode)
 	return f, err
 }
 

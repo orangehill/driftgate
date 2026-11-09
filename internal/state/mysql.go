@@ -611,24 +611,31 @@ func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items [
 // stops for a lock is read again in full (retryLocked).
 func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (f Fingerprint, err error) {
 	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
-		f, err = m.fingerprintOnce(ctx, c, db, items, format)
+		f, err = m.fingerprintOnce(ctx, c, db, items, format, fpRows)
 		return err
 	})
 	return f, err
 }
 
-func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
+// fingerprintOnce hashes items (nil: all) of db; with fpRestoreOnly only
+// the restore_only tables, which it otherwise leaves out.
+func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	objs, err := m.objects(ctx, c, db)
 	if err != nil {
 		return nil, err
 	}
 	want := func(item string) bool { return items == nil || contains(items, item) }
+	names := objs.tables
+	if mode == fpRestoreOnly {
+		names = objs.restoreOnly
+		want = func(item string) bool { return strings.HasPrefix(item, "table:") }
+	}
 	f := Fingerprint{}
 	// One read of SHOW CREATE for every table, view and trigger (showAll).
 	var tables, views []string
 	var trigs []dbx.MySQLTrigger
 	var reqs []showReq
-	for _, t := range objs.tables {
+	for _, t := range names {
 		if want("table:" + t) {
 			tables = append(tables, t)
 			reqs = append(reqs, showReq{"TABLE", db, t})
@@ -690,24 +697,6 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 	return f, nil
 }
 
-// hashTables adds to f the item of every table of db that want accepts:
-// its CREATE statement and its checksum.
-func (m *MySQL) hashTables(ctx context.Context, c *sql.Conn, db string, names []string, want func(string) bool, f Fingerprint) error {
-	var tables []string
-	var reqs []showReq
-	for _, t := range names {
-		if want("table:" + t) {
-			tables = append(tables, t)
-			reqs = append(reqs, showReq{"TABLE", db, t})
-		}
-	}
-	shown, err := m.showAll(ctx, c, reqs)
-	if err != nil {
-		return err
-	}
-	return m.hashCreated(ctx, c, db, tables, shown, f)
-}
-
 // hashCreated adds to f the item of every table: its CREATE statement, from
 // its row of SHOW CREATE TABLE in shown, and its checksum.
 func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint) error {
@@ -754,15 +743,7 @@ func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fing
 	if pristine {
 		db = m.o.Pristine
 	}
-	objs, err := m.objects(ctx, c, db)
-	if err != nil {
-		return nil, err
-	}
-	f := Fingerprint{}
-	if err := m.hashTables(ctx, c, db, objs.restoreOnly, func(string) bool { return true }, f); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return m.fingerprintOnce(ctx, c, db, nil, FingerprintFormat, fpRestoreOnly)
 }
 
 // checksums checksums the tables (see checksumGroup; defs are their CREATE
@@ -1209,6 +1190,47 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		return nil, err
 	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
+	// makeObjects makes the sequences of seqs, the triggers of trigDefs (in
+	// firing order per table) and the views of pending, and takes each
+	// made off its list: what a failure leaves on them is missing from
+	// dst. A closure: it shares create's session, collation and lost.
+	makeObjects := func() error {
+		for len(seqs) > 0 {
+			if err := makeSeq(seqs[0]); err != nil {
+				return err
+			}
+			seqs = seqs[1:]
+		}
+		for len(trigDefs) > 0 {
+			r := trigDefs[0]
+			if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
+				if lost == nil {
+					err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
+				}
+				return err
+			}
+			trigDefs = trigDefs[1:]
+		}
+		// A view may use another view: create them until no more succeed.
+		for len(pending) > 0 {
+			before := len(pending)
+			var lastErr error
+			for name, v := range pending {
+				if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
+					if lost != nil {
+						return lost
+					}
+					lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
+					continue
+				}
+				delete(pending, name)
+			}
+			if len(pending) == before { // no view could be created in this pass
+				return lastErr
+			}
+		}
+		return nil
+	}
 	// What makes again what a failure leaves missing: a restore of the
 	// working database, or a seed of the pristine copy.
 	recovery := "the next successful restore"
@@ -1240,42 +1262,11 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	} else {
 		extra, err = m.copyTables(ctx, c, src, dst, jobs)
 	}
+	if err == nil {
+		err = makeObjects()
+	}
 	if err != nil {
 		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
-	}
-	for i, q := range seqs {
-		if err := makeSeq(q); err != nil {
-			return nil, notMade(dst, recovery, err, lost, seqs[i:], trigDefs, pending)
-		}
-	}
-
-	// trigDefs are in firing order per table.
-	for i, r := range trigDefs {
-		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
-			if lost == nil {
-				err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
-			}
-			return nil, notMade(dst, recovery, err, lost, nil, trigDefs[i:], pending)
-		}
-	}
-
-	// A view may use another view: create them until no more succeed.
-	for len(pending) > 0 {
-		before := len(pending)
-		var lastErr error
-		for name, v := range pending {
-			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
-				if lost != nil {
-					return nil, notMade(dst, recovery, lost, lost, nil, nil, pending)
-				}
-				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
-				continue
-			}
-			delete(pending, name)
-		}
-		if len(pending) == before { // no view could be created in this pass
-			return nil, notMade(dst, recovery, lastErr, nil, nil, nil, pending)
-		}
 	}
 	return extra, nil
 }

@@ -95,7 +95,7 @@ func pristineSQLServer(t testing.TB, s *SQLServer) Fingerprint {
 			return err
 		}
 		defer c.Close()
-		fp, err = s.fingerprint(ctx, c, s.o.Pristine, nil, nil, nil, nil, false)
+		fp, err = s.fingerprint(ctx, c, s.o.Pristine, nil, nil, nil, nil, fpRows)
 		return err
 	})
 	if err != nil {

@@ -264,13 +264,15 @@ func (s *SQLServer) seededFingerprint(ctx context.Context) (Fingerprint, error) 
 // is not online has none of them, so the restore brings them all back.
 func (s *SQLServer) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
 	err = s.retryOthers(ctx, func() error {
-		f, err = s.restoreOnlyFingerprint(ctx, pristine)
+		f, err = s.read(ctx, pristine, fpRestoreOnly)
 		return err
 	})
 	return f, err
 }
 
-func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+// read fingerprints the working database, or the pristine copy, as mode
+// reads it.
+func (s *SQLServer) read(ctx context.Context, pristine bool, mode fpMode) (Fingerprint, error) {
 	db := s.o.Working
 	var inv *ssInventory
 	if pristine {
@@ -296,7 +298,7 @@ func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (
 		return nil, s.denied(err)
 	}
 	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, true)
+	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +334,7 @@ func (s *SQLServer) pristineFingerprint(ctx context.Context, mark *sqlServerMark
 		return nil, err
 	}
 	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil, false)
+	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil, fpRows)
 	if err != nil {
 		return nil, err
 	}
