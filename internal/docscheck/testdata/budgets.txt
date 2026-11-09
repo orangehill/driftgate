@@ -25,7 +25,7 @@ docs/guides/workflow/live-server.md 100
 docs/guides/catalog/coverage.md 110
 docs/guides/catalog/record.md 110
 docs/guides/catalog/hand-written-requests.md 150
-docs/guides/catalog/logins.md 120
+docs/guides/catalog/logins.md 140
 docs/guides/catalog/side-checks.md 160
 docs/guides/review/read-the-report.md 100
 docs/guides/review/fix-accept-or-expect.md 90

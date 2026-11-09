@@ -40,8 +40,8 @@ request is skipped until you `accept` its first answer
 
 A login request checks the login itself: its status, headers and body.
 Allow its new token by format ([changing values](../review/changing-values.md)).
-DriftGate keeps no cookies, and `params_from` fills only path parameters,
-so later requests do not use this session. They sign in with an
+DriftGate keeps no cookies, and `params_from` fills only `{name}` in the path
+and its query string, so later requests do not use this session. They sign in with an
 identity's token ([logins](logins.md)).
 
 This request replaces every generated request of `POST /api/auth/login`:

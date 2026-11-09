@@ -70,6 +70,20 @@ value. Sanctum keeps only its hash, and looks a token without `id|` up by
 that hash. The command prints the plain text. Seed the `user` token the
 same way; Sanctum comes with `php artisan install:api`.
 
+Sanctum writes `last_used_at` on every request a token signs in, so each
+GET as an identity would change `personal_access_tokens`. Restore that
+table before every capture, and leave it out of the fingerprint
+([restore_only](../../reference/state.md#restore_only)):
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite                  # or the driver you use
+    working: database/database.sqlite
+    restore_only: [personal_access_tokens]
+```
+
 ## Generate requests for routes that need a login
 
 <!-- check: config-fragment -->
