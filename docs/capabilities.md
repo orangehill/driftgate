@@ -32,6 +32,7 @@ does not do.
 | <!-- cap: mysql --> MySQL and MariaDB | your database is MySQL or MariaDB | [guide](guides/frameworks/laravel.md#the-database) | [reference](reference/databases/mysql-mariadb.md) |
 | <!-- cap: postgres --> PostgreSQL | your database is PostgreSQL | — | [reference](reference/databases/postgresql.md) |
 | <!-- cap: sqlite --> SQLite | your database is a file | [guide](guides/frameworks/laravel.md#sqlite) | [reference](reference/databases/sqlite.md) |
+| <!-- cap: sql-server-retries --> Retries on a busy SQL Server | other databases of the server are restored, or a deadlock occurs | — | [reference](reference/databases/sql-server.md#errors-927-and-952) |
 | <!-- cap: sql-server --> SQL Server | your database is SQL Server 2017 or later | [guide](guides/frameworks/aspnet-core.md) | [reference](reference/databases/sql-server.md) |
 | <!-- cap: guards --> Guards | mail or payments must not reach people | [guide](guides/catalog/side-checks.md#check-the-mail-the-application-sends) | [reference](reference/driftgate-yaml.md#seed-prepare-guards) |
 | <!-- cap: prepare --> Prepare commands | something must run after every restore | [guide](guides/frameworks/laravel.md) | [reference](reference/driftgate-yaml.md#what-belongs-in-prepare) |

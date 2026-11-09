@@ -151,6 +151,9 @@ The application held a lock for longer than DriftGate waits, 10 seconds ([locks]
 ### A command waits for another process
 Another command holds the lock on the local store. Wait for it, or stop it; Ctrl-C stops the wait ([when a command waits](reference/cli.md#when-a-command-waits-for-another-one)).
 
+### "… stayed in the middle of a restore, offline, single-user or in transition"
+SQL Server 2019 and earlier stopped the command for another database of the server, and it tried again for a minute. Bring that database online, give it `MULTI_USER` back, complete its restore, or drop it ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
+
 ### Errors 927 or 952 on SQL Server
 On SQL Server 2019 and earlier, another database of the server was being restored, created or renamed at that moment ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
 

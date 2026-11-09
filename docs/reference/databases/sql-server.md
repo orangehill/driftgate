@@ -371,8 +371,26 @@ SQL Server 2019 and earlier stop a statement of one database with error
 or 952 ("is in transition") while another database of the server is
 restored, created or renamed, such as by another checkout's seed.
 
-- A seed, restore, fingerprint or read that fails so runs again for up to a minute, and the log says so once. Each stops in a state the next run completes.
+Errors 924 ("can only have one user at a time") and 942 ("cannot be
+opened because it is offline") stop it the same way, while another
+database is set single-user or taken offline.
+
+- A seed, restore, fingerprint, `clean`, `generate` query or read of rows that fails so runs again; the log says so once.
+- It runs again for up to one minute, counted from the first such failure. Then it fails with the last error, which names the database.
+- A database left restoring, offline or single-user for good fails it every time: complete its restore, bring it online, give it `MULTI_USER` back, or drop it.
+- A restore also runs again, within the same minute, when the error names its own working database that a stopped restore left offline or restoring.
+- Each stops in a state the next run completes.
 - The application's own queries can fail the same way on those versions.
+
+### Deadlocks
+
+On every SQL Server version, a seed, restore, fingerprint, `clean` or
+`generate` query that the server chooses as a deadlock victim (error
+1205) runs again, up to three times. The server rolled its transaction
+back, and a restore is still checked against the pristine copy's
+fingerprint. A retry that gave up inside another operation is not run
+again by it, so the total stays bounded. One that keeps losing fails
+with error 1205.
 
 ### The application's login
 

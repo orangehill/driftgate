@@ -4,8 +4,8 @@
 
 The action runs `driftgate run` against the application the job started,
 and compares with the committed baseline. It reports in a pull-request
-comment, updated on every push, the job summary, a JUnit file and an
-artifact. The artifact `driftgate-report` holds the markdown, the JUnit file and the log.
+comment, updated on every push, the job summary and a JUnit file.
+The artifact `driftgate-report` holds the markdown, the JUnit file and the log.
 See the [complete workflow](../../../examples/github-actions/driftgate.yml) and [every input](../../../examples/github-actions/README.md).
 
 ## Before the first job
@@ -18,7 +18,10 @@ See the [complete workflow](../../../examples/github-actions/driftgate.yml) and 
 
 <!-- check: yaml -->
 ```yaml
-on: [pull_request, push]
+on:
+  pull_request:
+  push:
+    branches: [main]
 permissions:
   contents: read
   pull-requests: write
@@ -50,18 +53,15 @@ Outputs: `exit-code`, `result` (`clean`, `drift`, `config-error`, `environment-e
 
 ## Keys and secrets in CI
 
-The job needs **no project key**: the action uses a fresh store and a
-random key for every job.
+The job needs **no project key**: the action uses a fresh store and a random key for every job.
 
 - Never set `DRIFTGATE_KEY` (the action warns), production secrets or DSNs in a job that runs for pull requests, and never use `pull_request_target`. A pull request can change every command DriftGate runs ([security](../../security.md#keep-secrets-out-of-pull-request-jobs)).
 - A configuration with `key.op` needs 1Password on the runner. Use `key.env` instead, or no `key:`.
 
 ## Private bodies in CI
 
-Private bodies stay on the machine that captured them, so without them
-the run is incomplete (exit 3). With `--skip-private`, the job compares
-the status, headers, public bodies and side effects of every request
-([private bodies](../../security.md#private-bodies)).
+Private bodies stay on the machine that captured them, so without them the run is incomplete (exit 3).
+With `--skip-private`, the job compares the status, headers, public bodies and side effects of every request ([private bodies](../../security.md#private-bodies)).
 
 So decide which requests CI checks:
 
@@ -90,9 +90,8 @@ So decide which requests CI checks:
             < "$DRIFTGATE_PRISTINE_DIR/app.sql"
 ```
 
-A CI database starts empty, so the seed can take minutes per job. The
-action keeps a dump of the seeded databases in the Actions cache, keyed
-on the files the seed reads and `pristine-cache-key`.
+A CI database starts empty, so the seed can take minutes per job.
+The action keeps a dump of the seeded databases in the Actions cache, keyed on the files the seed reads and `pristine-cache-key`.
 
 - On a miss, the seed runs in full, then `pristine-dump` saves the working databases.
 - On a hit, `pristine-load` loads the dump, and `seed --skip-commands` makes the pristine copies from it. A failed load warns and seeds in full.
