@@ -220,8 +220,13 @@ func (r *Report) NoBaselineNote() string {
 // given only when nothing else drifted.
 func (r *Report) JoinAdvice() string {
 	capture, ok := strings.CutPrefix(r.Tag, "capture:")
-	if r.Mode != "freeze" || r.Baseline == "" || !ok {
+	switch {
+	case r.Mode != "freeze":
 		return "new requests join the baseline with driftgate accept"
+	case r.Baseline == "" || !ok:
+		// Not a capture against a baseline (two captures, two baselines):
+		// there is nothing to rebase on, and freeze refuses accept.
+		return "in mode freeze accept is refused; new requests join a baseline with driftgate baselines rebase <baseline> --from <capture> --allow-freeze, after a capture compared against it shows no other drift"
 	}
 	// A rebase takes the whole capture: next to a drift it would take a
 	// regression into the baseline, so its command is given only when

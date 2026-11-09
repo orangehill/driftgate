@@ -431,11 +431,24 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 			t.Errorf("with a drift (%s): %q", other.Outcome, n)
 		}
 	}
-	// Against a capture there is no baseline to join.
-	r = Build("capture:b", "capture:a", []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}})
-	r.Mode = "freeze"
-	if n := r.NoBaselineNote(); strings.Contains(n, "rebase") {
-		t.Errorf("against a capture: %q", n)
+	// Not a capture against a baseline: two captures, or two baselines
+	// (compare baseline:a against baseline:b). Freeze never names accept,
+	// and there is no capture to give as --from.
+	for _, sides := range [][2]string{{"capture:b", "capture:a"}, {"baseline:next", "baseline:local"}} {
+		r = Build(sides[0], sides[1], []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}})
+		r.Baseline, _ = strings.CutPrefix(sides[1], "baseline:")
+		if !strings.HasPrefix(sides[1], "baseline:") {
+			r.Baseline = ""
+		}
+		r.Mode = "freeze"
+		n := r.NoBaselineNote()
+		if strings.Contains(n, "join the baseline with driftgate accept") || strings.Contains(n, "--from next") || !strings.Contains(n, "in mode freeze accept is refused") {
+			t.Errorf("%s against %s: %q", sides[0], sides[1], n)
+		}
+		r.Mode = "evolve"
+		if n := r.NoBaselineNote(); !strings.Contains(n, "driftgate accept") {
+			t.Errorf("evolve, %s against %s: %q", sides[0], sides[1], n)
+		}
 	}
 }
 
