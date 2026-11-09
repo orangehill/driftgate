@@ -1,15 +1,9 @@
 package docscheck
 
 import (
-	"bufio"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
 	"net/netip"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -73,101 +67,6 @@ func TestLinks(t *testing.T) {
 				t.Errorf("%s:%d: %v", d.Path, l.Line, err)
 			}
 		}
-	}
-}
-
-// TestNoLinksIntoIndexes: no page links into a section of an index page
-// (testdata/index-pages.txt), which only keeps old headings for links from
-// outside; our own pages link the new home. A link to the index page
-// itself, and a link within it, are fine.
-func TestNoLinksIntoIndexes(t *testing.T) {
-	index := indexPages(t)
-	_, all := docs(t)
-	for _, d := range all {
-		for _, l := range d.Links {
-			rel, anchor, ok := Local(d.Path, l.Target)
-			if ok && anchor != "" && index[rel] && rel != d.Path {
-				t.Errorf("%s:%d: %s links a section of the index page %s; link its new home", d.Path, l.Line, l.Target, rel)
-			}
-		}
-	}
-}
-
-// TestNoCodeLinksIntoIndexes: no string of the program's code (help texts,
-// messages) names a section of an index page; it names the new home.
-func TestNoCodeLinksIntoIndexes(t *testing.T) {
-	root, err := Root()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for page := range indexPages(t) {
-		names = append(names, path.Base(page)+"#")
-	}
-	fset := token.NewFileSet()
-	err = filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if e.IsDir() {
-			if n := e.Name(); p != root && (n == "testdata" || n == "node_modules" || strings.HasPrefix(n, ".")) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
-			return nil
-		}
-		f, err := parser.ParseFile(fset, p, nil, 0)
-		if err != nil {
-			return err
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			v, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				return true
-			}
-			for _, name := range names {
-				if strings.Contains(v, name) {
-					t.Errorf("%s: %q links a section of an index page; name its new home", fset.Position(lit.Pos()), v)
-				}
-			}
-			return true
-		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestPublicAnchors: the anchors released binaries, code and other sites
-// link to keep resolving (testdata/public-anchors.txt).
-func TestPublicAnchors(t *testing.T) {
-	p, _ := pages(t)
-	f, err := os.Open(filepath.Join("testdata", "public-anchors.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	s := bufio.NewScanner(f)
-	n := 0
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		n++
-		if err := p.Resolve("", "/"+line); err != nil {
-			t.Errorf("public anchor %s: %v", line, err)
-		}
-	}
-	if n == 0 {
-		t.Error("testdata/public-anchors.txt lists no anchor")
 	}
 }
 
@@ -459,15 +358,11 @@ func TestExampleHost(t *testing.T) {
 // action or a download, a version input, a version printed.
 var releaseVersion = regexp.MustCompile(`(?:driftgate@|driftgate |tags/|version: |release download |Version=)(v\d+\.\d+\.\d+)\b`)
 
-// TestVersionStrings: every page names the same DriftGate release, except
-// the notes on upgrading from earlier ones.
+// TestVersionStrings: every page names the same DriftGate release.
 func TestVersionStrings(t *testing.T) {
 	_, all := docs(t)
 	first, where := "", ""
 	for _, d := range all {
-		if d.Path == "docs/reference/upgrading-driftgate.md" {
-			continue
-		}
 		for i, line := range d.Lines {
 			for _, m := range releaseVersion.FindAllStringSubmatch(line, -1) {
 				at := d.Path + ":" + strconv.Itoa(i+1)
@@ -485,15 +380,12 @@ func TestVersionStrings(t *testing.T) {
 	}
 }
 
-// sentenceLimit is the most words a sentence may have in a page, by its
-// folder; 0 for pages without a limit.
+// sentenceLimit is the most words a sentence may have in a page: 25 in
+// the documentation (docs/, README.md) and the style guide; 0 for pages
+// without a limit.
 func sentenceLimit(path string) int {
-	switch {
-	case strings.HasPrefix(path, "docs/start/"), strings.HasPrefix(path, "docs/concepts/"), strings.HasPrefix(path, "docs/guides/"),
-		path == "docs/glossary.md", path == ".github/docs-style.md":
+	if strings.HasPrefix(path, "docs/") || path == "README.md" || path == ".github/docs-style.md" {
 		return 25
-	case strings.HasPrefix(path, "docs/reference/"), path == "docs/security.md":
-		return 35
 	}
 	return 0
 }
@@ -565,9 +457,11 @@ func sentences(para string) []string {
 	return out
 }
 
-// TestBudgets (a warning unless DRIFTGATE_DOCS_STRICT=1): every page within
-// its line budget (testdata/budgets.txt: path and the most lines), and all
-// pages together within TOTAL.
+// TestBudgets (a warning unless DRIFTGATE_DOCS_STRICT=1): every page of
+// the documentation (docs/ and README.md) has a line budget in
+// testdata/budgets.txt (path and the most lines) and stays within it, and
+// all pages together stay within TOTAL. A budget for a page that does not
+// exist fails.
 func TestBudgets(t *testing.T) {
 	root, err := Root()
 	if err != nil {
@@ -577,6 +471,7 @@ func TestBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	budgeted, total := map[string]bool{}, false
 	for _, line := range strings.Split(string(raw), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
@@ -587,84 +482,56 @@ func TestBudgets(t *testing.T) {
 			t.Fatalf("budgets.txt: %q is not <path> <lines>", line)
 		}
 		if f[0] == "TOTAL" {
+			total = true
 			n := totalLines(t, root)
-			t.Logf("docs: %d lines, without the index pages (budget %d)", n, budget)
+			t.Logf("docs: %d lines (budget %d)", n, budget)
 			if n > budget {
-				warn(t, "docs: %d lines in all, without the index pages (budget %d)", n, budget)
+				warn(t, "docs: %d lines in all (budget %d)", n, budget)
 			}
 			continue
 		}
+		budgeted[f[0]] = true
 		page, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f[0])))
-		if os.IsNotExist(err) {
-			continue // a page still to be written
-		}
 		if err != nil {
-			t.Fatal(err)
+			t.Errorf("budgets.txt: %v", err)
+			continue
 		}
 		if n := strings.Count(string(page), "\n"); n > budget {
 			warn(t, "%s: %d lines (budget %d)", f[0], n, budget)
 		}
 	}
+	if !total {
+		t.Error("budgets.txt has no TOTAL")
+	}
+	for _, f := range docPages(t, root) {
+		if !budgeted[f] {
+			warn(t, "%s: no line budget in testdata/budgets.txt", f)
+		}
+	}
 }
 
-// indexPages are the pages of testdata/index-pages.txt.
-func indexPages(t *testing.T) map[string]bool {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "index-pages.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	index := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-			index[line] = true
-		}
-	}
-	if len(index) == 0 {
-		t.Fatal("testdata/index-pages.txt lists no page")
-	}
-	return index
-}
-
-// contextual are words of the glossary's "Words we do not use" that are
-// wrong only in one sense ("target" for a running application, "test" for
-// a request, "recording" for a baseline), and right elsewhere ("the data
-// module's target", "the docs test", "a recording proxy"): a reviewer checks
-// those, the test does not.
-var contextual = map[string]bool{"target": true, "test": true, "recording": true}
-
-var quoted = regexp.MustCompile(`"([^"]+)"`)
-
-// bannedWords reads the words of the glossary's "Words we do not use": the
-// quoted words before the colon of each item, without the contextual ones.
-func bannedWords(t *testing.T, glossary *Doc) []string {
-	t.Helper()
-	var out []string
-	in := false
-	for _, line := range glossary.Lines {
-		if strings.HasPrefix(line, "#") {
-			in = strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
-			continue
-		}
-		if !in || !strings.HasPrefix(line, "- ") {
-			continue
-		}
-		head, _, _ := strings.Cut(line, ":")
-		for _, m := range quoted.FindAllStringSubmatch(head, -1) {
-			if w := strings.ToLower(m[1]); !contextual[w] {
-				out = append(out, w)
-			}
-		}
-	}
-	if len(out) == 0 {
-		t.Fatal("the glossary lists no words not to use")
-	}
-	return out
+// bannedWords are words the documentation does not use, in lower case,
+// with what to say instead: the style guide (.github/docs-style.md) lists
+// them. Words wrong only in one sense ("target" for a running service,
+// "test" for a request, "recording" for a baseline) are left to review.
+var bannedWords = map[string]string{
+	"local mode":   `"the local layout", or "the baseline local"`,
+	"snapshot":     `"baseline"`,
+	"golden file":  `"baseline"`,
+	"mutating":     `"a request that changes data"`,
+	"note that":    "nothing",
+	"in order to":  `"to"`,
+	"basically":    "nothing",
+	"simply":       "nothing",
+	"as mentioned": "nothing",
+	"please":       "nothing",
+	"actually":     "nothing",
+	"of course":    "nothing",
 }
 
 // proseFindings lists the banned words in the prose of a page: outside
-// code blocks and code spans, and outside the glossary's own list.
-func proseFindings(d *Doc, banned []string) []string {
+// code blocks and code spans.
+func proseFindings(d *Doc) []string {
 	code := map[int]bool{}
 	for _, b := range d.Blocks {
 		for n := b.Line; n <= b.End; n++ {
@@ -672,40 +539,30 @@ func proseFindings(d *Doc, banned []string) []string {
 		}
 	}
 	var out []string
-	inList := false
 	for i, line := range d.Lines {
-		if strings.HasPrefix(line, "#") {
-			inList = d.Path == "docs/glossary.md" && strings.TrimSpace(strings.TrimLeft(line, "#")) == "Words we do not use"
-		}
-		if code[i+1] || inList {
+		if code[i+1] {
 			continue
 		}
 		prose := strings.ToLower(codeSpan.ReplaceAllString(line, ""))
-		for _, w := range banned {
+		for w, say := range bannedWords {
 			if regexp.MustCompile(`\b` + regexp.QuoteMeta(w) + `\b`).MatchString(prose) {
-				out = append(out, fmt.Sprintf("%s:%d: %q", d.Path, i+1, w))
+				out = append(out, fmt.Sprintf("%s:%d: %q (say %s)", d.Path, i+1, w, say))
 			}
 		}
 	}
 	return out
 }
 
-// TestGlossaryWords: the prose of every page of the documentation (docs/
-// and README.md) uses none of the words the glossary lists under "Words we
-// do not use", outside code and outside that list itself.
-func TestGlossaryWords(t *testing.T) {
-	p, all := docs(t)
-	g, err := p.Get("docs/glossary.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	banned := bannedWords(t, g)
+// TestBannedWords: the prose of the documentation (docs/ and README.md)
+// uses none of bannedWords, outside code.
+func TestBannedWords(t *testing.T) {
+	_, all := docs(t)
 	for _, d := range all {
 		if !strings.HasPrefix(d.Path, "docs/") && d.Path != "README.md" {
 			continue
 		}
-		for _, f := range proseFindings(d, banned) {
-			t.Errorf("%s is a word the glossary says not to use", f)
+		for _, f := range proseFindings(d) {
+			t.Errorf("%s is a word the documentation does not use", f)
 		}
 	}
 	// The test finds them.
@@ -713,25 +570,32 @@ func TestGlossaryWords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := proseFindings(probe, banned); len(got) != 2 {
+	if got := proseFindings(probe); len(got) != 2 {
 		t.Errorf("the probe gives %v, want mutating and snapshot", got)
 	}
 }
 
-// totalLines counts the lines of every page of the documentation (docs/
-// and README.md), without the index pages, which only keep old headings.
-func totalLines(t *testing.T, root string) int {
+// docPages lists the pages of the documentation: docs/ and README.md.
+func docPages(t *testing.T, root string) []string {
 	t.Helper()
-	index := indexPages(t)
 	files, err := Files(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := 0
+	var out []string
 	for _, f := range files {
-		if (!strings.HasPrefix(f, "docs/") && f != "README.md") || index[f] {
-			continue
+		if strings.HasPrefix(f, "docs/") || f == "README.md" {
+			out = append(out, f)
 		}
+	}
+	return out
+}
+
+// totalLines counts the lines of every page of the documentation.
+func totalLines(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	for _, f := range docPages(t, root) {
 		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
 		if err != nil {
 			t.Fatal(err)

@@ -47,15 +47,15 @@ func TestHelpTopics(t *testing.T) {
 		want  []string
 	}{
 		{"catalog", append(append(fields(catalog.Request{}, "json"), fields(catalog.Catalog{}, "json")...), fields(multipart, "json")...),
-			[]string{"(beside driftgate.yaml", docsBase() + "reference/catalog-json.md#request-fields", docsBase() + tasksDoc}},
+			[]string{"(beside driftgate.yaml", docsBase() + "catalog.md#request-fields"}},
 		{"allowlist", []string{"headers", "body", "arrays", "version", "request", "target", "reason"},
-			[]string{"(beside driftgate.yaml)", docsBase() + "reference/allowlist-yaml.md", "usage: driftgate allowlist check"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "review.md#allowlist-rules", "usage: driftgate allowlist check"}},
 		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),
-			[]string{"(beside driftgate.yaml)", docsBase() + "reference/exclusions-yaml.md"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "catalog.md#coverage-and-exclusions"}},
 		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), fields(data.ColumnRule{}, "yaml")...), fields(data.SchemaRule{}, "yaml")...),
-			[]string{"(beside driftgate.yaml)", docsBase() + "reference/classify-yaml.md"}},
+			[]string{"(beside driftgate.yaml)", docsBase() + "workflows.md#test-data"}},
 		{"config", fields(config.Config{}, "yaml"),
-			[]string{"driftgate.yaml", docsBase() + "reference/driftgate-yaml.md#top-level-keys"}},
+			[]string{"driftgate.yaml", docsBase() + "configuration.md#keys"}},
 	} {
 		code, out, errOut := runCLI(t, "help", c.topic)
 		if code != ExitClean || errOut != "" {
@@ -81,7 +81,7 @@ func TestHelpTopics(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{{"help", "uploads"}, {"uploads"}} {
-		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, docsBase()+tasksDoc) {
+		if code, _, errOut := runCLI(t, args...); code != ExitConfig || !strings.Contains(errOut, docsBase()+commandsDoc) {
 			t.Errorf("%v: exit %d %s", args, code, errOut)
 		}
 	}
@@ -107,16 +107,16 @@ func TestHelpNamesTopics(t *testing.T) {
 	}
 }
 
-// TestHelpLinksDocs: driftgate help ends with the documentation, what
-// DriftGate can do and the symptoms, each a page of this checkout.
+// TestHelpLinksDocs: driftgate help ends with the documentation, the
+// commands and the symptoms, each a page of this checkout.
 func TestHelpLinksDocs(t *testing.T) {
 	_, out, _ := runCLI(t, "help")
 	p := docPages(t)
-	for _, page := range []string{"README.md", tasksDoc, "troubleshooting.md"} {
-		if !strings.Contains(out, docsBase()+page+"\n") {
+	for _, page := range []string{"README.md#documentation", "docs/" + commandsDoc, "docs/troubleshooting.md"} {
+		if !strings.Contains(out, repoBase()+page+"\n") {
 			t.Errorf("driftgate help does not link %s:\n%s", page, out)
 		}
-		if err := p.Resolve("docs/README.md", page); err != nil {
+		if err := p.Resolve("", "/"+page); err != nil {
 			t.Errorf("help link %s: %v", page, err)
 		}
 	}

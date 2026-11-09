@@ -349,7 +349,7 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 			return configErr("setup: --driver and --database complete a database setting of the project, and none was found; add state: to the configuration by hand")
 		}
 		fmt.Fprintln(s.out, "no database settings found: without state:, requests that change data are not sent")
-		s.check = append(s.check, "no database settings found: if the application has a database, add state: ("+docsBase()+"reference/state.md)")
+		s.check = append(s.check, "no database settings found: if the application has a database, add state: ("+docsBase()+"databases.md)")
 		return nil
 	}
 	var options []string
@@ -716,7 +716,7 @@ func (s *setup) noState(p *config.Project, path string) (*config.Project, error)
 	at := strings.Index(text, stateOff)
 	if at < 0 || (at > 0 && text[at-1] != '\n') {
 		return nil, configErr("the project's settings name a database (%s), and %s has no state: database: requests would run without restoring it. Add state: (%s), or uncomment the block driftgate init wrote, then run %s",
-			describe(dbs[0]), rel(p.Root, path), docsBase()+"reference/state.md", s.resume)
+			describe(dbs[0]), rel(p.Root, path), docsBase()+"databases.md", s.resume)
 	}
 	s.step("state")
 	ok, err := s.a.confirm("Turn on state: in "+rel(p.Root, path)+", the database driftgate init found and wrote commented out?", "pass --yes to turn it on")
@@ -948,7 +948,7 @@ func (s *setup) summary(p *config.Project, d detected) {
 	}
 	check := s.check
 	if len(databases(p)) > 0 {
-		check = append(check, "guards: the application must not send mail or payments while DriftGate sends requests that change data ("+docsBase()+"reference/driftgate-yaml.md#seed-prepare-guards)")
+		check = append(check, "guards: the application must not send mail or payments while DriftGate sends requests that change data ("+docsBase()+"configuration.md#seed-prepare-and-guards)")
 	}
 	s.printCheck(check)
 	fmt.Fprintln(s.out, "\nnext: driftgate run after every upgrade step compares with the baseline")

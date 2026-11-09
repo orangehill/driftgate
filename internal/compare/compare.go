@@ -66,7 +66,7 @@ const (
 type KindInfo struct{ Name, Text string }
 
 // kinds lists every drift kind with what it means: the text of driftgate
-// help kinds and the Meaning column of docs/reference/drift-kinds.md, which
+// help kinds and the Meaning column of docs/review.md#drift-kinds, which
 // the docs test checks against it and the Kind constants.
 var kinds = []KindInfo{
 	{KindStatus, "the HTTP status changed, or the request got no answer"},

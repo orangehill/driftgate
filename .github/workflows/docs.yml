@@ -1,10 +1,11 @@
 name: docs
 
 # The docs test: check markers loaded with DriftGate's own parsers, links and
-# anchors between the pages, the public anchors, the help's links and the
-# commands' sections. ci.yml ignores changes to documents alone; this
-# workflow runs on them, and needs no database. A code change runs the same
-# tests in ci.yml (go test ./...).
+# anchors between the pages, sentence length, the line budget of every page
+# and the TOTAL, the help's links, a section for every command and every key
+# of driftgate.yaml. ci.yml ignores changes to documents alone; this workflow
+# runs on them, and needs no database. A code change runs the same tests in
+# ci.yml (go test ./...).
 on:
   push:
     branches: [main, development]
@@ -51,7 +52,7 @@ jobs:
           go-version-file: go.mod
       - name: Docs test
         env:
-          DRIFTGATE_DOCS_STRICT: "1"   # sentence length and line budgets fail, not warn
+          DRIFTGATE_DOCS_STRICT: "1"   # sentence length, page budgets and TOTAL fail, not warn
         run: |
           go test -count=1 ./internal/docscheck/
           go test -count=1 -run 'Help|Docs|Parity|Topic|DriftKinds' ./internal/cli/
