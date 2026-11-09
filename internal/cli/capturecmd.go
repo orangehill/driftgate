@@ -637,6 +637,17 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 func headerFormat(name string, positions [][]string) string {
 	var parts []string
 	seen := map[string]bool{}
+	if name == "set-cookie" {
+		// One format per cookie name, from its values at every position:
+		// responses set their cookies in other orders and numbers, and a
+		// position with one value of a cookie gave a literal alternative
+		// next to the format of the others.
+		var all []string
+		for _, vals := range positions {
+			all = append(all, vals...)
+		}
+		positions = [][]string{all}
+	}
 	for _, vals := range positions {
 		var ps []string
 		switch {
@@ -703,9 +714,34 @@ func cookieFormats(vals []string) []string {
 		case l[0] != l[1]:
 			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
 		}
-		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+valuesFormat(attrs[n]))
+		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+attrsFormat(attrs[n]))
 	}
 	return out
+}
+
+// cookieDate is an expiry date of a Set-Cookie value (an HTTP date), and
+// cookieDateFormat its format.
+var cookieDate = lazy.Regexp(`\b(?i:expires)=[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`)
+
+const cookieDateFormat = `[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`
+
+// attrsFormat is the format of a cookie's attributes: inferred as any other
+// value, but an expiry date seen the same in every value is a date all
+// the same (it moves with the time of the request), never the literal.
+func attrsFormat(vals []string) string {
+	if p := infer.Pattern(vals); p != "" {
+		return p
+	}
+	v := vals[0]
+	var b strings.Builder
+	last := 0
+	for _, m := range cookieDate().FindAllStringIndex(v, -1) {
+		b.WriteString(regexp.QuoteMeta(v[last : m[0]+len("expires=")])) // as the cookie spells it
+		b.WriteString(cookieDateFormat)
+		last = m[1]
+	}
+	b.WriteString(regexp.QuoteMeta(v[last:]))
+	return b.String()
 }
 
 var yamlQuote = compare.YAMLQuote

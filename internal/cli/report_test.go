@@ -255,3 +255,37 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 		t.Errorf("plain header: %s", f)
 	}
 }
+
+// TestCookieFormatOneAlternativePerCookie: a cookie seen at several
+// positions (responses set their cookies in other orders and numbers) gets
+// one format from all its values, and an expiry date seen once, or the
+// same in every value, is a date format: never a literal date, which the
+// next run's time would fail.
+func TestCookieFormatOneAlternativePerCookie(t *testing.T) {
+	session := func(date string) string {
+		return "laravel-session=" + strings.Repeat("x", 342) + "; expires=" + date + " GMT; Max-Age=7200; path=/; httponly"
+	}
+	xsrf := func(date string) string {
+		return "XSRF-TOKEN=" + strings.Repeat("X", 342) + "; expires=" + date + " GMT; Max-Age=7200; path=/"
+	}
+	f := headerFormat("set-cookie", [][]string{
+		{xsrf("Mon, 09 Nov 2026 04:56:45"), xsrf("Mon, 09 Nov 2026 04:56:46"), session("Mon, 09 Nov 2026 04:56:47")},
+		{session("Mon, 09 Nov 2026 04:56:46")},
+	})
+	if strings.Contains(f, "Mon") || strings.Count(f, "|") != 1 || strings.Count(f, "laravel-session") != 1 {
+		t.Errorf("format: %s", f)
+	}
+	one := headerFormat("set-cookie", [][]string{{session("Mon, 09 Nov 2026 04:56:46")}})
+	if strings.Contains(one, "Mon") || !strings.Contains(one, `; expires=[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT; Max-Age=7200; path=/; httponly`) {
+		t.Errorf("one value: %s", one)
+	}
+	re := regexp.MustCompile(`^(?:` + f + `)$`)
+	for _, v := range []string{session("Tue, 10 Nov 2026 09:00:00"), xsrf("Wed, 11 Nov 2026 10:11:12")} {
+		if !re.MatchString(v) {
+			t.Errorf("%q does not match %s", v, f)
+		}
+	}
+	if re.MatchString(strings.Replace(session("Tue, 10 Nov 2026 09:00:00"), "httponly", "", 1)) {
+		t.Errorf("a cookie without httponly matches %s", f)
+	}
+}
