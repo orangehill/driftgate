@@ -231,7 +231,7 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 func driftLine(d compare.Drift) string {
 	s := fmt.Sprintf("%-15s %s", d.Kind, report.Printable(d.Where))
 	if d.Baseline != "" || d.Current != "" {
-		b, c := report.ShortPair(d.Baseline, d.Current, 100)
+		b, c := report.DisplayPair(d, 100)
 		s += fmt.Sprintf("  %s → %s", report.Printable(b), report.Printable(c))
 	}
 	return s

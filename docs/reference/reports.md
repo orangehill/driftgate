@@ -32,6 +32,9 @@ where text is left out. Two long texts that differ in the middle show
 that difference. The group's explanation does the same with fewer
 characters.
 
+- A quoted text keeps both its quotes, with `…` outside them where text is left out.
+- A `Set-Cookie` value longer than 16 characters, such as a session token, shows as its length: `laravel-session=…(342); path=/`. Its attributes are shown in full, so a changed `samesite` is seen. A private value stays `(private)` without `review --show-private`.
+
 ## A request whose status changed
 
 When a request's status changes, what follows from it is summarized in

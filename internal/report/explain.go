@@ -39,7 +39,7 @@ func what(d compare.Drift, same bool) string {
 		if d.Baseline == "" && d.Current == "" {
 			return ""
 		}
-		b, c := ShortPair(d.Baseline, d.Current, max)
+		b, c := DisplayPair(d, max)
 		v := b + " → " + c
 		if same {
 			return " (" + v + ")"

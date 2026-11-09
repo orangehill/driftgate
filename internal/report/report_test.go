@@ -554,3 +554,35 @@ func TestShortPairQuoted(t *testing.T) {
 		}
 	}
 }
+
+// TestSetCookieDrift: a Set-Cookie drift shows each cookie's long value
+// (a token, recorded masked, new in every run) by its length and its
+// attributes in full, so an attribute that changed at the end
+// (samesite=lax) is seen; a cut around the first difference showed two
+// tokens. A short value stays, and a hidden one stays hidden.
+func TestSetCookieDrift(t *testing.T) {
+	token := func(c string) string { return strings.Repeat(c, 340) }
+	attrs := "; expires=Mon, 09 Nov 2026 04:56:46 GMT; Max-Age=7200; path=/"
+	b := `["XSRF-TOKEN=` + token("x") + attrs + `","laravel-session=` + token("X") + attrs + `; httponly"]`
+	c := `["XSRF-TOKEN=` + token("0") + attrs + `; samesite=lax","laravel-session=deleted` + attrs + `; httponly; samesite=lax"]`
+	d := compare.Drift{Request: "r", Kind: compare.KindFormat, Where: "header:set-cookie", Baseline: b, Current: c}
+	r := Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{d}}})
+	var out bytes.Buffer
+	r.Text(&out, DefaultDrifts)
+	line := strings.Split(out.String(), "\n")[1]
+	if !strings.Contains(line, "samesite=lax") || strings.Contains(line, "xxxxxxxx") {
+		t.Errorf("drift line: %s", line)
+	}
+	if x, y := DisplayPair(d, 400); !strings.Contains(y, "laravel-session=deleted; expires") || !strings.Contains(x, "laravel-session=…(340); expires") {
+		t.Errorf("values: %s → %s", x, y)
+	}
+	d.Baseline, d.Current = "(private)", "(private)"
+	if x, y := DisplayPair(d, 80); x != "(private)" || y != "(private)" {
+		t.Errorf("hidden: %s → %s", x, y)
+	}
+	// Another header is cut as any value.
+	d = compare.Drift{Where: "header:x-token", Baseline: b, Current: c}
+	if x, _ := DisplayPair(d, 80); strings.Contains(x, "…(340)") {
+		t.Errorf("x-token: %s", x)
+	}
+}

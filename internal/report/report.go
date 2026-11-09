@@ -502,7 +502,7 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		b, c := ShortPair(d.Baseline, d.Current, shortMax)
+		b, c := DisplayPair(d, shortMax)
 		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
@@ -554,6 +554,48 @@ const zwj = '\u200d' // zero width joiner
 func extends(c rune) bool {
 	return unicode.In(c, unicode.Mn, unicode.Me, unicode.Mc) || c == zwj ||
 		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
+}
+
+// DisplayPair is ShortPair of a drift's values as a line shows them. The
+// values of a Set-Cookie header show each cookie's value by its length
+// when it is long (a token, recorded masked, which differs in every run)
+// and its attributes in full: a cut around the first difference would
+// show two tokens and never the attribute that changed (samesite=lax at
+// the end). A value hidden as (private) stays hidden.
+func DisplayPair(d compare.Drift, max int) (string, string) {
+	b, c := d.Baseline, d.Current
+	if d.Where == "header:set-cookie" {
+		b, c = cookieView(b), cookieView(c)
+	}
+	return ShortPair(b, c, max)
+}
+
+// cookieShown is the longest cookie value cookieView shows as it is: a
+// short one ("deleted", an empty value) is what changed.
+const cookieShown = 16
+
+// cookieView writes a JSON list of Set-Cookie values with each long value
+// as …(its length); anything else is returned as it is.
+func cookieView(s string) string {
+	var vs []string
+	if json.Unmarshal([]byte(s), &vs) != nil {
+		return s
+	}
+	for i, v := range vs {
+		end := strings.IndexByte(v, ';')
+		if end < 0 {
+			end = len(v)
+		}
+		name, value, ok := strings.Cut(v[:end], "=")
+		if n := utf8.RuneCountInString(value); ok && n > cookieShown {
+			vs[i] = fmt.Sprintf("%s=…(%d)%s", name, n, v[end:])
+		}
+	}
+	out, err := json.Marshal(vs)
+	if err != nil {
+		return s
+	}
+	return string(out)
 }
 
 // shortMax is how many characters of a drift's values a line shows.

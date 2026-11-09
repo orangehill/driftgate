@@ -66,6 +66,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- A `Set-Cookie` drift shows each long cookie value by its length and the attributes in full. The cut around the first difference showed two different tokens, so an attribute changed at the end, such as `samesite=lax`, was never visible, also with `--show-private`. Private values stay hidden without `--show-private`.
 - A long quoted value cut in a drift line keeps both its quotes, with `…` outside them where text is left out, and no escape is cut in two. A cut that dropped the opening quote showed a stray `"` before the `…`, such as on a CSS body drift.
 - The `note:` of `generate` and `run` about missing templates names `empty-body` as well as `json-errors` for Laravel, whose validation rules DriftGate reads. It named `json-errors` only, and a project made with older templates still checked no validation message. A store that showed the old note shows the new one once.
 - `coverage` (and the coverage step of `run`) ends with a ✓ only when it listed no gap. After a list of routes whose validation error no request checks, or of routes only error answers reach, the last line names those gaps.
