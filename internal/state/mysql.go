@@ -137,7 +137,6 @@ type MySQL struct {
 	probeNoted map[string]bool // probes left behind already logged (noteProbe)
 	hooks      *mysqlHooks     // tests only
 	lockNote   sync.Once       // the note that GET_LOCK is not supported
-	retryNote  sync.Once       // the note that a step stopped for a lock runs again
 	login      string
 }
 

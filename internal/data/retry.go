@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -16,6 +17,10 @@ var (
 	lockRetries   = 3
 	lockRetryWait = 50 * time.Millisecond
 )
+
+// retryNoted holds the reads (what) whose retry was noted: one note per
+// read and process.
+var retryNoted sync.Map
 
 // readFault, tests only, runs at the end of each try of a retried read,
 // once the try has built its state; an error it returns is that try's.
@@ -49,8 +54,8 @@ func retryRead(ctx context.Context, log io.Writer, what string, f func() error) 
 		if !lockStopped(err) || try == lockRetries || ctx.Err() != nil {
 			return err
 		}
-		if try == 0 && log != nil {
-			fmt.Fprintf(log, "%s: the server stopped the read for a lock (%v), as a Galera node does when another session alters a table; reading again\n", what, err)
+		if _, told := retryNoted.LoadOrStore(what, true); !told && log != nil {
+			fmt.Fprintf(log, "%s: the server stopped the read of the %s for a lock (%v), as a Galera node does when another session alters a table; it is read again, and further reads of the %s stopped so are not noted\n", what, what, err, what)
 		}
 		select {
 		case <-ctx.Done():

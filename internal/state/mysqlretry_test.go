@@ -41,6 +41,7 @@ func TestMySQLRetryLocked(t *testing.T) {
 		u, _ := url.Parse(dsn)
 		t.Run(u.Host, func(t *testing.T) {
 			ctx := context.Background()
+			retryNoted.Clear()
 			work, pristine := "dgt_retry", "dgt_retry_pristine"
 			root := mysqlAdmin(t, dsn, "")
 			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
@@ -99,9 +100,13 @@ func TestMySQLRetryLocked(t *testing.T) {
 			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
 				t.Fatalf("after the retried restore: %v", d)
 			}
-			if n := strings.Count(log.String(), "stopped a"); n != 1 {
-				t.Errorf("%d notes of a retry: %q", n, log.String())
+			// One note per kind of step, naming it.
+			for _, what := range []string{"seed", "fingerprint", "restore"} {
+				if n := strings.Count(log.String(), "stopped a "+what+" for a lock"); n != 1 {
+					t.Errorf("%d notes of a retried %s: %q", n, what, log.String())
+				}
 			}
+			noted := log.Len()
 
 			// Stopped every time: the server's error, after lockRetries more.
 			for _, what := range []string{"fingerprint", "restore", "seed"} {
@@ -119,6 +124,9 @@ func TestMySQLRetryLocked(t *testing.T) {
 				if !errors.Is(err, deadlock) || calls != lockRetries+1 {
 					t.Errorf("%s: %v after %d tries", what, err, calls)
 				}
+			}
+			if log.Len() != noted {
+				t.Errorf("a kind of step noted again: %q", log.String()[noted:])
 			}
 			// Another error is not tried again.
 			calls = 0

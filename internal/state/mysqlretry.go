@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -24,6 +25,10 @@ func lockStopped(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
 }
+
+// retryNoted holds the kinds of step (what) whose retry was noted: one
+// note per kind and process, whichever component it was in.
+var retryNoted sync.Map
 
 // retryingKey marks a context inside retryLocked: a step within a step is
 // not tried again on its own, the outer one is.
@@ -48,9 +53,9 @@ func (m *MySQL) retryLocked(ctx context.Context, what string, f func(context.Con
 		if !lockStopped(err) || try == lockRetries || ctx.Err() != nil {
 			return err
 		}
-		m.retryNote.Do(func() {
-			m.logf("state %s: the server stopped a %s for a lock (%v), as a Galera node does when another session alters a table; trying again\n", m.o.Name, what, err)
-		})
+		if _, told := retryNoted.LoadOrStore(what, true); !told {
+			m.logf("state %s: the server stopped a %s for a lock (%v), as a Galera node does when another session alters a table; the %s runs again, and further %ss stopped so are not noted\n", m.o.Name, what, err, what, what)
+		}
 		select {
 		case <-ctx.Done():
 			return err

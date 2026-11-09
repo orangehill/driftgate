@@ -41,6 +41,7 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
 	lockRetryWait = time.Millisecond
 	defer func() { readFault = nil }()
+	retryNoted.Clear()
 	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock; try restarting transaction"}
 	ctx := context.Background()
 	const src, dst = "dgretry_src", "dgretry_dst"
@@ -103,7 +104,7 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	if !reflect.DeepEqual(clean.rep.Tables, retried.rep.Tables) {
 		t.Errorf("reports differ:\n%+v\n%+v", clean.rep.Tables, retried.rep.Tables)
 	}
-	if strings.Count(retried.log, "stopped the read for a lock") != 1 ||
+	if strings.Count(retried.log, "stopped the read of the source for a lock") != 1 ||
 		strings.Count(retried.log, "subset:") != strings.Count(clean.log, "subset:") {
 		t.Errorf("log after a retry:\n%s\nwithout:\n%s", retried.log, clean.log)
 	}
