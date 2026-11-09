@@ -476,7 +476,16 @@ func (t *tracker) restore(ctx context.Context) error {
 		}
 		start := time.Now()
 		if f := t.restoring[c.Name()]; f != "" {
-			os.WriteFile(f, nil, 0o600) // without it, a stopped restore is surveyed as any state
+			// Written whole (a new file renamed into place); without it, a
+			// stopped restore is surveyed as any state.
+			mark := restoringMark{Items: append(append([]string{}, items...), ro...), Whole: !c.Partial()}
+			snapshot.WriteJSON(f, mark)
+			if w, ok := c.(state.WholeRestorer); ok {
+				w.OnWholeRestore(func() {
+					mark.Whole = true
+					snapshot.WriteJSON(f, mark)
+				})
+			}
 		}
 		err := c.Restore(ctx, append(append([]string{}, items...), ro...))
 		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
@@ -488,6 +497,12 @@ func (t *tracker) restore(ctx context.Context) error {
 		}
 		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
+		}
+		// The restore finished: a difference the check below finds is the
+		// application's writes or the record's format, never a restore
+		// that stopped halfway.
+		if f := t.restoring[c.Name()]; f != "" {
+			os.Remove(f)
 		}
 		// The restore_only tables are not checked: the application may
 		// write them at any time, and they decide no pass.
@@ -502,9 +517,6 @@ func (t *tracker) restore(ctx context.Context) error {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
 			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
-		}
-		if f := t.restoring[c.Name()]; f != "" {
-			os.Remove(f)
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}

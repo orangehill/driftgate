@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -735,65 +736,133 @@ func TestChangedOutsideRestoreOnlyPrepare(t *testing.T) {
 }
 
 // TestChangedOutsideAfterStoppedRestore: a restore that stopped halfway
-// (killed, or failed) leaves its mark; the state it left is DriftGate's,
-// so the next capture completes the restore without the check, and says
-// so. The capture after it checks again.
+// (killed, or failed) leaves a mark with the items it was restoring. The
+// next capture completes those without taking them for changes made
+// outside DriftGate; any other change still stops it (a migration run
+// after a failed restore is no false pass). A mark of a restore of the
+// whole database exempts everything once. A seed removes the mark.
 func TestChangedOutsideAfterStoppedRestore(t *testing.T) {
-	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
-	root := t.TempDir()
-	app, srv := outsideApp(t, root)
-	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
-		Target: config.Target{BaseURL: srv.URL},
-		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}}}, root)
-	if err != nil {
-		t.Fatal(err)
+	setup := func(t *testing.T) (*sqliteApp, *config.Project, string) {
+		t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+		root := t.TempDir()
+		app, srv := outsideApp(t, root)
+		p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+			Target: config.Target{BaseURL: srv.URL},
+			State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}}}, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Seed(context.Background(), p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		server, err := serverOf(p, p.State["db"], "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := pristinePath(p, "db", server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return app, p, strings.TrimSuffix(record, ".json") + ".restoring"
+	}
+	exec := func(t *testing.T, app *sqliteApp, stmts ...string) {
+		t.Helper()
+		app.db.Exec("SELECT count(*) FROM sqlite_schema") // the schema a restore changed
+		for _, s := range stmts {
+			if _, err := app.db.Exec(s); err != nil {
+				t.Fatalf("%s: %v", s, err)
+			}
+		}
 	}
 	ctx := context.Background()
-	if err := Seed(ctx, p, SeedOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	server, err := serverOf(p, p.State["db"], "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, err := pristinePath(p, "db", server)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mark := strings.TrimSuffix(record, ".json") + ".restoring"
-	// A restore killed after it dropped a table and before it made it
-	// again: the table is gone, and the mark is there.
-	if _, err := app.db.Exec("DROP TABLE notes"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mark, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var out strings.Builder
-	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "after", Out: &out}); err != nil {
-		t.Fatalf("capture after a stopped restore: %v", err)
-	}
-	if !strings.Contains(out.String(), "state db: the last restore stopped halfway; this restore completes it") {
-		t.Errorf("output:\n%s", out.String())
-	}
-	if _, err := os.Stat(mark); err == nil {
-		t.Errorf("the mark is left after a complete restore")
-	}
-	if _, err := app.db.Exec("SELECT count(*) FROM sqlite_schema"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.db.Exec("ALTER TABLE users ADD COLUMN slug TEXT"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "column"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:users (its definition changed)") {
-		t.Fatalf("capture after a column, the restore complete: %v", err)
-	}
-	// A seed leaves no mark behind.
-	os.WriteFile(mark, nil, 0o600)
-	if err := Seed(ctx, p, SeedOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(mark); err == nil {
-		t.Errorf("the mark is left after a seed")
-	}
+
+	t.Run("killed partway", func(t *testing.T) {
+		app, p, mark := setup(t)
+		// Killed after it dropped notes and before it made it again.
+		exec(t, app, "DROP TABLE notes")
+		snapshot.WriteJSON(mark, restoringMark{Items: []string{"table:notes"}})
+		var out strings.Builder
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "after", Out: &out}); err != nil {
+			t.Fatalf("capture after a killed restore: %v", err)
+		}
+		if !strings.Contains(out.String(), "state db: the last restore stopped halfway; this restore completes its 1 item") {
+			t.Errorf("output:\n%s", out.String())
+		}
+		if _, err := os.Stat(mark); err == nil {
+			t.Errorf("the mark is left after a complete restore")
+		}
+		exec(t, app, "ALTER TABLE users ADD COLUMN slug TEXT")
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "column"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:users (its definition changed)") {
+			t.Fatalf("capture after a column, the restore complete: %v", err)
+		}
+	})
+
+	t.Run("failed, then a migration", func(t *testing.T) {
+		app, p, mark := setup(t)
+		// A restore that stopped with an error leaves the mark with its
+		// items (written as a restore writes it).
+		exec(t, app, "INSERT INTO notes (body) VALUES ('written')")
+		snapshot.WriteJSON(mark, restoringMark{Items: []string{"table:notes"}})
+		// Then the developer migrates another table.
+		exec(t, app, "ALTER TABLE users ADD COLUMN slug TEXT", "INSERT INTO migrations (migration, batch) VALUES ('add_slug', 2)")
+		var out strings.Builder
+		_, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "migrated", Out: &out})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:migrations (migrations ran), db/table:users (its definition changed). ") || strings.Contains(err.Error(), "table:notes") {
+			t.Fatalf("capture after a failed restore and a migration: %v\n%s", err, out.String())
+		}
+		if !strings.Contains(schemaOf(t, app), "slug") {
+			t.Errorf("the migration was undone")
+		}
+	})
+
+	t.Run("finished, its check failed, then a migration", func(t *testing.T) {
+		app, p, mark := setup(t)
+		// A restore that finished but fails its check (the pristine copy
+		// changed, the application wrote meanwhile) leaves no mark.
+		exec(t, app, "INSERT INTO notes (body) VALUES ('written')")
+		server, _ := serverOf(p, p.State["db"], "")
+		record, _ := pristinePath(p, "db", server)
+		pristine, err := sql.Open("sqlite", sqliteTestURI(sqliteStorePristine(record), "mode=rw"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pristine.Exec("INSERT INTO notes (body) VALUES ('tampered')"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "failed"}); err == nil || !strings.Contains(err.Error(), "left 1 items different") {
+			t.Fatalf("restore on a changed pristine copy: %v", err)
+		}
+		if _, err := os.Stat(mark); err == nil {
+			t.Fatalf("a restore that finished left its mark")
+		}
+		pristine.Exec("DELETE FROM notes WHERE body = 'tampered'")
+		pristine.Close()
+		// Then the developer migrates notes, the table the restore wrote.
+		exec(t, app, "ALTER TABLE notes ADD COLUMN title TEXT")
+		_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "migrated"})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:notes (its definition changed). ") {
+			t.Fatalf("capture after a restore whose check failed and a migration: %v", err)
+		}
+	})
+
+	t.Run("whole database, unreadable mark, seed", func(t *testing.T) {
+		app, p, mark := setup(t)
+		exec(t, app, "DROP TABLE notes", "CREATE VIEW emails AS SELECT email FROM users")
+		snapshot.WriteJSON(mark, restoringMark{Items: []string{"table:notes"}, Whole: true})
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "whole"}); err != nil {
+			t.Fatalf("capture after a stopped restore of the whole database: %v", err)
+		}
+		// A mark that cannot be read exempts nothing.
+		exec(t, app, "DROP TABLE notes")
+		os.WriteFile(mark, []byte("not json"), 0o600)
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "unread"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:notes (dropped since the pristine copy)") {
+			t.Fatalf("capture with an unreadable mark: %v", err)
+		}
+		if err := Seed(ctx, p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(mark); err == nil {
+			t.Errorf("the mark is left after a seed")
+		}
+	})
 }

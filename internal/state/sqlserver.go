@@ -35,6 +35,9 @@ var _ interface {
 type SQLServer struct {
 	o   Options
 	cfg msdsn.Config
+	// onWhole is called before a restore of the whole database
+	// (WholeRestorer).
+	onWhole func()
 
 	mu    sync.Mutex
 	pools map[string]*sql.DB // by database; "master" for the server
@@ -553,3 +556,7 @@ func (s *SQLServer) checkPristine(ctx context.Context, db string) error {
 	}
 	return fmt.Errorf("state %s: database %s, named as the pristine copy, was not made by driftgate seed and holds %d objects, schemas or users, so it is not dropped; drop it yourself or name another pristine database", s.o.Name, db, objects)
 }
+
+// OnWholeRestore sets what a restore calls before it restores the whole
+// database (WholeRestorer).
+func (s *SQLServer) OnWholeRestore(f func()) { s.onWhole = f }

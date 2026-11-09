@@ -172,6 +172,9 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 // the pristine copy's fingerprint: a restore of the whole database
 // changes items the caller did not name.
 func (s *SQLServer) restoreWhole(ctx context.Context, mark *sqlServerMark, w *sqlServerDatabase) (err error) {
+	if s.onWhole != nil {
+		s.onWhole()
+	}
 	saved, err := s.restoreDatabase(ctx, mark, w)
 	if err != nil {
 		return err

@@ -114,7 +114,7 @@ reads definitions of the working database when rows changed, and of the
 the pristine copy's. For 100 changed tables it takes under 1 ms on
 SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL. An older record
 format asks for a seed when a non-table object is on one side only. A
-restore that stopped halfway is completed by the next capture, unchecked.
+restore that stopped halfway leaves its items to the next capture, unchecked.
 
 ## When the state does not match the baseline
 

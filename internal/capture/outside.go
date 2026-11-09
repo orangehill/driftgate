@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -128,6 +129,7 @@ var rowKinds = map[string]bool{"table": true, "matview": true, "sequence": true}
 // of the pristine copy's changed tables is kept for redone.
 func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 	var out []outsideChange
+	exempt := map[string]map[string]bool{}
 	t.found, t.foundRO = states{}, states{}
 	t.outsideDefs, t.outsideRows = states{}, states{}
 	t.outsideRO = map[string]map[string]bool{}
@@ -145,19 +147,26 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 			return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
 		}
 		t.found[c.Name()] = cur
-		// A state DriftGate left: a restore that stopped halfway (killed,
-		// or failed: a database swapped out, offline or half restored),
-		// or no working database at all. The restore completes it; a
-		// change made outside DriftGate is found again by the next
-		// capture once it is back.
-		if f := t.restoring[c.Name()]; f != "" {
-			if _, err := os.Stat(f); err == nil {
-				fmt.Fprintf(t.out, "state %s: the last restore stopped halfway; this restore completes it (the check for changes made outside DriftGate is left out once)\n", c.Name())
-				continue
-			}
-		}
+		// No working database at all: nothing to keep (a database a
+		// restore swapped out halfway, or one never made).
 		if len(cur) == 0 {
 			continue
+		}
+		// A restore that stopped halfway (killed, or failed) left the
+		// items it was restoring as DriftGate left them: those are no
+		// change made outside DriftGate, and this restore completes them.
+		// Any other item is checked as always. A restore of the whole
+		// database leaves anything: nothing is checked then, once.
+		if m, ok := readRestoring(t.restoring[c.Name()]); ok {
+			if m.Whole {
+				fmt.Fprintf(t.out, "state %s: the last restore of the whole database stopped halfway; this restore completes it (the check for changes made outside DriftGate is left out once)\n", c.Name())
+				continue
+			}
+			fmt.Fprintf(t.out, "state %s: the last restore stopped halfway; this restore completes its %d %s\n", c.Name(), len(m.Items), plural(len(m.Items), "item", "items"))
+			exempt[c.Name()] = map[string]bool{}
+			for _, it := range m.Items {
+				exempt[c.Name()][it] = true
+			}
 		}
 		// A record of an older fingerprint format hashes views and
 		// triggers another way: their hashes are not compared (the restore
@@ -257,8 +266,38 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 		}
 		t.time.Fingerprint += time.Since(start)
 	}
+	kept := out[:0]
+	for _, ch := range out {
+		if !exempt[ch.component][ch.item] {
+			kept = append(kept, ch)
+		}
+	}
+	out = kept
 	sortChanges(out)
 	return out, nil
+}
+
+// restoringMark is what a restore keeps next to the record of the pristine
+// copy while it runs: the items it restores, and whether it restores the
+// whole database (a driver that cannot restore single items).
+type restoringMark struct {
+	Items []string `json:"items"`
+	Whole bool     `json:"whole,omitempty"`
+}
+
+// readRestoring reads the mark of a restore that stopped halfway; ok is
+// false without one. A mark that cannot be read exempts nothing.
+func readRestoring(path string) (restoringMark, bool) {
+	var m restoringMark
+	if path == "" {
+		return m, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return m, false
+	}
+	json.Unmarshal(raw, &m)
+	return m, true
 }
 
 // definitions reads the definitions of tables in the working database, and

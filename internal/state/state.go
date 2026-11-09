@@ -65,6 +65,14 @@ type Definer interface {
 	Contents(ctx context.Context, items []string, pristine bool) (Fingerprint, error)
 }
 
+// WholeRestorer is a component that restores single items but falls back
+// to a restore of the whole database (SQL Server: a view changed, a
+// database left offline): it calls the function OnWholeRestore set before
+// it does, so a restore that stops halfway is known to have left anything.
+type WholeRestorer interface {
+	OnWholeRestore(func())
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string
