@@ -42,21 +42,21 @@ func TestJSONErrorsTemplate(t *testing.T) {
 	}
 	var b strings.Builder
 	// A check without a store says nothing and makes no store.
-	jsonErrorsNote(p, &b, true)
+	templatesNote(p, &b, true)
 	if _, err := os.Stat(p.Layout.Store); b.Len() != 0 || err == nil {
 		t.Errorf("check without a store: %q, store made: %v", b.String(), err == nil)
 	}
 	// Otherwise once, also across commands.
-	jsonErrorsNote(p, &b, false)
-	jsonErrorsNote(p, &b, false)
-	jsonErrorsNote(p, &b, true)
+	templatesNote(p, &b, false)
+	templatesNote(p, &b, false)
+	templatesNote(p, &b, true)
 	if strings.Count(b.String(), "note:") != 1 || !strings.Contains(b.String(), "note: rails renders errors as JSON for API clients; add json-errors to templates: in driftgate.yaml") {
 		t.Errorf("once: %q", b.String())
 	}
 	b.Reset()
-	os.Remove(filepath.Join(p.Layout.Store, ".note-json-errors"))
+	os.Remove(filepath.Join(p.Layout.Store, ".note-templates"))
 	p.Templates = append(p.Templates, "json-errors")
-	jsonErrorsNote(p, &b, false)
+	templatesNote(p, &b, false)
 	if b.Len() != 0 {
 		t.Errorf("note with json-errors: %q", b.String())
 	}
@@ -73,5 +73,30 @@ func TestJSONErrorsCount(t *testing.T) {
 	runCLI(t, "discover", "--write", "--config", cfg)
 	if code, out, errOut := runCLI(t, "generate", "--config", cfg); code != 0 || !strings.Contains(out, "4 generated requests (1 of them json-errors)") {
 		t.Fatalf("generate: %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestTemplatesNoteEmptyBody: a Laravel project made with older templates
+// hears of empty-body as well as json-errors (its validation errors are
+// otherwise unchecked), and of empty-body alone once it has json-errors.
+func TestTemplatesNoteEmptyBody(t *testing.T) {
+	for templates, want := range map[string]string{
+		"[ok, not-found, json]": "note: laravel renders errors as JSON for API clients, and DriftGate reads laravel's validation rules, so an empty body shows a validation error; add json-errors and empty-body to templates: in driftgate.yaml",
+		"[ok, not-found, json, json-errors]": "note: DriftGate reads laravel's validation rules, so an empty body shows a validation error; add empty-body to templates: in driftgate.yaml",
+		"[ok, not-found, json, empty-body, json-errors]": "",
+	} {
+		root := t.TempDir()
+		cfg := filepath.Join(root, "driftgate.yaml")
+		write(t, cfg, "version: 1\nproject: shop\ntarget:\n  base_url: http://localhost:8000\ndiscover:\n  - adapter: laravel\n    command: [\"php\", \"artisan\", \"route:list\", \"--json\"]\ntemplates: "+templates+"\n")
+		t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+		p, err := config.Load(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		templatesNote(p, &b, false)
+		if want == "" && b.Len() != 0 || want != "" && !strings.Contains(b.String(), want) {
+			t.Errorf("%s: %q, want %q", templates, b.String(), want)
+		}
 	}
 }

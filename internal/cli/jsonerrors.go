@@ -41,22 +41,27 @@ func templatesFor(kinds []string) string {
 	return "[" + strings.Join(list, ", ") + "]"
 }
 
-// jsonErrorsNote says, once per local store, that a project of such a
-// framework generates no JSON variants of its error variants. The store
-// keeps a mark that it was said; a check (generate --check, a run that
-// only checks) makes no store for it, it says nothing without one.
-func jsonErrorsNote(p *config.Project, out io.Writer, check bool) {
-	if slices.Contains(p.Templates, routes.JSONErrors) {
-		return
-	}
-	framework := ""
+// templatesNote says, once per local store, which error templates a
+// project of such a framework lacks: json-errors where errors are rendered
+// by Accept (no JSON variants of its error variants), and empty-body where
+// discovery reads the validation rules (no request shows a validation
+// error). The store keeps a mark that it was said; a check (generate
+// --check, a run that only checks) makes no store for it, it says nothing
+// without one. (A store marked by an earlier release, which named only
+// json-errors, hears the whole note once.)
+func templatesNote(p *config.Project, out io.Writer, check bool) {
+	var missing, does []string
 	for _, a := range p.Discover {
-		if slices.Contains(errorsByAccept, a.Adapter) {
-			framework = a.Adapter
-			break
+		if slices.Contains(errorsByAccept, a.Adapter) && !slices.Contains(p.Templates, routes.JSONErrors) && !slices.Contains(missing, routes.JSONErrors) {
+			missing = append(missing, routes.JSONErrors)
+			does = append(does, a.Adapter+" renders errors as JSON for API clients")
+		}
+		if slices.Contains(validatesBodies, a.Adapter) && !slices.Contains(p.Templates, routes.EmptyBody) && !slices.Contains(missing, routes.EmptyBody) {
+			missing = append(missing, routes.EmptyBody)
+			does = append(does, "DriftGate reads "+a.Adapter+"'s validation rules, so an empty body shows a validation error")
 		}
 	}
-	if framework == "" {
+	if len(missing) == 0 {
 		return
 	}
 	if _, err := os.Stat(p.Layout.Store); err != nil {
@@ -67,15 +72,15 @@ func jsonErrorsNote(p *config.Project, out io.Writer, check bool) {
 			return
 		}
 	}
-	mark := filepath.Join(p.Layout.Store, ".note-json-errors")
+	mark := filepath.Join(p.Layout.Store, ".note-templates")
 	if _, err := os.Stat(mark); err == nil {
 		return
 	}
 	if os.WriteFile(mark, nil, 0o600) != nil {
 		return // said once, or not at all
 	}
-	fmt.Fprintf(out, "note: %s renders errors as JSON for API clients; add json-errors to templates: in %s and run driftgate generate --write to compare them too\n",
-		framework, rel(p.Root, p.Layout.Config))
+	fmt.Fprintf(out, "note: %s; add %s to templates: in %s and run driftgate generate --write to compare them too\n",
+		strings.Join(does, ", and "), strings.Join(missing, " and "), rel(p.Root, p.Layout.Config))
 }
 
 // countTemplate counts the generated requests of a template.

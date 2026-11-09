@@ -51,7 +51,7 @@ requests do not cover.
 - Parameter values come from `params:`. For routes it cannot make, it names every missing parameter, grouped by reason, with an example.
 - The same input always gives a byte-identical catalog.
 - The summary says how many generated requests `json-errors` made.
-- A project whose `discover:` uses the `laravel`, `symfony`, `rails` or `spring` adapter, and whose `templates:` lack `json-errors`, gets a one-line `note:` to add it ([templates](../driftgate-yaml.md#templates-generate-params)). The note comes once per local store, from `generate` or `run`; `generate --check` without a store says nothing.
+- A project whose `discover:` uses the `laravel`, `symfony`, `rails` or `spring` adapter, and whose `templates:` lack `json-errors`, gets a one-line `note:` to add it ([templates](../driftgate-yaml.md#templates-generate-params)). For `laravel`, whose validation rules DriftGate reads, the note names `empty-body` too when it is missing. The note comes once per local store, from `generate` or `run`; `generate --check` without a store says nothing.
 
 ```sh
 driftgate generate --check     # CI: is the committed catalog current?
