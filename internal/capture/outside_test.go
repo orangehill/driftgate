@@ -370,7 +370,8 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 	t.Cleanup(srv.Close)
 	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
 		Target: config.Target{BaseURL: srv.URL},
-		State:  map[string]config.Component{"db": {Driver: driver, DSN: config.Secret{Env: "DG_OUTSIDE_DSN"}, Working: work, Pristine: pristine}}}, t.TempDir())
+		State: map[string]config.Component{"db": {Driver: driver, DSN: config.Secret{Env: "DG_OUTSIDE_DSN"}, Working: work, Pristine: pristine,
+			RestoreEmpty: []string{"cache"}, RestoreOnly: []string{"tokens"}}}}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,11 +379,14 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 	create := []string{
 		"CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(50))",
 		"CREATE TABLE migrations (id INT AUTO_INCREMENT PRIMARY KEY, migration VARCHAR(50))",
+		"CREATE TABLE cache (k VARCHAR(50) PRIMARY KEY, v TEXT)",
+		"CREATE TABLE tokens (id INT AUTO_INCREMENT PRIMARY KEY, token VARCHAR(50))",
 	}
 	column := "ALTER TABLE users ADD COLUMN slug VARCHAR(50)"
 	if driver == config.Postgres {
 		open, suffix = dbx.OpenPostgres, " WITH (FORCE)"
-		create = []string{"CREATE TABLE users (id serial PRIMARY KEY, email text)", "CREATE TABLE migrations (id serial PRIMARY KEY, migration text)"}
+		create = []string{"CREATE TABLE users (id serial PRIMARY KEY, email text)", "CREATE TABLE migrations (id serial PRIMARY KEY, migration text)",
+			"CREATE TABLE cache (k text PRIMARY KEY, v text)", "CREATE TABLE tokens (id serial PRIMARY KEY, token text)", "CREATE SEQUENCE numbers"}
 		column = "ALTER TABLE users ADD COLUMN slug text"
 	}
 	admin, err := open(dsn, "", nil)
@@ -420,7 +424,28 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 		t.Fatal(err)
 	}
 	cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}}}
-	exec("INSERT INTO users (email) VALUES ('b@x')", "INSERT INTO migrations (migration) VALUES ('tried')", "DELETE FROM migrations WHERE migration = 'tried'")
+	exec("INSERT INTO users (email) VALUES ('b@x')", "INSERT INTO migrations (migration) VALUES ('tried')", "DELETE FROM migrations WHERE migration = 'tried'",
+		"INSERT INTO cache (k, v) VALUES ('k', 'v')", "INSERT INTO tokens (token) VALUES ('t')")
+	var version string
+	admin.QueryRow("SELECT VERSION()").Scan(&version)
+	sequences := driver == config.Postgres || strings.Contains(version, "MariaDB")
+	if sequences && driver != config.Postgres {
+		exec("CREATE SEQUENCE numbers")
+		if err := Seed(ctx, p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := "SELECT NEXT VALUE FOR numbers"
+	if driver == config.Postgres {
+		next = "SELECT nextval('numbers')"
+	}
+	if sequences {
+		exec(next) // a sequence that moved: rows
+		if _, err := Run(ctx, p, cat, Options{Tag: "moved"}); err != nil {
+			t.Fatalf("capture after a sequence moved: %v", err)
+		}
+		exec(next) // moved again, after a restore of it
+	}
 	if _, err := Run(ctx, p, cat, Options{Tag: "rows"}); err != nil {
 		t.Fatalf("capture after rows and a migration rolled back: %v", err)
 	}
@@ -434,4 +459,209 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 		t.Fatalf("capture after a migration: %v", err)
 	}
 	exec("UPDATE users SET slug = 'kept'") // the column is still there
+	exec("ALTER TABLE users DROP COLUMN slug", "DELETE FROM migrations WHERE migration = 'add_slug'")
+
+	// restore_empty and restore_only tables are never fingerprinted; a
+	// change of their definition stops the capture all the same.
+	for table, want := range map[string]string{"cache": "db/table:cache", "tokens": "db/table:tokens"} {
+		if driver == config.Postgres {
+			want = strings.Replace(want, "table:", "table:public.", 1)
+		}
+		exec("ALTER TABLE " + table + " ADD COLUMN extra INT")
+		_, err = Run(ctx, p, cat, Options{Tag: "ro-" + table})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "since the pristine copy was made: "+want+" (its definition changed). ") {
+			t.Fatalf("capture after a column of %s: %v", table, err)
+		}
+		exec("ALTER TABLE " + table + " DROP COLUMN extra")
+	}
+	if sequences {
+		item := "db/sequence:numbers"
+		if driver == config.Postgres {
+			item = "db/sequence:public.numbers"
+		}
+		exec("ALTER SEQUENCE numbers INCREMENT BY 5")
+		_, err = Run(ctx, p, cat, Options{Tag: "sequence"})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), item+" (its definition changed)") {
+			t.Fatalf("capture after ALTER SEQUENCE: %v", err)
+		}
+		exec("ALTER SEQUENCE numbers INCREMENT BY 1")
+	}
+	if _, err := Run(ctx, p, cat, Options{Tag: "back"}); err != nil {
+		t.Fatalf("capture with the definitions back: %v", err)
+	}
+}
+
+// TestChangedOutsideRestoreOnly: restore_only and restore_empty tables
+// (Laravel's cache, as setup proposes it) are restored at every restore
+// without a fingerprint: a column added to one stops the capture too,
+// rows written to them never do, nor do they with a record of the seed
+// made before their definitions were recorded.
+func TestChangedOutsideRestoreOnly(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change []string
+		want   string
+	}{
+		{"rows", []string{"INSERT INTO cache (key, value) VALUES ('k', 'v')", "INSERT INTO tokens (token) VALUES ('t')"}, ""},
+		{"restore_empty column", []string{"ALTER TABLE cache ADD COLUMN extra INT"}, "db/table:cache (its definition changed)"},
+		{"restore_only column", []string{"ALTER TABLE tokens ADD COLUMN extra INT"}, "db/table:tokens (its definition changed)"},
+		{"restore_only index", []string{"CREATE INDEX tokens_token ON tokens (token)"}, "db/table:tokens (its definition changed)"},
+		{"restore_only dropped", []string{"DROP TABLE tokens"}, "db/table:tokens (dropped since the pristine copy)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, srv := outsideApp(t, root)
+			for _, s := range []string{"CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT)", "CREATE TABLE tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT)"} {
+				if _, err := app.db.Exec(s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+				Target: config.Target{BaseURL: srv.URL},
+				State: map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"},
+					RestoreOnly: []string{"tokens"}, RestoreEmpty: []string{"cache"}}}}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "base"}); err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range c.change {
+				if _, err := app.db.Exec(s); err != nil {
+					t.Fatalf("%s: %v", s, err)
+				}
+			}
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("capture after %s: %v", c.name, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "since the pristine copy was made: "+c.want+". ") {
+				t.Fatalf("capture after %s: %v", c.name, err)
+			}
+		})
+	}
+}
+
+// TestMigrationsTableOfTheApplication: in a project whose framework keeps
+// its migrations in another table (Rails), an application table named
+// migrations is rows like any other; where it is the framework's own
+// (Laravel), the message says to exclude or rename it if it is the
+// application's.
+func TestMigrationsTableOfTheApplication(t *testing.T) {
+	for _, c := range []struct {
+		adapter, want string
+	}{
+		{"rails", ""},
+		{"laravel", `"…". When db/table:migrations is a table of the application, not of a migration tool, exclude it or rename it`},
+	} {
+		t.Run(c.adapter, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, srv := outsideApp(t, root)
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+				Target:   config.Target{BaseURL: srv.URL},
+				State:    map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}},
+				Discover: []discover.Adapter{{Adapter: c.adapter, Command: []string{"true"}}}}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := app.db.Exec("INSERT INTO migrations (migration, batch) VALUES ('a row of the application', 9)"); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+				t.Fatalf("%s: %v", c.adapter, err)
+			}
+		})
+	}
+}
+
+// TestChangedOutsideMigrateInPrepare: when prepare: runs the migrate
+// command already and still does not make the change again (a column from
+// another branch, or added by hand), the message does not say to add it to
+// prepare:; it says no migration of this checkout makes the change.
+func TestChangedOutsideMigrateInPrepare(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	// php: true makes the migrate command ["true", "artisan", "migrate",
+	// "--force"], which runs and changes nothing.
+	migrate := []string{"true", "artisan", "migrate", "--force"}
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+		Target:   config.Target{BaseURL: srv.URL},
+		State:    map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}},
+		Prepare:  []config.Command{{Run: migrate}},
+		Discover: []discover.Adapter{{Adapter: "laravel", Command: []string{"true"}, PHP: []string{"true"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec("ALTER TABLE users ADD COLUMN slug TEXT"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+	if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "prepare: runs the migrations already, so no migration of this checkout makes it: it comes from another branch, or was made by hand") ||
+		strings.Contains(err.Error(), "add prepare:") || !strings.Contains(err.Error(), "run driftgate seed") {
+		t.Fatalf("capture: %v", err)
+	}
+}
+
+// TestChangedOutsideOlderFormat: with a record of an older fingerprint
+// format, an item on one side only that is not a table may be one that
+// format does not make at all: the capture asks for a seed, rather than
+// call it made outside DriftGate.
+func TestChangedOutsideOlderFormat(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := serverOf(p, p.State["db"], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := pristinePath(p, "db", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	raw, _ := os.ReadFile(path)
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	delete(record, "format")
+	if err := snapshot.WriteJSON(path, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec("CREATE VIEW emails AS SELECT email FROM users"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+	if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "re-seed needed: the record of the pristine copy has an older fingerprint format, which may not make these items at all: [view:emails]") ||
+		strings.Contains(err.Error(), "changed outside DriftGate") {
+		t.Fatalf("capture: %v", err)
+	}
 }

@@ -188,6 +188,8 @@ type tracker struct {
 	found                    states
 	outsideDefs, outsideRows states
 	pristineDefs             states
+	// migrations are the project's migrations tables (migrationNames).
+	migrations map[string]bool
 }
 
 // openComponents connects to every state component, in name order.
@@ -294,7 +296,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		return nil, err
 	}
 	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
-		pristineDefs: states{}}
+		pristineDefs: states{}, migrations: migrationNames(p)}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -761,9 +763,11 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		}
 		if d, ok := c.(state.Definer); ok {
 			var tables []string
-			for it := range f {
-				if kind, _, _ := strings.Cut(it, ":"); kind == "table" || kind == "matview" {
-					tables = append(tables, it)
+			for _, fp := range []state.Fingerprint{f, pf.RestoreOnlyFingerprint} {
+				for it := range fp {
+					if kind, _, _ := strings.Cut(it, ":"); kind == "table" || kind == "matview" || kind == "sequence" {
+						tables = append(tables, it)
+					}
 				}
 			}
 			if pf.Definitions, err = d.Definitions(ctx, tables, true); err != nil {

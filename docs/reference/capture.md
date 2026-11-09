@@ -91,9 +91,9 @@ restore, the capture compares the working database with the pristine
 copy, and stops with exit 3 when a migration ran on it since the seed:
 
 - a table, view, trigger or other object was made or dropped;
-- the definition of a table changed: its columns, keys or indexes;
-- the definition of a view, trigger, function or type changed;
-- the rows of a migrations table changed, such as Laravel's `migrations`, Rails' `schema_migrations` or Django's `django_migrations`.
+- the definition of a table changed: its columns, keys or indexes, also of a `restore_only` or `restore_empty` table;
+- the definition of a view, trigger, function or type changed, or a sequence's parameters, such as its increment;
+- the rows of a migrations table changed, such as Laravel's `migrations`, Rails' `schema_migrations` or Django's `django_migrations`. When `discover:` names one of these frameworks, only its own table counts.
 
 The restore would undo that change, and the capture would run on the old
 schema. Rows the application wrote never stop a capture, nor does a
@@ -106,11 +106,15 @@ To go on, do one of these:
 
 1. Add the migrate command to [`prepare:`](driftgate-yaml.md#what-belongs-in-prepare). Every capture then runs the migrations after the restore, and the baseline stays valid.
 2. Or run `driftgate seed` to make the pristine copy anew, then follow [the next section](#when-the-state-does-not-match-the-baseline): the baseline was captured from the old copy.
+3. When `prepare:` runs the migrate command already, the change comes from another branch, or by hand. Add its migration, or seed.
 
 A `--read-only` capture takes no `prepare:`, so seed instead. The check
-reads definitions only when rows changed, of the working database; the
-seed recorded the pristine copy's. For 100 changed tables it takes under
-1 ms on SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL.
+reads definitions of the working database when rows changed, and of the
+`restore_only` and `restore_empty` tables every time. The seed recorded
+the pristine copy's. For 100 changed tables it takes under 1 ms on
+SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL. A record of an older
+fingerprint format asks for a seed when an object other than a table is
+on one side only.
 
 ## When the state does not match the baseline
 

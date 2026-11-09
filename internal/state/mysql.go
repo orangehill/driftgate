@@ -613,7 +613,46 @@ func (m *MySQL) Definitions(ctx context.Context, items []string, pristine bool) 
 		}
 		return nil
 	})
-	return f, err
+	if err != nil {
+		return nil, err
+	}
+	// A MariaDB sequence's CREATE statement: its parameters, without where
+	// it stands (next_not_cached_value is read apart).
+	db := m.o.Working
+	if pristine {
+		db = m.o.Pristine
+	}
+	var seqs []string
+	var reqs []showReq
+	for _, it := range items {
+		if name, ok := strings.CutPrefix(it, "sequence:"); ok {
+			seqs = append(seqs, name)
+			reqs = append(reqs, showReq{"SEQUENCE", db, name})
+		}
+	}
+	if len(reqs) == 0 {
+		return f, nil
+	}
+	c, err := m.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return nil, err
+	}
+	for i, s := range seqs {
+		if shown[i] == nil {
+			continue
+		}
+		def, err := dbx.ShowCreateStatement("SEQUENCE", s, shown[i])
+		if err != nil {
+			return nil, err
+		}
+		f["sequence:"+s] = hash([]byte(def))
+	}
+	return f, nil
 }
 
 // Contents hashes the rows of tables of the working database, or of the

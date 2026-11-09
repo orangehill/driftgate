@@ -402,6 +402,8 @@ func (s *SQLServer) Definitions(ctx context.Context, items []string, pristine bo
 		for _, it := range items {
 			if t := inv.ByItem[it]; t != nil && !t.Excluded {
 				f[it] = hash([]byte(inv.base[it]))
+			} else if def, ok := inv.base[it]; ok && strings.HasPrefix(it, "sequence:") {
+				f[it] = hash([]byte(def)) // its parameters; where it stands is in the values
 			}
 		}
 		return nil

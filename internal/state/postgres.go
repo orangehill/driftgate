@@ -532,10 +532,10 @@ func (p *Postgres) openRead(ctx context.Context, pristine bool) (d *sql.DB, done
 	return d, func() { d.Close(); closeAgain() }, nil
 }
 
-// Definitions hashes the definitions of tables and materialized views of
-// the working database, or of the pristine one (Definer): a table's
-// columns, constraints, indexes, triggers and what fingerprint adds to
-// them, a materialized view's query.
+// Definitions hashes the definitions of tables, materialized views and
+// sequences of the working database, or of the pristine one (Definer): a
+// table's columns, constraints, indexes, triggers and what fingerprint adds
+// to them, a materialized view's query, a sequence's parameters.
 func (p *Postgres) Definitions(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
 	f := Fingerprint{}
 	if len(items) == 0 {
@@ -558,8 +558,15 @@ func (p *Postgres) Definitions(ctx context.Context, items []string, pristine boo
 	for _, t := range tables {
 		present["table:"+t] = true
 	}
+	// A materialized view's query, and a sequence's parameters without
+	// where it stands (ALTER SEQUENCE … INCREMENT is a migration; a value
+	// that moved is a row written).
 	matviews := map[string]string{}
-	rows, err := d.QueryContext(ctx, `SELECT 'matview:' || schemaname || '.' || matviewname, definition FROM pg_matviews WHERE `+schemaFilter("schemaname"))
+	rows, err := d.QueryContext(ctx, `SELECT 'matview:' || schemaname || '.' || matviewname, definition FROM pg_matviews WHERE `+schemaFilter("schemaname")+`
+		 UNION ALL
+		 SELECT 'sequence:' || schemaname || '.' || sequencename,
+		        format('as %s start %s min %s max %s increment %s cycle %s cache %s', data_type, start_value, min_value, max_value, increment_by, cycle, cache_size)
+		   FROM pg_sequences WHERE `+schemaFilter("schemaname"))
 	if err != nil {
 		return nil, err
 	}

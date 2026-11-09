@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -66,6 +67,43 @@ var migrationTables = map[string]bool{
 	"goose_db_version": true, "_sqlx_migrations": true, "__diesel_schema_migrations": true,
 }
 
+// frameworkMigrations is the table the migration tool of a framework
+// discover: names records its migrations in.
+var frameworkMigrations = map[string]string{"laravel": "migrations", "rails": "schema_migrations", "django": "django_migrations", "symfony": "doctrine_migration_versions"}
+
+// migrationNames are the migrations tables of a project: those of the
+// frameworks its discover: names, or every one migrationTables knows when
+// it names none of them. An application's own table named migrations is
+// then no migrations table in a Rails project.
+func migrationNames(p *config.Project) map[string]bool {
+	names := map[string]bool{}
+	for _, a := range p.Discover {
+		if n, ok := frameworkMigrations[a.Adapter]; ok {
+			names[n] = true
+		}
+	}
+	if len(names) == 0 {
+		return migrationTables
+	}
+	return names
+}
+
+// migrationTable reports whether item is one of the project's migrations
+// tables (migrationNames; every one known without a project).
+func (t *tracker) migrationTable(item string) bool {
+	if t.migrations == nil {
+		return migrationTable(item)
+	}
+	name, ok := strings.CutPrefix(item, "table:")
+	if !ok {
+		return false
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	return t.migrations[strings.ToLower(name)]
+}
+
 // migrationTable reports whether item is the table:<name> of a table
 // migrationTables names, in any schema and letter case.
 func migrationTable(item string) bool {
@@ -110,13 +148,18 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 		// asks for a seed when they differ); tables are compared by their
 		// definitions, read anew on both sides.
 		older := t.formats[c.Name()] != state.FingerprintFormat
-		var tables, migrations []string
+		var tables, migrations, unknown []string
 		d, definer := c.(state.Definer)
 		for _, it := range state.Diff(cur, pf) {
 			_, now := cur[it]
 			_, then := pf[it]
 			kind, _, _ := strings.Cut(it, ":")
 			switch {
+			case older && now != then && kind != "table":
+				// The older format may not make such an item at all
+				// (PostgreSQL's functions, types and schemas came with
+				// format 2): only a seed tells.
+				unknown = append(unknown, it)
 			case !then:
 				out = append(out, outsideChange{c.Name(), it, outsideNew})
 			case !now:
@@ -125,10 +168,25 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 				if !older {
 					out = append(out, outsideChange{c.Name(), it, outsideDefinition})
 				}
-			case migrationTable(it) && !definer:
+			case t.migrationTable(it) && !definer:
 				out = append(out, outsideChange{c.Name(), it, outsideMigrations})
-			case kind != "sequence" && definer:
+			case definer:
 				tables = append(tables, it)
+			}
+		}
+		if len(unknown) > 0 {
+			return nil, envErr("state %s: re-seed needed: the record of the pristine copy has an older fingerprint format, which may not make these items at all: %v; run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(unknown, 20))
+		}
+		// The restore_only and restore_empty tables are restored at every
+		// restore without being fingerprinted: their definitions are
+		// compared every time (their rows never are).
+		restoreOnly := map[string]bool{}
+		if definer {
+			for it := range t.ro[c.Name()] {
+				if kind, _, _ := strings.Cut(it, ":"); kind == "table" {
+					tables = append(tables, it)
+					restoreOnly[it] = true
+				}
 			}
 		}
 		if len(tables) == 0 {
@@ -142,11 +200,15 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 		t.outsideDefs[c.Name()] = pris
 		changed := map[string]bool{}
 		for _, it := range state.Diff(work, pris) {
-			out = append(out, outsideChange{c.Name(), it, outsideDefinition})
+			how := outsideDefinition
+			if _, ok := work[it]; !ok {
+				how = outsideGone
+			}
+			out = append(out, outsideChange{c.Name(), it, how})
 			changed[it] = true
 		}
 		for _, it := range tables {
-			if migrationTable(it) && !changed[it] {
+			if t.migrationTable(it) && !changed[it] && !restoreOnly[it] {
 				migrations = append(migrations, it)
 			}
 		}
@@ -174,7 +236,7 @@ func definitions(ctx context.Context, d state.Definer, tables []string, recorded
 	if work, err = d.Definitions(ctx, tables, false); err != nil {
 		return nil, nil, fmt.Errorf("definitions: %v", err)
 	}
-	if recorded != nil {
+	if recorded != nil && len(recorded.Subset(tables)) == len(tables) {
 		return work, recorded.Subset(tables), nil
 	}
 	if pris, err = d.Definitions(ctx, tables, true); err != nil {
@@ -274,6 +336,19 @@ func changedItems(changes []outsideChange, n int) string {
 // framework discover: names, as prepare: takes it, or "" when there is no
 // one such framework.
 func migrateCommand(p *config.Project) string {
+	cmd := migrateArgs(p)
+	if cmd == nil {
+		return ""
+	}
+	quoted := make([]string, len(cmd))
+	for i, w := range cmd {
+		quoted[i] = fmt.Sprintf("%q", w)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// migrateArgs is migrateCommand as a program and its arguments, or nil.
+func migrateArgs(p *config.Project) []string {
 	var cmd []string
 	for _, a := range p.Discover {
 		var c []string
@@ -294,18 +369,11 @@ func migrateCommand(p *config.Project) string {
 			continue
 		}
 		if cmd != nil && strings.Join(cmd, "\x00") != strings.Join(c, "\x00") {
-			return ""
+			return nil
 		}
 		cmd = c
 	}
-	if cmd == nil {
-		return ""
-	}
-	quoted := make([]string, len(cmd))
-	for i, w := range cmd {
-		quoted[i] = fmt.Sprintf("%q", w)
-	}
-	return "[" + strings.Join(quoted, ", ") + "]"
+	return cmd
 }
 
 // outsideErr is the error of a capture that stops for changes made outside
@@ -317,14 +385,33 @@ func outsideErr(p *config.Project, changes []outsideChange, opt Options, restore
 		prepare = "prepare: [" + cmd + "]"
 	}
 	what := "the working database was changed outside DriftGate since the pristine copy was made: " + changedItems(changes, 20)
-	seed := "run driftgate seed to make the pristine copy anew (--skip-commands keeps the data as it is now), then " + rebaseSteps(p, opt.Baseline)
-	switch {
-	case restored:
-		return envErr("%s. The restore at the start of the capture undid that, and prepare did not make it again, so the capture would run on the old schema and could pass. Fix: add %s in %s; or run the migrations again (the restore left the pristine copy's data) and %s", what, prepare, configPath(p), seed)
-	case opt.ReadOnly:
-		return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix (a --read-only capture takes no prepare:): %s", what, seed)
+	var mine []string
+	for _, ch := range changes {
+		if ch.how == outsideMigrations {
+			mine = append(mine, ch.component+"/"+ch.item)
+		}
 	}
-	return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix: add %s in %s, so every capture runs the migrations after the restore and the baseline stays valid; or %s", what, prepare, configPath(p), seed)
+	hint := ""
+	if len(mine) > 0 {
+		// A table of the application that happens to have the name.
+		hint = fmt.Sprintf(". When %s is a table of the application, not of a migration tool, exclude it or rename it", strings.Join(mine, ", "))
+	}
+	seed := "run driftgate seed to make the pristine copy anew (--skip-commands keeps the data as it is now), then " + rebaseSteps(p, opt.Baseline)
+	migrates := false
+	if args := migrateArgs(p); args != nil {
+		for _, c := range p.Prepare {
+			migrates = migrates || slices.Equal(c.Run, args)
+		}
+	}
+	switch {
+	case restored && migrates:
+		return envErr("%s. The restore at the start of the capture undid that, and prepare: runs the migrations already, so no migration of this checkout makes it: it comes from another branch, or was made by hand. The capture would run without it and could pass. Fix: if it belongs to this checkout, add its migration; otherwise %s%s", what, seed, hint)
+	case restored:
+		return envErr("%s. The restore at the start of the capture undid that, and prepare did not make it again, so the capture would run on the old schema and could pass. Fix: add %s in %s; or run the migrations again (the restore left the pristine copy's data) and %s%s", what, prepare, configPath(p), seed, hint)
+	case opt.ReadOnly:
+		return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix (a --read-only capture takes no prepare:): %s%s", what, seed, hint)
+	}
+	return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix: add %s in %s, so every capture runs the migrations after the restore and the baseline stays valid; or %s%s", what, prepare, configPath(p), seed, hint)
 }
 
 // rebaseSteps says how a baseline captured from other data takes the data
