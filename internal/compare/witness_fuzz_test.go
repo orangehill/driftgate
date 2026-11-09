@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"unicode/utf16"
 
@@ -811,31 +810,21 @@ func FuzzWitness(f *testing.F) {
 }
 
 // TestWitnessProperty runs the property over many generated cases, as a
-// test (FuzzWitness searches further). The seeds are split over parallel
-// subtests; together they report at most 5 failures, each with its seed.
+// test (FuzzWitness searches further).
 func TestWitnessProperty(t *testing.T) {
-	const seeds, shards, maxFailures = 20000, 16, 5
-	var failures atomic.Int32
-	for shard := range shards {
-		t.Run(fmt.Sprint(shard), func(t *testing.T) {
-			t.Parallel()
-			for seed := shard; seed < seeds; seed += shards {
-				if failures.Load() >= maxFailures {
-					return
-				}
-				r := rand.New(rand.NewPCG(uint64(seed), 7))
-				data := make([]byte, 96)
-				for i := range data {
-					data[i] = byte(r.Uint32())
-				}
-				if msg := checkWitness(t, data); msg != "" {
-					if failures.Add(1) > maxFailures {
-						return
-					}
-					t.Errorf("seed %d: %s", seed, msg)
-				}
+	failures := 0
+	for seed := range 20000 {
+		r := rand.New(rand.NewPCG(uint64(seed), 7))
+		data := make([]byte, 96)
+		for i := range data {
+			data[i] = byte(r.Uint32())
+		}
+		if msg := checkWitness(t, data); msg != "" {
+			t.Error(msg)
+			if failures++; failures == 5 {
+				return
 			}
-		})
+		}
 	}
 }
 
