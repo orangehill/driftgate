@@ -231,7 +231,8 @@ func TestSQLServerDropPristineRetried(t *testing.T) {
 	if err := s.Seed(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer func(w time.Duration) { sqlServerOthersWait = w }(sqlServerOthersWait)
+	wait := sqlServerOthersWait
+	defer func() { sqlServerOthersWait = wait }()
 	sqlServerOthersWait = 300 * time.Millisecond
 	s.retried.Store(0)
 	s.hooks = &ssHooks{drop: func(ctx context.Context, c *sql.Conn, q string) error {
@@ -243,7 +244,11 @@ func TestSQLServerDropPristineRetried(t *testing.T) {
 	if was, err := s.DropPristine(ctx); was || err == nil || s.retried.Load() == 0 || access() != "MULTI_USER" {
 		t.Fatalf("stopped on every try: %v %v, run again %d times, %s", was, err, s.retried.Load(), access())
 	}
+	// The drop itself with the whole wait: other packages' seeds restore
+	// their copies meanwhile (927 about <pristine>_dgnew of theirs), for
+	// longer than 300 ms.
 	s.hooks = nil
+	sqlServerOthersWait = wait
 	if was, err := s.DropPristine(ctx); !was || err != nil {
 		t.Fatalf("drop: %v %v", was, err)
 	}

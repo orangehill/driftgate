@@ -85,7 +85,7 @@ Every way, with the verification commands: [Install DriftGate](docs/start/instal
 - [Upgrade a framework step by step](docs/guides/workflow/framework-upgrade.md): the check after every upgrade step.
 
 In CI, the GitHub Action runs the same check on every pull request
-([CI with GitHub Actions](docs/guides/github-actions.md)).
+([CI with GitHub Actions](docs/guides/ci/github-actions.md)).
 
 ## Documentation
 

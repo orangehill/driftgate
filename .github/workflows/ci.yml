@@ -135,6 +135,8 @@ jobs:
         run: go test -count=1 -run=Budget ./internal/compare/ ./internal/jsonx/
       - name: Fuzz the JSON parser
         run: go test -run='^$' -fuzz=FuzzParse -fuzztime=60s ./internal/jsonx/
+      - name: Fuzz the dump reader of data verify
+        run: go test -run='^$' -fuzz=FuzzStatements -fuzztime=60s ./internal/data/
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
@@ -320,8 +322,14 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      # One package at a time (-p 1). On SQL Server 2017 and 2019 a
+      # statement fails while another database of the server changes, and
+      # the state tests keep other databases changing or restoring on
+      # purpose (TestSQLServerOtherDatabaseRestoring) for a minute and
+      # more: the packages run alongside them could not tell that from a
+      # failure of their own. The state tests cover the retries.
       - name: Test
-        run: go test -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
+        run: go test -p 1 -count=1 -timeout "$GO_TEST_TIMEOUT" -run SQLServer ./internal/state/ ./internal/capture/ ./internal/cli/ ./tools/e2e/
       - name: TLS
         env:
           IMAGE: mcr.microsoft.com/mssql/server:${{ matrix.version }}

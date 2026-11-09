@@ -139,7 +139,7 @@ needs `--allow-non-loopback`.
 - A gzip or deflate body is decoded for the scan, within 16 MiB of decoded size.
 - A body in another encoding (`br`, `zstd`), one that does not decode, and one over 16 MiB count as personal data, so the entry is private. So does one cut off because the client or the service went away.
 - The client gets the body as the service sent it.
-- Request and response bodies are held in memory up to 16 MiB per request. A larger request body passes through unrecorded.
+- Request and response bodies are held in memory up to 16 MiB per request. A larger request body passes through, and the request is proposed without its body, with a note to add it by hand.
 - The request rate is not limited: the proxy is local and as fast as the service.
 
 ### No telemetry

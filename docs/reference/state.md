@@ -232,7 +232,7 @@ state:
 Anything else (Redis, files, a search index) is a component with
 `restore`, required, and optionally `fingerprint`: a command whose
 output must be the same after every restore
-([recipes](../guides/side-checks.md)). `dsn`, `working`, `pristine`,
+([recipes](../guides/catalog/side-checks.md)). `dsn`, `working`, `pristine`,
 `exclude`, `restore_only`, `restore_empty` and `row_tracking` need a
 driver.
 
