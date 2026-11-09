@@ -85,6 +85,11 @@ $ driftgate coverage
 every route is covered or excluded ✓
 ```
 
+When a gap is listed above it, the last line names the gaps instead of
+the ✓, and the exit code stays 0. A gap is a route whose validation
+error no request checks, or one reached only by requests that answered
+an error.
+
 ### When a request counts as failed
 
 With a baseline, a request covers its route only when it did not fail

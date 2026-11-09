@@ -127,8 +127,8 @@ func failedRouteLines(rs []routes.FailedRoute) []string {
 }
 
 const (
-	knownTitle          = "Known failures (known_failures: in exclusions.yaml; still compared)"
-	staleKnownTitle     = "Known failures that are stale (remove them from exclusions.yaml)"
+	knownTitle      = "Known failures (known_failures: in exclusions.yaml; still compared)"
+	staleKnownTitle = "Known failures that are stale (remove them from exclusions.yaml)"
 )
 
 // failedRoutesTitle heads the routes whose requests all failed in the

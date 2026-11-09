@@ -500,9 +500,26 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 	section(out, "Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
 	section(out, noInvalidBodyTitle, c.NoInvalidBody)
 	if code == ExitClean {
-		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
+		fmt.Fprintln(out, "\n"+coveredLine(c))
 	}
 	return c, code, nil
+}
+
+// coveredLine is the last line of a coverage without uncovered routes: a
+// ✓ only when no gap was listed above it either (routes whose validation
+// error no request checks, routes only error answers reach).
+func coveredLine(c *routes.Coverage) string {
+	var gaps []string
+	if n := len(c.NoInvalidBody); n > 0 {
+		gaps = append(gaps, fmt.Sprintf("%d %s whose validation error no request checks", n, plural(n, "route method", "route methods")))
+	}
+	if n := len(c.ErrorOnly); n > 0 {
+		gaps = append(gaps, fmt.Sprintf("%d %s reached only by requests that answered an error", n, plural(n, "route", "routes")))
+	}
+	if len(gaps) == 0 {
+		return "every route is covered or excluded ✓"
+	}
+	return "every route is covered or excluded, with gaps listed above: " + strings.Join(gaps, "; ")
 }
 
 // noInvalidBodyTitle heads the covered routes whose validation error no

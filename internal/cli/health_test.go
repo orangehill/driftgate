@@ -183,3 +183,21 @@ func TestFailedTitlesByMode(t *testing.T) {
 		t.Errorf("evolve: %s / %s", failedRoutesTitle(config.Evolve), failedRequestsTitle(config.Evolve))
 	}
 }
+
+// TestCoveredLine: coverage ends with a ✓ only when it listed no gap
+// either; a gap list printed above it is named on the last line.
+func TestCoveredLine(t *testing.T) {
+	for _, c := range []struct {
+		cov  routes.Coverage
+		want string
+	}{
+		{routes.Coverage{}, "every route is covered or excluded ✓"},
+		{routes.Coverage{NoInvalidBody: []string{"POST /api/import"}}, "every route is covered or excluded, with gaps listed above: 1 route method whose validation error no request checks"},
+		{routes.Coverage{NoInvalidBody: []string{"POST /a", "POST /b"}, ErrorOnly: []string{"GET /c"}},
+			"every route is covered or excluded, with gaps listed above: 2 route methods whose validation error no request checks; 1 route reached only by requests that answered an error"},
+	} {
+		if got := coveredLine(&c.cov); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.cov, got, c.want)
+		}
+	}
+}
