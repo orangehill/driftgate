@@ -245,7 +245,7 @@ func benchSeed(b *testing.B, s *server, src string, users int) {
 	}
 	s.create(b, src)
 	first := min(users, 2000)
-	s.exec(b, src, seedStatements(s.driver, people(first), mariadb)...)
+	s.exec(b, src, seedStatements(s.driver, people(first), invoiceSequence(s, mariadb))...)
 	for from := first + 1; from <= users; from += 2000 {
 		var ps []person
 		for i := from; i < min(from+2000, users+1); i++ {

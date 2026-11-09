@@ -90,7 +90,9 @@ In CI, the GitHub Action runs the same check on every pull request
 ## Documentation
 
 Everything else, by task and by topic, is in the
-[documentation](docs/README.md).
+[documentation](docs/README.md). Two pages to start from:
+[what DriftGate can do](docs/capabilities.md), and
+[troubleshooting](docs/troubleshooting.md) when something goes wrong.
 
 ## Contributing
 

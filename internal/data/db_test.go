@@ -59,13 +59,28 @@ func newPerson(i int) person {
 	}
 }
 
+// invoiceSequence is the sequence of seedStatements on MariaDB, "" on
+// other servers. A Galera node creates a sequence with MariaDB's default
+// cache only with an increment of 0 (auto_increment_increment, 1235).
+func invoiceSequence(s *server, mariadb bool) string {
+	if !mariadb {
+		return ""
+	}
+	def := "CREATE SEQUENCE invoice_numbers START WITH 100"
+	var wsrep int
+	if s.admin.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+		def += " INCREMENT BY 0"
+	}
+	return def
+}
+
 func lit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // seedStatements builds the source database: references (also on a personal
 // column), a generated column, a trigger, views over views, JSON, HTML and
 // free text with embedded personal data, serialized PHP, a table without a
-// primary key.
-func seedStatements(driver string, ps []person, mariadb bool) []string {
+// primary key; on MariaDB (sequence, from invoiceSequence) a sequence.
+func seedStatements(driver string, ps []person, sequence string) []string {
 	var st []string
 	if driver == MySQL {
 		st = append(st,
@@ -91,8 +106,10 @@ func seedStatements(driver string, ps []person, mariadb bool) []string {
 			"CREATE TRIGGER post_log_bi BEFORE INSERT ON post_log FOR EACH ROW SET NEW.action = IF('a' = 'A', NEW.action, CONCAT(NEW.action, ':bin'))",
 			"SET NAMES utf8mb4",
 		)
-		if mariadb {
-			st = append(st, "CREATE SEQUENCE invoice_numbers START WITH 100", "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)")
+		if sequence != "" {
+			st = append(st, sequence, "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)",
+				// One that has cycled: its count of cycles is copied too.
+				"CREATE SEQUENCE rounds MINVALUE 1 MAXVALUE 2 NOCACHE CYCLE", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)")
 		}
 	} else {
 		st = append(st,
@@ -300,7 +317,7 @@ func testAnonymize(t *testing.T, s *server) {
 	ps := people(testUsers())
 	s.create(t, src)
 	s.drop(dst, loaded)
-	s.exec(t, src, seedStatements(s.driver, ps, mariadb)...)
+	s.exec(t, src, seedStatements(s.driver, ps, invoiceSequence(s, mariadb))...)
 
 	rulesText := testRules
 	if s.driver == Postgres {
@@ -440,6 +457,10 @@ func testAnonymize(t *testing.T, s *server) {
 			// (next_not_cached_value): a gap, as after a server restart.
 			if n := count(tdb, "SELECT NEXTVAL(invoice_numbers)"); n != 1100 {
 				t.Errorf("sequence continues at %d", n)
+			}
+			var next, cycles int
+			if err := tdb.QueryRow("SELECT next_not_cached_value, cycle_count FROM rounds").Scan(&next, &cycles); err != nil || next != 2 || cycles != 1 {
+				t.Errorf("cycled sequence: next %d, cycles %d, %v; want 2, 1", next, cycles, err)
 			}
 		}
 	} else {

@@ -12,22 +12,7 @@ keeps the old headings, so older links still work.
 | `classify.yaml` | [classify.yaml](reference/classify-yaml.md) |
 
 ## What to use for what
-
-| Task or symptom | What to use |
-|---|---|
-| a value that may change on every request (a time, a token) | a [body or header rule](reference/allowlist-yaml.md), with a format and a reason |
-| the same header differs on every request (another server stack) | a [header rule](reference/allowlist-yaml.md#header-rules); the [line on one change](reference/reports.md#one-change-in-almost-every-request) proposes it |
-| rows in another order (`item-order`; another database server or ORM) | an [array rule](reference/allowlist-yaml.md#array-rules): `key` pairs the items, `any_order` allows the order |
-| uploading a file | a [`multipart`](reference/catalog-json.md#multipart) catalog entry with a fixture from the uploads folder |
-| a queue worker, a command, an import or export, an admin path that changes the schema | a [command step](reference/catalog-json.md#command-steps), or a catalog request for the path; [side checks](guides/catalog/side-checks.md) |
-| measured, not compared (a value no rule can describe) | [`observe`](reference/driftgate-yaml.md#observe) |
-| what the gate does not check | `driftgate coverage`, and the [not-covered summary](reference/reports.md#what-the-result-does-not-cover) after every comparison |
-| two server stacks (database, PHP, web server) | [upgrading the server](guides/workflow/server-upgrade.md) |
-
-The header rule's line names `server`, `x-powered-by` and `via` with the
-exact new value. Any other header that changed is fixed, accepted or
-expected. `driftgate help catalog`, `help allowlist`, `help exclusions`,
-`help classify` and `help config` list the fields of those files.
+Moved to [What DriftGate can do](capabilities.md): every feature, with when to use it.
 
 ## driftgate.yaml
 Moved to [driftgate.yaml](reference/driftgate-yaml.md).

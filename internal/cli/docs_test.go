@@ -5,13 +5,16 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
+	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/docscheck"
 )
 
@@ -297,4 +300,108 @@ func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
 		}
 	}
 	return out, meanings
+}
+
+var (
+	capRow  = regexp.MustCompile(`^\|\s*<!-- cap: ([a-z0-9-]+) -->`)
+	rowLink = regexp.MustCompile(`\[(guide|reference)\]\(([^)\s]+)\)`)
+)
+
+// TestCapabilitiesParity: every row of docs/capabilities.md has a unique ID,
+// a reference link and a guide link (or none, "—") that resolve; every
+// command of driftgate help has a row that links its own section; and every
+// key of driftgate.yaml and catalog.json is named in a heading or a table of
+// its own reference page.
+func TestCapabilitiesParity(t *testing.T) {
+	p := docPages(t)
+	d, err := p.Get("docs/capabilities.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	refs := map[string]bool{} // page#anchor of every reference link
+	for i, line := range d.Lines {
+		m := capRow.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if ids[m[1]] {
+			t.Errorf("capabilities.md:%d: the ID %s is used twice", i+1, m[1])
+		}
+		ids[m[1]] = true
+		kinds := map[string]bool{}
+		for _, l := range rowLink.FindAllStringSubmatch(line, -1) {
+			kinds[l[1]] = true
+			if err := p.Resolve("docs/capabilities.md", l[2]); err != nil {
+				t.Errorf("capabilities.md:%d: %s link %s: %v", i+1, l[1], l[2], err)
+			}
+			if l[1] == "reference" {
+				rel, anchor, _ := docscheck.Local("docs/capabilities.md", l[2])
+				refs[rel+"#"+anchor] = true
+			}
+		}
+		if !kinds["reference"] {
+			t.Errorf("capabilities.md:%d: %s has no reference link", i+1, m[1])
+		}
+		if !kinds["guide"] && !strings.Contains(line, "| — |") {
+			t.Errorf("capabilities.md:%d: %s has no guide link, nor —", i+1, m[1])
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("capabilities.md has no rows")
+	}
+	for _, c := range commands {
+		if !refs["docs/"+c.doc] {
+			t.Errorf("no capability row links the section of the command %s (%s)", c.name, c.doc)
+		}
+	}
+	for _, c := range []struct {
+		page  string
+		types []reflect.Type
+		tag   string
+	}{
+		{"docs/reference/driftgate-yaml.md", []reflect.Type{reflect.TypeOf(config.Config{})}, "yaml"},
+		{"docs/reference/catalog-json.md", []reflect.Type{reflect.TypeOf(catalog.Request{}), reflect.TypeOf(catalog.Multipart{}), reflect.TypeOf(catalog.Catalog{})}, "json"},
+	} {
+		named := pageNames(t, p, c.page)
+		for _, ty := range c.types {
+			for _, k := range yamlKeys(ty, c.tag) {
+				if !strings.Contains(named, "`"+k+"`") && !regexp.MustCompile(`(?m)(^|[ ,])`+regexp.QuoteMeta(k)+`([ ,]|$)`).MatchString(named) {
+					t.Errorf("the key %s is named in no heading or table of %s", k, c.page)
+				}
+			}
+		}
+	}
+}
+
+// pageNames are the headings of a page and the first column of its tables,
+// one per line.
+func pageNames(t *testing.T, p *docscheck.Pages, page string) string {
+	t.Helper()
+	d, err := p.Get(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, h := range d.Headings {
+		b.WriteString(h.Text + "\n")
+	}
+	for _, l := range d.Lines {
+		if strings.HasPrefix(l, "| `") || strings.HasPrefix(l, "| [`") {
+			first, _, _ := strings.Cut(strings.TrimPrefix(l, "|"), "|")
+			b.WriteString(first + "\n")
+		}
+	}
+	return b.String()
+}
+
+// yamlKeys are the names of the fields of a struct under a tag.
+func yamlKeys(ty reflect.Type, tag string) []string {
+	var out []string
+	for i := range ty.NumField() {
+		if name, _, _ := strings.Cut(ty.Field(i).Tag.Get(tag), ","); name != "" && name != "-" {
+			out = append(out, name)
+		}
+	}
+	return out
 }

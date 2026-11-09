@@ -79,7 +79,7 @@ This is the structure the documentation is moving to; until a folder exists, a p
 
 - Use the terms of the [glossary](../docs/glossary.md), with the meanings given there.
 - Avoid the [words we do not use](../docs/glossary.md#words-we-do-not-use).
-- Cut words that carry nothing: "note that", "it is important to", "in order to", "basically", "simply", "just", "as mentioned", "please", "actually", "of course".
+- Cut words that carry nothing, such as "it is important to" and "just"; the others are in the glossary list above.
 - Active voice, present tense, and "you" in guides.
 
 ## Names in examples

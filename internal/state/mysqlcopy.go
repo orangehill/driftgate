@@ -62,24 +62,40 @@ type tableInfo struct {
 }
 
 // tableInfos reads the tableInfo of the tables of db, those it finds.
+//
+// Each information_schema table is filtered by db itself, not through a
+// join: MariaDB then reads db alone, where a joined one is read for every
+// database of the server (EXPLAIN: "Scanned all databases"), opening every
+// table there, which a Galera node aborts when another session alters one
+// of them (1213).
+//
+// Table names are compared as bytes (CAST … AS BINARY): information_schema
+// compares them without case, so with lower_case_table_names=0, where
+// users and Users are two tables, a join or a list of names would mix the
+// columns, keys and rows of the two, or drop one of them.
 func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (map[string]*tableInfo, error) {
 	out := map[string]*tableInfo{}
 	if len(tables) == 0 {
 		return out, nil
 	}
-	args := []any{db}
 	marks := make([]string, len(tables))
+	names := make([]any, len(tables))
 	for i, t := range tables {
-		marks[i] = "?"
-		args = append(args, t)
+		marks[i], names[i] = "?", t
 	}
-	rows, err := c.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, k.COLUMN_NAME IS NOT NULL, COALESCE(t.TABLE_ROWS, 0)
-		FROM information_schema.TABLES t
-		JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
-		LEFT JOIN information_schema.KEY_COLUMN_USAGE k ON k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME
-			AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME = 'PRIMARY'
-		WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME IN (`+strings.Join(marks, ", ")+`)
-		ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`, args...)
+	in := strings.Join(marks, ", ")
+	args := append(append(append([]any{db}, db), names...), db)
+	args = append(args, names...)
+	rows, err := c.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA,
+			(CAST(c.TABLE_NAME AS BINARY), c.COLUMN_NAME) IN (SELECT CAST(k.TABLE_NAME AS BINARY), k.COLUMN_NAME
+				FROM information_schema.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA = ? AND k.CONSTRAINT_NAME = 'PRIMARY'),
+			COALESCE(t.n, 0)
+		FROM information_schema.COLUMNS c
+		JOIN (SELECT CAST(TABLE_NAME AS BINARY) AS name, MAX(TABLE_ROWS) AS n FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = ? AND CAST(TABLE_NAME AS BINARY) IN (`+in+`) GROUP BY CAST(TABLE_NAME AS BINARY)) t
+			ON t.name = CAST(c.TABLE_NAME AS BINARY)
+		WHERE c.TABLE_SCHEMA = ? AND CAST(c.TABLE_NAME AS BINARY) IN (`+in+`)
+		ORDER BY CAST(c.TABLE_NAME AS BINARY), c.ORDINAL_POSITION`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -538,8 +554,9 @@ func readTableInfo(ctx context.Context, c *sql.Conn, src, t string) (*tableInfo,
 		return in, nil
 	}
 	rows, err := c.QueryContext(ctx, `SELECT k.COLUMN_NAME, c.DATA_TYPE FROM information_schema.KEY_COLUMN_USAGE k
-		JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA = k.TABLE_SCHEMA AND c.TABLE_NAME = k.TABLE_NAME AND c.COLUMN_NAME = k.COLUMN_NAME
-		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.CONSTRAINT_NAME = 'PRIMARY'`, src, t)
+		JOIN information_schema.COLUMNS c ON c.COLUMN_NAME = k.COLUMN_NAME
+		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.CONSTRAINT_NAME = 'PRIMARY'
+			AND c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ?`, src, t, src, t)
 	if err != nil {
 		return nil, err
 	}

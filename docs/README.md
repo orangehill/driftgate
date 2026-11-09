@@ -27,9 +27,8 @@ and [where DriftGate keeps its files](concepts/project-layout.md).
 
 ## What it can do
 
-[What to use for what](configuration.md) names the feature for a task or
-a symptom: an upload, rows in another order, a command, a value that may
-change, a gap in the check.
+- [What DriftGate can do](capabilities.md): every feature, when to use it, its guide and its reference, and what DriftGate does not do.
+- [Troubleshooting](troubleshooting.md): a symptom or a message, its cause, and what to do.
 
 ## Look something up
 

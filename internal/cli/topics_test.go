@@ -14,7 +14,7 @@ import (
 
 // TestHelpTopics: help catalog, allowlist, exclusions, classify and
 // config list every field of those files and the section to read (help allowlist also the allowlist
-// command); an unknown topic points to the table of what to use for a task.
+// command); an unknown topic points to the page of what DriftGate can do.
 func TestHelpTopics(t *testing.T) {
 	fields := func(v any, tag string) []string {
 		var out []string
@@ -52,7 +52,7 @@ func TestHelpTopics(t *testing.T) {
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/allowlist-yaml.md", "usage: driftgate allowlist check"}},
 		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/exclusions-yaml.md"}},
-		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), withoutKey(fields(data.ColumnRule{}, "yaml"), "options")...), fields(data.SchemaRule{}, "yaml")...),
+		{"classify", append(append(append(fields(data.Rules{}, "yaml"), fields(data.TableRule{}, "yaml")...), fields(data.ColumnRule{}, "yaml")...), fields(data.SchemaRule{}, "yaml")...),
 			[]string{"(beside driftgate.yaml)", docsBase() + "reference/classify-yaml.md"}},
 		{"config", fields(config.Config{}, "yaml"),
 			[]string{"driftgate.yaml", docsBase() + "reference/driftgate-yaml.md#top-level-keys"}},
@@ -87,18 +87,6 @@ func TestHelpTopics(t *testing.T) {
 	}
 }
 
-// withoutKey is keys without key. ColumnRule's options is refused for every
-// column kind (data.ColumnRule.validate), so help classify does not offer it.
-func withoutKey(keys []string, key string) []string {
-	var out []string
-	for _, k := range keys {
-		if k != key {
-			out = append(out, k)
-		}
-	}
-	return out
-}
-
 // TestHelpNamesTopics: driftgate help names every help topic.
 func TestHelpNamesTopics(t *testing.T) {
 	_, out, _ := runCLI(t, "help")
@@ -115,6 +103,21 @@ func TestHelpNamesTopics(t *testing.T) {
 	for _, tp := range topics {
 		if !strings.Contains(line, " "+tp.name+",") && !strings.HasSuffix(line, " "+tp.name) {
 			t.Errorf("driftgate help does not name the topic %s: %s", tp.name, line)
+		}
+	}
+}
+
+// TestHelpLinksDocs: driftgate help ends with the documentation, what
+// DriftGate can do and the symptoms, each a page of this checkout.
+func TestHelpLinksDocs(t *testing.T) {
+	_, out, _ := runCLI(t, "help")
+	p := docPages(t)
+	for _, page := range []string{"README.md", tasksDoc, "troubleshooting.md"} {
+		if !strings.Contains(out, docsBase()+page+"\n") {
+			t.Errorf("driftgate help does not link %s:\n%s", page, out)
+		}
+		if err := p.Resolve("docs/README.md", page); err != nil {
+			t.Errorf("help link %s: %v", page, err)
 		}
 	}
 }
