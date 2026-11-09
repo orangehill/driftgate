@@ -419,6 +419,18 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 	if n := r.NoBaselineNote(); !strings.Contains(n, "a capture of the whole catalog (run without --only, then driftgate baselines rebase local") {
 		t.Errorf("--only: %q", n)
 	}
+	// Next to a drift, even an expected one, no rebase command: it would
+	// take the drift into the baseline.
+	for _, other := range []Result{
+		{ID: "old", Outcome: Drift, Drifts: []compare.Drift{{Request: "old", Kind: compare.KindValue, Where: "$.a"}}},
+		{ID: "old", Outcome: Pass, Expected: []string{"T-1"}, Drifts: []compare.Drift{{Request: "old", Kind: compare.KindValue, Where: "$.a", Expected: "T-1"}}},
+	} {
+		d := Build("capture:run-1", "baseline:local", []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}, other})
+		d.Baseline, d.Mode = "local", "freeze"
+		if n := d.NoBaselineNote(); strings.Contains(n, "--from") || !strings.Contains(n, "fix or expect the drifts first, then rebase to add the new requests") {
+			t.Errorf("with a drift (%s): %q", other.Outcome, n)
+		}
+	}
 	// Against a capture there is no baseline to join.
 	r = Build("capture:b", "capture:a", []Result{{ID: "new", Outcome: Skipped, Note: NoteNoBaseline}})
 	r.Mode = "freeze"

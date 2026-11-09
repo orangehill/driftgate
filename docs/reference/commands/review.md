@@ -279,7 +279,9 @@ reviewed where they were made. `accept` stays refused.
 
 New requests, such as those of a template added to `templates:`, join a
 baseline in mode `freeze` this way. `run` and `review` print the command
-with the baseline and the capture of the last comparison.
+with the baseline and the capture of the last comparison, when nothing
+else drifted. Next to a drift they say to fix or expect it first: the
+rebase would take it into the baseline.
 
 ## driftgate verify
 

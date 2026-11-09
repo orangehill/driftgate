@@ -215,11 +215,20 @@ func (r *Report) NoBaselineNote() string {
 
 // JoinAdvice says how new requests join the baseline in the comparison's
 // mode. Mode freeze refuses accept: there a rebase on the capture adds
-// them, with --allow-freeze; it takes the whole capture, its drifts too.
+// them, with --allow-freeze; it takes the whole capture, so its command is
+// given only when nothing else drifted.
 func (r *Report) JoinAdvice() string {
 	capture, ok := strings.CutPrefix(r.Tag, "capture:")
 	if r.Mode != "freeze" || r.Baseline == "" || !ok {
 		return "new requests join the baseline with driftgate accept"
+	}
+	// A rebase takes the whole capture: next to a drift it would take a
+	// regression into the baseline, so its command is given only when
+	// nothing else drifted (an expected drift included).
+	for _, res := range r.Results {
+		if res.Outcome == Drift || len(res.Drifts) > 0 {
+			return "in mode freeze accept is refused; fix or expect the drifts first, then rebase to add the new requests (driftgate baselines rebase " + r.Baseline + " --allow-freeze takes the whole capture)"
+		}
 	}
 	rebase := fmt.Sprintf(`driftgate baselines rebase %s --from %s --reason "…" --allow-freeze`, r.Baseline, capture)
 	if r.NotCovered != nil && r.NotCovered.Only {

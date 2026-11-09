@@ -163,7 +163,7 @@ The line says how a new request joins the baseline, in the mode of the
 comparison, and `review` repeats it:
 
 - mode `evolve`: `driftgate accept <request>... --reason "…"`;
-- mode `freeze`, which refuses `accept`: `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`, with the baseline and capture of the comparison. The rebase takes the whole capture, its drifts too, so run it when nothing else drifts. After `run --only`, it first needs a capture of the whole catalog.
+- mode `freeze`, which refuses `accept`: `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`, with the baseline and capture of the comparison. The rebase takes the whole capture, its drifts too. So the command is printed only when nothing else drifted, an expected drift included; otherwise the line says to fix or expect the drifts first. After `run --only`, it first needs a capture of the whole catalog.
 
 ## Requests sent again after a restore
 
