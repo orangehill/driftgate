@@ -600,8 +600,8 @@ func TestSQLServerRetryGivesUp(t *testing.T) {
 }
 
 // TestSQLServerDeadlockRetried: a try chosen as a deadlock victim (1205)
-// runs again, up to sqlServerDeadlockTries times, also within another
-// retry, never more; another error is not retried.
+// runs again, up to sqlServerDeadlockTries times; an inner retry that gave
+// up is not run again by an outer one; another error is not retried.
 func TestSQLServerDeadlockRetried(t *testing.T) {
 	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
 	if err != nil {
@@ -633,5 +633,29 @@ func TestSQLServerDeadlockRetried(t *testing.T) {
 		return mssql.Error{Number: 1222, Message: "Lock request time out period exceeded."}
 	}); err == nil || calls != 1 {
 		t.Errorf("a lock timeout: %d calls, %v", calls, err)
+	}
+}
+
+// TestSQLServerRetryAroundGaveUp: an operation whose inner retry gave up
+// on a database stuck in transition returns that error at once, though
+// it still names a 927 about another database and the wait (a minute
+// here) has not passed; the error names the stuck database.
+func TestSQLServerRetryAroundGaveUp(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	stuck := mssql.Error{Number: 927, Message: "Database 'left_restoring' cannot be opened. It is in the middle of a restore."}
+	gaveUp := s.stillInTransition(stuck, "left_restoring") // as an inner retryOthers returns it
+	calls := 0
+	err = s.retryOthers(context.Background(), func() error {
+		if calls++; calls > 1 {
+			return nil // tried again: the early return is gone
+		}
+		return gaveUp
+	})
+	if calls != 1 || err == nil || !strings.Contains(err.Error(), "database left_restoring of the same server stayed in the middle of a restore") {
+		t.Fatalf("%d calls: %v", calls, err)
 	}
 }

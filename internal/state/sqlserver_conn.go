@@ -591,6 +591,13 @@ var sqlServerDeadlockTries = 3
 // the application's writes, may make it one. Each operation verifies its
 // result (a restore, by the fingerprint after it), so a try again never
 // passes what failed; one that keeps losing fails with that error.
+//
+// An inner retry's error that gave up (ssGaveUp: the wait passed, or the
+// deadlock tries are spent) is never retried again by an outer one. Each
+// retryWhile counts its own deadlocks: a 1205 of a statement of the outer
+// try itself, outside the inner retries, may run that try again up to
+// sqlServerDeadlockTries times, each with inner retries of their own. The
+// total stays bounded (at most (1+n)² tries for two levels).
 func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string, bool), f func() error) error {
 	var deadline time.Time
 	wait := 20 * time.Millisecond

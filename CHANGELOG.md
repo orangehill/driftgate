@@ -77,7 +77,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - SQL Server 2017 and 2019: after a restore of the whole database stopped and left the working database offline or restoring (a killed capture), the next capture's restore no longer fails with error 942 or 927 about the working database while other databases of the server are being restored. It tries again, bounded by the same minute, and the restore completes.
 - SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` that another database's restore stopped no longer fails when its next try gets an error without a reason ("Request failed but didn't provide reason"). That try is waited out as the stop before it, within the same minute.
 - SQL Server 2017 and 2019: `generate`'s `params` query of the pristine copy is tried again, as seeds and restores are, when another database's restore stops it (927, 952). When a retry gives up after the minute, the error names the database that stayed restoring, offline or single-user and says how to end that.
-- SQL Server: a seed, restore, fingerprint, `clean` or `generate` query that the server chose as a deadlock victim (error 1205) runs again, up to three more times, instead of failing at once. A restore is still checked against the pristine copy's fingerprint after it.
+- SQL Server: a seed, restore, fingerprint, `clean` or `generate` query that the server chose as a deadlock victim (error 1205) runs again, up to three more times per retry (bounded in total when one operation runs inside another), instead of failing at once. A restore is still checked against the pristine copy's fingerprint after it.
 
 ### Security
 

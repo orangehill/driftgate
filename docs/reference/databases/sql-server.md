@@ -503,8 +503,9 @@ database.
 
 On every SQL Server version, a seed, restore, fingerprint, `clean` or
 `generate` query that the server chooses as a deadlock victim (error
-1205) runs again, up to three times. The server rolled its transaction
-back, and a restore is still checked against the pristine copy's
+1205) runs again, up to three times. A retry that already gave up
+inside another operation is not run again by it, so the total stays
+bounded. The server rolled its transaction back, and a restore is still checked against the pristine copy's
 fingerprint. One that keeps losing fails with error 1205.
 
 ### The application's login
