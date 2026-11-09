@@ -493,12 +493,19 @@ with error 942 ("cannot be opened because it is offline") when another
 database is offline, as a restore of the whole database takes its working
 database.
 
-- A seed, restore, fingerprint, `generate` query or read of rows that fails so about another database runs again; the log says so once.
+- A seed, restore, fingerprint, `clean`, `generate` query or read of rows that fails so about another database runs again; the log says so once.
 - It runs again for up to one minute, counted from the first such failure. After that it fails with the last error, which names the database. A database left in that state for good (restoring, offline or single-user) fails it every time: complete its restore, bring it online, give it `MULTI_USER` back, or drop it.
 - A restore also runs again when the error names its own working database that a stopped restore left offline or restoring, within the same minute.
 - Each stops in a state the next run completes.
-- One that the server chooses as a deadlock victim (error 1205) runs again up to three times.
 - The application's own queries can fail the same way on those versions.
+
+### Deadlocks
+
+On every SQL Server version, a seed, restore, fingerprint, `clean` or
+`generate` query that the server chooses as a deadlock victim (error
+1205) runs again, up to three times. The server rolled its transaction
+back, and a restore is still checked against the pristine copy's
+fingerprint. One that keeps losing fails with error 1205.
 
 ### The application's login
 
