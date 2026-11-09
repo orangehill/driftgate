@@ -66,6 +66,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- A long quoted value cut in a drift line keeps both its quotes, with `…` outside them where text is left out, and no escape is cut in two. A cut that dropped the opening quote showed a stray `"` before the `…`, such as on a CSS body drift.
 - The `note:` of `generate` and `run` about missing templates names `empty-body` as well as `json-errors` for Laravel, whose validation rules DriftGate reads. It named `json-errors` only, and a project made with older templates still checked no validation message. A store that showed the old note shows the new one once.
 - `coverage` (and the coverage step of `run`) ends with a ✓ only when it listed no gap. After a list of routes whose validation error no request checks, or of routes only error answers reach, the last line names those gaps.
 - Mode `freeze`: the lists of requests and routes that failed in the baseline (`coverage`, `run`, `accept`, `baselines rebase`) no longer say to accept the new answers, which freeze refuses. They say to make the baseline again, or to rebase it on a capture of the fix.

@@ -494,3 +494,63 @@ func TestShortPairKeepsCharactersWhole(t *testing.T) {
 		}
 	}
 }
+
+// TestShortPairQuoted: a quoted text, or a compare excerpt of one
+// (…"…"…), is cut inside its quotes: both quotes stay, with … outside them
+// where text is left out. A cut that took the opening quote and kept the
+// closing one showed a stray " (seen on a CSS body drift), and an escape
+// is never cut in two.
+func TestShortPairQuoted(t *testing.T) {
+	css := func(v string) string {
+		return `…"frames pulse{50%{opacity:` + v + `}}@keyframes bounce{0%,to{animation-timing-function:cubic-bezier(.8,0,1,1)}}"…`
+	}
+	x, y := ShortPair(css(".5"), css(".6"), 80)
+	for _, s := range []string{x, y} {
+		if strings.Count(s, `"`) != 2 || !strings.HasPrefix(s, `…"`) || !strings.HasSuffix(s, `"…`) || len([]rune(s)) > 80 {
+			t.Errorf("excerpt cut: %q (%d characters)", s, len([]rune(s)))
+		}
+	}
+	if !strings.Contains(x, ".5}") || !strings.Contains(y, ".6}") {
+		t.Errorf("difference not shown: %q → %q", x, y)
+	}
+	// A JSON string that differs near its end keeps its closing quote and
+	// gets its opening one back.
+	head := strings.Repeat("a", 150)
+	x, y = ShortPair(`"`+head+`END1"`, `"`+head+`END2"`, 80)
+	if x != `…"`+head[:150-49]+`END1"` && (!strings.HasPrefix(x, `…"`) || !strings.HasSuffix(x, `END1"`)) || !strings.HasSuffix(y, `END2"`) || len([]rune(x)) > 80 {
+		t.Errorf("end: %q → %q", x, y)
+	}
+	// Short quoted values, and values that are not one quoted text, as
+	// before.
+	if x, y := ShortPair(`"a"`, `"b"`, 80); x != `"a"` || y != `"b"` {
+		t.Errorf("short: %q %q", x, y)
+	}
+	if x, _ := ShortPair(`"`+head+`" and "x"`, `"`+head+`" and "y"`, 80); x != "…"+strings.Repeat("a", 19)+`" and "x"` {
+		t.Errorf("two quoted texts: %q", x)
+	}
+	// An escape stays whole at either end of the window.
+	for pad := range 8 {
+		esc := strings.Repeat(`\"`, 60)
+		b, c := `"`+strings.Repeat("a", pad)+esc+`OLD`+esc+`"`, `"`+strings.Repeat("a", pad)+esc+`NEW`+esc+`"`
+		x, y := ShortPair(b, c, 80)
+		for _, s := range []string{x, y} {
+			inner := strings.TrimSuffix(strings.TrimPrefix(s, `…"`), `"…`)
+			if n := len(inner) - len(strings.TrimRight(inner, `\`)); n%2 == 1 {
+				t.Errorf("pad %d: an escape cut at the end: %q", pad, s)
+			}
+			if strings.HasPrefix(inner, `"`) {
+				t.Errorf("pad %d: an escape cut at the start: %q", pad, s)
+			}
+		}
+	}
+	for pad := range 8 {
+		b := `"` + strings.Repeat("a", 100+pad) + `éOLD` + strings.Repeat("z", 100) + `"`
+		c := `"` + strings.Repeat("a", 100+pad) + `éNEW` + strings.Repeat("z", 100) + `"`
+		for _, max := range []int{20, 30, 40} {
+			x, _ := ShortPair(b, c, max)
+			if i := strings.Index(x, `\u`); i >= 0 && len(x) < i+6 {
+				t.Errorf("a \\u escape cut: %q", x)
+			}
+		}
+	}
+}

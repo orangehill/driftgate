@@ -81,8 +81,8 @@ func TestJSONErrorsCount(t *testing.T) {
 // otherwise unchecked), and of empty-body alone once it has json-errors.
 func TestTemplatesNoteEmptyBody(t *testing.T) {
 	for templates, want := range map[string]string{
-		"[ok, not-found, json]": "note: laravel renders errors as JSON for API clients, and DriftGate reads laravel's validation rules, so an empty body shows a validation error; add json-errors and empty-body to templates: in driftgate.yaml",
-		"[ok, not-found, json, json-errors]": "note: DriftGate reads laravel's validation rules, so an empty body shows a validation error; add empty-body to templates: in driftgate.yaml",
+		"[ok, not-found, json]":                          "note: laravel renders errors as JSON for API clients, and DriftGate reads laravel's validation rules, so an empty body shows a validation error; add json-errors and empty-body to templates: in driftgate.yaml",
+		"[ok, not-found, json, json-errors]":             "note: DriftGate reads laravel's validation rules, so an empty body shows a validation error; add empty-body to templates: in driftgate.yaml",
 		"[ok, not-found, json, empty-body, json-errors]": "",
 	} {
 		root := t.TempDir()

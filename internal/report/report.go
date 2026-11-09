@@ -569,33 +569,21 @@ func ShortPair(a, b string, max int) (string, string) {
 	if len(ra) <= max && len(rb) <= max {
 		return a, b
 	}
-	first := 0
-	for first < len(ra) && first < len(rb) && ra[first] == rb[first] {
-		first++
+	// A quoted text (a JSON string, or an excerpt of one: …"…"…) is cut
+	// inside its quotes, which stay: a cut that took the opening quote
+	// and kept the closing one showed a stray ".
+	qa, okA := quotedOf(ra)
+	qb, okB := quotedOf(rb)
+	if okA && okB && max > 4 {
+		from := windowStart(qa.inner, qb.inner, max-2)
+		return qa.cut(from, max-2), qb.cut(from, max-2)
 	}
-	// A third of the window before the difference, the rest after it.
-	from := 0
-	if lead := max / 3; first > lead {
-		from = first - lead
-	}
+	from := windowStart(ra, rb, max)
 	cut := func(r []rune) string {
 		if len(r) <= max {
 			return string(r) // short enough as it is
 		}
-		start := min(from, len(r))
-		end := min(len(r), start+max-1)
-		if start > 0 {
-			end = min(len(r), start+max-2) // room for both marks
-		}
-		// Not inside a character the eye sees as one: an accent, a
-		// variation selector, a skin tone or a joined emoji stays with
-		// the character it belongs to.
-		for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
-			start--
-		}
-		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
-			end++
-		}
+		start, end := cutRange(r, from, max, false, false)
 		s := string(r[start:end])
 		if start > 0 {
 			s = "…" + s
@@ -606,6 +594,118 @@ func ShortPair(a, b string, max int) (string, string) {
 		return s
 	}
 	return cut(ra), cut(rb)
+}
+
+// windowStart is where the window of two values starts: a third of it
+// before the first character where they differ.
+func windowStart(a, b []rune, max int) int {
+	first := 0
+	for first < len(a) && first < len(b) && a[first] == b[first] {
+		first++
+	}
+	if lead := max / 3; first > lead {
+		return first - lead
+	}
+	return 0
+}
+
+// cutRange is the part of r a window of max characters from from shows,
+// with room for a … at each end where text is left out (lead, trail: a …
+// is there anyway). It does not cut inside a character the eye sees as
+// one: an accent, a variation selector, a skin tone or a joined emoji
+// stays with the character it belongs to.
+func cutRange(r []rune, from, max int, lead, trail bool) (start, end int) {
+	start = min(from, len(r))
+	marks := 0
+	if start > 0 || lead {
+		marks++
+	}
+	if trail || len(r)-start > max-marks {
+		marks++
+	}
+	end = min(len(r), start+max-marks)
+	for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
+		start--
+	}
+	for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
+		end++
+	}
+	return start, end
+}
+
+// quotedText is a value written as a quoted text: its inner text (as
+// quoted, escapes kept), and whether a … stood before or after the quotes.
+type quotedText struct {
+	lead, trail bool
+	inner       []rune
+}
+
+// quotedOf reads a quoted text: "…", …"…", "…"… or …"…"…, with no
+// unescaped quote inside.
+func quotedOf(r []rune) (quotedText, bool) {
+	var q quotedText
+	i, j := 0, len(r)
+	if i < j && r[i] == '…' {
+		q.lead, i = true, i+1
+	}
+	if j > i && r[j-1] == '…' {
+		q.trail, j = true, j-1
+	}
+	if j-i < 2 || r[i] != '"' || r[j-1] != '"' {
+		return q, false
+	}
+	q.inner = r[i+1 : j-1]
+	escaped := false
+	for _, c := range q.inner {
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			return q, false
+		}
+	}
+	return q, !escaped
+}
+
+// cut is the quoted text in a window of max characters of its inner text
+// from from: the quotes kept, a … outside them where text is left out,
+// and no escape cut in two.
+func (q quotedText) cut(from, max int) string {
+	start, end := cutRange(q.inner, from, max, q.lead, q.trail)
+	// An escape (\", \\, \u00e9) stays whole: the window starts at its
+	// backslash and ends before one it would cut.
+	backslashes := func(at int) int { // the backslashes right before at
+		n := 0
+		for at-n > 0 && q.inner[at-n-1] == '\\' {
+			n++
+		}
+		return n
+	}
+	if start > 0 && backslashes(start)%2 == 1 {
+		start--
+	}
+	for k := end - 1; k >= start && k >= end-5; k-- {
+		if q.inner[k] == '\\' && backslashes(k)%2 == 0 {
+			length := 2
+			if k+1 < len(q.inner) && q.inner[k+1] == 'u' {
+				length = 6
+			}
+			if k+length > end {
+				end = k
+			}
+			break
+		}
+	}
+	s := `"` + string(q.inner[start:end]) + `"`
+	if start > 0 || q.lead {
+		s = "…" + s
+	}
+	if end < len(q.inner) || q.trail {
+		s += "…"
+	}
+	return s
 }
 
 // Text writes a readable report: every drifted request with up to maxDrifts
