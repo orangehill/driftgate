@@ -199,13 +199,15 @@ var dataAnonymizeFlags = []flagHelp{
 const helpIntro = "driftgate — a regression gate for HTTP APIs\n\nUsage:\n"
 
 // helpOutro ends driftgate help: the common flags, the help topics (from
-// topics, so a new one is always named) and the exit codes.
+// topics, so a new one is always named), the exit codes and the links to
+// the documentation, what DriftGate can do and the symptoms.
 func helpOutro() string {
 	var names []string
 	for _, t := range topics {
 		names = append(names, t.name)
 	}
-	return strings.Replace(helpOutroText, "{topics}", wrap(strings.Fields("driftgate help <topic> lists the fields of a file, or the kinds of drift: "+strings.Join(names, ", ")+"."), "", "", 80), 1)
+	out := strings.Replace(helpOutroText, "{topics}", wrap(strings.Fields("driftgate help <topic> lists the fields of a file, or the kinds of drift: "+strings.Join(names, ", ")+"."), "", "", 80), 1)
+	return out + "\nDocumentation: " + docsBase() + "README.md\nWhat it can do: " + docsBase() + tasksDoc + "\nSymptoms: " + docsBase() + "troubleshooting.md\n"
 }
 
 const helpOutroText = `

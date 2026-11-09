@@ -488,10 +488,10 @@ statement that names only its own database: another checkout's seed, or
 a restore elsewhere.
 
 The same happens with error 924 ("can only have one user at a time")
-when another database is set single-user, as a seed or a drop does, and
-with error 942 ("cannot be opened because it is offline") when another
-database is offline, as a restore of the whole database takes its working
-database.
+when another database is set single-user, as a seed or a drop does. So it
+does with error 942 ("cannot be opened because it is offline") when
+another database is offline, as a restore of the whole database takes its
+working database.
 
 - A seed, restore, fingerprint, `clean`, `generate` query or read of rows that fails so about another database runs again; the log says so once.
 - It runs again for up to one minute, counted from the first such failure. After that it fails with the last error, which names the database. A database left in that state for good (restoring, offline or single-user) fails it every time: complete its restore, bring it online, give it `MULTI_USER` back, or drop it.

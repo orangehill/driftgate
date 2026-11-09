@@ -45,6 +45,12 @@ The file is `.driftgate/catalog.json`, or `driftgate/catalog.json` with
 }
 ```
 
+| Key | Meaning |
+|---|---|
+| `version` | `1` |
+| `requests` | the requests, in order ([request fields](#request-fields)) |
+| `sequences` | requests that run in order, together ([sequences](#sequences)) |
+
 ## Request fields
 
 <!-- check: catalog -->
@@ -153,7 +159,10 @@ Sequences run their requests in order, together.
 }
 ```
 
-Each file has a `field` and either `path` or `synthetic`.
+| Key | Meaning |
+|---|---|
+| `fields` | the form fields, `[[name, value], …]` |
+| `files` | the files; each has a `field` and either `path` or `synthetic` (below) |
 
 `path` is a real file, relative to the
 [uploads folder](driftgate-yaml.md#uploads), without `.` or `..`.

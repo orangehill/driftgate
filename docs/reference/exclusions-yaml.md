@@ -75,7 +75,7 @@ What a known failure does:
 How a request is matched:
 
 - A request takes the first known failure whose glob matches it.
-- When that one names a status its failure does not have (the 500 became a 404, the timeout a refused connection), the request is reported as failed, with a note that its known failure changed.
+- When that one names a status its failure does not have (the 500 became a 404, the timeout a refused connection), the request is reported as failed, with a note saying its known failure changed.
 - A known failure whose requests succeed now, or that matches no request, is reported as stale. Remove it once the fix is accepted.
 - A known failure that acknowledges failures on more than 5 routes is reported as broad: such a glob also hides the new failures it reaches.
 

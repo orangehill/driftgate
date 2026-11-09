@@ -51,9 +51,9 @@ func docsRef(version, module string) string {
 	return "main"
 }
 
-// tasksDoc is the table of what to use for a task, under docsBase; it is
-// kept on the configuration index page until capabilities.md takes it.
-const tasksDoc = "configuration.md#what-to-use-for-what"
+// tasksDoc is the page of what DriftGate can do: every feature, when to
+// use it, its guide and its reference, under docsBase.
+const tasksDoc = "capabilities.md"
 
 var topics = []topic{
 	{name: "catalog", summary: "catalog.json (beside driftgate.yaml: .driftgate/catalog.json, or driftgate/catalog.json with baselines: git) lists the requests every capture sends; generate writes it, entries may be written by hand. Its keys:",
