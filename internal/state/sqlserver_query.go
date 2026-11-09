@@ -216,11 +216,20 @@ func sqlServerName(name string) error {
 }
 
 // Query runs a read-only query (see checkSQLServerQuery) on the pristine
-// database, in a transaction that is rolled back.
-func (s *SQLServer) Query(ctx context.Context, query string) ([]string, error) {
+// database, in a transaction that is rolled back. It runs again while
+// another database of the server is in transition (retryOthers).
+func (s *SQLServer) Query(ctx context.Context, query string) (out []string, err error) {
 	if err := checkSQLServerQuery(query); err != nil {
 		return nil, err
 	}
+	err = s.retryOthers(ctx, func() error {
+		out, err = s.query(ctx, query)
+		return err
+	})
+	return out, err
+}
+
+func (s *SQLServer) query(ctx context.Context, query string) ([]string, error) {
 	if _, err := s.server(ctx); err != nil {
 		return nil, err
 	}

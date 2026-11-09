@@ -306,10 +306,15 @@ func TestRetryStatusBudget(t *testing.T) {
 // TestRetryNotRecoveredByOtherFailure: a resend that fails in another way
 // than load (the server is gone, an interrupt) did not recover.
 func TestRetryNotRecoveredByOtherFailure(t *testing.T) {
+	// Answers once, then is gone: the resend is refused. The listener is
+	// closed before the answer, and the answer closes its connection, so
+	// no resend can reach the server however soon it comes (closing the
+	// server in the background after the answer raced the resend).
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.Listener.Close()
+		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		go srv.Close() // answers once, then is gone: the resend is refused
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
