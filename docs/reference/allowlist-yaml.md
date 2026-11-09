@@ -228,6 +228,10 @@ by key.
 format for values that differ between two captures on the same state.
 You add the reason.
 
+- A `set-cookie` format has one alternative per cookie name, from its values in every response.
+- A cookie's value is any text of the lengths seen, since it is recorded masked.
+- An `expires=` date in a cookie is always a date format, never the date seen.
+
 ## Check the rules
 
 [`driftgate allowlist check`](commands/review.md#driftgate-allowlist-check)

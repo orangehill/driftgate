@@ -27,8 +27,6 @@ headers:
 ```
 
 The header may change, but only to a value the whole format matches.
-A proposed `set-cookie` format has one alternative per cookie name. An
-`expires=` date in it is always a date format, never the date seen.
 `ignore_case: true` instead lets a value change only in letter case
 ([header rules](../../reference/allowlist-yaml.md#header-rules)).
 
