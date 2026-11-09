@@ -602,6 +602,88 @@ func (m *MySQL) PristineFingerprint(ctx context.Context, items []string) (Finger
 	return m.fingerprint(ctx, c, m.o.Pristine, items)
 }
 
+// Definitions hashes the CREATE statements of tables of the working
+// database, or of the pristine one (Definer), without AUTO_INCREMENT,
+// which moves with the rows.
+func (m *MySQL) Definitions(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
+	f := Fingerprint{}
+	err := m.readTables(ctx, items, pristine, func(_ *sql.Conn, _ string, tables []string, creates map[string]string) error {
+		for _, t := range tables {
+			f["table:"+t] = hash([]byte(autoIncrement().ReplaceAllString(creates[t], "")))
+		}
+		return nil
+	})
+	return f, err
+}
+
+// Contents hashes the rows of tables of the working database, or of the
+// pristine one (Definer): their checksum, as a fingerprint reads it.
+func (m *MySQL) Contents(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
+	f := Fingerprint{}
+	err := m.readTables(ctx, items, pristine, func(c *sql.Conn, db string, tables []string, creates map[string]string) error {
+		mariadb, err := m.mariadb(ctx, c)
+		if err != nil {
+			return err
+		}
+		sums, err := checksumGroup(ctx, c, db, tables, creates, mariadb)
+		if err != nil {
+			return err
+		}
+		for _, t := range tables {
+			f["table:"+t] = hash([]byte(sums[t]))
+		}
+		return nil
+	})
+	return f, err
+}
+
+// readTables calls read with the tables of the working database, or of
+// the pristine one, that items name (table:<name>) and exist, with their
+// CREATE statements, on a session of its own.
+func (m *MySQL) readTables(ctx context.Context, items []string, pristine bool, read func(c *sql.Conn, db string, tables []string, creates map[string]string) error) error {
+	db := m.o.Working
+	if pristine {
+		db = m.o.Pristine
+	}
+	var names []string
+	var reqs []showReq
+	for _, it := range items {
+		if name, ok := strings.CutPrefix(it, "table:"); ok {
+			names = append(names, name)
+			reqs = append(reqs, showReq{"TABLE", db, name})
+		}
+	}
+	if len(reqs) == 0 {
+		return nil
+	}
+	c, err := m.session(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	shown, err := m.showAll(ctx, c, reqs)
+	if err != nil {
+		return err
+	}
+	var tables []string
+	creates := map[string]string{}
+	for i, t := range names {
+		if shown[i] == nil {
+			continue // no such table
+		}
+		def, err := dbx.ShowCreateStatement("TABLE", t, shown[i])
+		if err != nil {
+			return err
+		}
+		tables = append(tables, t)
+		creates[t] = def
+	}
+	if len(tables) == 0 {
+		return nil
+	}
+	return read(c, db, tables, creates)
+}
+
 func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string) (Fingerprint, error) {
 	return m.fingerprintAs(ctx, c, db, items, FingerprintFormat)
 }

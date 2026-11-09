@@ -57,7 +57,7 @@ func mysqlServers(t *testing.T) []string {
 	return strings.Split(v, ",")
 }
 
-func mustExec(t *testing.T, db *sql.DB, stmts ...string) {
+func mustExec(t testing.TB, db *sql.DB, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
 		if err := RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {

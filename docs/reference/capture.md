@@ -84,6 +84,34 @@ components.
 - With both configured, the first capture takes one more fingerprint between them. The later restores (before the requests that change data, `--restore each`) are checked only without a `tokens.command`.
 - Only components with a fingerprint are seen. The warning never changes the exit code.
 
+## A migration run outside DriftGate
+
+Every capture starts with a restore from the pristine copy. Before that
+restore, the capture compares the working database with the pristine
+copy, and stops with exit 3 when a migration ran on it since the seed:
+
+- a table, view, trigger or other object was made or dropped;
+- the definition of a table changed: its columns, keys or indexes;
+- the definition of a view, trigger, function or type changed;
+- the rows of a migrations table changed, such as Laravel's `migrations`, Rails' `schema_migrations` or Django's `django_migrations`.
+
+The restore would undo that change, and the capture would run on the old
+schema. Rows the application wrote never stop a capture, nor does a
+migration that was rolled back.
+
+- Without `prepare:`, nothing is restored, and the working database stays as it is.
+- With `prepare:`, the restore and `prepare` run first. Each changed item must then differ from the pristine copy again, as after a migrate command. Otherwise the capture stops.
+
+To go on, do one of these:
+
+1. Add the migrate command to [`prepare:`](driftgate-yaml.md#what-belongs-in-prepare). Every capture then runs the migrations after the restore, and the baseline stays valid.
+2. Or run `driftgate seed` to make the pristine copy anew, then follow [the next section](#when-the-state-does-not-match-the-baseline): the baseline was captured from the old copy.
+
+A `--read-only` capture takes no `prepare:`, so seed instead. The check
+reads definitions only when rows changed, of the working database; the
+seed recorded the pristine copy's. For 100 changed tables it takes under
+1 ms on SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL.
+
 ## When the state does not match the baseline
 
 When the restored state differs from the state the baseline was captured
@@ -93,7 +121,17 @@ migrations.
 
 - Seed the data the baseline was captured from.
 - Or make a new baseline of this data: move the baseline's folder away, and the next `driftgate run` makes it (`--baseline <name>` for another than `local`).
-- When the data changed on purpose, you can also capture with `--skip-fingerprint-check`, and make that capture the baseline's content with [`driftgate baselines rebase`](commands/review.md#driftgate-baselines-rebase).
+- When the data changed on purpose, such as by a migration, make the new data the baseline's with the steps below.
+
+```sh
+driftgate capture migrated --skip-fingerprint-check
+driftgate compare migrated --skip-fingerprint-check   # review each drift
+driftgate baselines rebase local --from migrated --reason "Adds posts.slug"   # add --allow-freeze in mode: freeze
+```
+
+The capture without the check is marked unreliable, and only a
+comparison with the same flag takes it. [`driftgate baselines rebase`](commands/review.md#driftgate-baselines-rebase)
+then makes it the baseline's content, with the new state.
 
 When the items that differ are tables made `restore_only` since, it says
 that the configuration changed: make the baseline again.

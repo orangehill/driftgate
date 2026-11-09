@@ -961,3 +961,89 @@ func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (_ F
 func sameVersion(a, b os.FileInfo) bool {
 	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
+
+// Definitions hashes the definitions of tables of the working file, or of
+// the pristine one (Definer): the CREATE statement and its indexes', as a
+// restore compares them.
+func (s *SQLite) Definitions(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
+	f := Fingerprint{}
+	err := s.readTables(ctx, items, pristine, func(_ *sql.Conn, tables []*sqliteTable) error {
+		for _, t := range tables {
+			f["table:"+t.name] = hash([]byte(t.def()))
+		}
+		return nil
+	})
+	return f, err
+}
+
+// Contents hashes the rows of tables of the working file, or of the
+// pristine one (Definer), without the sqlite_sequence value.
+func (s *SQLite) Contents(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
+	f := Fingerprint{}
+	err := s.readTables(ctx, items, pristine, func(c *sql.Conn, tables []*sqliteTable) error {
+		got, _, err := s.tableSums(ctx, []*sql.Conn{c}, "main", tables, nil)
+		if err != nil {
+			return err
+		}
+		for _, t := range tables {
+			f["table:"+t.name] = hash(got[t.name].rows)
+		}
+		return nil
+	})
+	return f, err
+}
+
+// readTables calls read with the tables of the working file, or of the
+// pristine one, that items name (table:<name>), in a read transaction of
+// a connection of its own.
+func (s *SQLite) readTables(ctx context.Context, items []string, pristine bool, read func(c *sql.Conn, tables []*sqliteTable) error) (err error) {
+	defer s.busy(&err)
+	var db *sql.DB
+	if pristine {
+		if _, err := os.Stat(s.o.Pristine); errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("state %s: pristine file %s does not exist; run driftgate seed", s.o.Name, s.o.Pristine)
+		}
+		if db, err = sqliteOpen(s.o.Pristine, sqliteReadOnly); err != nil {
+			return err
+		}
+		defer db.Close()
+	} else {
+		if err := s.current(); err != nil {
+			return err
+		}
+		if s.seen.ok {
+			dv, err := s.dataVersion(ctx)
+			if err != nil {
+				return err
+			}
+			if s.unseen(dv, s.stampNow()) {
+				if err := s.reopen(); err != nil {
+					return err
+				}
+			}
+		}
+		db = s.db
+	}
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := sqliteBegin(ctx, c); err != nil {
+		return err
+	}
+	defer c.ExecContext(context.Background(), "ROLLBACK")
+	o, err := s.objects(ctx, c, "main")
+	if err != nil {
+		return err
+	}
+	var tables []*sqliteTable
+	for _, it := range items {
+		if name, ok := strings.CutPrefix(it, "table:"); ok {
+			if t := o.tables[name]; t != nil {
+				tables = append(tables, t)
+			}
+		}
+	}
+	return read(c, tables)
+}

@@ -26,8 +26,11 @@ A `GET` wrote something. Mark it `mutates: true` ([read-only requests](guides/ca
 ### "private body not on this machine"
 The private bodies are in another machine's local store. Pass `--skip-private`, or run the check where they are ([private bodies in CI](guides/ci/github-actions.md#private-bodies-in-ci)).
 
+### "the working database was changed outside DriftGate"
+A migration ran on the working database since the seed, and the restore would undo it. Add the migrate command to `prepare:`, or run `driftgate seed` ([a migration run outside DriftGate](reference/capture.md#a-migration-run-outside-driftgate)).
+
 ### The restored state differs from the baseline's state
-The pristine copy holds other data than the baseline was made from. Seed that data again, or make a new baseline ([when the state does not match](reference/capture.md#when-the-state-does-not-match-the-baseline)).
+The pristine copy holds other data than the baseline was made from. Seed that data again, make a new baseline, or rebase the baseline on a capture of the new data ([when the state does not match](reference/capture.md#when-the-state-does-not-match-the-baseline)).
 
 ### "restore of … left … items different from the fingerprint"
 The restored data does not match the pristine copy's fingerprint. The message says which cause it found:

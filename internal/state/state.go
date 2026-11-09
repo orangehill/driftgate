@@ -49,6 +49,22 @@ type PristineFingerprinter interface {
 	PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error)
 }
 
+// Definer is a database component that can hash the definitions of its
+// tables without their rows, and without what moves with the rows (an
+// AUTO_INCREMENT, an identity's or sqlite_sequence's value), in the
+// working database or in the pristine copy. Items other than table: (and
+// PostgreSQL's matview:) and items that do not exist are left out. A
+// capture compares the two to tell a change of the schema made outside
+// DriftGate (a migration) from rows the application wrote.
+type Definer interface {
+	Definitions(ctx context.Context, items []string, pristine bool) (Fingerprint, error)
+	// Contents hashes the rows of tables only, without their definition
+	// and the counters that move with the rows: a table a migration tool
+	// records its migrations in, which a migration and its rollback leave
+	// with the same rows and a counter moved.
+	Contents(ctx context.Context, items []string, pristine bool) (Fingerprint, error)
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string

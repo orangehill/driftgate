@@ -38,6 +38,16 @@ driftgate run          # against the same baseline, on the same restored data
 Upgrade one version, or one dependency, per branch. Then run the check.
 A small step gives a few drifts with one cause.
 
+## When a step adds a migration
+
+Add the migrate command to `prepare:`, such as
+`["php", "artisan", "migrate", "--force"]`. Every capture then runs the
+migrations after its restore, so the baseline's data stays valid.
+
+Without it, a capture stops with exit 3 when a migration ran on the
+working database. Its restore would undo the migration
+([a migration run outside DriftGate](../../reference/capture.md#a-migration-run-outside-driftgate)).
+
 ## Typical drift after an upgrade
 
 - `type`: a driver returns native numbers now (`$.data[*].id: type string → int`).

@@ -447,6 +447,12 @@ value it writes anew each time then drifts in every run.
 - If the step does not depend on the restored data, move it to `seed`: the pristine copy then holds its result.
 - The capture warns when `prepare` changed the restored state ([how](capture.md#guards-and-prepare-during-a-capture)).
 
+The migrate command belongs in `prepare`, such as `php artisan migrate --force`.
+It does nothing when no migration is pending. When a step of an upgrade
+adds one, every capture runs it after the restore, and the baseline's
+data stays valid. Without it, a capture stops when a migration ran on the
+working database ([why](capture.md#a-migration-run-outside-driftgate)).
+
 ## discover
 
 <!-- check: config-fragment -->

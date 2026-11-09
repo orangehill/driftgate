@@ -352,6 +352,78 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		args = []any{rels}
 	}
 
+	defs, err := tableDefs(ctx, d, format, only, args)
+	if err != nil {
+		return nil, err
+	}
+
+	f := Fingerprint{}
+	for _, t := range tables {
+		if p.excludedQualified(t) {
+			if p.restoreOnlyQualified(t) {
+				return nil, p.o.bothErr(t)
+			}
+			continue
+		}
+		if p.restoreOnlyQualified(t) != restoreOnly || !want("table:"+t) {
+			continue
+		}
+		schema, name, _ := strings.Cut(t, ".")
+		var count int64
+		var sum string
+		q := `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(name) + " AS r"
+		if err := d.QueryRowContext(ctx, q).Scan(&count, &sum); err != nil {
+			return nil, fmt.Errorf("%s: %w", t, err)
+		}
+		def := ""
+		if defs[t] != nil {
+			def = defs[t].String()
+		}
+		f["table:"+t] = hash([]byte(fmt.Sprintf("%s\x00%d\x00%s", def, count, sum)))
+	}
+	owned, err := p.ownedSequences(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	if restoreOnly {
+		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format)
+		return f, err
+	}
+	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE `+schemaFilter("schemaname"))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var v, def string
+		if err := rows.Scan(&v, &def); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !p.excludedQualified(v) && want("view:"+v) {
+			if defs[v] != nil {
+				def += "\x00" + defs[v].String()
+			}
+			f["view:"+v] = hash([]byte(def))
+		}
+	}
+	rows.Close()
+	if err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && !owned[strings.TrimPrefix(item, "sequence:")] }, format); err != nil {
+		return nil, err
+	}
+	if format < 2 {
+		return f, nil
+	}
+	if err := p.schemaItems(ctx, d, f, want); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// tableDefs reads the definitions of the tables (and views) of the
+// database d is connected to: columns, constraints, indexes and triggers
+// per table, and what only some have; only and args narrow the queries
+// to some tables (fingerprint's restore_only tables).
+func tableDefs(ctx context.Context, d *sql.DB, format int, only func(rel string) string, args []any) (map[string]*strings.Builder, error) {
 	// Definitions: columns, constraints, indexes and triggers per table.
 	// What only some tables or columns have is added only where they have
 	// it, so the hash of any other table stays what it was (format 1).
@@ -433,15 +505,112 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		}
 	}
 
+	return defs, nil
+}
+
+// openRead connects to the working database, or to the pristine one, which
+// takes connections only while it is read (a template copied while a
+// session is connected to it would fail the copy). done closes the
+// connection and closes the pristine database to connections again.
+func (p *Postgres) openRead(ctx context.Context, pristine bool) (d *sql.DB, done func(), err error) {
+	if !pristine {
+		if d, err = p.open(p.o.Working); err != nil {
+			return nil, nil, err
+		}
+		return d, func() { d.Close() }, nil
+	}
+	if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
+		return nil, nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
+	}
+	closeAgain := func() {
+		p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS false")
+	}
+	if d, err = p.open(p.o.Pristine); err != nil {
+		closeAgain()
+		return nil, nil, err
+	}
+	return d, func() { d.Close(); closeAgain() }, nil
+}
+
+// Definitions hashes the definitions of tables and materialized views of
+// the working database, or of the pristine one (Definer): a table's
+// columns, constraints, indexes, triggers and what fingerprint adds to
+// them, a materialized view's query.
+func (p *Postgres) Definitions(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
 	f := Fingerprint{}
+	if len(items) == 0 {
+		return f, nil
+	}
+	d, done, err := p.openRead(ctx, pristine)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	defs, err := tableDefs(ctx, d, FingerprintFormat, func(string) string { return "" }, nil)
+	if err != nil {
+		return nil, err
+	}
+	tables, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname"))
+	if err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
 	for _, t := range tables {
-		if p.excludedQualified(t) {
-			if p.restoreOnlyQualified(t) {
-				return nil, p.o.bothErr(t)
-			}
+		present["table:"+t] = true
+	}
+	matviews := map[string]string{}
+	rows, err := d.QueryContext(ctx, `SELECT 'matview:' || schemaname || '.' || matviewname, definition FROM pg_matviews WHERE `+schemaFilter("schemaname"))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var item, def string
+		if err := rows.Scan(&item, &def); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		matviews[item] = def
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		if def, ok := matviews[it]; ok {
+			f[it] = hash([]byte(def))
 			continue
 		}
-		if p.restoreOnlyQualified(t) != restoreOnly || !want("table:"+t) {
+		rel, ok := strings.CutPrefix(it, "table:")
+		if !ok || !present[it] {
+			continue
+		}
+		def := ""
+		if defs[rel] != nil {
+			def = defs[rel].String()
+		}
+		f[it] = hash([]byte(def))
+	}
+	return f, nil
+}
+
+// Contents hashes the rows of tables of the working database, or of the
+// pristine one (Definer), as a fingerprint reads them.
+func (p *Postgres) Contents(ctx context.Context, items []string, pristine bool) (Fingerprint, error) {
+	f := Fingerprint{}
+	if len(items) == 0 {
+		return f, nil
+	}
+	d, done, err := p.openRead(ctx, pristine)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	tables, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname"))
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range tables {
+		if !contains(items, "table:"+t) {
 			continue
 		}
 		schema, name, _ := strings.Cut(t, ".")
@@ -451,46 +620,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		if err := d.QueryRowContext(ctx, q).Scan(&count, &sum); err != nil {
 			return nil, fmt.Errorf("%s: %w", t, err)
 		}
-		def := ""
-		if defs[t] != nil {
-			def = defs[t].String()
-		}
-		f["table:"+t] = hash([]byte(fmt.Sprintf("%s\x00%d\x00%s", def, count, sum)))
-	}
-	owned, err := p.ownedSequences(ctx, d)
-	if err != nil {
-		return nil, err
-	}
-	if restoreOnly {
-		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format)
-		return f, err
-	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE `+schemaFilter("schemaname"))
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var v, def string
-		if err := rows.Scan(&v, &def); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if !p.excludedQualified(v) && want("view:"+v) {
-			if defs[v] != nil {
-				def += "\x00" + defs[v].String()
-			}
-			f["view:"+v] = hash([]byte(def))
-		}
-	}
-	rows.Close()
-	if err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && !owned[strings.TrimPrefix(item, "sequence:")] }, format); err != nil {
-		return nil, err
-	}
-	if format < 2 {
-		return f, nil
-	}
-	if err := p.schemaItems(ctx, d, f, want); err != nil {
-		return nil, err
+		f["table:"+t] = hash([]byte(fmt.Sprintf("%d\x00%s", count, sum)))
 	}
 	return f, nil
 }

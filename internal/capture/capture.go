@@ -315,7 +315,16 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	// Every capture starts from the pristine state, so two captures of the
-	// same code see the same data.
+	// same code see the same data; but never by undoing a change of the
+	// schema made outside DriftGate that prepare does not make again
+	// (outside.go).
+	outside, err := tr.survey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(outside) > 0 && len(p.Prepare) == 0 {
+		return nil, outsideErr(p, outside, opt, false)
+	}
 	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
@@ -345,7 +354,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 				if tr.restoreOnlyNow(d) {
 					return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
 				}
-				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
+				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose (a migration), %s", len(d), limit(d, 30), opt.Baseline.Dir, run, rebaseSteps(p, opt.Baseline))
 			}
 		}
 	}
@@ -387,6 +396,15 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	tr.markDirty(diffStates(start, before))
+	if len(outside) > 0 {
+		left, err := tr.redone(ctx, outside, before)
+		if err != nil {
+			return nil, err
+		}
+		if len(left) > 0 {
+			return nil, outsideErr(p, left, opt, true)
+		}
+	}
 	switch {
 	case mid != nil:
 		r.prepared(diffStates(start, mid))

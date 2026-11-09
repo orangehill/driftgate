@@ -73,11 +73,33 @@ func Probe(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Pro
 	}
 	defer tr.close()
 	r := &runner{p: p, services: services, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr}
+	// As a capture's first restore (outside.go): the capture after the
+	// probe would not see a change the probe's restore undid.
+	outside, err := tr.survey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(outside) > 0 && len(p.Prepare) == 0 {
+		return nil, outsideErr(p, outside, Options{}, false)
+	}
 	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.prepare(ctx); err != nil {
 		return nil, err
+	}
+	if len(outside) > 0 {
+		after, err := tr.fingerprint(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		left, err := tr.redone(ctx, outside, after)
+		if err != nil {
+			return nil, err
+		}
+		if len(left) > 0 {
+			return nil, outsideErr(p, left, Options{}, true)
+		}
 	}
 	for _, name := range opt.Services {
 		reqs := byService[name]

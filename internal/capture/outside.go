@@ -1,0 +1,336 @@
+package capture
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/snapshot"
+	"github.com/orangehill/driftgate/internal/state"
+)
+
+// A capture starts with a restore, which brings the working database back
+// to the pristine copy. When the schema was changed since the copy was
+// made (a migration that ran on the working database), that restore undoes
+// it silently, and the capture runs the application on the old schema: a
+// pass that proves nothing about the new one. Before the first restore,
+// the working database is compared with the pristine copy, from the
+// fingerprint that restore takes anyway:
+//
+//   - an item on one side only (a table, view, trigger … made or dropped);
+//   - an item that holds no rows (a view, trigger, function, pragma) whose
+//     hash differs: its definition changed;
+//   - a table that differs whose definition differs too (state.Definer):
+//     its columns, keys or indexes changed, not only its rows;
+//   - the table a migration tool records the migrations it ran in
+//     (migrationTables) whose rows differ: a migration ran, which may also
+//     have changed data only.
+//
+// Rows the application wrote (its own requests, a user trying it out) are
+// none of these: they never stop a capture. A sequence's value moves with
+// the rows, so only a sequence made or dropped counts.
+//
+// Without prepare: the capture stops before the restore, so the working
+// database stays as it is. With prepare: the restore and prepare run, and
+// each of those items must then differ from the pristine copy again: the
+// migrations prepare runs made it again. Else the capture stops.
+
+// outsideChange is an item of the working database changed outside
+// DriftGate that a restore undoes; how says in what way.
+type outsideChange struct {
+	component, item, how string
+}
+
+const (
+	outsideNew        = "made since the pristine copy"
+	outsideGone       = "dropped since the pristine copy"
+	outsideDefinition = "its definition changed"
+	outsideMigrations = "migrations ran"
+)
+
+// migrationTables are the tables migration tools record the migrations
+// they ran in (lower case; a PostgreSQL or SQL Server item names its
+// schema first): Laravel, Rails, Symfony (Doctrine), Django, ASP.NET Core
+// (Entity Framework), Spring Boot (Flyway, Liquibase), Prisma, Drizzle,
+// Knex, Sequelize, TypeORM, MikroORM, Kysely, Alembic, Phinx, goose,
+// golang-migrate, sqlx and Diesel.
+var migrationTables = map[string]bool{
+	"migrations": true, "schema_migrations": true, "doctrine_migration_versions": true, "migration_versions": true,
+	"django_migrations": true, "__efmigrationshistory": true, "flyway_schema_history": true, "databasechangelog": true,
+	"_prisma_migrations": true, "__drizzle_migrations": true, "knex_migrations": true, "sequelizemeta": true,
+	"mikro_orm_migrations": true, "kysely_migration": true, "alembic_version": true, "phinxlog": true,
+	"goose_db_version": true, "_sqlx_migrations": true, "__diesel_schema_migrations": true,
+}
+
+// migrationTable reports whether item is the table:<name> of a table
+// migrationTables names, in any schema and letter case.
+func migrationTable(item string) bool {
+	name, ok := strings.CutPrefix(item, "table:")
+	if !ok {
+		return false
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	return migrationTables[strings.ToLower(name)]
+}
+
+// rowKinds are the kinds of items whose hash includes rows or a value that
+// moves with them; any other item holds a definition only.
+var rowKinds = map[string]bool{"table": true, "matview": true, "sequence": true}
+
+// survey fingerprints every database component before the first restore,
+// keeps the fingerprint for that restore, and returns the items changed
+// outside DriftGate that the restore would undo (see above). What it read
+// of the pristine copy's changed tables is kept for redone.
+func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
+	var out []outsideChange
+	t.found = states{}
+	t.outsideDefs, t.outsideRows = states{}, states{}
+	for _, c := range t.comps {
+		pf, isDB := t.pristine[c.Name()]
+		if !isDB {
+			continue
+		}
+		// The restore's own fingerprint, taken early: its time is the
+		// restore's.
+		start := time.Now()
+		cur, err := c.Fingerprint(ctx, nil)
+		t.time.Restore += time.Since(start)
+		if err != nil {
+			return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
+		}
+		t.found[c.Name()] = cur
+		var tables, migrations []string
+		d, definer := c.(state.Definer)
+		for _, it := range state.Diff(cur, pf) {
+			_, now := cur[it]
+			_, then := pf[it]
+			kind, _, _ := strings.Cut(it, ":")
+			switch {
+			case !then:
+				out = append(out, outsideChange{c.Name(), it, outsideNew})
+			case !now:
+				out = append(out, outsideChange{c.Name(), it, outsideGone})
+			case !rowKinds[kind]:
+				out = append(out, outsideChange{c.Name(), it, outsideDefinition})
+			case migrationTable(it) && !definer:
+				out = append(out, outsideChange{c.Name(), it, outsideMigrations})
+			case kind != "sequence" && definer:
+				tables = append(tables, it)
+			}
+		}
+		if len(tables) == 0 {
+			continue
+		}
+		start = time.Now()
+		work, pris, err := definitions(ctx, d, tables, t.pristineDefs[c.Name()])
+		if err != nil {
+			return nil, envErr("state %s: %v", c.Name(), err)
+		}
+		t.outsideDefs[c.Name()] = pris
+		changed := map[string]bool{}
+		for _, it := range state.Diff(work, pris) {
+			out = append(out, outsideChange{c.Name(), it, outsideDefinition})
+			changed[it] = true
+		}
+		for _, it := range tables {
+			if migrationTable(it) && !changed[it] {
+				migrations = append(migrations, it)
+			}
+		}
+		if len(migrations) > 0 {
+			work, pris, err := contents(ctx, d, migrations)
+			if err != nil {
+				return nil, envErr("state %s: %v", c.Name(), err)
+			}
+			t.outsideRows[c.Name()] = pris
+			for _, it := range state.Diff(work, pris) {
+				out = append(out, outsideChange{c.Name(), it, outsideMigrations})
+			}
+		}
+		t.time.Fingerprint += time.Since(start)
+	}
+	sortChanges(out)
+	return out, nil
+}
+
+// definitions reads the definitions of tables in the working database, and
+// takes the pristine copy's from recorded, the record of the seed, which
+// has every table of the copy; a record of an earlier release has none, and
+// they are read from the copy.
+func definitions(ctx context.Context, d state.Definer, tables []string, recorded state.Fingerprint) (work, pris state.Fingerprint, err error) {
+	if work, err = d.Definitions(ctx, tables, false); err != nil {
+		return nil, nil, fmt.Errorf("definitions: %v", err)
+	}
+	if recorded != nil {
+		return work, recorded.Subset(tables), nil
+	}
+	if pris, err = d.Definitions(ctx, tables, true); err != nil {
+		return nil, nil, fmt.Errorf("definitions of the pristine copy: %v", err)
+	}
+	return work, pris, nil
+}
+
+// contents reads the rows of tables in the working database and in the
+// pristine copy.
+func contents(ctx context.Context, d state.Definer, tables []string) (work, pris state.Fingerprint, err error) {
+	if work, err = d.Contents(ctx, tables, false); err != nil {
+		return nil, nil, fmt.Errorf("rows: %v", err)
+	}
+	if pris, err = d.Contents(ctx, tables, true); err != nil {
+		return nil, nil, fmt.Errorf("rows of the pristine copy: %v", err)
+	}
+	return work, pris, nil
+}
+
+func sortChanges(list []outsideChange) {
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].component != list[j].component {
+			return list[i].component < list[j].component
+		}
+		return list[i].item < list[j].item
+	})
+}
+
+// redone returns the changes prepare did not make again: after the
+// restore and prepare, each item must differ from the pristine copy again,
+// a table by what survey found changed (its definition, or the rows of a
+// migrations table). after is a fingerprint of the working state taken
+// after prepare.
+func (t *tracker) redone(ctx context.Context, changes []outsideChange, after states) ([]outsideChange, error) {
+	var left []outsideChange
+	defs, rows := map[string][]string{}, map[string][]string{}
+	for _, ch := range changes {
+		pf := t.pristine[ch.component]
+		now, inNow := after[ch.component][ch.item]
+		then, inThen := pf[ch.item]
+		kind, _, _ := strings.Cut(ch.item, ":")
+		_, definer := t.outsideDefs[ch.component]
+		switch {
+		case ch.how == outsideDefinition && rowKinds[kind]:
+			defs[ch.component] = append(defs[ch.component], ch.item)
+		case ch.how == outsideMigrations && definer:
+			rows[ch.component] = append(rows[ch.component], ch.item)
+		case inNow == inThen && now == then:
+			left = append(left, ch)
+		}
+	}
+	for _, c := range t.comps {
+		d, ok := c.(state.Definer)
+		if !ok {
+			continue
+		}
+		start := time.Now()
+		for _, x := range []struct {
+			items []string
+			read  func(context.Context, []string, bool) (state.Fingerprint, error)
+			pris  state.Fingerprint
+			how   string
+		}{
+			{defs[c.Name()], d.Definitions, t.outsideDefs[c.Name()], outsideDefinition},
+			{rows[c.Name()], d.Contents, t.outsideRows[c.Name()], outsideMigrations},
+		} {
+			if len(x.items) == 0 {
+				continue
+			}
+			work, err := x.read(ctx, x.items, false)
+			if err != nil {
+				return nil, envErr("state %s: %v", c.Name(), err)
+			}
+			for _, it := range x.items {
+				if work[it] == x.pris[it] {
+					left = append(left, outsideChange{c.Name(), it, x.how})
+				}
+			}
+		}
+		t.time.Fingerprint += time.Since(start)
+	}
+	sortChanges(left)
+	return left, nil
+}
+
+// changedItems lists the changes as <component>/<item> (how), at most n.
+func changedItems(changes []outsideChange, n int) string {
+	var list []string
+	for _, ch := range changes {
+		list = append(list, ch.component+"/"+ch.item+" ("+ch.how+")")
+	}
+	return strings.Join(limit(list, n), ", ")
+}
+
+// migrateCommand is the command that runs the migrations of the
+// framework discover: names, as prepare: takes it, or "" when there is no
+// one such framework.
+func migrateCommand(p *config.Project) string {
+	var cmd []string
+	for _, a := range p.Discover {
+		var c []string
+		switch a.Adapter {
+		case "laravel":
+			php := a.PHP
+			if len(php) == 0 {
+				php = []string{"php"}
+			}
+			c = append(append([]string{}, php...), "artisan", "migrate", "--force")
+		case "rails":
+			c = []string{"bin/rails", "db:migrate"}
+		case "django":
+			c = []string{"python", "manage.py", "migrate", "--noinput"}
+		case "symfony":
+			c = []string{"php", "bin/console", "doctrine:migrations:migrate", "--no-interaction", "--allow-no-migration"}
+		default:
+			continue
+		}
+		if cmd != nil && strings.Join(cmd, "\x00") != strings.Join(c, "\x00") {
+			return ""
+		}
+		cmd = c
+	}
+	if cmd == nil {
+		return ""
+	}
+	quoted := make([]string, len(cmd))
+	for i, w := range cmd {
+		quoted[i] = fmt.Sprintf("%q", w)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// outsideErr is the error of a capture that stops for changes made outside
+// DriftGate; restored says whether the restore and prepare ran already
+// (prepare did not make them again).
+func outsideErr(p *config.Project, changes []outsideChange, opt Options, restored bool) error {
+	prepare := "the command that runs the migrations to prepare:"
+	if cmd := migrateCommand(p); cmd != "" {
+		prepare = "prepare: [" + cmd + "]"
+	}
+	what := "the working database was changed outside DriftGate since the pristine copy was made: " + changedItems(changes, 20)
+	seed := "run driftgate seed to make the pristine copy anew (--skip-commands keeps the data as it is now), then " + rebaseSteps(p, opt.Baseline)
+	switch {
+	case restored:
+		return envErr("%s. The restore at the start of the capture undid that, and prepare did not make it again, so the capture would run on the old schema and could pass. Fix: add %s in %s; or run the migrations again (the restore left the pristine copy's data) and %s", what, prepare, configPath(p), seed)
+	case opt.ReadOnly:
+		return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix (a --read-only capture takes no prepare:): %s", what, seed)
+	}
+	return envErr("%s. The restore at the start of a capture would undo that, and the capture would run on the old schema and could pass, so nothing was restored. Fix: add %s in %s, so every capture runs the migrations after the restore and the baseline stays valid; or %s", what, prepare, configPath(p), seed)
+}
+
+// rebaseSteps says how a baseline captured from other data takes the data
+// of a new pristine copy: a capture without the check of the baseline's
+// state, its comparison, and a rebase once its drifts are right.
+func rebaseSteps(p *config.Project, baseline *snapshot.Set) string {
+	name := "local"
+	if baseline != nil {
+		name = filepath.Base(baseline.Dir)
+	}
+	freeze := ""
+	if p.Mode == "freeze" {
+		freeze = " --allow-freeze"
+	}
+	return fmt.Sprintf("make the baseline's state the new one: driftgate capture <tag> --skip-fingerprint-check, driftgate compare <tag> --skip-fingerprint-check, and once its drifts are right, driftgate baselines rebase %s --from <tag>%s --reason \"…\"", name, freeze)
+}

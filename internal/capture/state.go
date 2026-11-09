@@ -92,6 +92,11 @@ type pristineFile struct {
 	RestoreOnly            []string          `json:"restore_only,omitempty"`
 	RestoreEmpty           []string          `json:"restore_empty,omitempty"` // as RestoreOnly, for restore_empty (their fingerprint is in RestoreOnlyFingerprint)
 	RestoreOnlyFingerprint state.Fingerprint `json:"restore_only_fingerprint,omitempty"`
+	// Definitions are the definitions of the pristine copy's tables
+	// (state.Definer), which a capture compares the working database's
+	// with when rows changed (outside.go); none in a record of an earlier
+	// release, which has them read from the pristine copy.
+	Definitions state.Fingerprint `json:"definitions,omitempty"`
 }
 
 // pristinePath is the pristine file of a database component on a server.
@@ -174,6 +179,15 @@ type tracker struct {
 	// are those whose last restore ended sessions.
 	databases map[string]endedDatabase
 	endedBy   []endedDatabase
+	// found is the fingerprint of every database component that survey
+	// took before the first restore, which that restore takes instead of
+	// its own; outsideDefs the definitions of the pristine copy's tables
+	// survey compared, and outsideRows the rows of its migrations tables
+	// (outside.go); pristineDefs the definitions the record of the
+	// pristine copy has.
+	found                    states
+	outsideDefs, outsideRows states
+	pristineDefs             states
 }
 
 // openComponents connects to every state component, in name order.
@@ -279,7 +293,8 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
+		pristineDefs: states{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -335,6 +350,9 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)
+		if pf.Definitions != nil {
+			t.pristineDefs[c.Name()] = pf.Definitions
+		}
 	}
 	return t, nil
 }
@@ -413,9 +431,12 @@ func (t *tracker) restore(ctx context.Context) error {
 		}
 		var items []string
 		if t.dirty == nil {
-			cur, err := c.Fingerprint(ctx, nil)
-			if err != nil {
-				return envErr("state %s: fingerprint: %v", c.Name(), err)
+			cur, ok := t.found[c.Name()]
+			if !ok {
+				var err error
+				if cur, err = c.Fingerprint(ctx, nil); err != nil {
+					return envErr("state %s: fingerprint: %v", c.Name(), err)
+				}
 			}
 			items = state.Diff(cur, pf)
 		} else {
@@ -468,6 +489,7 @@ func (t *tracker) restore(ctx context.Context) error {
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
 	t.dirty = map[string][]string{}
+	t.found = nil
 	return nil
 }
 
@@ -736,6 +758,17 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
 			}
 			pf.RestoreOnly, pf.RestoreEmpty = sortedCopy(sc.RestoreOnly), sortedCopy(sc.RestoreEmpty)
+		}
+		if d, ok := c.(state.Definer); ok {
+			var tables []string
+			for it := range f {
+				if kind, _, _ := strings.Cut(it, ":"); kind == "table" || kind == "matview" {
+					tables = append(tables, it)
+				}
+			}
+			if pf.Definitions, err = d.Definitions(ctx, tables, true); err != nil {
+				return envErr("state %s: definitions of the pristine copy: %v", c.Name(), err)
+			}
 		}
 		if pi, ok := c.(pristineIdentifier); ok {
 			if pf.PristineID, err = pi.PristineID(ctx); err != nil {

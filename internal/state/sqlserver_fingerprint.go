@@ -379,3 +379,61 @@ func (s *SQLServer) rememberRowversions(ctx context.Context, c *sql.Conn, tables
 	}
 	return nil
 }
+
+// Definitions hashes the definitions of tables of the working database, or
+// of the pristine one (Definer): columns, keys, indexes and constraints
+// from the catalog, without where an identity column stands.
+func (s *SQLServer) Definitions(ctx context.Context, items []string, pristine bool) (f Fingerprint, err error) {
+	db := s.o.Working
+	if pristine {
+		db = s.o.Pristine
+	}
+	err = s.retryOthers(ctx, func() error {
+		c, err := s.conn(ctx, db)
+		if err != nil {
+			return s.denied(err)
+		}
+		defer c.Close()
+		inv, err := s.inventory(ctx, c)
+		if err != nil {
+			return err
+		}
+		f = Fingerprint{}
+		for _, it := range items {
+			if t := inv.ByItem[it]; t != nil && !t.Excluded {
+				f[it] = hash([]byte(inv.base[it]))
+			}
+		}
+		return nil
+	})
+	return f, err
+}
+
+// Contents hashes the rows of tables of the working database, or of the
+// pristine one (Definer), as a fingerprint reads them, without where an
+// identity column stands.
+func (s *SQLServer) Contents(ctx context.Context, items []string, pristine bool) (f Fingerprint, err error) {
+	db := s.o.Working
+	if pristine {
+		db = s.o.Pristine
+	}
+	err = s.retryOthers(ctx, func() error {
+		c, err := s.conn(ctx, db)
+		if err != nil {
+			return s.denied(err)
+		}
+		defer c.Close()
+		fp, err := s.fingerprint(ctx, c, db, items, nil, nil, nil, false)
+		if err != nil {
+			return err
+		}
+		f = Fingerprint{}
+		for _, it := range items {
+			if t := fp.inv.ByItem[it]; t != nil && !t.Excluded {
+				f[it] = hash([]byte(fp.content[t.ID]))
+			}
+		}
+		return nil
+	})
+	return f, err
+}
