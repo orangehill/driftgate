@@ -285,8 +285,9 @@ func TestMigrateCommand(t *testing.T) {
 }
 
 // TestChangedOutsideOlderRecord: a record of the pristine copy made by an
-// earlier release has no definitions; they are read from the copy, and a
-// column is found as with a new record. Rows written stop nothing.
+// earlier release has no definitions, and may be of an older fingerprint
+// format; the definitions are read from the copy, and a column is found as
+// with a new record. Rows written stop nothing.
 func TestChangedOutsideOlderRecord(t *testing.T) {
 	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
 	root := t.TempDir()
@@ -315,6 +316,7 @@ func TestChangedOutsideOlderRecord(t *testing.T) {
 		t.Fatalf("record of the seed: %s %v", raw, err)
 	}
 	delete(record, "definitions")
+	delete(record, "format") // fingerprint format 1: views and triggers hashed another way
 	if err := snapshot.WriteJSON(path, record); err != nil {
 		t.Fatal(err)
 	}

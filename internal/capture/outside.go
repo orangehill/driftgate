@@ -105,6 +105,11 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 			return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
 		}
 		t.found[c.Name()] = cur
+		// A record of an older fingerprint format hashes views and
+		// triggers another way: their hashes are not compared (the restore
+		// asks for a seed when they differ); tables are compared by their
+		// definitions, read anew on both sides.
+		older := t.formats[c.Name()] != state.FingerprintFormat
 		var tables, migrations []string
 		d, definer := c.(state.Definer)
 		for _, it := range state.Diff(cur, pf) {
@@ -117,7 +122,9 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 			case !now:
 				out = append(out, outsideChange{c.Name(), it, outsideGone})
 			case !rowKinds[kind]:
-				out = append(out, outsideChange{c.Name(), it, outsideDefinition})
+				if !older {
+					out = append(out, outsideChange{c.Name(), it, outsideDefinition})
+				}
 			case migrationTable(it) && !definer:
 				out = append(out, outsideChange{c.Name(), it, outsideMigrations})
 			case kind != "sequence" && definer:
