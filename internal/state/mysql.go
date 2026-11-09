@@ -1352,49 +1352,14 @@ func (m *MySQL) galeraSequences(ctx context.Context, c *sql.Conn, src string, se
 	if len(seqs) == 0 {
 		return nil
 	}
-	var name, value string
-	err := c.QueryRowContext(ctx, "SHOW SESSION VARIABLES LIKE 'wsrep_on'").Scan(&name, &value)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && !strings.EqualFold(value, "ON") {
-		return nil
-	}
-	if err != nil {
+	if galera, err := dbx.GaleraNode(ctx, c); err != nil || !galera {
 		return err
 	}
-	// One query for all of them.
-	parts := make([]string, len(seqs))
-	var args []any
-	for i, q := range seqs {
-		parts[i] = "SELECT ?, increment, cache_size, (SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?) FROM " + qi(src) + "." + qi(q)
-		args = append(args, q, src, q)
-	}
-	rows, err := c.QueryContext(ctx, strings.Join(parts, " UNION ALL "), args...)
-	if err != nil {
+	refused, err := dbx.GaleraRefusedSequences(ctx, c, src, seqs)
+	if err != nil || len(refused) == 0 {
 		return err
 	}
-	defer rows.Close()
-	var refused []string
-	for rows.Next() {
-		var q string
-		var increment int64
-		var cache uint64
-		var engine sql.NullString
-		if err := rows.Scan(&q, &increment, &cache, &engine); err != nil {
-			return err
-		}
-		switch {
-		case !strings.EqualFold(engine.String, "InnoDB"):
-			refused = append(refused, fmt.Sprintf("%s (ENGINE=%s)", q, engine.String))
-		case cache != 0 && increment != 0:
-			refused = append(refused, fmt.Sprintf("%s (CACHE %d, INCREMENT BY %d)", q, cache, increment))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(refused) == 0 {
-		return nil
-	}
-	return fmt.Errorf("state %s: the server is a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of %s cannot be copied: %s; make them NOCACHE or INCREMENT BY 0 (ALTER SEQUENCE) and InnoDB (ALTER TABLE … ENGINE=InnoDB), or add them to exclude", m.o.Name, src, strings.Join(refused, ", "))
+	return fmt.Errorf("state %s: the server is a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of %s cannot be copied: %s; %s, or add them to exclude", m.o.Name, src, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
 }
 
 // copySequence makes sequence q of dst as src has it, where it goes on.

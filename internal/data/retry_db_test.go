@@ -163,3 +163,56 @@ func testRetrySourceRead(t *testing.T, s *server) {
 		t.Errorf("classify: %v after %d tries", err, tries)
 	}
 }
+
+// TestMySQLGaleraTargetSequences (MariaDB Galera): a target on a Galera
+// node gets no sequence the node refuses to create (a cache with an
+// increment other than 0, another engine than InnoDB): anonymize names
+// them before anything is written, and writes no target or staging
+// database. A dump, which may be loaded anywhere, is still made.
+func TestMySQLGaleraTargetSequences(t *testing.T) {
+	eachMySQL(t, func(t *testing.T, s *server) {
+		ctx := context.Background()
+		var wsrep int
+		if s.admin.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) != nil || wsrep == 0 {
+			t.Skip("not a Galera node")
+		}
+		const src, dst = "dggalera_src", "dggalera_dst"
+		t.Cleanup(func() { s.drop(src, dst) })
+		s.create(t, src)
+		s.drop(dst)
+		s.exec(t, src, "CREATE TABLE t (id INT PRIMARY KEY)", "INSERT INTO t VALUES (1)", "CREATE SEQUENCE plain NOCACHE")
+		// Only a session without wsrep makes what the node refuses.
+		c, err := s.admin.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{"SET SESSION wsrep_on = 0", "CREATE SEQUENCE " + src + ".cached CACHE 10",
+			"CREATE SEQUENCE " + src + ".aria NOCACHE ENGINE=Aria", "SET SESSION wsrep_on = 1"} {
+			if _, err := c.ExecContext(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		c.Close()
+		rules, err := ParseRules([]byte("version: 1\ntables:\n  t:\n    columns: {id: keep}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := s.db(dst)
+		var dump bytes.Buffer
+		_, err = Anonymize(ctx, Options{Source: s.db(src), Target: &target, Dump: &dump, Rules: rules, Key: testKey})
+		if err == nil || !strings.Contains(err.Error(), "cached (CACHE 10, INCREMENT BY 1)") || !strings.Contains(err.Error(), "aria (ENGINE=Aria)") ||
+			strings.Contains(err.Error(), "plain") || strings.Contains(err.Error(), "1235") && !strings.Contains(err.Error(), "Galera cluster node") {
+			t.Fatalf("anonymize: %v", err)
+		}
+		if dump.Len() != 0 {
+			t.Errorf("a dump was written: %d bytes", dump.Len())
+		}
+		if n := s.query(t, "", "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE '"+dst+"%'"); n != "0" {
+			t.Errorf("%s databases named like the target", n)
+		}
+		dump.Reset()
+		if _, err := Anonymize(ctx, Options{Source: s.db(src), Dump: &dump, Rules: rules, Key: testKey}); err != nil || !strings.Contains(dump.String(), "cached") {
+			t.Errorf("dump only: %v", err)
+		}
+	})
+}

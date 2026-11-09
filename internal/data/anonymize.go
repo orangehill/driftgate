@@ -365,6 +365,14 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 		return nil, err
 	}
 	defer srcDB.Close()
+	// A Galera target refuses some sequences (1235): they are named before
+	// anything is written (galeraSequences, in the source phase).
+	galeraTarget := false
+	if opt.Target != nil && opt.Target.Driver == MySQL {
+		if galeraTarget, err = galeraNode(ctx, *opt.Target); err != nil {
+			return nil, fmt.Errorf("target: %w", err)
+		}
+	}
 	// The source phase: a snapshot, the schema, the checks, the stand-ins
 	// reserved for the originals, the index of originals and the sample.
 	// Nothing is written before it ends. A try the server stops for a lock
@@ -421,6 +429,11 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 		}
 		if p, ok := opt.Filter.(preparer); ok {
 			if err := p.prepare(ctx, src, e.dl, schema, opt.Rules, &sampleLog); err != nil {
+				return err
+			}
+		}
+		if galeraTarget {
+			if err := galeraSequences(ctx, src, opt.Source.Name, schema, *opt.Target); err != nil {
 				return err
 			}
 		}
