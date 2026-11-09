@@ -299,9 +299,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	defer tr.close()
-	if opt.ReadOnly {
-		tr.run = runReadOnly
-	}
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
 		timings: map[string]int64{},
@@ -709,11 +706,11 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 }
 
 // CheckReadOnly refuses a configuration a read-only capture cannot keep
-// from writing: --read-only selects requests, and prepare: runs after
-// every restore as configured.
+// from writing: --read-only selects requests, and prepare: runs as
+// configured. With state: it writes only to data the restore brings back.
 func CheckReadOnly(p *config.Project) error {
-	if len(p.Prepare) > 0 {
-		return configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
+	if len(p.Prepare) > 0 && len(p.State) == 0 {
+		return configErr("--read-only covers the requests only, not the project's commands: prepare: may write, and without state: nothing restores what it writes; leave it out of the configuration for a read-only check")
 	}
 	return nil
 }

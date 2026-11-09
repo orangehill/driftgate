@@ -188,8 +188,9 @@ func TestChangedOutside(t *testing.T) {
 // message never says to add prepare:. Of two migrations, the one prepare
 // does not make again is named. A restore_only table dropped or made, and
 // made so again by prepare, goes on. The throughput probe checks the
-// same; a --read-only capture, which takes no prepare:, offers the seed
-// only; a seed takes the change into the pristine copy.
+// same; a --read-only capture without prepare: is told to add it, and
+// with it (state: restores what it writes) is checked as any capture; a
+// seed takes the change into the pristine copy.
 func TestChangedOutsideWithPrepare(t *testing.T) {
 	const slug, title = "ALTER TABLE users ADD COLUMN slug TEXT", "ALTER TABLE notes ADD COLUMN title TEXT"
 	for _, c := range []struct {
@@ -245,8 +246,16 @@ func TestChangedOutsideWithPrepare(t *testing.T) {
 		}
 		app.exec(t, slug)
 		_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "ro", ReadOnly: true})
-		if !changedOutside(err, "db/table:users (changed)") || !strings.Contains(err.Error(), "Fix (a --read-only capture takes no prepare:): run driftgate seed") {
+		if !changedOutside(err, "db/table:users (changed)") || !strings.Contains(err.Error(), "Fix: add the command that runs the migrations to prepare:") {
 			t.Fatalf("read-only capture: %v", err)
+		}
+		// With state:, a read-only capture takes prepare: and its check.
+		_, err = Run(ctx, outsideProject(t, root, srv.URL, "SELECT 1"), sqliteCatalog(), Options{Tag: "ro-prepare", ReadOnly: true})
+		if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:users; the restore undid it, and prepare did not make it again") {
+			t.Fatalf("read-only capture whose prepare does not make it again: %v", err)
+		}
+		if _, err := Run(ctx, outsideProject(t, root, srv.URL, slug), sqliteCatalog(), Options{Tag: "ro-made", ReadOnly: true}); err != nil {
+			t.Fatalf("read-only capture whose prepare makes it again: %v", err)
 		}
 		if err := Seed(ctx, p, SeedOptions{}); err != nil {
 			t.Fatal(err)

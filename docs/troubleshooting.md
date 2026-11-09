@@ -29,7 +29,7 @@ vary. Exit codes are under [exit codes](commands.md#exit-codes).
 | `guard "…" failed: …` | A guard's check did not pass, such as mail not going to a log. | Fix the setting it checks ([guards](configuration.md#seed-prepare-and-guards)). |
 | `read-only requests changed …; finding which …` | A `GET` or another read-only request writes data. | Mark it `mutates: true` under [`requests:`](configuration.md#storage-observe-and-requests), then `driftgate generate --write`. |
 | `warning: the state changed between the restore and the end of prepare: …` | A `prepare` command writes data before every capture. | Move it to `seed`. |
-| `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
+| `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change, and no `state:` restores it. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
 | `… incomplete … (interrupted?); capture it again with --force` | The capture was interrupted. | Capture again with `--force`. |
 | `another driftgate is using the store …; waiting until it is done (Ctrl-C to stop)` | Another command holds the local store. | Wait for it, or stop it. |
 | `personal data or credentials found in … responses marked public; they were stored as private …` | The detector found personal data in a public body. | Mark the request private, or allow the value ([private bodies](security.md#private-bodies)). |

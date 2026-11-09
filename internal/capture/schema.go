@@ -20,7 +20,6 @@ type runKind int
 
 const (
 	runCapture      runKind = iota // a capture or a throughput probe, which run prepare:
-	runReadOnly                    // a --read-only capture, which takes no prepare:
 	runMigrateState                // verify --migrate-state, which runs no prepare:
 )
 
@@ -45,7 +44,6 @@ const (
 	notMadeAgain    = "the schema of the working database changed since the pristine copy was made: %s; the restore undid it, and prepare did not make it again, or made it otherwise (another migration may change it too): it comes from another branch, or was made by hand. %s%s"
 	fixPrepare      = "Fix: add the command that runs the migrations to prepare: in %s, so the capture makes the change again after the restore; or run driftgate seed to make the working database the new pristine copy"
 	fixSeed         = "Fix: run driftgate seed to make the working database the new pristine copy"
-	fixReadOnly     = "Fix (a --read-only capture takes no prepare:): run driftgate seed to make the working database the new pristine copy"
 	fixCaptureFirst = "Fix: run a capture first; its prepare: makes the change again"
 	fixMissing      = "Fix: a restore that stopped left them missing; make them again in the working database as the pristine copy has them (SHOW CREATE there), then run again"
 	acceptUndo      = "; or delete %s to accept that a restore undid it"
@@ -150,8 +148,6 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 	switch {
 	case t.missingOnly:
 		fix = fixMissing
-	case t.run == runReadOnly:
-		fix = fixReadOnly
 	case t.run == runMigrateState && t.prepare:
 		fix = fixCaptureFirst
 	}

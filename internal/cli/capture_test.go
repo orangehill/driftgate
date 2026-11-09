@@ -571,8 +571,8 @@ func TestReadOnlyCalibrate(t *testing.T) {
 }
 
 // TestReadOnlyProjectCommands: --read-only selects requests only, so a
-// prepare: (which may write) is refused, and a tokens.command, which runs
-// as configured, is warned of.
+// prepare: (which may write) is refused without state: to restore what it
+// writes, and a tokens.command, which runs as configured, is warned of.
 func TestReadOnlyProjectCommands(t *testing.T) {
 	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -586,7 +586,7 @@ func TestReadOnlyProjectCommands(t *testing.T) {
 	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
 
 	write(t, cfg, base+"prepare:\n  - [\"true\"]\n")
-	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg, "--read-only"); code != ExitConfig || !strings.Contains(errOut, "prepare: runs after every restore and may write") {
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg, "--read-only"); code != ExitConfig || !strings.Contains(errOut, "prepare: may write, and without state: nothing restores what it writes") {
 		t.Fatalf("prepare: exit %d\n%s\n%s", code, out, errOut)
 	}
 	write(t, cfg, base+"tokens:\n  command: [\"echo\", \"{}\"]\n")
@@ -595,9 +595,9 @@ func TestReadOnlyProjectCommands(t *testing.T) {
 	}
 }
 
-// TestRunReadOnlyRefusesPrepareFirst: run --read-only refuses prepare:
-// before anything runs, also the seed of a store without a pristine copy.
-func TestRunReadOnlyRefusesPrepareFirst(t *testing.T) {
+// TestRunReadOnlyPrepareWithState: with state:, run --read-only takes
+// prepare:, which writes only to data the restore brings back.
+func TestRunReadOnlyPrepareWithState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":1}`)
@@ -614,16 +614,13 @@ func TestRunReadOnlyRefusesPrepareFirst(t *testing.T) {
 	if code, out, errOut := runCLI(t, "run", "--config", cfg); code != ExitClean {
 		t.Fatalf("baseline: %d\n%s\n%s", code, out, errOut)
 	}
-	// A new store: run would seed first.
-	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
-	seeded := filepath.Join(t.TempDir(), "seeded")
-	write(t, cfg, conf+"seed:\n  - [\"touch\", \""+seeded+"\"]\nprepare:\n  - [\"true\"]\n")
-	code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only")
-	if code != ExitConfig || !strings.Contains(errOut, "prepare: runs after every restore") {
+	prepared := filepath.Join(t.TempDir(), "prepared")
+	write(t, cfg, conf+"prepare:\n  - [\"touch\", \""+prepared+"\"]\n")
+	if code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only"); code != ExitClean {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
-	if _, err := os.Stat(seeded); err == nil {
-		t.Fatal("the seed ran before the refusal")
+	if _, err := os.Stat(prepared); err != nil {
+		t.Fatalf("prepare did not run: %v", err)
 	}
 }
 

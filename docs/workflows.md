@@ -121,7 +121,7 @@ driftgate compare live-after --against live-before
 | Rule | Why it matters |
 |---|---|
 | No `state:` | Nothing is restored, seeded or fingerprinted, and no side effect is recorded. |
-| No `prepare:` | `--read-only` refuses it: it runs after a restore and may write. |
+| No `prepare:` | Without `state:`, `--read-only` refuses it: it may write, and nothing restores what it writes. |
 | No `tokens.command` | It runs as configured and may write. |
 | `level: types` | The data is not yours. A pass proves the contract, not the behaviour. |
 | `--read-only` | Sends only requests that do not change data: safe methods unless `mutates: true`, and `mutates: false`. |
