@@ -820,7 +820,7 @@ func TestWitnessProperty(t *testing.T) {
 			data[i] = byte(r.Uint32())
 		}
 		if msg := checkWitness(t, data); msg != "" {
-			t.Error(msg)
+			t.Errorf("seed %d: %s", seed, msg)
 			if failures++; failures == 5 {
 				return
 			}
