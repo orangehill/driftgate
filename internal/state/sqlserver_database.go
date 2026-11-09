@@ -1048,7 +1048,9 @@ func (s *SQLServer) dropLeft(ctx context.Context, db string, family bool) error 
 }
 
 // ssHooks, set by tests on an SQLServer, make a drop fail where a server
-// would: drop runs dropLeft's batch q on c in place of sending it.
+// would: drop runs dropLeft's batch q on c in place of sending it; restore
+// is each try of Restore in place of the restore itself.
 type ssHooks struct {
-	drop func(ctx context.Context, c *sql.Conn, q string) error
+	drop    func(ctx context.Context, c *sql.Conn, q string) error
+	restore func(ctx context.Context, items []string) error
 }
