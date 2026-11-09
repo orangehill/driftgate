@@ -58,7 +58,7 @@ type ssFingerprint struct {
 // with fpRestoreOnly they are all it hashes.
 func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string, inv *ssInventory, vals *ssValues, reuse func(t *ssTable, def string) (string, bool), mode fpMode) (*ssFingerprint, error) {
 	var err error
-	if vals == nil {
+	if vals == nil && mode != fpSchema {
 		if vals, err = values(ctx, c); err != nil {
 			return nil, err
 		}
@@ -67,6 +67,13 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 		if inv, err = s.inventory(ctx, c); err != nil {
 			return nil, err
 		}
+	}
+	if mode == fpSchema { // the definitions without the values
+		out := &ssFingerprint{f: Fingerprint{}, inv: inv}
+		for item, def := range inv.base {
+			out.f[item] = hash([]byte(def))
+		}
+		return out, nil
 	}
 	if vals, err = s.readOnlyValues(ctx, db, vals); err != nil {
 		return nil, err

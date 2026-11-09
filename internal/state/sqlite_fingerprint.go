@@ -304,13 +304,16 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
-		if objs.tables[name].restoreOnly == (mode == fpRestoreOnly) && want("table:"+name) {
+		if (mode == fpSchema || objs.tables[name].restoreOnly == (mode == fpRestoreOnly)) && want("table:"+name) {
 			tables = append(tables, objs.tables[name])
 		}
 	}
-	got, read, err := s.tableSums(ctx, conns, schema, tables, sums)
-	if err != nil {
-		return nil, nil, err
+	var got map[string]sqliteSum
+	var read []string
+	if mode != fpSchema {
+		if got, read, err = s.tableSums(ctx, conns, schema, tables, sums); err != nil {
+			return nil, nil, err
+		}
 	}
 	if sums != nil {
 		if all {
@@ -324,6 +327,10 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		writeFields(h, "table", t.sql)
 		for _, ix := range t.indexes {
 			writeFields(h, ix)
+		}
+		if mode == fpSchema {
+			f["table:"+t.name] = hex.EncodeToString(h.Sum(nil))
+			continue
 		}
 		if seq, ok := objs.seq[t.name]; ok {
 			h.Write(appendValue([]byte{'s'}, seq))
@@ -915,6 +922,12 @@ func (s *SQLite) pristineFingerprint(ctx context.Context) (Fingerprint, error) {
 // file, or of the pristine one (RestoreOnly).
 func (s *SQLite) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
 	return s.readFile(ctx, pristine, fpRestoreOnly)
+}
+
+// SchemaFingerprint hashes the definitions of the working file, or of the
+// pristine one (Schemer).
+func (s *SQLite) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return s.readFile(ctx, pristine, fpSchema)
 }
 
 // readFile fingerprints the working file, or the pristine one, as mode

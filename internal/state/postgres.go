@@ -305,6 +305,13 @@ func (p *Postgres) read(ctx context.Context, pristine bool, items []string, form
 	return f, err
 }
 
+// SchemaFingerprint hashes the definitions of the working database, or of
+// the pristine one (Schemer); nil for a working database that does not
+// exist.
+func (p *Postgres) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return p.read(ctx, pristine, nil, FingerprintFormat, fpSchema)
+}
+
 // orEmpty gives a working database that does not exist no items, so a
 // restore brings back every item of the pristine copy.
 func orEmpty(f Fingerprint, err error) (Fingerprint, error) {
@@ -451,9 +458,19 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			if p.restoreOnlyQualified(t) {
 				return nil, p.o.bothErr(t)
 			}
+			if mode != fpSchema { // the schema mode has them by definition
+				continue
+			}
+		}
+		if mode != fpSchema && p.restoreOnlyQualified(t) != (mode == fpRestoreOnly) || !want("table:"+t) {
 			continue
 		}
-		if p.restoreOnlyQualified(t) != (mode == fpRestoreOnly) || !want("table:"+t) {
+		def := ""
+		if defs[t] != nil {
+			def = defs[t].String()
+		}
+		if mode == fpSchema {
+			f["table:"+t] = hash([]byte(def))
 			continue
 		}
 		schema, name, _ := strings.Cut(t, ".")
@@ -463,10 +480,6 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		if err := d.QueryRowContext(ctx, q).Scan(&count, &sum); err != nil {
 			return nil, fmt.Errorf("%s: %w", t, err)
 		}
-		def := ""
-		if defs[t] != nil {
-			def = defs[t].String()
-		}
 		f["table:"+t] = hash([]byte(fmt.Sprintf("%s\x00%d\x00%s", def, count, sum)))
 	}
 	owned, err := p.ownedSequences(ctx, d)
@@ -474,7 +487,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		return nil, err
 	}
 	if mode == fpRestoreOnly {
-		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format)
+		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format, mode)
 		return f, err
 	}
 	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE `+schemaFilter("schemaname"))
@@ -487,7 +500,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			rows.Close()
 			return nil, err
 		}
-		if !p.excludedQualified(v) && want("view:"+v) {
+		if (mode == fpSchema || !p.excludedQualified(v)) && want("view:"+v) {
 			if defs[v] != nil {
 				def += "\x00" + defs[v].String()
 			}
@@ -495,13 +508,15 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		}
 	}
 	rows.Close()
-	if err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && !owned[strings.TrimPrefix(item, "sequence:")] }, format); err != nil {
+	if err := p.sequences(ctx, d, f, func(item string) bool {
+		return want(item) && (mode == fpSchema || !owned[strings.TrimPrefix(item, "sequence:")])
+	}, format, mode); err != nil {
 		return nil, err
 	}
 	if format < 2 {
 		return f, nil
 	}
-	if err := p.schemaItems(ctx, d, f, want); err != nil {
+	if err := p.schemaItems(ctx, d, f, want, mode); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -515,9 +530,10 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 // their hash stays that of format 1.) pg_sequences shows no
 // value for a sequence not called yet; that value is read from the
 // sequence itself, in one query for all of them.
-// Format 1 has the last value only.
-func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, format int) error {
-	params, own := "''", "NULL"
+// Format 1 has the last value only; fpSchema the parameters only, of
+// excluded sequences too.
+func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, format int, mode fpMode) error {
+	value, params, own := "coalesce(last_value::text, 'not called') || ", "''", "NULL"
 	if format >= 2 {
 		params = `CASE WHEN start_value = 1 AND min_value = 1 AND increment_by = 1 AND NOT cycle AND cache_size = 1 AND
 		                 max_value = CASE data_type WHEN 'smallint'::regtype THEN 32767 WHEN 'integer'::regtype THEN 2147483647 ELSE 9223372036854775807 END
@@ -526,7 +542,10 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 		own = `CASE WHEN last_value IS NULL THEN format('SELECT %L, %s FROM %I.%I WHERE last_value <> %s',
 		            schemaname || '.' || sequencename, 'last_value', schemaname, sequencename, start_value) END`
 	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || sequencename, coalesce(last_value::text, 'not called') || `+params+`, `+own+`
+	if mode == fpSchema {
+		value, own = "", "NULL"
+	}
+	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || sequencename, `+value+params+`, `+own+`
 		  FROM pg_sequences WHERE `+schemaFilter("schemaname"))
 	if err != nil {
 		return err
@@ -539,7 +558,7 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 			rows.Close()
 			return err
 		}
-		if p.excludedQualified(s) || !want("sequence:"+s) {
+		if mode != fpSchema && p.excludedQualified(s) || !want("sequence:"+s) {
 			continue
 		}
 		f["sequence:"+s] = v // hashed below, with the value of unused
@@ -585,8 +604,9 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 // attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other than public, and
 // materialized views with their rows (REFRESH). Objects of extensions
 // are left out: CREATE EXTENSION makes them, and a library such as PostGIS
-// has thousands.
-func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool) error {
+// has thousands. fpSchema leaves out the rows, keeps excluded materialized
+// views, and adds every extension with its version (CREATE EXTENSION).
+func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, mode fpMode) error {
 	queries := []string{
 		`SELECT 'function:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')', pg_get_functiondef(f.oid)
 		   FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
@@ -609,6 +629,9 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		  WHERE n.nspname <> 'public' AND ` + schemaFilter("n.nspname") + ` AND ` + dbx.PostgresNotExtension("n.oid", "pg_namespace"),
 		`SELECT 'matview:' || schemaname || '.' || matviewname, definition || ' ' || ispopulated::text FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
 	}
+	if mode == fpSchema {
+		queries = append(queries, `SELECT 'extension:' || extname, extversion FROM pg_extension`)
+	}
 	defs := map[string]string{}
 	for _, q := range queries {
 		rows, err := d.QueryContext(ctx, q)
@@ -625,7 +648,7 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 				continue
 			}
 			kind, name, _ := strings.Cut(item, ":")
-			if kind == "matview" && p.excludedQualified(name) {
+			if kind == "matview" && mode != fpSchema && p.excludedQualified(name) {
 				continue
 			}
 			defs[item] = def
@@ -640,7 +663,7 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		sum := ""
 		if kind == "matview" {
 			sum = "not populated"
-			if strings.HasSuffix(def, " true") {
+			if strings.HasSuffix(def, " true") && mode != fpSchema {
 				schema, rel, _ := strings.Cut(name, ".")
 				var count int64
 				var rowsSum string

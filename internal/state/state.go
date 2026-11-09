@@ -55,6 +55,7 @@ type fpMode int
 const (
 	fpRows        fpMode = iota // every item but the restore_only tables, with their rows
 	fpRestoreOnly               // the restore_only tables only, with their rows
+	fpSchema                    // every item Restore takes, by its definition only (Schemer)
 )
 
 // Diff lists the items whose hash differs or that exist on one side only.
@@ -180,6 +181,13 @@ type RestoreOnly interface {
 	// state, or with pristine of the pristine copy, as the items Restore
 	// takes. It reads them every time: no fingerprint keeps them.
 	RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
+}
+
+// Schemer hashes the definitions of the items Restore takes, without rows
+// or counters: the schema a restore brings back. A working database a
+// stopped restore left unreadable gives nil; the pristine copy never does.
+type Schemer interface {
+	SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
 }
 
 // SessionEnder is a Component whose Restore may end the application's own

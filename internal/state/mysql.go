@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -618,7 +619,8 @@ func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items
 }
 
 // fingerprintOnce hashes items (nil: all) of db; with fpRestoreOnly only
-// the restore_only tables, which it otherwise leaves out.
+// the restore_only tables, which it otherwise leaves out; with fpSchema
+// those too, without checksums, AUTO_INCREMENT or where a sequence goes on.
 func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	objs, err := m.objects(ctx, c, db)
 	if err != nil {
@@ -626,9 +628,12 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 	}
 	want := func(item string) bool { return items == nil || contains(items, item) }
 	names := objs.tables
-	if mode == fpRestoreOnly {
+	switch mode {
+	case fpRestoreOnly:
 		names = objs.restoreOnly
 		want = func(item string) bool { return strings.HasPrefix(item, "table:") }
+	case fpSchema:
+		names = slices.Concat(objs.tables, objs.restoreOnly)
 	}
 	f := Fingerprint{}
 	// One read of SHOW CREATE for every table, view and trigger (showAll).
@@ -657,7 +662,7 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 	if err != nil {
 		return nil, err
 	}
-	if err := m.hashCreated(ctx, c, db, tables, shown[:len(tables)], f); err != nil {
+	if err := m.hashCreated(ctx, c, db, tables, shown[:len(tables)], f, mode); err != nil {
 		return nil, err
 	}
 	shown = shown[len(tables):]
@@ -678,9 +683,11 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 		if err != nil {
 			return nil, err
 		}
-		next, err := sequenceNext(ctx, c, db, s)
-		if err != nil {
-			return nil, err
+		var next string
+		if mode != fpSchema {
+			if next, err = sequenceNext(ctx, c, db, s); err != nil {
+				return nil, err
+			}
 		}
 		f["sequence:"+s] = hash([]byte(def + "\x00" + next))
 	}
@@ -698,8 +705,9 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 }
 
 // hashCreated adds to f the item of every table: its CREATE statement, from
-// its row of SHOW CREATE TABLE in shown, and its checksum.
-func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint) error {
+// its row of SHOW CREATE TABLE in shown, and its checksum; with fpSchema
+// the statement without AUTO_INCREMENT only.
+func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint, mode fpMode) error {
 	creates := map[string]string{}
 	for i, t := range tables {
 		def, err := dbx.ShowCreateStatement("TABLE", t, shown[i])
@@ -707,6 +715,12 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 			return err
 		}
 		creates[t] = def
+		if mode == fpSchema {
+			f["table:"+t] = hash([]byte(autoIncrement().ReplaceAllString(def, "")))
+		}
+	}
+	if mode == fpSchema {
+		return nil
 	}
 	sums, err := m.checksums(ctx, c, db, tables, creates)
 	if err != nil {
@@ -725,15 +739,27 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
 // database, or of the pristine one (RestoreOnly). It leaves the last
 // fingerprint and its counters as they were.
-func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return m.read(ctx, pristine, fpRestoreOnly)
+}
+
+// SchemaFingerprint hashes the definitions of the working database, or of
+// the pristine one (Schemer).
+func (m *MySQL) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return m.read(ctx, pristine, fpSchema)
+}
+
+// read fingerprints the working database, or the pristine one, as mode
+// reads it, again when the server stops it for a lock (retryLocked).
+func (m *MySQL) read(ctx context.Context, pristine bool, mode fpMode) (f Fingerprint, err error) {
 	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
-		f, err = m.restoreOnlyFingerprint(ctx, pristine)
+		f, err = m.readOnce(ctx, pristine, mode)
 		return err
 	})
 	return f, err
 }
 
-func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+func (m *MySQL) readOnce(ctx context.Context, pristine bool, mode fpMode) (Fingerprint, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -743,7 +769,7 @@ func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fing
 	if pristine {
 		db = m.o.Pristine
 	}
-	return m.fingerprintOnce(ctx, c, db, nil, FingerprintFormat, fpRestoreOnly)
+	return m.fingerprintOnce(ctx, c, db, nil, FingerprintFormat, mode)
 }
 
 // checksums checksums the tables (see checksumGroup; defs are their CREATE
@@ -1233,7 +1259,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	// What makes again what a failure leaves missing: a restore of the
 	// working database, or a seed of the pristine copy.
-	recovery := "the next successful restore"
+	recovery := "they are made again from the pristine copy"
 	if dst == m.o.Pristine {
 		recovery = "driftgate seed runs again"
 	}
@@ -1264,6 +1290,19 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	if err == nil {
 		err = makeObjects()
+	}
+	if err != nil && lost == nil && dst == m.o.Working {
+		// A failed or stopped restore makes them again, on a session no
+		// cancel stops: the working schema stays the pristine copy's.
+		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if s, serr := m.session(bg); serr == nil {
+			defer s.Close()
+			if _, serr = s.ExecContext(bg, "USE "+qi(dst)); serr == nil {
+				ctx, c = bg, s
+				makeObjects()
+			}
+		}
 	}
 	if err != nil {
 		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
@@ -1398,7 +1437,7 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 // are dst's before the drops); when the working copy's triggers of that
 // table were reordered, or others stand between, the order may still
 // differ from the pristine one, which the message says. It names what was
-// made again; what is missing and the next successful restore makes again
+// made again; what is missing until it is made again from the pristine copy
 // (its creation failed, or it is of another kind in the pristine copy);
 // and what is gone, which no restore makes again (the pristine copy has
 // nothing of that name).
@@ -1521,7 +1560,7 @@ func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]stri
 
 // notMade adds to err, a failure after the drops, the sequences (seqs),
 // triggers and views that are not made yet: missing from dst until
-// recovery (the next successful restore, or a new seed). A lost session (lost) is returned in err's
+// recovery (made again from the pristine copy, or a new seed). A lost session (lost) is returned in err's
 // place, with them.
 func notMade(dst, recovery string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
 	if lost != nil {

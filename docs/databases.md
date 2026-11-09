@@ -19,6 +19,7 @@ capture. This page covers the four built-in drivers. The keys are in
 - `seed` copies `working` to `pristine` (default `<working>_pristine`). Seed while the application does not write.
 - `seed` replaces only a pristine copy it made itself; it never drops a database it did not mark.
 - A capture checks the restored data against the pristine fingerprint. Different data stops it with exit 3.
+- Before its first restore, a run compares the working schema with the pristine copy's. A migration run since the seed stops it with exit 3. With `prepare:` it goes on when `prepare` makes the change again. Rows and counters never count.
 - Fingerprints are comparable only on the same server version. A server upgrade needs a new seed and baseline ([server upgrade](workflows.md#server-upgrade)).
 - `driftgate clean` removes the pristine copies seed made ([clean](commands.md#clean)).
 

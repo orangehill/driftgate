@@ -299,6 +299,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	defer tr.close()
+	if opt.ReadOnly {
+		tr.run = runReadOnly
+	}
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
 		timings: map[string]int64{},
@@ -837,7 +840,7 @@ func (r *runner) runPrepare(ctx context.Context) error {
 			return envErr("prepare: %v", err)
 		}
 	}
-	return nil
+	return r.tr.checkPrepared(ctx)
 }
 
 // reloadTokens reads the tokens again, which a restore or a prepare may

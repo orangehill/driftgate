@@ -174,6 +174,13 @@ type tracker struct {
 	// are those whose last restore ended sessions.
 	databases map[string]endedDatabase
 	endedBy   []endedDatabase
+	// The schema check (schema.go).
+	run          runKind
+	prepare      bool
+	config       string
+	schema       map[string]schemaDiff
+	missingOnly  bool
+	prepareCheck bool
 }
 
 // openComponents connects to every state component, in name order.
@@ -279,7 +286,8 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
+		prepare: len(p.Prepare) > 0, config: configPath(p)}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -402,6 +410,11 @@ func (t *tracker) restore(ctx context.Context) error {
 	t.resentAfter = ""
 	t.endedBy = nil
 	ended := 0
+	if t.dirty == nil {
+		if err := t.checkSchema(ctx); err != nil {
+			return err
+		}
+	}
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -515,6 +528,7 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 		return nil, err
 	}
 	defer tr.close()
+	tr.run = runMigrateState
 	for _, c := range tr.comps {
 		if f, ok := tr.formats[c.Name()]; ok && f != state.FingerprintFormat {
 			return nil, envErr("state %s: the record of the pristine copy has the older fingerprint format too; run driftgate seed first", c.Name())
