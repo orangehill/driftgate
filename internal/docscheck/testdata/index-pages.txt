@@ -5,3 +5,12 @@ docs/commands.md
 docs/configuration.md
 docs/guides/framework-upgrade.md
 docs/guides/bisect.md
+docs/guides/record.md
+docs/guides/github-actions.md
+docs/guides/test-data.md
+docs/guides/side-checks.md
+docs/guides/laravel.md
+docs/guides/aspnet-core.md
+docs/guides/nextjs-nuxt.md
+docs/guides/openapi.md
+docs/guides/multi-service.md

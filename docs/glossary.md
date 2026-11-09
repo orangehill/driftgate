@@ -185,7 +185,7 @@ Another origin under which the application writes its own URLs, listed under `al
 Sending a read-only request again after it failed under load. The report always shows a request that passed only after a retry. More: [retries](reference/capture.md#retries-of-requests-that-failed-under-load).
 
 ### Side check
-A check of what the application does besides answering, such as its schema, files, Redis keys or mail, in the same gate. More: [side checks](guides/side-checks.md).
+A check of what the application does besides answering, such as its schema, files, Redis keys or mail, in the same gate. More: [side checks](guides/catalog/side-checks.md).
 
 ## Words we do not use
 

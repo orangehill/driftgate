@@ -217,7 +217,7 @@ A certificate file is a CA (go-mssqldb's `certificate`, Prisma's
 
 What each reads:
 
-- **ASP.NET, EF Core**: the connection string, as above, and the client from the `.csproj` ([the ASP.NET Core guide](../../guides/aspnet-core.md)).
+- **ASP.NET, EF Core**: the connection string, as above, and the client from the `.csproj` ([the ASP.NET Core guide](../../guides/frameworks/aspnet-core.md)).
 - **Laravel**: `DB_CONNECTION=sqlsrv`, `DB_HOST` (also `host\instance` or `host,port`), `DB_PORT` (default 1433), `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD`, with `DB_URL` (`sqlsrv://`) over them.
 - Laravel's `DB_ENCRYPT` and `DB_TRUST_SERVER_CERTIFICATE` count only when `config/database.php` passes them on; Laravel ships those lines commented out. Without a `config/database.php`, a value that weakens TLS is left out, with a note.
 - **Spring, Quarkus, Micronaut**: `jdbc:sqlserver://host:1433;databaseName=…;encrypt=…` (also `serverName`, `portNumber`, `instanceName`), with the user and password keys.
@@ -566,4 +566,4 @@ TLS weaker than the application's.
 - For a certificate that names another host, set `hostNameInCertificate=<that name>`.
 
 ---
-**Related:** [State: restoring the data](../state.md) · [Database connection settings](../database-settings.md) · [ASP.NET Core guide](../../guides/aspnet-core.md) · [Security model](../../security.md)
+**Related:** [State: restoring the data](../state.md) · [Database connection settings](../database-settings.md) · [ASP.NET Core guide](../../guides/frameworks/aspnet-core.md) · [Security model](../../security.md)

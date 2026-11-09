@@ -82,11 +82,11 @@ demo.
 
 ## Choose your framework guide
 
-- [Laravel](../guides/laravel.md), with Herd, Docker, Sail or SQLite
-- [ASP.NET Core and EF Core on SQL Server](../guides/aspnet-core.md)
-- [Next.js and Nuxt pages](../guides/nextjs-nuxt.md)
-- [Frameworks with an OpenAPI description](../guides/openapi.md): Spring Boot, FastAPI, NestJS and others
-- [Several services and monorepos](../guides/multi-service.md)
+- [Laravel](../guides/frameworks/laravel.md), with Herd, Docker, Sail or SQLite
+- [ASP.NET Core and EF Core on SQL Server](../guides/frameworks/aspnet-core.md)
+- [Next.js and Nuxt pages](../guides/frameworks/nextjs-nuxt.md)
+- [Frameworks with an OpenAPI description](../guides/frameworks/openapi.md): Spring Boot, FastAPI, NestJS and others
+- [Several services and monorepos](../guides/frameworks/multi-service.md)
 
 To work on a change in a git worktree of its own, see
 [setup in a git worktree](../reference/commands/project.md#setup-in-a-git-worktree).
