@@ -191,16 +191,11 @@ type tracker struct {
 	// are those whose last restore ended sessions.
 	databases map[string]endedDatabase
 	endedBy   []endedDatabase
-	// The schema check (schema.go).
-	run         runKind
-	prepare     bool
-	config      string
-	records     map[string]string // the schemaRecord file of every database component, by name
-	schemas     states            // the pristine schema the seed recorded in state.SchemaFormat, by name
-	copiedWhole map[string]bool   // the components the last restore copied whole (not Partial)
-	compared    map[string]bool   // the components whose whole copy was compared with the record in this run (compareWhole)
-	schema      map[string]schemaRecord
-	missingOnly bool
+	// The whole-restore check against the record of the pristine copy
+	// (checkWhole, compareWhole), part of the restore's own checks.
+	copiedWhole map[string]bool // the components the last restore copied whole (not Partial)
+	compared    map[string]bool // the components whose whole copy was compared with the record in this run
+	schemaCheck
 }
 
 // openComponents connects to every state component, in name order.
@@ -304,7 +299,8 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		return nil, err
 	}
 	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
-		prepare: len(p.Prepare) > 0, config: configPath(p), records: map[string]string{}, schemas: states{}, compared: map[string]bool{}}
+		compared:    map[string]bool{},
+		schemaCheck: schemaCheck{prepare: len(p.Prepare) > 0, config: configPath(p), records: map[string]string{}, schemas: states{}}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {

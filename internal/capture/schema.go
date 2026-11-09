@@ -23,6 +23,20 @@ const (
 	runMigrateState                // verify --migrate-state, which runs no prepare:
 )
 
+// schemaCheck is the state of the schema check of a tracker: what the run
+// is and its prepare: and configuration file, where the records are, the
+// pristine schemas the seeds recorded, and what checkSchema found for
+// checkPrepared.
+type schemaCheck struct {
+	run         runKind
+	prepare     bool
+	config      string
+	records     map[string]string // the schemaRecord file of every database component, by name
+	schemas     states            // the pristine schema the seed recorded in state.SchemaFormat, by name
+	schema      map[string]schemaRecord
+	missingOnly bool
+}
+
 // schemaRecord is a component's working schema before a restore on the
 // prepare path: the items that differed from the pristine copy's and the
 // working hashes of them, which prepare must make again; and, once a check
