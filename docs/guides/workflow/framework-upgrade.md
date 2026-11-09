@@ -46,7 +46,7 @@ A small step gives a few drifts with one cause.
 - `item-order`: the same rows in another order, after a database or ORM change. The note names the array rule to add, where the order does not matter to clients.
 - `header-…`: cookies, cache headers, content types.
 - `status`: a validation or authorization rule behaves differently.
-- `side-effect`: a request writes other tables, rows or columns, even with the same response.
+- `side-effect`: a request writes other tables than in the baseline, even with the same response. Rows and columns only with [`row_tracking`](../../reference/state.md#database-components).
 
 Each kind is explained in [Drift kinds](../../reference/drift-kinds.md).
 `driftgate review` groups the drifts, and names the route, the

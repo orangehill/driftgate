@@ -220,7 +220,7 @@ Allowlist rules that applied to no change in the comparison are listed:
 
 - `no request`: all the rule's requests are gone or renamed.
 - `no change`: the values it names did not change this time.
-- A rule listed comparison after comparison is probably stale: the value it names was renamed or removed.
+- A rule listed comparison after comparison is probably stale: the value it names was renamed or removed. Not so for a value that changes only sometimes, such as a render time in whole milliseconds: keep its rule.
 - With `--only` or `--target`, rules of the requests not compared are not listed.
 - Nor is a rule that its requests were not compared far enough for: below `--level values` a header or value rule never applies, so it is not called stale.
 - A rule `init` wrote for the framework (a throttle's `x-ratelimit-*`) is not listed while it is as `init` wrote it: the same header or path, request, format, options and reason. One you changed is listed.

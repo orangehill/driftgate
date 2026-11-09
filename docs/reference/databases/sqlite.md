@@ -117,23 +117,20 @@ seed stops and names it.
 
 ## What the fingerprint covers
 
-The fingerprint covers:
-
 - `table:<name>`: its `CREATE` statement, those of its indexes, its `sqlite_sequence` value and its rows;
 - `view:` and `trigger:`;
 - `pragma:user_version` and `pragma:application_id`.
 
-- Every value is hashed with its storage class, so `1`, `1.0`, `'1'` and `x'31'` differ, as do NULL and `''`.
-- A generated column counts by its definition.
+- Every value is hashed with its storage class, so `1`, `1.0`, `'1'` and `x'31'` differ. What all drivers share is under [fingerprints](../state.md#fingerprints).
 - A virtual table (FTS5, R*Tree) counts by its `CREATE` statement, and its rows by its shadow tables.
 - A module DriftGate's SQLite does not have stops a restore, with the advice to exclude the table.
-- Not covered: SQLite's statistics (`sqlite_stat1` …, which `ANALYZE` and `PRAGMA optimize` write), temporary objects, excluded tables and the mark.
+- Not covered: SQLite's statistics (`sqlite_stat1` …, which `ANALYZE` and `PRAGMA optimize` write) and temporary objects.
 - A trigger of an excluded table is covered: its body may write any table.
 
 ## How fast a fingerprint is
 
-A fingerprint is taken at one of four costs. The first one of a command
-reads every table.
+The [tiers](../state.md#fingerprints), with page digests between reused
+and per table (rows):
 
 | Fingerprint | When | 1 MB | 50 MB | 500 MB |
 |---|---|---|---|---|

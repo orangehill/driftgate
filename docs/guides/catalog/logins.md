@@ -49,6 +49,41 @@ The file holds the same JSON object. Keep it out of the repository; a
 relative path is relative to the project. `tokens` takes `command` or
 `file`, not both.
 
+## A repeatable tokens command for Laravel Sanctum
+
+```php
+// database/seeders/DatabaseSeeder.php, after the test users
+User::where('email', 'admin@shop.example')->first()->tokens()->create([
+    'name' => 'driftgate', 'token' => hash('sha256', 'dg-admin-token'), 'abilities' => ['*'],
+]);
+
+// routes/console.php
+Artisan::command('driftgate:tokens', function () {
+    $this->line(json_encode(['admin' => 'dg-admin-token', 'user' => 'dg-user-token']));
+});
+```
+
+The tokens command runs after every restore. One that issues new tokens
+writes rows with new values and times each time, so a response that
+shows them differs. Here the seeder writes the token once, with a fixed
+value. Sanctum keeps only its hash, and looks a token without `id|` up by
+that hash. The command prints the plain text. Seed the `user` token the
+same way; Sanctum comes with `php artisan install:api`.
+
+Sanctum writes `last_used_at` on every request a token signs in, so each
+GET as an identity would change `personal_access_tokens`. Restore that
+table before every capture, and leave it out of the fingerprint
+([restore_only](../../reference/state.md#restore_only)):
+
+<!-- check: config-fragment -->
+```yaml
+state:
+  db:
+    driver: sqlite                  # or the driver you use
+    working: database/database.sqlite
+    restore_only: [personal_access_tokens]
+```
+
 ## Generate requests for routes that need a login
 
 <!-- check: config-fragment -->
@@ -57,9 +92,10 @@ identities:
   admin: { env: DG_TOKEN_ADMIN }
 generate:
   identity: admin
-templates: [ok, not-found, json, anonymous, identities]
+templates: [ok, not-found, json, anonymous, identities]   # keep what init wrote; add anonymous, identities
 ```
 
+Keep the list `init` wrote for your framework, such as `empty-body` and `json-errors` for Laravel, and add the last two.
 `generate.identity` sends the routes that need a login as that user.
 `anonymous` adds each such route without a login, and `identities` once
 per other identity. A change of who may see what is then a drift

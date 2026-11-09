@@ -61,28 +61,21 @@ driftgate accept get-api-reports --reason "New report endpoint"
 A request the baseline has no answer for is skipped and listed, not
 failed. `accept` it by its ID to add its answer to the baseline. A
 request the capture no longer has (`not-captured`) leaves the baseline
-the same way, by its ID. Mode `freeze` refuses `accept`; there `run`
-prints the [rebase](../../reference/commands/review.md#rebase-in-freeze-mode)
-that adds new requests.
+the same way, by its ID.
+
+In `mode: freeze`, `accept` is refused, also for a new request. When
+nothing else drifted, `run` and `review` print the
+[rebase](../../reference/commands/review.md#rebase-in-freeze-mode) that
+adds the new requests:
+`driftgate baselines rebase local --from <capture> --reason "…" --allow-freeze`.
+Next to a drift they say to fix or expect it first: the rebase would take
+it into the baseline.
 
 ## Keep a failing request without hiding it
 
-<!-- check: exclusions -->
-```yaml
-version: 1
-routes: []
-known_failures:
-  - request: post-api-tree-reorder
-    reason: Answers 500 since the move to nested sets; fixed in the Laravel 9 step.
-    ref: SHOP-412
-    status: 500
-```
-
-A request that already fails in the baseline would leave its route
-uncovered. A known failure in `exclusions.yaml` keeps the request in the
-catalog, still compared, and lists it instead of failing on its route.
-Remove it once the fix is accepted
-([acknowledge a request that fails](../../reference/exclusions-yaml.md#acknowledge-a-request-that-fails)).
+A request that already fails in the baseline can stay in the catalog,
+still compared, as a known failure in `exclusions.yaml`. How:
+[keep a request that fails in the baseline](../catalog/coverage.md#keep-a-request-that-fails-in-the-baseline).
 
 ---
 **Next:** [Make the catalog cover every route](../catalog/coverage.md): check what the gate does not see.
