@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -822,20 +823,38 @@ func TestChangedOutsideSchemaCache(t *testing.T) {
 // item the restore did not find different, stops the run with the
 // restore's message, from the fingerprint the run reads anyway; with a
 // record of an older fingerprint format it is not compared, nor is a
-// component the restore did not copy (the application wrote since).
+// component the restore did not copy (the application wrote since). A
+// whole copy later in the run (the reset before a request that changes
+// data) is compared too, before prepare.
 func TestWholeRestoreDrift(t *testing.T) {
 	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
 	if dsn == "" {
 		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
 	}
-	for _, kind := range []string{"drift", "older format", "not restored"} {
+	for _, kind := range []string{"drift", "drift mid-run", "older format", "not restored"} {
 		t.Run(kind, func(t *testing.T) {
 			older := kind == "older format"
 			ctx := context.Background()
 			t.Setenv(config.EnvStore, t.TempDir())
 			t.Setenv("DG_DRIFT_DSN", dsn)
 			work, pristine := "dgt_drift", "dgt_drift_pristine"
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"ok":true}`)) }))
+			// A POST writes a row to a (the restore ends the sessions:
+			// a connection of its own each time).
+			var posts atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" {
+					c, err := dbx.OpenPostgres(dsn, work, nil)
+					if err == nil {
+						_, err = c.Exec("INSERT INTO a VALUES ($1)", 100+posts.Add(1))
+						c.Close()
+					}
+					if err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+				}
+				w.Write([]byte(`{"ok":true}`))
+			}))
 			t.Cleanup(srv.Close)
 			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
 				Target: config.Target{BaseURL: srv.URL},
@@ -919,8 +938,15 @@ func TestWholeRestoreDrift(t *testing.T) {
 			}
 			exec(pristine, "INSERT INTO b VALUES (2)")
 			admin.Exec("ALTER DATABASE " + pristine + " ALLOW_CONNECTIONS false")
-			exec(work, "INSERT INTO a VALUES (1)")
 			cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}}}
+			if kind == "drift mid-run" {
+				// The first restore copies nothing; the reset before the
+				// second POST copies the whole database, with the drift.
+				cat.Requests = append(cat.Requests, catalog.Request{ID: "post1", Method: "POST", Path: "/", Storage: snapshot.Public},
+					catalog.Request{ID: "post2", Method: "POST", Path: "/", Storage: snapshot.Public})
+			} else {
+				exec(work, "INSERT INTO a VALUES (1)")
+			}
 			_, err = Run(ctx, p, cat, Options{Tag: "now"})
 			if older {
 				if err != nil {
