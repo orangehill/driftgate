@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -54,7 +55,7 @@ func (m *MySQL) retryLocked(ctx context.Context, what string, f func(context.Con
 			return err
 		}
 		if _, told := retryNoted.LoadOrStore(what, true); !told {
-			m.logf("state %s: the server stopped a %s for a lock (%v), as a Galera node does when another session alters a table; the %s runs again, and further %ss stopped so are not noted\n", m.o.Name, what, err, what, what)
+			m.logf("%s", retryNote(m.o.Name, what, err))
 		}
 		select {
 		case <-ctx.Done():
@@ -63,6 +64,11 @@ func (m *MySQL) retryLocked(ctx context.Context, what string, f func(context.Con
 		}
 		wait *= 4
 	}
+}
+
+// retryNote is the one note of a kind of step (what) that runs again.
+func retryNote(name, what string, err error) string {
+	return fmt.Sprintf("state %s: the server stopped a %s for a lock (%v), as a Galera node does when another session alters a table; it runs again, and this is not noted again\n", name, what, err)
 }
 
 // lockTry is one try of f; a test may make it fail first (mysqlHooks).

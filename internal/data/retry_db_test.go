@@ -26,6 +26,18 @@ func TestLockStopped(t *testing.T) {
 	}
 }
 
+// TestRetryNote: the note reads as a sentence for every read retryRead
+// runs.
+func TestRetryNote(t *testing.T) {
+	err := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	for _, what := range []string{"source", "target"} {
+		want := what + ": the server stopped the read of the " + what + " for a lock (Error 1213: Deadlock), as a Galera node does when another session alters a table; it is read again, and this is not noted again\n"
+		if got := retryNote(what, err); got != want {
+			t.Errorf("%s:\n%q\nwant\n%q", what, got, want)
+		}
+	}
+}
+
 // TestMySQLRetrySourceRead: the source phase of anonymize (with a subset
 // and an index of originals), of verify (source and target) and of
 // classify, stopped for a lock (1213, injected once each try has built its

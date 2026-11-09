@@ -28,6 +28,18 @@ func TestLockStopped(t *testing.T) {
 	}
 }
 
+// TestRetryNote: the note reads as a sentence for every kind of step
+// retryLocked runs.
+func TestRetryNote(t *testing.T) {
+	err := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	for _, what := range []string{"fingerprint", "restore", "seed", "read of rows", "query"} {
+		want := "state db: the server stopped a " + what + " for a lock (Error 1213: Deadlock), as a Galera node does when another session alters a table; it runs again, and this is not noted again\n"
+		if got := retryNote("db", what, err); got != want {
+			t.Errorf("%s:\n%q\nwant\n%q", what, got, want)
+		}
+	}
+}
+
 // TestMySQLRetryLocked: a fingerprint, restore or seed the server stops for
 // a lock (1213, injected) runs again and then gives what a run without the
 // stop gives; a retried read sees a write made between the tries; one that
