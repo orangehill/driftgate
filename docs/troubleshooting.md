@@ -1,187 +1,65 @@
 # Troubleshooting
 
-Find the symptom, read its cause, and follow the link. Messages are
-quoted as DriftGate prints them, so you can search this page for a word
-of yours.
+Find the message as DriftGate prints it; `…` stands for the parts that
+vary. Exit codes are under [exit codes](commands.md#exit-codes).
 
-## The first run
+## Setup
 
-### The first run makes no baseline: the two captures differ
-A value changes by itself between captures. Add the allowlist entries the run proposes, with a reason, and run again ([changing values](guides/review/changing-values.md#find-the-values-that-change)).
+| Message | Cause | Fix |
+|---|---|---|
+| `the application does not answer at …` | The application is not running at `base_url`. | Start it, or set `base_url`, then run `driftgate setup` again. |
+| `the catalog has no requests: configure discover: …` | No routes were found. | Configure `discover:`, or [write requests by hand](catalog.md#hand-written-requests). |
+| `2 runs on the same state gave different responses.` | A value changes by itself, such as a time or a token. | Add the proposed [allowlist rules](review.md#allowlist-rules) with a reason, and run again. |
+| `no baseline was made: add the proposed allowlist entries (with reasons) and run again` | The two first captures differ. | As above. |
+| `there is no baseline yet: the first run makes it from every request, so it takes no --read-only …` | The first `run` got `--read-only`. | Make the baseline without `--read-only`. |
+| `git does not ignore …, which hold the key, captures and private bodies: …` | `.gitignore` lacks `.driftgate/`, or git tracks files in it. | Add the line the message names; untrack files with `git rm -r --cached`. |
+| `… names the database …, but working is …` | The application's setting and `working:` name different databases, as in a worktree. | Make them agree ([worktrees](workflows.md#worktrees)). |
+| `generate.identity … is not an identity and no tokens source is configured` | `generate.identity` names no identity. | Add it under `identities:`, or configure `tokens:`. |
+| The server refuses to create the pristine database | The database login may not create databases. | Grant the rights in [what every database needs](databases.md#what-every-database-needs). |
 
-### "the application does not answer at …"
-The application is not running at `base_url`. Start it, or set `base_url` to where it answers, then run again ([when setup stops](start/your-project.md#when-setup-stops)).
+## Capture and state
 
-### "the catalog has no requests"
-No routes were found. Configure `discover:`, or write catalog entries by hand ([discover](reference/driftgate-yaml.md#discover)).
+| Message | Cause | Fix |
+|---|---|---|
+| `no token for identity …` | A request names an identity without a token. | Give it one ([identities and tokens](configuration.md#identities-and-tokens)). |
+| `the catalog has requests that change data (…), but no state with a restore command is configured` | No `state:` component can restore the data. | Configure [`state:`](configuration.md#state), or pass `--allow-mutating-without-restore`. |
+| `state … has no pristine copy yet; run driftgate seed` | The database was never seeded. | Run `driftgate seed`; `run` seeds by itself. |
+| `restore of … left … items different from the fingerprint driftgate seed recorded of the pristine copy` | The application wrote during the seed or the restore. | Stop queue workers and schedulers, then run `driftgate seed` again. |
+| `the state differs from the one the baseline was captured from (…)` | The pristine copy holds other data than the baseline's. | Seed the baseline's data, or make a new baseline. |
+| `guard "…" failed: …` | A guard's check did not pass, such as mail not going to a log. | Fix the setting it checks ([guards](configuration.md#seed-prepare-and-guards)). |
+| `read-only requests changed …; finding which …` | A `GET` or another read-only request writes data. | Mark it `mutates: true` under [`requests:`](configuration.md#storage-observe-and-requests), then `driftgate generate --write`. |
+| `warning: the state changed between the restore and the end of prepare: …` | A `prepare` command writes data before every capture. | Move it to `seed`. |
+| `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
+| `capture … is incomplete (interrupted?); capture it again with --force` | The capture was interrupted. | Capture again with `--force`. |
+| `another driftgate is using the store …; waiting until it is done (Ctrl-C to stop)` | Another command holds the local store. | Wait for it, or stop it. |
+| `personal data or credentials found in … responses marked public; they were stored as private …` | The detector found personal data in a public body. | Mark the request private, or allow the value ([private bodies](security.md#private-bodies)). |
+| `state …: another connection held a lock on … for …` | SQLite: a long transaction or a worker of the application. | End the transaction or stop the worker, then run again. |
+| `… the server is a Galera cluster node, which creates no sequence with a cache …` | MariaDB Galera cannot copy these sequences. | Make them `NOCACHE` and InnoDB, or exclude them ([MySQL and MariaDB](databases.md#mysql-and-mariadb)). |
+| `… stayed in the middle of a restore, offline, single-user or in transition …` | SQL Server 2019 and earlier: another database of the server is in transition. | Bring it online, set `MULTI_USER`, or drop it ([SQL Server](databases.md#sql-server)). |
 
-### "no token for identity …"
-A catalog request names an identity without a token. Give it one from the environment, 1Password, a command or a file ([logins](guides/catalog/logins.md)).
+## Compare and review
 
-### A read-only request changed data
-A `GET` wrote something. Mark it `mutates: true` ([read-only requests](guides/catalog/hand-written-requests.md#mark-a-request-that-only-reads); [details](reference/capture.md#a-read-only-request-that-changed-data)).
+| Message | Cause | Fix |
+|---|---|---|
+| `nothing was compared: no request was selected …` | `--only` or `--target` matches no request ID. | Check the glob against the catalog. |
+| `nothing was compared: the baseline has none of the selected requests …` | The baseline was made for another catalog, or IDs were renamed. | Make the baseline again. |
+| `… has private bodies, encrypted with the project key, and comparing them needs it …` | The project key is missing. | Set `DRIFTGATE_KEY` or `key:` ([the project key](security.md#the-project-key)). |
+| `baseline … changed outside driftgate accept (…); run driftgate verify` | A baseline file was edited, removed, or checked out with CRLF line endings. | Run `driftgate verify`, then restore the baseline from git. |
+| `mode is freeze: the API must stay as the baseline has it, so drifts are not accepted; …` | `accept` in mode `freeze`. | Fix the code, [expect](review.md#accept-expect-or-rebase) the drift, or set `mode: evolve`. |
+| `accept needs --reason "…": …` | No reason was given. | Pass `--reason`. |
+| `… takes only part of the drifts of … requests; a request is accepted with all of its drifts or not at all` | The groups selected cover only part of a request. | Select the other groups too, or name the requests. |
+| `there is no comparison yet: run driftgate compare or driftgate run first` | `review`, `accept` or `expect` ran before any comparison. | Run `driftgate run`. |
+| `it applies to no request of the catalog that is compared …` | `allowlist check`: the rule names a renamed or removed request. | Fix or remove the rule. |
+| `item-order` drifts after a database change | A list has no `ORDER BY`. | Add `ORDER BY`, or an [`any_order` rule](review.md#allowlist-rules). |
+| Every absolute URL drifts | The application writes its own URLs under another origin. | List it under [`target.aliases`](configuration.md#target). |
+| Every web form `POST` answers 419 | DriftGate keeps no session, so it sends no CSRF token. | Exempt those routes ([Laravel](frameworks.md#laravel)). |
+| A validation message changed, but the run passed | No request sends an invalid body. | Add `empty-body` and `json-errors` to [`templates:`](catalog.md#generate-and-templates). |
 
-## Exit code 3: the result is incomplete or the environment failed
+## CI
 
-### "private body not on this machine"
-The private bodies are in another machine's local store. Pass `--skip-private`, or run the check where they are ([private bodies in CI](guides/ci/github-actions.md#private-bodies-in-ci)).
-
-### The restored state differs from the baseline's state
-The pristine copy holds other data than the baseline was made from. Seed that data again, or make a new baseline ([when the state does not match](reference/capture.md#when-the-state-does-not-match-the-baseline)).
-
-### "restore of … left … items different from the fingerprint"
-The restored data does not match the pristine copy's fingerprint. The message says which cause it found:
-
-- The pristine copy changed since the seed, or the application wrote during the seed: run `driftgate seed` again while the application does not write.
-- The application wrote during the restore: stop its background writers, such as queue workers or schedulers, during the capture.
-- On MySQL 8, a pristine copy from up to v1.0.2 named a column's collation: re-create the working database, then seed ([column collations](reference/upgrading-driftgate.md#column-collations-after-v102-on-mysql-8)).
-
-### A comparison compared nothing
-`--only` matched no request, or the baseline has none of the catalog's requests. Check the glob and the baseline ([the verdict line](reference/reports.md#the-verdict-line)).
-
-### A guard failed
-A guard's check did not succeed, such as mail not going to a log. Fix the setting it checks ([guards](reference/driftgate-yaml.md#seed-prepare-guards)).
-
-### "baseline … changed outside driftgate accept …; run driftgate verify"
-Every command that reads the baseline (`capture`, `compare`, `run`, `accept`, `expect`, `rebase`, `bisect`) refuses one whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git ([driftgate verify](reference/commands/review.md#driftgate-verify)).
-
-### A command stops: a baseline is in `.tmp-old-*`
-An `accept` or a first `run` was killed while it replaced the baseline. Put `.tmp-old-*/baseline` back, or restore it from git ([Ctrl-C](reference/cli.md#what-happens-when-you-press-ctrl-c)).
-
-### No encryption key
-Private bodies need the project key. Run `driftgate key create`, or set `DRIFTGATE_KEY` ([the project key](concepts/project-layout.md#the-project-key)).
-
-### "state … has no pristine copy yet"
-Run `driftgate seed`; `run` seeds by itself ([driftgate seed](reference/commands/state.md#driftgate-seed)).
-
-## Exit code 2: configuration
-
-### "git does not ignore …"
-`.driftgate/` holds the key, captures and private bodies, so git must ignore it. Add the line the message names to `.gitignore` ([baselines](reference/driftgate-yaml.md#baselines)).
-
-### accept is refused
-`mode: freeze`, a missing `--reason`, part of a request's drifts, or a stale comparison ([what accept refuses](reference/commands/review.md#what-accept-refuses)).
-
-### A switch of layouts stopped halfway (`.driftgate/switching`)
-Run `driftgate baselines <mode>` with the same mode again; it finishes the switch ([a switch that stopped halfway](reference/commands/project.md#a-switch-that-stopped-halfway)).
-
-### `--read-only` is refused because `prepare:` is configured
-`prepare` runs after every restore and may write. Leave it out for a server that must not change ([live server](guides/workflow/live-server.md#configure-a-server-that-must-not-change)).
-
-### Personal data in a public body
-The detector found personal data in a response stored as public. The body is kept private; mark the request `storage: private`, or allow the value ([the personal-data detector](security.md#the-personal-data-detector)).
-
-### The setting names another database than `working`
-A restore would reset a database the application does not run on. Make the setting and `working:` agree ([database settings](reference/database-settings.md#read-the-dsn-from-the-projects-own-settings)).
-
-### setup stops in a worktree
-The worktree's settings name the main worktree's database, or none. Give the worktree a database of its own ([worktrees](guides/workflow/worktrees.md#give-the-worktree-its-own-database-and-address)).
-
-## Exit code 1 without a regression
-
-### coverage fails: routes not covered, or failed in the baseline
-A route has no request that succeeds. Add one, exclude the route, or acknowledge a known failure ([coverage](guides/catalog/coverage.md)).
-
-### `generate --check` fails in CI
-The committed catalog is not what `generate` writes. Run `driftgate generate --write` and commit ([keep the catalog current](guides/catalog/coverage.md#keep-the-catalog-current-in-ci)).
-
-### verify reports changes after a checkout on Windows
-`verify` exits 1, naming files that differ only in their line endings. Git checked the baseline files out with CRLF line endings. Check them out again with the two git commands under [line endings on Windows](reference/commands/review.md#line-endings-on-windows).
-
-## Drift you did not expect
-
-### The same rows in another order (`item-order`)
-Another database server or ORM returns a list without `ORDER BY` in another order ([rows in another order](guides/review/changing-values.md#rows-in-another-order-pair-by-key-or-allow-any-order)).
-
-### Many `array-length` and null or object drifts after loading another dump
-The two sides ran on different data. Capture both sides from the same dump ([data newer than the baseline](guides/workflow/server-upgrade.md#data-newer-than-the-baseline)).
-
-### The `server` header drifts on every request
-Another server stack answers. The report's line gives the header rule for the new value ([one change in almost every request](reference/reports.md#one-change-in-almost-every-request)).
-
-### Every absolute URL drifts
-The application writes its own URLs under an origin DriftGate does not know, such as its `APP_URL`. List it under `aliases` ([your own URLs on another port](reference/comparison.md#your-own-urls-on-another-port)).
-
-### Paths in error pages differ between checkouts
-A stack trace names the project's folder. Capture both sides with the same release, which records the folder, so `compare` takes the two folders as one ([paths of the project folder](reference/comparison.md#paths-of-the-project-folder)).
-
-### A 500 on the first request after a restore (SQL Server)
-A whole restore ended the application's pooled connections ([pooled connections](reference/databases/sql-server.md#pooled-connections-after-a-whole-restore)).
-
-### Timeouts and 503 under load
-A development server fails now and then under a capture's load. It is retried once by default ([retries](reference/capture.md#retries-of-requests-that-failed-under-load)).
-
-### A changed file still answers the old way (PHP opcache)
-PHP's opcache keeps the old code for a while ([opcache](guides/frameworks/laravel.md#phps-opcache-delays-your-changes)).
-
-### A live server answers differently from the capture
-A warm cache answers differently from a cold one ([a cache emptied at every restore](concepts/what-a-pass-proves.md#a-cache-emptied-at-every-restore)).
-
-### `rowversion` values differ on every capture
-SQL Server writes new `rowversion` values on every write. Add the allowlist rule for them ([allow rowversion values](guides/frameworks/aspnet-core.md#allow-rowversion-values)).
-
-### prepare changed the restored state
-A `prepare` command writes data before every capture ([what belongs in prepare](reference/driftgate-yaml.md#what-belongs-in-prepare)).
-
-### An allowlist rule is listed as unused
-The value it names was renamed, removed, or did not change this time, like a render time that is often the same ([find rules that cannot apply](guides/review/changing-values.md#find-rules-that-cannot-apply)).
-
-## A green result that misses something
-
-### A validation message changed, but the run passed
-No request sends an invalid body to that route, so its validation errors are not compared. `coverage` and `run` list such routes. Add `empty-body` to `templates:` (and `json-errors` for Laravel, Symfony, Rails and Spring Boot), run `driftgate generate --write`, and add the new requests to the baseline ([validation errors](reference/upgrading-driftgate.md#validation-errors-in-a-project-made-before-empty-body)).
-
-### Requests the frontend sends are not checked
-They are not in the catalog. Record them ([record](guides/catalog/record.md)).
-
-### Uploads, jobs or commands are not checked
-The catalog has no request or command step for them ([what a pass does not check](concepts/what-a-pass-proves.md#what-a-pass-does-not-check)).
-
-### A request that needs a cookie session answers 401
-DriftGate keeps no cookies between requests. Give the identity a token ([sessions with cookies](guides/catalog/logins.md#sessions-with-cookies)).
-
-### Every web POST answers 419
-DriftGate keeps no session, so it sends no CSRF token. Exempt those routes, or compare only the 419 ([Laravel](guides/frameworks/laravel.md#web-forms-answer-419)).
-
-## Slow or stuck
-
-### Fingerprints are slow on MySQL in Docker
-The server looks up the name of every client. Start it with `--skip-name-resolve` ([run the server in a container](reference/databases/mysql-mariadb.md#run-the-server-in-a-container)).
-
-### Fingerprints are slow on SQL Server
-Grant the login `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 and later, or `VIEW SERVER STATE` on 2017 and 2019 ([fast fingerprints](reference/databases/sql-server.md#fast-fingerprints)).
-
-### "database is locked" (SQLite)
-The application held a lock for longer than DriftGate waits, 10 seconds ([locks](reference/databases/sqlite.md#locks-and-the-applications-writers)).
-
-### A command waits for another process
-Another command holds the lock on the local store. Wait for it, or stop it; Ctrl-C stops the wait ([when a command waits](reference/cli.md#when-a-command-waits-for-another-one)).
-
-### "… stayed in the middle of a restore, offline, single-user or in transition"
-SQL Server 2019 and earlier stopped the command for another database of the server, and it tried again for a minute. Bring that database online, give it `MULTI_USER` back, complete its restore, or drop it ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
-
-### Errors 927 or 952 on SQL Server
-On SQL Server 2019 and earlier, another database of the server was being restored, created or renamed at that moment ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
-
-## Databases
-
-### "… Galera cluster node, which creates no sequence with a cache …"
-A Galera node cannot create these MariaDB sequences, so a seed or a restore stops before it changes anything. So do `data anonymize` and `subset` when their target is on such a node ("target … is on a Galera cluster node"). For the state, make the sequences `NOCACHE` or `INCREMENT BY 0` and InnoDB, or exclude them. For the data module, change them so in the source, or write to a server without Galera ([MySQL and MariaDB](reference/databases/mysql-mariadb.md#how-seed-and-restore-work)).
-
-### "not a dump of driftgate data anonymize or subset for …"
-`data verify --dump` reads only a dump that `anonymize` or `subset` wrote, with its header line. Check that dump, or the target database ([data verify](reference/commands/data.md#driftgate-data-verify)).
-
-### "a statement runs into the next one …"
-A dump made by an earlier release hid a `;` behind a comment. Make the dump again with this release ([data verify](reference/commands/data.md#driftgate-data-verify)).
-
-### seed fails: the user may not create a database
-Grant the rights setup prints ([what the database user needs](reference/state.md#what-the-database-user-needs)).
-
-### "certificate signed by unknown authority"
-The server's certificate is verified, as the application's client does, and it does not pass ([certificate errors](reference/databases/sql-server.md#certificate-errors)).
-
-### The SQL Server container stops at its first start
-The `sa` password needs eight characters of three kinds; the container's log says why ([the sa password](reference/databases/sql-server.md#the-sa-password)).
-
----
-**Related:** [What DriftGate can do](capabilities.md) · [Exit codes](reference/cli.md#exit-codes) · [Glossary](glossary.md)
+| Message | Cause | Fix |
+|---|---|---|
+| `the result is incomplete: … could not be compared here (the private body is not on this machine) …` | Private bodies stay on the machine that captured them. | Pass `--skip-private`, or use [test data](workflows.md#test-data) without personal data. |
+| `generate --check` exits 1 | The committed catalog is not what `generate` writes. | Run `driftgate generate --write` and commit. |
+| `… routes: … covered, … excluded, … uncovered` with exit 1 | A route has no request that succeeds. | Add a request, exclude the route, or list a known failure ([coverage](catalog.md#coverage-and-exclusions)). |
+| `Known failures that are stale (remove them from exclusions.yaml)` | A known failure succeeds now. | Remove it from `exclusions.yaml`. |

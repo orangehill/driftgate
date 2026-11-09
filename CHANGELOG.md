@@ -22,7 +22,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - Existing configurations and allowlists work as before. All new keys are optional. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The binary is about 6.3 MB larger, for the SQLite and SQL Server drivers. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - MySQL/MariaDB: each database component holds one more connection (13 instead of 12), for reading many definitions in one query. ([#22](https://github.com/orangehill/driftgate/pull/22))
-- A project made by an earlier `init` keeps its `templates:` and its baseline. `coverage` and `run` now list its routes whose validation errors no request checks. To check them, add `empty-body` to `templates:` (and `json-errors` for Laravel, Symfony, Rails and Spring Boot), run `driftgate generate --write` and `driftgate run`, and add the new requests to the baseline ([upgrading](docs/reference/upgrading-driftgate.md#validation-errors-in-a-project-made-before-empty-body)). The coverage JSON lists them under `routes_without_invalid_body`, and the report under `not_covered.no_invalid_body`.
+- A project made by an earlier `init` keeps its `templates:` and its baseline. `coverage` and `run` now list its routes whose validation errors no request checks. To check them, add `empty-body` to `templates:` (and `json-errors` for Laravel, Symfony, Rails and Spring Boot), run `driftgate generate --write` and `driftgate run`, and add the new requests to the baseline ([templates](docs/catalog.md#generate-and-templates)). The coverage JSON lists them under `routes_without_invalid_body`, and the report under `not_covered.no_invalid_body`.
 
 ### Added
 
