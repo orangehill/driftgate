@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
@@ -539,6 +540,17 @@ func short(s string) string {
 	return s
 }
 
+const zwj = '\u200d' // zero width joiner
+
+// extends reports a rune that belongs to the character before it: a
+// combining mark, a variation selector, an emoji skin tone or a joiner.
+// It approximates grapheme cluster boundaries with the standard library
+// (no regional-indicator pairs or Hangul syllable rules).
+func extends(c rune) bool {
+	return unicode.In(c, unicode.Mn, unicode.Me, unicode.Mc) || c == zwj ||
+		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
+}
+
 // shortMax is how many characters of a drift's values a line shows.
 const shortMax = 80
 
@@ -569,6 +581,15 @@ func ShortPair(a, b string, max int) (string, string) {
 		end := min(len(r), start+max-1)
 		if start > 0 {
 			end = min(len(r), start+max-2) // room for both marks
+		}
+		// Not inside a character the eye sees as one: an accent, a
+		// variation selector, a skin tone or a joined emoji stays with
+		// the character it belongs to.
+		for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
+			start--
+		}
+		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
+			end++
 		}
 		s := string(r[start:end])
 		if start > 0 {

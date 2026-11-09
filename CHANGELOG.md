@@ -83,6 +83,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - A Set-Cookie format proposed by a repeated capture or the first `run` no longer comes from the masked value: the cookie's value is proposed as text without `;` of the lengths seen (`[^;]{40,44}`), so a cookie emptied or set to `deleted` fails it, and a header masked whole (`Authorization`, a credential header) as `.+`. A format such as `[0-9A-Za-z]+%\dX` described the mask's letters, not the cookie, and failed on a value of another shape.
 - A header value that came or went under an allowlist rule, such as a cookie no longer set, reads as such: `header:set-cookie has 1 value instead of 2: laravel-session removed`, not "no longer matches its allowlist format". The drift kind stays `format`.
 - `drift-kinds.md` and `driftgate help kinds` gave `1.0 for 1` as a `number-literal`; the comparison reports it, as intended, as a `type` drift (`int → float`), which level `types` already catches. The docs now say so, and give same-type examples for `number-literal` (`1.0` → `1.00`, `1250.5` → `1.2505e3`). Detection is unchanged.
+- The shortened drift values no longer start or end inside a character the eye sees as one: an accent stays on its letter, and a joined emoji, a skin tone or a variation selector stays whole.
 
 ### Security
 

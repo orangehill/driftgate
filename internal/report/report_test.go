@@ -459,3 +459,25 @@ func TestRemovedHeaderValueReads(t *testing.T) {
 		}
 	}
 }
+
+// TestShortPairKeepsCharactersWhole: a window does not start or end inside
+// a character the eye sees as one: an accent stays on its letter, a
+// joined emoji stays whole.
+func TestShortPairKeepsCharactersWhole(t *testing.T) {
+	for _, unit := range []string{"é", "👨‍👩‍👧", "👍🏽", "❤️"} {
+		for pad := range 4 {
+			b := strings.Repeat("a", pad) + strings.Repeat(unit, 120) + "OLD" + strings.Repeat(unit, 120)
+			c := strings.Repeat("a", pad) + strings.Repeat(unit, 120) + "NEW" + strings.Repeat(unit, 120)
+			x, y := ShortPair(b, c, 80)
+			for _, w := range []string{x, y} {
+				inner := strings.TrimSuffix(strings.TrimPrefix(w, "…"), "…")
+				if !strings.HasPrefix(inner, unit) && !strings.HasPrefix(inner, "a") || !strings.HasSuffix(inner, unit) {
+					t.Errorf("%q, pad %d: window cuts a character: %q", unit, pad, w)
+				}
+			}
+			if !strings.Contains(x, "OLD") || !strings.Contains(y, "NEW") {
+				t.Errorf("%q: difference not shown: %q → %q", unit, x, y)
+			}
+		}
+	}
+}
