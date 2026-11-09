@@ -64,7 +64,7 @@ func benchSchema(driver string) []string {
 // a server, or "" for SQLite), seeds it, and returns the project and what
 // runs a statement on the working database, on a new connection to a
 // server (a PostgreSQL restore ends the sessions).
-func benchProject(b *testing.B, driver, dsn string) (*config.Project, func(string) error) {
+func benchProject(b testing.TB, driver, dsn string) (*config.Project, func(string) error) {
 	b.Helper()
 	b.Setenv(config.EnvStore, filepath.Join(b.TempDir(), "store"))
 	root := b.TempDir()

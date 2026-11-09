@@ -50,3 +50,45 @@ func BenchmarkSchemaFingerprint(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkCheckSchema is the schema check before a capture's first
+// restore on benchSchema, unchanged since the seed: cached, with the
+// pristine schema the seed recorded (one read, of the working database);
+// live, without it (both read). Servers as BenchmarkCaptureSchema.
+func BenchmarkCheckSchema(b *testing.B) {
+	servers := map[string]string{config.SQLite: ""}
+	if v := os.Getenv("DRIFTGATE_TEST_MYSQL"); v != "" {
+		servers[config.MySQL], _, _ = strings.Cut(v, ",")
+	}
+	if v := os.Getenv("DRIFTGATE_TEST_POSTGRES"); v != "" {
+		servers[config.Postgres] = v
+	}
+	for _, driver := range []string{config.SQLite, config.MySQL, config.Postgres} {
+		dsn, ok := servers[driver]
+		if !ok {
+			continue
+		}
+		b.Run(driver, func(b *testing.B) {
+			p, _ := benchProject(b, driver, dsn)
+			tr, err := newTracker(context.Background(), p, nil, nil, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer tr.close()
+			cached := tr.schemas
+			for _, mode := range []string{"cached", "live"} {
+				b.Run(mode, func(b *testing.B) {
+					tr.schemas = cached
+					if mode == "live" {
+						tr.schemas = states{}
+					}
+					for range b.N {
+						if err := tr.checkSchema(context.Background()); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
