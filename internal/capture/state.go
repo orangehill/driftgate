@@ -191,6 +191,11 @@ type tracker struct {
 	pristineDefs             states
 	// migrations are the project's migrations tables (migrationNames).
 	migrations map[string]bool
+	// restoring names, per database component, the file a restore keeps
+	// while it runs: one found at the start is of a restore that stopped
+	// halfway (killed, or failed), whose state survey leaves to the restore
+	// that completes it.
+	restoring map[string]string
 }
 
 // openComponents connects to every state component, in name order.
@@ -297,7 +302,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		return nil, err
 	}
 	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
-		pristineDefs: states{}, migrations: migrationNames(p)}
+		pristineDefs: states{}, migrations: migrationNames(p), restoring: map[string]string{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -305,6 +310,9 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		}
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
+		}
+		if path, err := pristinePath(p, c.Name(), servers[c.Name()]); err == nil {
+			t.restoring[c.Name()] = strings.TrimSuffix(path, ".json") + ".restoring"
 		}
 		pf, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
@@ -467,6 +475,9 @@ func (t *tracker) restore(ctx context.Context) error {
 			fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
 		}
 		start := time.Now()
+		if f := t.restoring[c.Name()]; f != "" {
+			os.WriteFile(f, nil, 0o600) // without it, a stopped restore is surveyed as any state
+		}
 		err := c.Restore(ctx, append(append([]string{}, items...), ro...))
 		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
 			n := e.EndedSessions()
@@ -491,6 +502,9 @@ func (t *tracker) restore(ctx context.Context) error {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
 			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
+		}
+		if f := t.restoring[c.Name()]; f != "" {
+			os.Remove(f)
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
@@ -786,6 +800,9 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if err := snapshot.WriteJSON(path, pf); err != nil {
 			return err
 		}
+		// The working data is the pristine copy's now: a restore that
+		// stopped before has nothing left to complete.
+		os.Remove(strings.TrimSuffix(path, ".json") + ".restoring")
 		pristine := sc.Pristine
 		if sc.Driver == config.SQLite && pristine == "" {
 			pristine = sqliteStorePristine(path)

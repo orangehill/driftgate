@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -144,6 +145,20 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 			return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
 		}
 		t.found[c.Name()] = cur
+		// A state DriftGate left: a restore that stopped halfway (killed,
+		// or failed: a database swapped out, offline or half restored),
+		// or no working database at all. The restore completes it; a
+		// change made outside DriftGate is found again by the next
+		// capture once it is back.
+		if f := t.restoring[c.Name()]; f != "" {
+			if _, err := os.Stat(f); err == nil {
+				fmt.Fprintf(t.out, "state %s: the last restore stopped halfway; this restore completes it (the check for changes made outside DriftGate is left out once)\n", c.Name())
+				continue
+			}
+		}
+		if len(cur) == 0 {
+			continue
+		}
 		// A record of an older fingerprint format hashes views and
 		// triggers another way: their hashes are not compared (the restore
 		// asks for a seed when they differ); tables are compared by their

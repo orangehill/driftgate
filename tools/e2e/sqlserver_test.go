@@ -285,11 +285,23 @@ var ssWrite = []string{
 	"INSERT INTO sessions (what) VALUES ('written by the application')",
 }
 
+// wholeRestore makes the restore of the demo's data a restore of the whole
+// database, before the seed: a table refers to faq, so faq cannot be
+// truncated, and only a restore of the database sets its identity back to
+// unused once the application wrote its first rows. (A view the
+// application made would do it too, but a capture stops for a change of
+// the schema made outside DriftGate.)
+func wholeRestore(t *testing.T, p *ssProject) {
+	t.Helper()
+	sqlExec(t, p.db, "CREATE TABLE faq_ref (faq_id int NOT NULL REFERENCES faq(id))")
+}
+
 // TestCrashRestoreSQLServer: a capture killed (SIGKILL) inside its first
 // restore. Restored table by table, at the point before the commit: the
 // server rolls the transaction back, and the application finds every
-// table as it left it. Restored as a whole database (the application made
-// a view), after the excluded table was saved, after the database was
+// table as it left it. Restored as a whole database (the application wrote
+// the first rows of a table a foreign key refers to, whose identity only
+// a restore of the database sets back), after the excluded table was saved, after the database was
 // taken offline, and after it was restored before the excluded rows came
 // back: the next capture brings the database online and as pristine, with
 // the excluded rows the application wrote, and lets the application in
@@ -299,7 +311,7 @@ var ssWrite = []string{
 func TestCrashRestoreSQLServer(t *testing.T) {
 	for i, tc := range []struct {
 		point string
-		view  bool // the application makes a view: the whole database is restored
+		whole bool // a table only a restore of the whole database sets back (wholeRestore)
 		// after are the states of the working database the kill may leave.
 		after []string
 	}{
@@ -313,7 +325,8 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 				full(t)
 			}
 			p := sqlServerProject(t, fmt.Sprintf("restore%d", i))
-			if tc.view {
+			if tc.whole {
+				wholeRestore(t, p)
 				// A restore of the whole database ends the application's
 				// sessions: an idle connection kept would fail the first
 				// request after it (the demo answers it with 500), which
@@ -327,9 +340,6 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 			p.must(t, 0, "capture", "c1")
 			sessions := p.sessions(t)
 			sqlExec(t, p.db, ssWrite...)
-			if tc.view {
-				sqlExec(t, p.db, "CREATE VIEW faq_count AS SELECT COUNT(*) AS n FROM dbo.faq")
-			}
 			written := p.data(t)
 			r := p.run(t, tc.point, "capture", "c2")
 			if r.code != killed {
@@ -362,10 +372,6 @@ func TestCrashRestoreSQLServer(t *testing.T) {
 			p.must(t, 0, "compare", "c2", "--against", "c1")
 			if got := p.data(t); got != pristine {
 				t.Errorf("the data after the capture:\n%s\nwant pristine:\n%s", got, pristine)
-			}
-			var view sql.NullInt64
-			if err := p.master.QueryRow("SELECT OBJECT_ID(N'[" + p.work + "].dbo.faq_count')").Scan(&view); err != nil || view.Valid {
-				t.Errorf("the application's view is left (%v)", err)
 			}
 			if n := p.sessions(t); n < sessions+1 {
 				t.Errorf("%d session rows after the capture, want the %d before and the one written (excluded)", n, sessions)
@@ -440,12 +446,18 @@ func TestCrashSeedSQLServer(t *testing.T) {
 func TestWholeRestoreSQLServerPool(t *testing.T) {
 	p := sqlServerProject(t, "pool")
 	p.db.SetMaxIdleConns(8)
+	wholeRestore(t, p)
 	p.must(t, 0, "seed")
 	p.must(t, 0, "capture", "c1")
 	for i := range 3 {
 		// The application's pool holds idle connections into the
 		// database the restore takes offline.
-		sqlExec(t, p.db, "CREATE VIEW faq_count AS SELECT COUNT(*) AS n FROM dbo.faq")
+		// The application writes the first rows of faq again, on a
+		// connection of its own: those of its pool are the ones the
+		// last restore ended.
+		w := openSQLServer(t, "mssql", sqlServerE2E(t), p.work)
+		sqlExec(t, w, "INSERT INTO faq (created_at) VALUES ('2024-05-01 10:00:00')")
+		w.Close()
 		p.data(t)
 		tag := fmt.Sprintf("w%d", i)
 		p.must(t, 0, "capture", tag)

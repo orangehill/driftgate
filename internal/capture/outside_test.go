@@ -733,3 +733,67 @@ func TestChangedOutsideRestoreOnlyPrepare(t *testing.T) {
 		})
 	}
 }
+
+// TestChangedOutsideAfterStoppedRestore: a restore that stopped halfway
+// (killed, or failed) leaves its mark; the state it left is DriftGate's,
+// so the next capture completes the restore without the check, and says
+// so. The capture after it checks again.
+func TestChangedOutsideAfterStoppedRestore(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := serverOf(p, p.State["db"], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := pristinePath(p, "db", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := strings.TrimSuffix(record, ".json") + ".restoring"
+	// A restore killed after it dropped a table and before it made it
+	// again: the table is gone, and the mark is there.
+	if _, err := app.db.Exec("DROP TABLE notes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mark, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "after", Out: &out}); err != nil {
+		t.Fatalf("capture after a stopped restore: %v", err)
+	}
+	if !strings.Contains(out.String(), "state db: the last restore stopped halfway; this restore completes it") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	if _, err := os.Stat(mark); err == nil {
+		t.Errorf("the mark is left after a complete restore")
+	}
+	if _, err := app.db.Exec("SELECT count(*) FROM sqlite_schema"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec("ALTER TABLE users ADD COLUMN slug TEXT"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "column"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "db/table:users (its definition changed)") {
+		t.Fatalf("capture after a column, the restore complete: %v", err)
+	}
+	// A seed leaves no mark behind.
+	os.WriteFile(mark, nil, 0o600)
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mark); err == nil {
+		t.Errorf("the mark is left after a seed")
+	}
+}

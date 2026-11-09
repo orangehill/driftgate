@@ -112,9 +112,9 @@ A `--read-only` capture takes no `prepare:`, so seed instead. The check
 reads definitions of the working database when rows changed, and of the
 `restore_only` and `restore_empty` tables every time. The seed recorded
 the pristine copy's. For 100 changed tables it takes under 1 ms on
-SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL. A record of an older
-fingerprint format asks for a seed when an object other than a table is
-on one side only.
+SQLite, about 2 ms on MySQL and 13 ms on PostgreSQL. An older record
+format asks for a seed when a non-table object is on one side only. A
+restore that stopped halfway is completed by the next capture, unchecked.
 
 ## When the state does not match the baseline
 
