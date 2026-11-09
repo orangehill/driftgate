@@ -32,7 +32,8 @@ func docPages(t *testing.T) *docscheck.Pages {
 // in the docs of this checkout.
 func TestHelpDocLinks(t *testing.T) {
 	p := docPages(t)
-	links := []string{commandsDoc}
+	// The pages setup's messages link (setupcmd.go).
+	links := []string{commandsDoc, "databases.md", "configuration.md#seed-prepare-and-guards"}
 	for _, c := range commands {
 		if c.doc == "" {
 			t.Errorf("%s: no doc", c.name)
@@ -306,8 +307,8 @@ func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
 
 // TestDocsParity: every command driftgate help lists has an H2 of its own
 // in docs/commands.md; every key of driftgate.yaml (config.Config, nested
-// keys too) is named in a code span of docs/configuration.md, and every key
-// of catalog.json in one of docs/catalog.md.
+// keys too) is named in a heading or the first column of a table of
+// docs/configuration.md, and every key of catalog.json so in docs/catalog.md.
 func TestDocsParity(t *testing.T) {
 	p := docPages(t)
 	d, err := p.Get("docs/commands.md")
@@ -350,10 +351,10 @@ func TestDocsParity(t *testing.T) {
 		{"docs/configuration.md", reflect.TypeOf(config.Config{}), "yaml"},
 		{"docs/catalog.md", reflect.TypeOf(catalog.Catalog{}), "json"},
 	} {
-		named := spanWords(t, p, c.page)
+		named := namedWords(t, p, c.page)
 		for _, k := range nestedKeys(c.ty, c.tag) {
 			if !named[k] {
-				t.Errorf("the key %s is named in no code span of %s", k, c.page)
+				t.Errorf("the key %s is named in no heading or first table column of %s", k, c.page)
 			}
 		}
 	}
@@ -361,13 +362,21 @@ func TestDocsParity(t *testing.T) {
 
 var word = regexp.MustCompile(`[A-Za-z0-9_]+`)
 
-// spanWords are the words of the code spans of a page, outside fenced
-// blocks.
-func spanWords(t *testing.T, p *docscheck.Pages, page string) map[string]bool {
+// namedWords are the words a page names keys with, outside fenced
+// blocks: those of its headings (in lower case) and of the code spans in
+// the first column of its tables. A nested key is named by its own name,
+// written alone or after its parent (data.source.dsn, params[].from).
+func namedWords(t *testing.T, p *docscheck.Pages, page string) map[string]bool {
 	t.Helper()
 	d, err := p.Get(page)
 	if err != nil {
 		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, h := range d.Headings {
+		for _, w := range word.FindAllString(strings.ToLower(h.Text), -1) {
+			out[w] = true
+		}
 	}
 	code := map[int]bool{}
 	for _, b := range d.Blocks {
@@ -375,12 +384,12 @@ func spanWords(t *testing.T, p *docscheck.Pages, page string) map[string]bool {
 			code[n] = true
 		}
 	}
-	out := map[string]bool{}
 	for i, l := range d.Lines {
-		if code[i+1] {
+		if code[i+1] || !strings.HasPrefix(l, "|") {
 			continue
 		}
-		for _, span := range codeSpan.FindAllString(l, -1) {
+		first, _, _ := strings.Cut(strings.ReplaceAll(strings.TrimPrefix(l, "|"), `\|`, "/"), "|")
+		for _, span := range codeSpan.FindAllString(first, -1) {
 			for _, w := range word.FindAllString(span, -1) {
 				out[w] = true
 			}

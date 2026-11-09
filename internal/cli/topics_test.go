@@ -47,7 +47,7 @@ func TestHelpTopics(t *testing.T) {
 		want  []string
 	}{
 		{"catalog", append(append(fields(catalog.Request{}, "json"), fields(catalog.Catalog{}, "json")...), fields(multipart, "json")...),
-			[]string{"(beside driftgate.yaml", docsBase() + "catalog.md#request-fields", docsBase() + commandsDoc}},
+			[]string{"(beside driftgate.yaml", docsBase() + "catalog.md#request-fields"}},
 		{"allowlist", []string{"headers", "body", "arrays", "version", "request", "target", "reason"},
 			[]string{"(beside driftgate.yaml)", docsBase() + "review.md#allowlist-rules", "usage: driftgate allowlist check"}},
 		{"exclusions", append(append(fields(routes.Exclusion{}, "yaml"), fields(routes.Exclusions{}, "yaml")...), fields(routes.KnownFailure{}, "yaml")...),

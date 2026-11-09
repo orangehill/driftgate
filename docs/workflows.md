@@ -105,16 +105,16 @@ after a change.
 level: types
 target:
   base_url: https://shop.example
-  connect_to: 203.0.113.10        # optional: the new server, whatever DNS says
+  connect_to: 203.0.113.10        # the new server; allow_hosts names this address
   allow_hosts: [203.0.113.10]
 identities:
   admin: { env: DG_TOKEN_ADMIN }  # a token issued beforehand; a login would write
 ```
 
 ```sh
-driftgate capture live-before --read-only --allow-remote
+driftgate capture live-before --read-only
 # make the change on the server
-driftgate capture live-after --read-only --allow-remote
+driftgate capture live-after --read-only
 driftgate compare live-after --against live-before
 ```
 
@@ -124,7 +124,7 @@ driftgate compare live-after --against live-before
 | No `prepare:` | `--read-only` refuses it: it runs after a restore and may write. |
 | No `tokens.command` | It runs as configured and may write. |
 | `level: types` | The data is not yours. A pass proves the contract, not the behaviour. |
-| `--read-only` | Sends only `GET`, `HEAD`, `OPTIONS` and `mutates: false` requests. |
+| `--read-only` | Sends only requests that do not change data: safe methods unless `mutates: true`, and `mutates: false`. |
 | `connect_to` | Keeps the host name for `Host` and TLS; `allow_hosts` names the address. |
 
 A page's own requests (a filter, a widget) are checked only when the
@@ -181,7 +181,7 @@ Outputs: `exit-code`, `result` (`clean`, `drift`, `config-error`,
 `environment-error`, `incomplete`), `report`, `junit`, `pristine-cache-hit`.
 
 - Use the same database image and version as the baseline: fingerprints are comparable only there.
-- Never set `DRIFTGATE_KEY`, production secrets or DSNs in a pull-request job. Never use `pull_request_target` ([security](security.md#what-a-pr-job-may-run)).
+- Never give a pull-request job the project key, production secrets or production DSNs. Never use `pull_request_target` ([security](security.md#what-a-pr-job-may-run)).
 - Private bodies never reach the runner. Mark bodies without personal data public, or run on [test data](#test-data).
 
 ### Other CI
@@ -189,7 +189,7 @@ Outputs: `exit-code`, `result` (`clean`, `drift`, `config-error`,
 ```sh
 export DRIFTGATE_STORE="$(mktemp -d)"
 export DRIFTGATE_KEY="$(head -c32 /dev/urandom | base64)"   # random per job, never the project key
-driftgate run --skip-private; code=$?
+code=0; driftgate run --skip-private || code=$?
 driftgate report --format markdown > driftgate-report.md
 driftgate report --format junit > driftgate-junit.xml
 exit $code

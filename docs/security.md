@@ -71,7 +71,7 @@ Requests and connections stay local unless you allow more.
 | `target.allow_hosts` | request hosts; default `localhost` and private ranges such as `10.0.0.0/8` |
 | `capture --allow-remote` | a service outside `allow_hosts` |
 | `--allow-remote-mutations` | with `--allow-remote`: requests that change data, and repeated requests |
-| `--read-only` | only `GET`, `HEAD`, `OPTIONS` and `mutates: false` requests |
+| `--read-only` | requests that do not change data: safe methods unless `mutates: true`, and `mutates: false` |
 | `allow_remote: true` on a component | a database host that is not local nor in `allow_hosts` |
 | `data.allow_remote` | the data module's target on another host |
 

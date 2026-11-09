@@ -35,9 +35,10 @@ Build provenance and SBOMs: [release verification](security.md#release-verificat
 
 ## The demo in 5 minutes
 
-The repository has a demo API. Build and start it, in a checkout:
+The repository has a demo API. Build and start it:
 
 ```sh
+git clone https://github.com/orangehill/driftgate && cd driftgate
 go build -o /tmp/demoserver ./tools/demoserver
 /tmp/demoserver -addr 127.0.0.1:8920 -version v1 &
 mkdir ~/driftgate-demo && cd ~/driftgate-demo
@@ -97,8 +98,10 @@ $ kill %1; /tmp/demoserver -addr 127.0.0.1:8920 -version v2 &
 $ driftgate run
 DRIFT  get-api-news-id
          header-extra    header:x-powered-by   → ["demo"]
+         key-extra       $.entry.meta   → (private)
          type            $.entry.id  string → int
 ...
+kinds: header-extra 3, key-extra 3, type 3, value 3
 ```
 
 Exit 1: drift. If version 2 is right, accept it with a reason:
@@ -131,7 +134,7 @@ After every upgrade step, `driftgate run` compares with this baseline.
 
 ### When setup stops
 
-Setup stops with an instruction and the command that goes on.
+Setup stops with an instruction and the command that goes on. Other messages are in [troubleshooting](troubleshooting.md).
 
 | Stop | What to do |
 |---|---|
@@ -141,20 +144,17 @@ Setup stops with an instruction and the command that goes on.
 | a question without a terminal | pass `--yes`, or the flag it names |
 | several database settings disagree | run setup at a terminal to choose |
 
-Other messages: [troubleshooting](troubleshooting.md).
-
 ### Step by step with init
 
 `driftgate init` writes only the configuration, with the database it
-found commented out:
+found commented out. Uncomment `state:` first: without it, `run` refuses
+requests that change data.
 
 ```sh
 driftgate init --project shop    # .driftgate/driftgate.yaml, catalog.json, allowlist.yaml
 driftgate key create             # the project key
 driftgate run                    # routes, catalog and the first baseline
 ```
-
-Uncomment `state:` first: without it, `run` refuses requests that change data.
 
 ## What to commit
 

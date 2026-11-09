@@ -20,7 +20,7 @@
 |---|---|
 | `version` | `1` |
 | `requests` | the requests, in order |
-| `sequences` | requests run in order, together ([below](#sequences)) |
+| `sequences`, `restore` | requests run in order, together; `"restore": "before"` restores first ([below](#sequences)) |
 | `id` | unique name: letters, digits, `. _ -`; unique also ignoring case |
 | `target` | the service, with several services |
 | `method` | HTTP method; default `GET` |

@@ -849,7 +849,7 @@ func initCmd(args []string, out io.Writer) error {
 %s
 
 Next steps:
-  1. driftgate key create   (key for private bodies; DRIFTGATE_KEY takes precedence)
+  1. driftgate key create   (key for private bodies; DRIFTGATE_KEY takes precedence unless key: is set)
   2. check target.base_url and start the application
   3. driftgate run          (routes, catalog and the first baseline; later runs compare with it)
 `, rel(root, l.Config), rel(root, l.Catalog), rel(root, l.Allowlist), found)

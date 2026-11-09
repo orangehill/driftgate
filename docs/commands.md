@@ -10,7 +10,7 @@ These mean the same in every command that takes them. Flags go before or after t
 |---|---|
 | `--config <path>` | the configuration file; default: `.driftgate/driftgate.yaml` or `driftgate.yaml` here or in the nearest folder above |
 | `--target <service>` | with several services, work on these only (repeatable or comma-separated) |
-| `--baseline <name>` | the baseline to use; default `local` |
+| `--baseline <name>` | the baseline to use; usually `local` |
 | `--only <glob>` | only requests whose ID matches |
 | `--format <f>` | output format; default `text` |
 | `--max-drifts N` | list up to N drifts per request (default 20) |
@@ -143,7 +143,7 @@ Lists the drift groups of the last comparison, with the `accept` command for eac
 | Flag | Meaning |
 |---|---|
 | `--ref <ticket>`, `--reason "…"`, `--comparison <id>` | the first two required; `--comparison` as for `accept` |
-| `--drop <ref>`, `--import <file>`, `--baseline <name>` | instead: remove a ref's expectations, or take its file from another checkout; of this baseline |
+| `--drop <ref>`, `--import <file>`, `--baseline <name>` | remove a ref's expectations; import its file from another checkout; the baseline for both |
 
 ## verify
 Checks baselines against their manifest and acceptance log. Exit 1 when they disagree.

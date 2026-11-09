@@ -8,12 +8,16 @@ Every drift left after the allowlist gets one answer: fix the code, accept it, o
 ```console
 DRIFT  get-api-news-id
          header-extra    header:x-powered-by   → ["demo"]
+         key-extra       $.entry.meta   → (private)
          type            $.entry.id  string → int
          value           $.entry.published_at  (private) → (private)
+
 Groups:
   [1] 3 drifts in 3 requests: header x-powered-by is new
-capture:run-b299c63a4c38 against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
-kinds: header-extra 3, type 3, value 3
+      GET /api/news  (+2 more routes)
+...
+capture:run-bd607d2d390c against baseline:local: 3 compared, 0 passed, 3 drifted, 0 skipped, 0 observed
+kinds: header-extra 3, key-extra 3, type 3, value 3
 ```
 
 | Part | Meaning |
@@ -123,7 +127,7 @@ arrays:
 | not intended (the usual case in an upgrade) | fix the code until the old answer comes back |
 | intended; the team may change the baseline (`mode: evolve`) | `driftgate accept group:3 --reason "…" --ref SHOP-12` |
 | intended by a ticket; the baseline stays | `driftgate expect group:3 --ref SHOP-12 --reason "…"` |
-| a new request, or one no longer captured | `driftgate accept <id> --reason "…"` |
+| a new request, or one no longer captured | `driftgate accept <id> --reason "…"` (evolve; in freeze: rebase, below) |
 | the baseline should become a capture, after a merge | `driftgate baselines rebase local --from <tag> --reason "…"` |
 
 - `accept` takes whole requests into the baseline, and logs who, when and why in `acceptances.jsonl`.

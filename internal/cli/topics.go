@@ -172,6 +172,6 @@ func writeTopic(w io.Writer, t *topic) {
 	for _, f := range t.fields {
 		b.WriteString(wrap(strings.Fields(f[1]), fmt.Sprintf("  %-*s  ", width, f[0]), strings.Repeat(" ", width+4), 80))
 	}
-	fmt.Fprintf(&b, "\nRead %s; every command: %s\n", docsBase()+t.doc, docsBase()+commandsDoc)
+	fmt.Fprintf(&b, "\nRead %s\n", docsBase()+t.doc)
 	fmt.Fprint(w, b.String())
 }

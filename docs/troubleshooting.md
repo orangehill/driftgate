@@ -30,7 +30,7 @@ vary. Exit codes are under [exit codes](commands.md#exit-codes).
 | `read-only requests changed …; finding which …` | A `GET` or another read-only request writes data. | Mark it `mutates: true` under [`requests:`](configuration.md#storage-observe-and-requests), then `driftgate generate --write`. |
 | `warning: the state changed between the restore and the end of prepare: …` | A `prepare` command writes data before every capture. | Move it to `seed`. |
 | `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
-| `capture … is incomplete (interrupted?); capture it again with --force` | The capture was interrupted. | Capture again with `--force`. |
+| `… incomplete … (interrupted?); capture it again with --force` | The capture was interrupted. | Capture again with `--force`. |
 | `another driftgate is using the store …; waiting until it is done (Ctrl-C to stop)` | Another command holds the local store. | Wait for it, or stop it. |
 | `personal data or credentials found in … responses marked public; they were stored as private …` | The detector found personal data in a public body. | Mark the request private, or allow the value ([private bodies](security.md#private-bodies)). |
 | `state …: another connection held a lock on … for …` | SQLite: a long transaction or a worker of the application. | End the transaction or stop the worker, then run again. |

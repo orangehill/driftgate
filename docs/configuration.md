@@ -13,7 +13,7 @@ key is an error, not a warning.
 | `driftgate.yaml` | `.driftgate/driftgate.yaml` | `driftgate.yaml` at the root |
 | `catalog.json`, `allowlist.yaml`, `routes.json`, `exclusions.yaml`, `classify.yaml`, `baselines/` | `.driftgate/` | `driftgate/`, committed |
 | local store: captures, private bodies | `.driftgate/store/` | `~/.driftgate/<project>/` |
-| project key | `DRIFTGATE_KEY`, then `.driftgate/key` | `DRIFTGATE_KEY`, then the macOS Keychain |
+| project key | `key:`, then `DRIFTGATE_KEY`, then `.driftgate/key` | `key:`, then `DRIFTGATE_KEY`, then the macOS Keychain |
 | for | checks on your machine before a pull request | a baseline shared by the team or CI |
 
 Git must ignore `.driftgate/`; `init` adds it to `.gitignore`. Commands find
@@ -100,11 +100,11 @@ folder without a shell. Write a shell explicitly: `["sh", "-c", "…"]`.
 
 ### Target
 
-`target:` describes one service. `targets:` maps names to the same keys,
-for several services ([several services](frameworks.md#several-services)).
+`target:` describes one service with the keys below ([several services](frameworks.md#several-services)).
 
 | Key | Type | Meaning |
 |---|---|---|
+| `targets.<name>` | target | several services by name, each with these keys; not with `target` |
 | `base_url` | URL | where requests go |
 | `allow_hosts` | list | host names, IPs or CIDR ranges requests may reach; default: localhost and private ranges |
 | `connect_to` | host[:port] | connect there instead of where DNS points; `Host` and TLS keep `base_url`'s name |
@@ -112,7 +112,7 @@ for several services ([several services](frameworks.md#several-services)).
 | `timeout` | duration | per request; default `60s` |
 | `concurrency` | int \| `auto` | read-only requests sent in parallel; default `1` |
 | `follow_redirects` | bool | follow redirects instead of recording them; default `false` |
-| `rate_limits` | list of `{match, per_minute}` | space the requests whose path matches the glob |
+| `rate_limits[].match`, `per_minute` | glob, int | space the requests whose path matches the glob |
 | `aliases` | list of origins | other origins of the application's own URLs, such as `APP_URL` |
 | `retry` | `0`–`3` | how often a read-only request that failed under load is sent again; default `1` |
 
@@ -175,10 +175,9 @@ database than `working` stops the command (exit 2).
 |---|---|---|
 | `seed` | commands | load the data: migrations, seeders, a dump; `driftgate seed` then keeps the pristine copy |
 | `prepare` | commands | run after every restore |
-| `guards` | list of `{name, command}` | checks that must pass before requests that change data, such as "mail goes to the log" |
+| `guards[].name`, `command` | name, command | checks that must pass before requests that change data, such as "mail goes to the log" |
+| `run`, `dir`, `stdin` | list, path, path | a command as a mapping: the list, its folder, a file for its standard input |
 
-A `seed`, `prepare` or guard command may also be a mapping: `run` (the
-list), `dir` (its folder) and `stdin` (a file for its standard input).
 A `prepare` step that changes the restored data drifts on every run: move
 it to `seed`.
 
@@ -195,10 +194,10 @@ it to `seed`.
 | `discover[].target`, `discover[].dir`, `discover[].base_path` | | the service, its folder, and a prefix of every path |
 | `templates` | list | request variants per route ([templates](catalog.md#generate-and-templates)); default `[ok]` |
 | `generate.identity` | name | the identity for routes that need authentication |
-| `params[]` | list | values of route parameters: `name`, optional `route` glob and `target` |
-| `params[].value`, `values` | string, list | a fixed value, or several; `foreach: true` sends one request per value |
+| `params[].name`, `route`, `target` | name, glob, service | which route parameter; `route` and `target` narrow it |
+| `params[].value`, `values`, `foreach` | string, list, bool | a fixed value, or several; `foreach: true` sends one request per value |
 | `params[].sql`, `state` | query, component | `SELECT … ORDER BY …` on the pristine database; read-only |
-| `params[].from` | `{request, path}` | a value from an earlier response, such as `$.data.id` |
+| `params[].from.request`, `path` | ID, JSON path | a value from an earlier response, such as `$.data.id` |
 
 ### Storage, observe and requests
 
@@ -207,8 +206,8 @@ it to `seed`.
 | `storage.default` | `private` \| `public` | how generated requests keep bodies; default `private`: encrypted, never in git |
 | `storage.public` | globs | request IDs whose bodies are public |
 | `pii.allow` | regexes | values the personal-data detector lets through in public bodies |
-| `observe[]` | `{match, target, reason}` | generated requests measured but never compared |
-| `requests[]` | `{match, target, mutates, body}` | whether generated requests change data, and their JSON body |
+| `observe[].match`, `target`, `reason` | glob, service, text | generated requests measured but never compared |
+| `requests[].match`, `target`, `mutates`, `body` | glob, service, bool, YAML | whether generated requests change data, and their JSON body |
 
 `match` is a glob over `METHOD /route/path`, `/route/path` or the request
 ID. Set `mutates` here, not in the catalog: `generate --write` keeps it.
@@ -223,8 +222,8 @@ ID. Set `mutates` here, not in the catalog: `generate --write` keeps it.
 | `bisect.finish` | command | once at the end |
 | `bisect.timeout`, `bisect.ready_timeout` | duration | defaults `10m` and `1m` |
 | `data.driver` | `mysql` \| `postgres` | the data module's server |
-| `data.source` | `{dsn, database}` | a copy of production data; read only |
-| `data.target` | `{dsn, database}` | receives the anonymized copy; `dsn` defaults to the source's |
+| `data.source.dsn`, `database` | DSN source, name | a copy of production data; read only |
+| `data.target.dsn`, `database` | DSN source, name | receives the anonymized copy; `dsn` defaults to the source's |
 | `data.allow_remote` | bool | allow a target host outside `allow_hosts`; it is dropped and made again |
 | `data.key` | `{env}` \| `{op}` | the key that replaces values; default the project key |
-| `data.files` | `{source, target}` | uploaded files, and a folder for their placeholders |
+| `data.files.source`, `target` | paths | uploaded files, and a folder for their placeholders |

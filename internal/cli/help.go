@@ -220,9 +220,9 @@ Common flags:
 driftgate help <command> (or <command> --help) describes a command and its flags.
 {topics}
 Exit codes: 0 clean, 1 drift (also: changed routes, uncovered routes, a stale
-catalog with --check, findings of allowlist check), 2 configuration error, 3 environment error or an incomplete
-result (an interrupted capture; private requests whose body is not on this
-machine, without --skip-private).
+catalog with --check, findings of allowlist check), 2 configuration error,
+3 environment error or an incomplete result (an interrupted capture; private
+requests whose body is not on this machine, without --skip-private).
 `
 
 func lookupCommand(name string) *commandHelp {
