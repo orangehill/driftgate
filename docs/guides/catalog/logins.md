@@ -78,9 +78,10 @@ identities:
   admin: { env: DG_TOKEN_ADMIN }
 generate:
   identity: admin
-templates: [ok, not-found, json, anonymous, identities]   # the list init wrote, plus the last two
+templates: [ok, not-found, json, anonymous, identities]   # keep what init wrote; add anonymous, identities
 ```
 
+Keep the list `init` wrote for your framework, such as `empty-body` and `json-errors` for Laravel, and add the last two.
 `generate.identity` sends the routes that need a login as that user.
 `anonymous` adds each such route without a login, and `identities` once
 per other identity. A change of who may see what is then a drift
