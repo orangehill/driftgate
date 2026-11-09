@@ -90,7 +90,7 @@ for.
 | Flag | Meaning |
 |---|---|
 | `--target <database>` | the database to check (default `data.target`) |
-| `--dump <file>` | the dump to check: one that `anonymize` or `subset` wrote (another dump, such as a `mysqldump` or `pg_dump` output, is refused) |
+| `--dump <file>` | the dump to check: one that `anonymize` or `subset` wrote (a file without its header line, such as a `mysqldump` or `pg_dump` output, is refused) |
 | `--format text\|json` | output format (default text) |
 
 Exit 1 when it finds personal data. `anonymize` and `subset` run the

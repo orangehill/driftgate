@@ -1543,19 +1543,19 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 			s.value(schemaTable, objectName(q), "", q, true)
 			continue
 		}
-		i := strings.Index(q, " VALUES\n")
-		if i < 0 {
+		head, rows, ok := splitInsert(q)
+		if !ok {
 			return fmt.Errorf("an INSERT without rows: %.80s", q)
 		}
-		dt := heads[q[:i+len(" VALUES")]]
+		dt := heads[head]
 		if dt == nil {
-			return fmt.Errorf("an INSERT into a table the source does not have with these columns: %.120s", q[:i])
+			return fmt.Errorf("an INSERT into a table the source does not have with these columns: %.120s", strings.TrimSuffix(head, " VALUES"))
 		}
 		if last != nil && last != dt {
 			fmt.Fprintf(log, "%-40s verified %d rows\n", last.t.Name, last.n)
 		}
 		last = dt
-		if err := parseRows(q[i+len(" VALUES\n"):], len(dt.cols), schema.Driver, func(vals [][]byte) {
+		if err := parseRows(rows, len(dt.cols), schema.Driver, func(vals [][]byte) {
 			dt.n++
 			s.row(dt.t, dt.cols, dt.label, dt.n, vals)
 		}); err != nil {
@@ -1568,6 +1568,19 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 	return nil
 }
 
+// splitInsert splits an INSERT of rows at its first " VALUES" line end:
+// the head (up to VALUES, as dialect.insert writes it) and the rows.
+func splitInsert(q string) (head, rows string, ok bool) {
+	i, end := strings.Index(q, " VALUES\n"), len(" VALUES\n")
+	if j := strings.Index(q, " VALUES\r\n"); j >= 0 && (i < 0 || j < i) {
+		i, end = j, len(" VALUES\r\n") // CRLF line endings
+	}
+	if i < 0 {
+		return "", "", false
+	}
+	return q[:i+len(" VALUES")], q[i+end:], true
+}
+
 // statements reads a dump statement by statement, the way mysql and psql
 // split it: quotes, PostgreSQL dollar quotes, comments and the DELIMITER
 // lines of MySQL. A statement is at most one INSERT batch (about 1 MiB), so
@@ -1577,6 +1590,7 @@ type statements struct {
 	driver string
 	delim  string
 	b      []byte
+	format int // the dump format its header names; 0: not read
 }
 
 func newStatements(r io.Reader, driver string) *statements {
@@ -1595,9 +1609,14 @@ func (st *statements) header(driver string) error {
 	if err != nil && err != io.EOF {
 		return err
 	}
+	// A dump with CRLF line endings (a checkout or an editor on Windows).
+	if strings.HasSuffix(l, "\r\n") {
+		l = l[:len(l)-2] + "\n"
+	}
 	for format := 1; format <= DumpFormat; format++ {
 		for _, d := range []string{driver, st.driver, "mariadb"} {
 			if (d != "mariadb" || st.driver == MySQL) && l == dumpHeader(format, d) {
+				st.format = format
 				return nil
 			}
 		}
@@ -1610,6 +1629,44 @@ func isIdentByte(c byte) bool {
 }
 
 var errUnterminated = errors.New("the dump ends inside a quoted string or a comment")
+
+var errHiddenDelimiter = errors.New("a statement runs into the next one (a comment at the end of its last line hid its delimiter): make the dump again with this release")
+
+// hidesDelimiter tells whether the line comment l (to its newline) of a
+// format 1 dump hid the delimiter the writer put right after a statement,
+// so that the statements after it would be read as part of it. The
+// comment ends in the delimiter, and what follows is what the writer wrote
+// after that delimiter: after ;; (a compound statement) the line
+// "DELIMITER ;", after ; the INSERT of rows that starts a line after blank
+// and comment lines. Neither follows such a comment inside a statement
+// the writer wrote: a trigger may hold INSERTs, but not a line
+// "DELIMITER ;" outside a string or comment, and a statement other than a
+// compound one holds no INSERT. Format 2 puts the delimiter on a line of
+// its own after such a comment; a dump of it is never refused here.
+func (st *statements) hidesDelimiter(l string) bool {
+	if st.format != 1 || !strings.HasSuffix(strings.TrimRight(l, " \t\r\n"), st.delim) {
+		return false
+	}
+	p, _ := st.r.Peek(1 << 16)
+	if st.delim != ";" {
+		return bytes.HasPrefix(p, []byte("DELIMITER "))
+	}
+	for len(p) > 0 {
+		switch {
+		case p[0] == ' ' || p[0] == '\t' || p[0] == '\r' || p[0] == '\n':
+			p = p[1:]
+		case bytes.HasPrefix(p, []byte("--")) || (st.driver == MySQL && p[0] == '#'):
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				return false
+			}
+			p = p[i+1:]
+		default:
+			return bytes.HasPrefix(p, []byte("INSERT INTO "))
+		}
+	}
+	return false
+}
 
 // next returns the next statement without its delimiter, or io.EOF.
 func (st *statements) next() (string, error) {
@@ -1719,6 +1776,9 @@ func (st *statements) next() (string, error) {
 				st.b = append(st.b, l...)
 				if err != nil && err != io.EOF {
 					return "", err
+				}
+				if st.hidesDelimiter(l) {
+					return "", errHiddenDelimiter
 				}
 				continue
 			}

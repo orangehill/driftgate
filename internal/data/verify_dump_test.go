@@ -345,15 +345,15 @@ func readDump(r io.Reader, driver string, ncols func(i int, q string) int) (stmt
 		if !strings.HasPrefix(q, "INSERT INTO ") {
 			continue
 		}
-		at := strings.Index(q, " VALUES\n")
-		if at < 0 {
+		head, text, ok := splitInsert(q)
+		if !ok {
 			return stmts, rows, fmt.Errorf("statement %d: an INSERT without rows", i)
 		}
-		n := ncols(i, q[:at+len(" VALUES")])
+		n := ncols(i, head)
 		if n < 0 {
 			continue
 		}
-		if err := parseRows(q[at+len(" VALUES\n"):], n, driver, func(vals [][]byte) {
+		if err := parseRows(text, n, driver, func(vals [][]byte) {
 			row := make([][]byte, len(vals))
 			for k, v := range vals {
 				if v != nil {
@@ -574,5 +574,93 @@ func TestDumpHeader(t *testing.T) {
 	err := sc.dump(strings.NewReader(refused[1].dump), &Schema{Driver: MySQL}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "not a dump of driftgate") {
 		t.Errorf("scanner.dump: %v", err)
+	}
+}
+
+// TestDumpRoundTripCRLF reads the dumps of TestDumpRoundTrip with CRLF line
+// endings: every newline of the dump, those in statements and in
+// PostgreSQL's strings included, becomes \r\n, and is read back as such.
+func TestDumpRoundTripCRLF(t *testing.T) {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	for _, driver := range []string{MySQL, Postgres} {
+		t.Run(driver, func(t *testing.T) {
+			t.Parallel()
+			failed := 0
+			for seed := range uint64(500) {
+				dc := randDumpCase(t, rand.New(rand.NewPCG(seed, 13)), driver)
+				dc.dump = []byte(crlf(string(dc.dump)))
+				for i := range dc.stmts {
+					dc.stmts[i] = crlf(dc.stmts[i])
+				}
+				for i := range dc.heads {
+					dc.heads[i] = crlf(dc.heads[i])
+				}
+				for _, rows := range dc.rows {
+					for _, row := range rows {
+						for k, v := range row {
+							if v != nil && driver == Postgres { // MySQL writes \n as \n
+								row[k] = []byte(crlf(string(v)))
+							}
+						}
+					}
+				}
+				if err := dc.check(dumpReaders[seed%3]); err != nil {
+					t.Errorf("seed %d: %v\ndump:\n%q", seed, err, dc.dump)
+					if failed++; failed == 5 {
+						return
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDumpHiddenDelimiter: in a dump of format 1, a statement whose last
+// line ended in a comment had its delimiter in that comment, and the
+// statements after it ran into it: their rows would be read as the text
+// of a schema statement, not as rows. Such a dump is refused. A statement
+// that only holds INSERTs, comments or DELIMITER text (a trigger) is read.
+func TestDumpHiddenDelimiter(t *testing.T) {
+	read := func(driver, dump string) error {
+		_, _, err := readDump(strings.NewReader(dump), driver, func(int, string) int { return 1 })
+		return err
+	}
+	f1 := func(driver string) string { return dumpHeader(1, driver) }
+	refused := []struct{ driver, dump string }{
+		{MySQL, f1(MySQL) + "DELIMITER ;;\nCREATE TRIGGER `x` AFTER INSERT ON `t` FOR EACH ROW BEGIN\n  SET @a = 1;\nEND # keep;;\nDELIMITER ;\nINSERT INTO `t` (`v`) VALUES\n('secret');\n"},
+		{MySQL, f1(MySQL) + "DELIMITER ;;\nCREATE TRIGGER `x` AFTER INSERT ON `t` FOR EACH ROW BEGIN\n  SET @a = 1;\nEND -- keep;;\r\nDELIMITER ;\r\nINSERT INTO `t` (`v`) VALUES\r\n('secret');\r\n"},
+		{MySQL, f1(MySQL) + "CREATE TABLE `t` (`v` text) -- keep;\n\n-- Table t\n# more\nINSERT INTO `t` (`v`) VALUES\n('secret');\n"},
+		{Postgres, f1(Postgres) + "CREATE VIEW v AS SELECT 1 -- keep;\nINSERT INTO \"t\" (\"v\") VALUES\n('secret');\n"},
+	}
+	for _, c := range refused {
+		if err := read(c.driver, c.dump); !errors.Is(err, errHiddenDelimiter) {
+			t.Errorf("%s %q: %v", c.driver, c.dump, err)
+		}
+	}
+
+	// A trigger with INSERTs (one at the start of a line, after a comment
+	// that ends in the delimiter), INSERT and DELIMITER in strings and
+	// comments, ending in a comment: read as written, in either format.
+	trigger := "CREATE TRIGGER `x` AFTER INSERT ON `t` FOR EACH ROW BEGIN\n" +
+		"  INSERT INTO `log` (`v`) VALUES ('a;;\nINSERT INTO `t`\nDELIMITER ;');\n" +
+		"  SET @a = 1; # done;;\n" +
+		"INSERT INTO `log` (`v`) VALUES\n(NEW.`v`); -- ;;\n" +
+		"  /* ;;\nDELIMITER ;\n*/ SET @b = 2;\n" +
+		"END # keep;;"
+	tb := &Table{Name: "t", quoted: "`t`", Columns: []*Column{{Name: "v", Category: CatText}}}
+	ins := insertStmt(mysqlDialect{}, tb, tb.Columns, [][][]byte{{[]byte("v")}})
+	dump := writeDump(t, MySQL, []any{Stmt{SQL: trigger, Compound: true}, "Table t", ins})
+	dc := &dumpCase{driver: MySQL, dump: dump, stmts: []string{trigger, ins.SQL},
+		ncols: map[int]int{1: 1}, rows: map[int][][][]byte{1: {{[]byte("v")}}}, heads: map[int]string{1: mysqlDialect{}.insert(tb, tb.Columns)}}
+	if err := dc.check(dumpReaders[0]); err != nil {
+		t.Errorf("format %d: %v", DumpFormat, err)
+	}
+	// Format 1 wrote the same trigger with its delimiter right after it.
+	// Without the comment at its end, it reads as written there too.
+	body := strings.TrimSuffix(trigger, " # keep;;")
+	f1dump := f1(MySQL) + "DELIMITER ;;\n" + body + ";;\nDELIMITER ;\n" + ins.SQL + ";\n"
+	stmts, _, err := readDump(strings.NewReader(f1dump), MySQL, func(int, string) int { return 1 })
+	if err != nil || len(stmts) != 2 || stmts[0] != body {
+		t.Errorf("format 1: %v, %q", err, stmts)
 	}
 }

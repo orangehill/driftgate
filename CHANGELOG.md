@@ -49,7 +49,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
-- `data verify --dump` reads only a dump that `data anonymize` or `data subset` wrote (format 1 or 2, for the source's database type), and refuses any other file, such as a `mysqldump` or `pg_dump` output, instead of reading it in part.
+- `data verify --dump` reads only a dump that starts with the header line `data anonymize` and `data subset` write (format 1 or 2, for the source's database type). Other files, such as a `mysqldump` or `pg_dump` output, are refused unless they carry that line. Dumps with CRLF line endings are read. A format 1 dump in which a comment at the end of a statement hid its `;` is refused with a message to make the dump again, instead of being read with the next statements' rows as text.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))
 - MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing. ([#22](https://github.com/orangehill/driftgate/pull/22))
 - Allowlist proposals are narrower: enum values as the words seen, digit widths kept, a stable UUID kept literal. ([#10](https://github.com/orangehill/driftgate/pull/10), [#15](https://github.com/orangehill/driftgate/pull/15))
