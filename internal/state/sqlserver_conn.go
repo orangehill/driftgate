@@ -470,45 +470,74 @@ var sqlServerOthersWait = time.Minute
 // ssDatabaseNamed is the database a message of SQL Server names.
 var ssDatabaseNamed = lazy.Regexp(`Database '((?:[^']|'')+)'`)
 
-// othersTransition reports, for an error 927 ("Database '…' cannot be
-// opened. It is in the middle of a restore") or 952 ("is in transition"),
-// the database it names when that is not one of this component's
-// (working, pristine, <pristine>_dgnew, <pristine>_dgx). SQL Server 2019
-// and earlier fail a statement of one database so while another one is
-// restored, created or renamed: even a three-part name of its own
-// database (an item restore's INSERT … SELECT FROM [pristine].…) or a
-// connection to it, when the other's name comes up in the lookup.
+// othersTransition reports, for an error of a database in transition
+// (ssInTransition), the database it names when that is not one of this
+// component's (working, pristine, <pristine>_dgnew, <pristine>_dgx). SQL
+// Server 2019 and earlier fail a statement of one database so while
+// another one is restored, created, renamed, dropped or taken offline:
+// even a three-part name of its own database (an item restore's INSERT …
+// SELECT FROM [pristine].…) or a connection to it, when the other's name
+// comes up in the lookup.
 //
-// Every 927 and 952 the error carries (each message of a server error,
+// Every such error the error carries (each message of a server error,
 // each error wrapped or joined) must name another database: one that
 // names this component's, or names none, is not retried.
 func (s *SQLServer) othersTransition(err error) (string, bool) {
-	if n := sqlServerNumber(err); n != 927 && n != 952 {
+	return s.transition(err, false)
+}
+
+// workingStopped is othersTransition for a restore, which also tries again
+// after a 942 or 927 that names the working database: the state a restore
+// of the whole database that stopped leaves it in (OFFLINE, RESTORING),
+// and the one this restore completes. Its lookup fails a statement of
+// another database so, as another database's does: the copy's mark read
+// from <pristine>_dgx (leftSave) while other databases of the server are
+// restored. Each try reads the working database's state anew first.
+func (s *SQLServer) workingStopped(err error) (string, bool) {
+	return s.transition(err, true)
+}
+
+// transition is othersTransition; working also takes a 942 or 927 about
+// the working database (workingStopped).
+func (s *SQLServer) transition(err error, working bool) (string, bool) {
+	if !ssInTransition(sqlServerNumber(err)) {
 		return "", false
 	}
-	other := ""
+	named := ""
 	for _, e := range sqlServerErrors(err) {
-		if e.Number != 927 && e.Number != 952 {
+		if !ssInTransition(e.Number) {
 			continue
 		}
-		// The name in the message of the 927 or 952 itself, not another
-		// one of the error or of the text it is wrapped in.
+		// The name in the message of the error itself, not another one
+		// of the error or of the text it is wrapped in.
 		m := ssDatabaseNamed().FindStringSubmatch(e.Message)
 		if m == nil {
 			return "", false
 		}
 		name := strings.ReplaceAll(m[1], "''", "'")
+		stopped := working && (e.Number == 942 || e.Number == 927) && strings.EqualFold(name, s.o.Working)
 		for _, own := range []string{s.o.Working, s.o.Pristine, s.o.Pristine + "_dgnew", s.excludedDB()} {
-			if strings.EqualFold(name, own) {
+			if strings.EqualFold(name, own) && !stopped {
 				return "", false
 			}
 		}
-		if other == "" {
-			other = name
+		if named == "" {
+			named = name
 		}
 	}
-	return other, other != ""
+	return named, named != ""
 }
+
+// ssInTransition reports the errors SQL Server 2019 and earlier give a
+// statement while another database changes: 927 ("Database '…' cannot be
+// opened. It is in the middle of a restore"), 952 ("is in transition"),
+// 924 ("is already open and can only have one user at a time": a seed or
+// a drop sets a database SINGLE_USER first) and 942 ("cannot be opened
+// because it is offline": a restore of the whole database takes the
+// working database offline). Only othersTransition's check of the name
+// makes one a reason to try again: about this component's own database,
+// each means what it says.
+func ssInTransition(n int32) bool { return n == 924 || n == 927 || n == 942 || n == 952 }
 
 // sqlServerErrors are the messages of every server error in err: each
 // one's own and every message it carries (mssql.Error.All), in wrapped and
@@ -542,23 +571,86 @@ func sqlServerErrors(err error) []mssql.Error {
 
 // retryOthers runs f again while it fails because another database of
 // the server is in transition (othersTransition), up to
-// sqlServerOthersWait: each of DriftGate's operations leaves the
-// databases as a stop at any point does, and the next run completes it.
+// sqlServerOthersWait after the first such failure: each of DriftGate's
+// operations leaves the databases as a stop at any point does, and the
+// next run completes it. The wait counts from that failure, not from the
+// start: a try that ran longer than the wait (a seed of a large database,
+// a statement slowed by a busy server) is still tried again.
 func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
-	deadline := time.Now().Add(sqlServerOthersWait)
+	return s.retryWhile(ctx, s.othersTransition, f)
+}
+
+// sqlServerDeadlockTries bounds how many times retryWhile runs f again
+// after a deadlock.
+var sqlServerDeadlockTries = 3
+
+// retryWhile is retryOthers with the errors that make f run again told by
+// stopped (othersTransition, workingStopped). A try the server chose as a
+// deadlock victim (1205) runs again too, up to sqlServerDeadlockTries
+// times: as another restore's or seed's DDL of the server's catalog, or
+// the application's writes, may make it one. Each operation verifies its
+// result (a restore, by the fingerprint after it), so a try again never
+// passes what failed; one that keeps losing fails with that error.
+//
+// An inner retry's error that gave up (ssGaveUp: the wait passed, or the
+// deadlock tries are spent) is never retried again by an outer one. Each
+// retryWhile counts its own deadlocks: a 1205 of a statement of the outer
+// try itself, outside the inner retries, may run that try again up to
+// sqlServerDeadlockTries times, each with inner retries of their own. The
+// total stays bounded (at most (1+n)² tries for two levels).
+func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string, bool), f func() error) error {
+	var deadline time.Time
 	wait := 20 * time.Millisecond
 	told := false
+	last := "" // the database whose transition stopped the last try
+	deadlocks := 0
 	for {
 		err := f()
-		name, ok := s.othersTransition(err)
-		if !ok || time.Now().After(deadline) || ctx.Err() != nil {
+		var gaveUp *ssGaveUp
+		if sqlServerNumber(err) == 1205 && !errors.As(err, &gaveUp) && ctx.Err() == nil {
+			// Chosen as a deadlock victim: the server rolled the try's
+			// transaction back, and a try stops in a state the next one
+			// completes. A few more tries; then the error as it is.
+			if deadlocks++; deadlocks > sqlServerDeadlockTries {
+				return &ssGaveUp{fmt.Errorf("%w (tried %d times)", err, deadlocks)}
+			}
+			s.retried.Add(1)
+			fmt.Fprintf(s.o.Log, "state %s: the server chose a statement of DriftGate as a deadlock victim; trying again\n", s.o.Name)
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(deadlocks) * 100 * time.Millisecond):
+			}
+			continue
+		}
+		name, ok := stopped(err)
+		if !ok && last != "" && sqlServerNoReason(err) {
+			// A try after one another database stopped failed without a
+			// reason (a DONE token with its error flag and no error
+			// message): as SQL Server 2017 stopped an item restore while
+			// other databases were restored. Nothing tells it from the
+			// stop before, so it is waited out as that one, within the
+			// same wait.
+			name, ok = last, true
+		}
+		if deadline.IsZero() {
+			deadline = time.Now().Add(sqlServerOthersWait)
+		}
+		if !ok || ctx.Err() != nil || errors.As(err, &gaveUp) { // an operation within f waited the whole time already
 			return err
 		}
-		s.retried.Add(1)
-		if !told {
-			fmt.Fprintf(s.o.Log, "state %s: database %s of the same server is being restored or changed, which stopped a statement on this one; trying again\n", s.o.Name, name)
-			told = true
+		if time.Now().After(deadline) {
+			return s.stillInTransition(err, name)
 		}
+		s.retried.Add(1)
+		switch {
+		case told:
+		case strings.EqualFold(name, s.o.Working):
+			fmt.Fprintf(s.o.Log, "state %s: working database %s, which a restore that stopped left offline or restoring, stopped a statement on another database while other databases of the server change; trying again\n", s.o.Name, name)
+		default:
+			fmt.Fprintf(s.o.Log, "state %s: database %s of the same server is being restored or changed, which stopped a statement on this one; trying again\n", s.o.Name, name)
+		}
+		told, last = true, name
 		select {
 		case <-ctx.Done():
 			return err
@@ -566,6 +658,35 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 		}
 		wait = min(2*wait, time.Second)
 	}
+}
+
+// stillInTransition is the error of an operation retryWhile gave up on:
+// the database named stayed in transition for the whole wait, and may be
+// so for good (left restoring, offline or single-user).
+func (s *SQLServer) stillInTransition(err error, name string) error {
+	if strings.EqualFold(name, s.o.Working) {
+		return &ssGaveUp{fmt.Errorf("%w (tried again for %s: the working database %s stays offline or restoring while other databases of the server change; run the command again once they are done)", err, sqlServerOthersWait, name)}
+	}
+	return &ssGaveUp{fmt.Errorf("%w (tried again for %s: database %s of the same server stayed in the middle of a restore, offline, single-user or in transition; if it stays so for good, which SQL Server 2019 and earlier let stop statements of other databases, bring it online, give it MULTI_USER back, complete its restore or drop it)", err, sqlServerOthersWait, name)}
+}
+
+// ssGaveUp is the error of an operation retryWhile gave up on
+// (stillInTransition).
+type ssGaveUp struct{ err error }
+
+func (e *ssGaveUp) Error() string { return e.err.Error() }
+func (e *ssGaveUp) Unwrap() error { return e.err }
+
+// sqlServerNoReason reports a request SQL Server failed without saying
+// why: the driver's error of a DONE token with its error flag and no error
+// message before it ("Request failed but didn't provide reason", number 0).
+func sqlServerNoReason(err error) bool {
+	for _, e := range sqlServerErrors(err) {
+		if e.Number == 0 && strings.HasPrefix(e.Message, "Request failed but didn't provide reason") {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryInTransition runs f again while it fails with SQL Server's error
