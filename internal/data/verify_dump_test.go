@@ -106,6 +106,35 @@ func pgString(r *rand.Rand) string {
 	return "e'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
+// dollarBody is the text of a dollar quote with the given tag: pieces that
+// overlap the tag ($a$a$), contain part of it ($a $), or nest another
+// tag, but end the quote only at its closing tag (as PostgreSQL reads it:
+// the first tag after the opening one).
+func dollarBody(r *rand.Rand, tag string) string {
+	inner := tag[1 : len(tag)-1] // the name between the dollars
+	pieces := []string{
+		tag[1:],                 // right after the opening tag: $a$a$
+		tag[:len(tag)-1] + " ",  // $a without its closing dollar
+		"$" + inner + " $",      // $a $
+		"$b$ '; $b$", "$$", "$", // another tag, nested; dollars alone
+		"\nBEGIN\n  RAISE NOTICE 'a;b';\nEND\n",
+	}
+	for {
+		var b strings.Builder
+		for range 1 + r.IntN(4) {
+			if r.IntN(3) == 0 {
+				b.WriteString(string(randText(r)))
+			} else {
+				b.WriteString(pieces[r.IntN(len(pieces))])
+			}
+		}
+		body := b.String()
+		if strings.Index(body+tag, tag) == len(body) {
+			return body
+		}
+	}
+}
+
 // randSchemaStmt is a statement other than an INSERT of rows, with strings,
 // quoted names, comments and (PostgreSQL) dollar quotes in it.
 func randSchemaStmt(r *rand.Rand, driver string) Stmt {
@@ -132,9 +161,9 @@ func randSchemaStmt(r *rand.Rand, driver string) Stmt {
 	case 0:
 		return Stmt{SQL: "SET standard_conforming_strings = on"}
 	case 1:
-		tag := []string{"$$", "$fn$", "$_x1$", "$body$"}[r.IntN(4)]
+		tag := []string{"$$", "$a$", "$fn$", "$_x1$", "$body$"}[r.IntN(5)]
 		return Stmt{SQL: "CREATE FUNCTION " + q(randName(r)) + "() RETURNS trigger LANGUAGE plpgsql AS " + tag +
-			"\nBEGIN\n  RAISE NOTICE " + without(r, tag) + ";\nEND\n" + tag}
+			dollarBody(r, tag) + tag}
 	case 2:
 		return Stmt{SQL: "COMMENT ON TABLE " + q(randName(r)) + " IS " + pgString(r)}
 	case 3:
@@ -384,6 +413,11 @@ var dumpReaders = []func(io.Reader) io.Reader{
 // TestDumpRoundTrip writes random statements and rows with every awkward
 // byte through the dump writer and reads them back: the same statements,
 // the same values byte for byte, NULL kept.
+//
+// Mutating statements.next is caught here, with one exception: reading ”
+// in a quote as the quote's end and a new quote is the same as reading it
+// as an escaped quote (the statement's bytes do not change), so that
+// mutant is equivalent.
 func TestDumpRoundTrip(t *testing.T) {
 	seeds := 3000
 	if testing.Short() {
