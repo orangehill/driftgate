@@ -432,6 +432,16 @@ var dumpReaders = []func(io.Reader) io.Reader{
 	iotest.HalfReader,
 }
 
+// dumpSeeds is how many seeds a round-trip test runs: full, or fewer with
+// -short or under the race detector, which makes them about ten times
+// slower (the fuzz step and the run without it cover the rest).
+func dumpSeeds(full, fewer int) int {
+	if raceEnabled || testing.Short() {
+		return fewer
+	}
+	return full
+}
+
 // TestDumpRoundTrip writes random statements and rows with every awkward
 // byte through the dump writer and reads them back: the same statements,
 // the same values byte for byte, NULL kept.
@@ -441,10 +451,7 @@ var dumpReaders = []func(io.Reader) io.Reader{
 // as an escaped quote (the statement's bytes do not change), so that
 // mutant is equivalent.
 func TestDumpRoundTrip(t *testing.T) {
-	seeds := 3000
-	if testing.Short() {
-		seeds = 300
-	}
+	seeds := dumpSeeds(3000, 300)
 	for _, driver := range []string{MySQL, Postgres} {
 		t.Run(driver, func(t *testing.T) {
 			t.Parallel()
@@ -586,7 +593,7 @@ func TestDumpRoundTripCRLF(t *testing.T) {
 		t.Run(driver, func(t *testing.T) {
 			t.Parallel()
 			failed := 0
-			for seed := range uint64(500) {
+			for seed := range uint64(dumpSeeds(500, 100)) {
 				dc := randDumpCase(t, rand.New(rand.NewPCG(seed, 13)), driver)
 				dc.dump = []byte(crlf(string(dc.dump)))
 				for i := range dc.stmts {
