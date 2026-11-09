@@ -180,8 +180,9 @@ reach the console, `run.log` and pull-request comments.
 ### Masked headers
 
 `Authorization`, `Cookie` and `Set-Cookie` values are masked in
-captures, so that their format can still be checked: letters become `x`,
-digits `0`. So is any other header named as a credential:
+captures, so that their format can still be checked: small letters
+become `x`, capitals `X`, digits `0`. So is any other header named as a
+credential:
 
 - with or without `X-`: `X-CSRF-Token`, `X-Api-Key`, `Access-Token`, `Token`, `Api-Key`;
 - not the standard `Access-Control-*`, `Public-Key-Pins` or `Signature`.
@@ -192,6 +193,12 @@ masked too:
 - the values of query and fragment parameters named or shaped as credentials: `token=`, `signature=`, `X-Amz-Signature=`, `#access_token=`;
 - a fragment shaped as a token;
 - path segments shaped as one, as in a reset link.
+
+An allowlist format that a capture proposes takes nothing from a masked
+value. The mask keeps a value's length, so a cookie's value is proposed
+as text without a `;` of the lengths seen, such as `[^;]{40,44}`. A
+cookie emptied or set to `deleted` then fails the format. A header
+masked whole is proposed as any text (`.+`).
 
 ### Redirects and terminal output
 

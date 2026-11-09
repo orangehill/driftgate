@@ -14,7 +14,7 @@ driftgate setup
 Setup recognises Laravel, and writes:
 
 - a `laravel` adapter: routes from `php artisan route:list --json`; with `php: ["php"]`, request bodies built from the form request classes' rules;
-- `templates: [ok, not-found, json, json-errors]` ([templates](../../reference/driftgate-yaml.md#templates));
+- `templates: [ok, not-found, json, empty-body, json-errors]` ([templates](../../reference/driftgate-yaml.md#templates)). `empty-body` sends an empty body to each route with validation rules. Its `json-errors` twin gets the 422 message, so a changed validation error is compared;
 - exclusions with reasons for Debugbar, Ignition, Telescope, Horizon and `/storage/*`;
 - allowlist entries for `Date`, and the throttle headers that depend on time: `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`.
 - Rules written in a controller (`$request->validate([...])`) are not read: such routes get no sample body, and `coverage` lists them.
@@ -183,8 +183,8 @@ route counts as failed and `run` exits 1. Give it a real test user under
 driftgate run
 ```
 
-On a fresh application the session cookies differ, so the first run
-proposes allowlist entries: add a reason to each, and run again.
+Session cookies differ on a fresh application, so the first run proposes
+allowlist entries; a masked cookie value by its length. Add reasons, run again.
 
 - Routes that upload files get a synthetic file of a kind their rules accept (`file`, `image`, `mimes:`, `mimetypes:`). A real import needs a [real file](../catalog/hand-written-requests.md#upload-a-file).
 - A queued job runs as a [command step](../catalog/hand-written-requests.md#run-a-queue-worker-or-another-command): `["php", "artisan", "queue:work", "--stop-when-empty"]`.

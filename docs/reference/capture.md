@@ -57,6 +57,13 @@ and the capture prints the `requests:` entries that mark it
 developers, users or background jobs), such a side effect may be their
 traffic, not the request's. Check it before you mark the request.
 
+To find that request, the capture sends the read-only requests again, in
+groups, each group after a restore, `prepare` and the tokens command.
+
+- Each group is compared with the state it started from. A tokens command that writes a new token on every run therefore does not hide the request; the capture notes that the starting state is not repeatable.
+- When no single request explains a change and the starting state was not repeatable, the capture stops with exit 3. It names the change and what is not repeatable: the requests did not run on the same state, so the change is not passed as an order effect.
+- When the starting state is repeatable, such a change is reported as one that no single request makes alone (an order effect or background work).
+
 ## Guards and prepare during a capture
 
 When requests change data, the
@@ -66,7 +73,7 @@ restore and `prepare`, which may set up what they check.
 - They run before the first request, and again right before the first request that changes data when read-only requests ran in between.
 - A guard that fails stops the capture there (exit 3), in seconds rather than after the read-only requests.
 - Guards only check. A write of one becomes part of the state the read-only requests start from; a restore removes it before the requests that change data.
-- Such a write may be reported as a change `prepare` made. A later search for read-only requests that wrote may report `prepare` as not repeatable.
+- Such a write may be reported as a change `prepare` made.
 
 The capture fingerprints the state right after the restore and after
 `prepare`. When the two differ, it warns that the state changed between

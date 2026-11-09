@@ -44,16 +44,26 @@ means nothing beyond the list above.
 | `key-order` | the same keys in another order | serializer change | — |
 | `array-length` | an array has more or fewer items | data or query change | an `any_length` rule for a list that changes by itself |
 | `item-order` | the same items of an array in another order | another database server or ORM; no `ORDER BY` | add `ORDER BY`; an `any_order` array rule if order does not matter |
-| `type` | a value's type changed, in JSON or in a spreadsheet cell | a driver returns native numbers now | cast the value in the code |
-| `number-literal` | the same number written differently, such as 1.0 for 1 | encoder or driver change | fix the encoder |
+| `type` | a value's type changed, in JSON or in a spreadsheet cell | a driver returns native numbers now; a decimal cast writes `7.0` for `7` | cast the value in the code |
+| `number-literal` | the same number of the same type written differently, such as 1.00 for 1.0 | encoder or driver change | fix the encoder |
 | `value` | a JSON value changed | a real change, a time, a random ID | a body rule for a value that changes by itself |
 | `format` | a value an allowlist rule covers no longer matches its format | the value's format changed | fix, or update the rule |
 | `encoding` | the same values in other bytes: layout, escapes, byte order mark, charset | pretty printing, `\/`, a byte order mark, another charset | fix the encoder |
 | `body` | a body that is not JSON changed, or JSON became non-JSON | an error page, a text line, CSV quoting | a `$raw` rule for a whole page that changes by itself |
 
+A whole number that gains a fraction (`7` → `7.0`) changes its JSON
+type, as a typed client reads it: a `type` drift, `int → float`, which
+level `types` already reports. `number-literal` is the same number of the
+same type in another spelling (`1.0` → `1.00`, `1250.5` → `1.2505e3`,
+`0` → `-0`), reported from level `values`.
+
 An array rule's `key` only pairs the items: a changed order is still an
 `item-order` drift. A `format` drift can come from any value a rule
 covers: a header, a JSON value, an HTML text or attribute, or a cell.
+A header rule lets the values change, not their number. A header value
+that came or went, such as a cookie no longer set, is a `format` drift
+whose explanation says so: `header:set-cookie has 1 value instead of 2:
+laravel-session removed`.
 
 ## HTML pages
 

@@ -461,8 +461,11 @@ parameters.
 
 ### Templates
 
-The default is `[ok]`. `init` usually writes `[ok, not-found, json]`,
-and adds `json-errors` for Laravel, Symfony, Rails and Spring Boot.
+The default is `[ok]`. `init` usually writes `[ok, not-found, json]`.
+It adds `json-errors` for Laravel, Symfony, Rails and Spring Boot, and
+`empty-body` for Laravel and FastAPI, whose discovery reads the rules
+the framework validates request bodies against. Laravel gets
+`[ok, not-found, json, empty-body, json-errors]`.
 
 | Template | Request |
 |---|---|
@@ -472,11 +475,18 @@ and adds `json-errors` for Laravel, Symfony, Rails and Spring Boot.
 | `anonymous` | a route that needs authentication, without an identity |
 | `identities` | a route that needs authentication, once per other identity |
 | `json` | with `Accept: application/json` |
-| `empty-body` | a route that takes a body, with `{}` |
+| `empty-body` | a route that takes a body and has a sample, with `{}`: its validation error |
 | `json-errors` | each error variant once more with `Accept: application/json` ([below](#json-errors)) |
 
 A rate limit is not generated: write a
 [repeated request](catalog-json.md#repeat) by hand.
+
+Without `empty-body`, no request checks a validation error: a changed
+validation message passes. Laravel, Symfony, Rails and Spring Boot
+answer the `empty-body` request with a redirect back; its
+[`json-errors`](#json-errors) twin gets the message. `coverage` lists the
+covered routes whose body is validated (they have a sample) and whose
+validation error no request shows.
 
 ### json-errors
 

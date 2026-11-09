@@ -51,6 +51,7 @@ does not do.
 | <!-- cap: json-errors --> JSON error answers | an API client gets JSON errors | [guide](guides/catalog/coverage.md#add-the-variants-clients-depend-on) | [reference](reference/driftgate-yaml.md#json-errors) |
 | <!-- cap: params --> Route parameter values | a route has `{id}` or another parameter | [guide](guides/catalog/coverage.md#give-route-parameters-values) | [reference](reference/driftgate-yaml.md#parameter-values) |
 | <!-- cap: coverage --> Coverage | you want to see the routes without a check | [guide](guides/catalog/coverage.md) | [reference](reference/commands/catalog.md#driftgate-coverage) |
+| <!-- cap: validation-gaps --> Unchecked validation errors | a changed validation message must not pass | [guide](guides/catalog/coverage.md#add-the-variants-clients-depend-on) | [reference](reference/commands/catalog.md#what-coverage-lists) |
 | <!-- cap: exclusions --> Exclude a route | a route is not checked on purpose | [guide](guides/catalog/coverage.md#exclude-a-route-on-purpose) | [reference](reference/exclusions-yaml.md#exclude-a-route) |
 | <!-- cap: known-failures --> Known failures | a request already fails in the baseline | [guide](guides/review/fix-accept-or-expect.md#keep-a-failing-request-without-hiding-it) | [reference](reference/exclusions-yaml.md#acknowledge-a-request-that-fails) |
 | <!-- cap: record --> Record a session | a browser, frontend or E2E suite sends requests | [guide](guides/catalog/record.md) | [reference](reference/commands/catalog.md#driftgate-record) |

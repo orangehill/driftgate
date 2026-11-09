@@ -240,6 +240,10 @@ state items differ from the old baseline's.
 In mode `freeze`, a rebase needs `--allow-freeze`: the capture's changes
 were reviewed where they were made. `accept` stays refused.
 
+New requests, such as those of a template added to `templates:`, join a
+baseline in mode `freeze` this way; when `run` and `review` print the
+command is under [requests without a baseline response](../reports.md#requests-without-a-baseline-response).
+
 ## driftgate verify
 
 ```

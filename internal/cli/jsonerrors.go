@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -18,14 +19,26 @@ import (
 // that differs from the error variant it doubles.
 var errorsByAccept = []string{"laravel", "symfony", "rails", "spring"}
 
+// validatesBodies are the frameworks (as detect names them) whose
+// discovery reads the rules the framework itself checks every request body
+// against: Laravel's validation rules and FastAPI's models (in its OpenAPI
+// document). An empty body answers a validation error there, so init
+// writes the empty-body template for them: without a request that sends an
+// invalid body, a changed validation message would pass unseen. generate
+// makes empty-body requests only for routes with a sample body (rules
+// found), so a route without rules gets none.
+var validatesBodies = []string{"laravel", "fastapi"}
+
 // templatesFor is the templates: list init writes for the frameworks found.
 func templatesFor(kinds []string) string {
-	for _, k := range kinds {
-		if slices.Contains(errorsByAccept, k) {
-			return "[ok, not-found, json, " + routes.JSONErrors + "]"
-		}
+	list := []string{"ok", "not-found", "json"}
+	if slices.ContainsFunc(kinds, func(k string) bool { return slices.Contains(validatesBodies, k) }) {
+		list = append(list, "empty-body")
 	}
-	return "[ok, not-found, json]"
+	if slices.ContainsFunc(kinds, func(k string) bool { return slices.Contains(errorsByAccept, k) }) {
+		list = append(list, routes.JSONErrors)
+	}
+	return "[" + strings.Join(list, ", ") + "]"
 }
 
 // jsonErrorsNote says, once per local store, that a project of such a

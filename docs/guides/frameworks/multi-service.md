@@ -35,7 +35,7 @@ discover:
   - adapter: nextjs
     target: web
     dir: apps/web
-templates: [ok, not-found, json, json-errors]
+templates: [ok, not-found, json, empty-body, json-errors]
 ```
 
 `dir` is the service's folder: its commands run there, and its files are

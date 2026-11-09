@@ -128,6 +128,9 @@ The value it names was renamed, removed, or did not change this time ([find rule
 
 ## A green result that misses something
 
+### A validation message changed, but the run passed
+No request sends an invalid body to that route, so its validation errors are not compared. `coverage` and `run` list such routes. Add `empty-body` to `templates:` (and `json-errors` for Laravel, Symfony, Rails and Spring Boot), run `driftgate generate --write`, and add the new requests to the baseline ([validation errors](reference/upgrading-driftgate.md#validation-errors-in-a-project-made-before-empty-body)).
+
 ### Requests the frontend sends are not checked
 They are not in the catalog. Record them ([record](guides/catalog/record.md)).
 

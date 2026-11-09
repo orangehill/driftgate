@@ -199,8 +199,11 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 	}
 	if len(fresh) > 0 {
 		fmt.Fprintf(out, "\nrequests without a baseline record: %s\n", strings.Join(fresh, ", "))
-		if canAccept {
+		switch {
+		case canAccept:
 			fmt.Fprintf(out, "    accept:   %s\n", acceptLine(fresh))
+		case canExpect && r.Mode == config.Freeze:
+			fmt.Fprintf(out, "    %s\n", r.JoinAdvice())
 		}
 	}
 	if len(r.Accepted) > 0 {
@@ -228,7 +231,8 @@ func reviewCmd(args []string, out io.Writer) (int, error) {
 func driftLine(d compare.Drift) string {
 	s := fmt.Sprintf("%-15s %s", d.Kind, report.Printable(d.Where))
 	if d.Baseline != "" || d.Current != "" {
-		s += fmt.Sprintf("  %s → %s", report.Printable(short(d.Baseline)), report.Printable(short(d.Current)))
+		b, c := report.ShortPair(d.Baseline, d.Current, 100)
+		s += fmt.Sprintf("  %s → %s", report.Printable(b), report.Printable(c))
 	}
 	return s
 }

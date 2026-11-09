@@ -3,11 +3,15 @@ package cli
 import (
 	"encoding/xml"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/discover"
+	"github.com/orangehill/driftgate/internal/generate"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/report"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
@@ -159,5 +163,95 @@ func TestReportStatusChange(t *testing.T) {
 	_, out, _ = runCLI(t, "report", "--config", p.cfg, "--max-drifts", "20")
 	if !strings.Contains(out, "element-missing html>body>h1") || strings.Contains(out, "body differs") {
 		t.Errorf("--max-drifts does not list every drift:\n%s", out)
+	}
+}
+
+// TestDriftLineAroundTheDifference: review and review --group show the
+// part of two long values where they differ.
+func TestDriftLineAroundTheDifference(t *testing.T) {
+	head, tail := strings.Repeat("a", 150), strings.Repeat("z", 150)
+	d := compare.Drift{Kind: compare.KindValue, Where: "$.body", Baseline: `"` + head + "OLD-WORD" + tail + `"`, Current: `"` + head + "NEW-WORD" + tail + `"`}
+	if l := driftLine(d); !strings.Contains(l, "OLD-WORD") || !strings.Contains(l, "NEW-WORD") {
+		t.Errorf("drift line %q", l)
+	}
+}
+
+// TestPrintReplaced: generate and run name the generated requests that
+// entries written by hand take the place of.
+func TestPrintReplaced(t *testing.T) {
+	var b strings.Builder
+	printReplaced(&b, nil)
+	if b.Len() != 0 {
+		t.Errorf("nothing replaced: %q", b.String())
+	}
+	printReplaced(&b, []generate.Replaced{
+		{Route: "GET /api/limited", ByHand: []string{"limited-throttle", "limited-throttle-json"}, Generated: []string{"get-api-limited", "get-api-limited-json"}},
+		{Route: "POST /api/import", ByHand: []string{"import-real"}},
+	})
+	want := "\nnote: entries written by hand take the place of the generated requests of 2 route methods (generate --all makes those too):\n" +
+		"  GET /api/limited: limited-throttle, limited-throttle-json instead of get-api-limited, get-api-limited-json\n" +
+		"  POST /api/import: import-real instead of its generated requests\n"
+	if b.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", b.String(), want)
+	}
+}
+
+// TestRouteCount: the count of routes per adapter cannot be read as a
+// version ("laravel 13").
+func TestRouteCount(t *testing.T) {
+	adapters := []discover.Adapter{{Adapter: "laravel"}, {Adapter: "openapi"}, {Adapter: "laravel"}}
+	for _, c := range []struct {
+		total    int
+		bySource map[string]int
+		want     string
+	}{
+		{13, map[string]int{"laravel": 13}, "13 routes (13 from laravel)"},
+		{20, map[string]int{"laravel": 13, "openapi": 7}, "20 routes (13 from laravel, 7 from openapi)"},
+		{0, map[string]int{}, "0 routes"},
+	} {
+		if got := routeCount(c.total, adapters, c.bySource); got != c.want {
+			t.Errorf("got %q, want %q", got, c.want)
+		}
+	}
+}
+
+// TestHeaderFormatNotFromMask: a cookie's value and a header masked whole
+// are recorded masked (x, X, 0), so the proposed format takes nothing from
+// what the mask left; it still matches every value recorded.
+func TestHeaderFormatNotFromMask(t *testing.T) {
+	mask := func(name, v string) string { return httpx.MaskHeader(name, v) }
+	cookies := [][]string{
+		{mask("set-cookie", "XSRF-TOKEN=eyJpdiI6IkF%3D; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"),
+			mask("set-cookie", "XSRF-TOKEN=Qm9vbGVhbg%2F%3D; expires=Sun, 09 Nov 2026 01:23:47 GMT; Max-Age=7200; path=/")},
+		{mask("set-cookie", "laravel-session="+strings.Repeat("aB3", 13)+"%3D; path=/; httponly"), mask("set-cookie", "laravel-session="+strings.Repeat("Zz9", 14)+"%2B; path=/; httponly")},
+	}
+	f := headerFormat("set-cookie", cookies)
+	if strings.Contains(f, "X") && !strings.Contains(f, "XSRF") || strings.Contains(f, `%\d`) || strings.Contains(f, "[x") {
+		t.Errorf("format derived from the mask: %s", f)
+	}
+	// The value's length is kept by the mask: the lengths seen bound it.
+	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]{14,16}; expires=`) || !strings.Contains(f, `|laravel-session=[^;]{42,45}; path=/; httponly`) {
+		t.Errorf("format %s", f)
+	}
+	re := regexp.MustCompile(`^(?:` + f + `)$`)
+	for _, pos := range cookies {
+		for _, v := range pos {
+			if !re.MatchString(v) {
+				t.Errorf("%q does not match %s", v, f)
+			}
+		}
+	}
+	// A cookie emptied or set to "deleted" (a logout) fails the format.
+	for _, v := range []string{"laravel-session=deleted; path=/; httponly", "laravel-session=; path=/; httponly", "XSRF-TOKEN=; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"} {
+		if re.MatchString(v) {
+			t.Errorf("%q matches %s", v, f)
+		}
+	}
+	if f := headerFormat("authorization", [][]string{{mask("authorization", "Bearer abc"), mask("authorization", "Bearer xyz9")}}); f != ".+" {
+		t.Errorf("masked whole: %s", f)
+	}
+	// A header that is not masked is inferred as before.
+	if f := headerFormat("x-request-time", [][]string{{"12", "345"}}); f != `\d+` && f != `\d{2,3}` {
+		t.Errorf("plain header: %s", f)
 	}
 }

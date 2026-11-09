@@ -25,7 +25,7 @@ Routes come from the adapters under
 
 ```console
 $ driftgate discover
-3 routes (command 3)
+3 routes (3 from command)
 routes unchanged ✓
 ```
 
@@ -47,6 +47,7 @@ requests do not cover.
 
 - It makes one request per route method and template (`templates:`; default `ok`).
 - Entries written by hand or imported stay untouched. A route method that a hand-written entry already reaches is skipped, unless `--all`.
+- `generate` and `run` name each route method skipped so in a `note:`, with the entries that reach it and the requests `generate` would make there, such as its error variants and JSON twins.
 - Parameter values come from `params:`. For routes it cannot make, it names every missing parameter, grouped by reason, with an example.
 - The same input always gives a byte-identical catalog.
 - The summary says how many generated requests `json-errors` made.
@@ -112,6 +113,10 @@ it is listed as a route without a sample body.
 - Known failures (`known_failures:` in [exclusions.yaml](../exclusions-yaml.md)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
 - Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../exclusions-yaml.md) describes. A stale one also matches no request of any service.
 - Requests that reach no route, stale exclusions, and routes without a sample body.
+- Covered routes whose body is validated (they have a sample body, from validation rules or OpenAPI) but whose validation error no request shows. Their validation errors are not compared, so a changed validation message passes. The list never changes the exit code.
+  - A request counts when the baseline recorded it as refused (400 or 422): one of the `empty-body` template, its `json-errors` twin, or one written by hand or imported.
+  - Without a baseline answer, an `empty-body` request counts. For Laravel, Symfony, Rails and Spring Boot only its JSON twin does: they answer a request without `Accept: application/json` with a redirect back.
+  - Add `empty-body` to `templates:`, and `json-errors` for those four frameworks. Then run `driftgate generate --write`.
 
 An exclusion that `init` wrote for the framework (Debugbar, Telescope,
 Horizon …) is not reported stale while it keeps `init`'s route and
@@ -126,6 +131,7 @@ reason: the project need not have that part.
 - `requests_failed_in_baseline`, with `known_status` when a known failure no longer matches;
 - `known_failures`, with `reason` and `ref`;
 - `known_failure_routes`, `stale_known_failures`, `broad_known_failures` and `only_error_answers`;
+- `routes_without_invalid_body`: the covered routes whose validation errors no request checks;
 - `stale_exclusions`, without the exclusions `init` wrote for the framework.
 
 ## driftgate har import

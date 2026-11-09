@@ -4,6 +4,9 @@
 
 `generate` cannot make every flow: a login, an upload with a real file, a
 queued job, a rate limit. Write those in `.driftgate/catalog.json` by hand.
+A request written by hand takes the place of the generated requests of its
+route method; `generate` and `run` name them
+([entries you write](../../reference/catalog-json.md#entries-generate-writes-and-entries-you-write)).
 
 ## Add a request
 

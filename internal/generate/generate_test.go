@@ -449,3 +449,53 @@ func TestJSONErrorsNothingToFollow(t *testing.T) {
 		}
 	}
 }
+
+// TestReplacedByHand: a route method an entry written by hand reaches gets
+// no generated requests, and the result names them with the entries that
+// take their place; the IDs and the rest of the catalog are as without
+// the note. --all generates them and replaces nothing.
+func TestReplacedByHand(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "json", "json-errors"},
+		Params:   []config.Param{{Name: "id", Value: "1"}},
+		Requests: []config.RequestSetting{{Match: "GET /limited", Mutates: new(bool)}}})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"GET"}, Path: "/limited"},
+		{Methods: []string{"GET"}, Path: "/items/{id}"},
+		{Methods: []string{"GET"}, Path: "/nothing/{slug}"}, // no value: generate makes only not-found…
+	}}
+	inv.Sort()
+	manual := &catalog.Catalog{Requests: []catalog.Request{
+		{ID: "limited-throttle", Method: "GET", Path: "/limited", Repeat: 6, Storage: "public"},
+		{ID: "limited-throttle-json", Method: "GET", Path: "/limited", Repeat: 6, Storage: "public"},
+		{ID: "item-by-hand", Method: "GET", Path: "/items/{id}", Params: map[string]string{"id": "2"}, Storage: "public"},
+	}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: manual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Replaced{
+		{Route: "GET /items/{id}", ByHand: []string{"item-by-hand"}, Generated: []string{"get-items-id", "get-items-id-not-found", "get-items-id-not-found-json", "get-items-id-json"}},
+		{Route: "GET /limited", ByHand: []string{"limited-throttle", "limited-throttle-json"}, Generated: []string{"get-limited", "get-limited-json"}},
+	}
+	if !reflect.DeepEqual(res.Replaced, want) {
+		t.Errorf("replaced\n got %+v\nwant %+v", res.Replaced, want)
+	}
+	var ids []string
+	for _, r := range res.Catalog.Requests {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"limited-throttle", "limited-throttle-json", "item-by-hand", "get-nothing-slug-not-found", "get-nothing-slug-not-found-json"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("catalog %v, want %v", ids, want)
+	}
+	// The setting that names the replaced route only is still reported as unused.
+	if len(res.Unused) != 1 {
+		t.Errorf("unused %v", res.Unused)
+	}
+	all, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: manual, All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Replaced) != 0 || all.Generated != 8 {
+		t.Errorf("--all: replaced %v, generated %d", all.Replaced, all.Generated)
+	}
+}

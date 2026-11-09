@@ -83,7 +83,7 @@ paths:
 
 ```console
 $ driftgate discover --write
-3 routes (openapi 3)
+3 routes (3 from openapi)
   route-added   GET /api/news
   route-added   GET /api/news/{id}
   route-added   POST /api/faq

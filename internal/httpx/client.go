@@ -519,8 +519,6 @@ func MaskHeader(name, value string) string {
 			masked += ";" + rest
 		}
 		return masked
-	case "authorization", "cookie", "proxy-authorization":
-		return maskChars(value)
 	case "location", "content-location", "refresh":
 		masked, _ := credential.MaskURL(value, true, maskChars)
 		return masked
@@ -541,10 +539,24 @@ func MaskHeader(name, value string) string {
 			value = value[end:]
 		}
 	}
-	if !plainHeaders[name] && !strings.HasPrefix(name, "access-control-") && credential.Name(name) {
+	if MasksWhole(name) {
 		return maskChars(value)
 	}
 	return value
+}
+
+// MasksWhole reports a header whose whole value MaskHeader masks: one that
+// carries a credential by definition (Authorization, Cookie), or is named
+// as one. Its recorded values say nothing of the value but its length and
+// punctuation.
+func MasksWhole(name string) bool {
+	switch name {
+	case "authorization", "cookie", "proxy-authorization":
+		return true
+	case "set-cookie", "location", "content-location", "refresh", "link":
+		return false // masked in part
+	}
+	return !plainHeaders[name] && !strings.HasPrefix(name, "access-control-") && credential.Name(name)
 }
 
 // plainHeaders are standard headers that hold no credential: some named

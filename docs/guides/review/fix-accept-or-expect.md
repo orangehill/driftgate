@@ -63,11 +63,13 @@ failed. `accept` it by its ID to add its answer to the baseline. A
 request the capture no longer has (`not-captured`) leaves the baseline
 the same way, by its ID.
 
-In `mode: freeze`, `accept` is refused, also for a new request. There,
-capture the whole catalog and take the capture into the baseline with
-`driftgate baselines rebase local --from <tag> --reason "…" --allow-freeze`,
-which adds the new requests' answers too
-([baselines rebase](../../reference/commands/review.md#driftgate-baselines-rebase)).
+In `mode: freeze`, `accept` is refused, also for a new request. When
+nothing else drifted, `run` and `review` print the
+[rebase](../../reference/commands/review.md#rebase-in-freeze-mode) that
+adds the new requests:
+`driftgate baselines rebase local --from <capture> --reason "…" --allow-freeze`.
+Next to a drift they say to fix or expect it first: the rebase would take
+it into the baseline.
 
 ## Keep a failing request without hiding it
 
