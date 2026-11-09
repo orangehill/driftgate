@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -822,14 +821,16 @@ func TestChangedOutsideSchemaCache(t *testing.T) {
 // pristine copy is now. A pristine copy changed behind its record, in an
 // item the restore did not find different, stops the run with the
 // restore's message, from the fingerprint the run reads anyway; with a
-// record of an older fingerprint format it is not compared.
+// record of an older fingerprint format it is not compared, nor is a
+// component the restore did not copy (the application wrote since).
 func TestWholeRestoreDrift(t *testing.T) {
 	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
 	if dsn == "" {
 		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
 	}
-	for _, older := range []bool{false, true} {
-		t.Run(fmt.Sprintf("older format %v", older), func(t *testing.T) {
+	for _, kind := range []string{"drift", "older format", "not restored"} {
+		t.Run(kind, func(t *testing.T) {
+			older := kind == "older format"
 			ctx := context.Background()
 			t.Setenv(config.EnvStore, t.TempDir())
 			t.Setenv("DG_DRIFT_DSN", dsn)
@@ -889,6 +890,27 @@ func TestWholeRestoreDrift(t *testing.T) {
 				if err := snapshot.WriteJSON(path, record); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if kind == "not restored" {
+				// Nothing to restore; the application writes before the
+				// fingerprint the run reads after the restore.
+				tr, err := newTracker(ctx, p, nil, io.Discard, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tr.close()
+				if err := tr.restore(ctx); err != nil {
+					t.Fatal(err)
+				}
+				exec(work, "INSERT INTO a VALUES (1)")
+				now, err := tr.fingerprint(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := tr.checkWhole(ctx, now); err != nil {
+					t.Fatalf("a component the restore did not copy: %v", err)
+				}
+				return
 			}
 			// Another hand changes the pristine copy's b; the application
 			// writes a, which the restore finds different.

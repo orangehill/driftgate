@@ -197,6 +197,7 @@ type tracker struct {
 	config      string
 	records     map[string]string // the schemaRecord file of every database component, by name
 	schemas     states            // the pristine schema the seed recorded in state.SchemaFormat, by name
+	copied      map[string]bool   // the components the last restore copied whole (not Partial), for checkWhole
 	schema      map[string]schemaRecord
 	missingOnly bool
 }
@@ -428,6 +429,7 @@ func (t *tracker) restore(ctx context.Context) error {
 	t.resends.Store(0)
 	t.resentAfter = ""
 	t.endedBy = nil
+	t.copied = map[string]bool{}
 	ended := 0
 	if t.dirty == nil {
 		if err := t.checkSchema(ctx); err != nil {
@@ -483,6 +485,7 @@ func (t *tracker) restore(ctx context.Context) error {
 		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
+		t.copied[c.Name()] = !c.Partial()
 		// The restore_only tables are not checked: the application may
 		// write them at any time, and they decide no pass.
 		var got state.Fingerprint
@@ -506,19 +509,19 @@ func (t *tracker) restore(ctx context.Context) error {
 // restoreLeft is the stop of a restore of c that left items d different
 // from the record of its pristine copy (pf).
 func restoreLeft(ctx context.Context, c state.Component, pf state.Fingerprint, d []string) error {
-	return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
+	return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; the working database now holds what the pristine copy has now. When the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
 }
 
 // checkWhole compares the fingerprint read right after the first restore
-// (now) of a component that restores the whole database (not Partial) with
-// the record of its pristine copy: the restore checks only the items it
-// found different, and copies every other item too, as the pristine copy
-// has it now, which another seed or a hand may have changed since the
-// record. A record of an older format is not compared.
+// (now) of each component that restore copied whole (copied) with the
+// record of its pristine copy: the restore checks only the items it found
+// different, and copies every other item too, as the pristine copy has it
+// now, which another seed or a hand may have changed since the record. A
+// record of an older format is not compared.
 func (t *tracker) checkWhole(ctx context.Context, now states) error {
 	for _, c := range t.comps {
-		pf, ok := t.pristine[c.Name()]
-		if !ok || c.Partial() || t.formats[c.Name()] != state.FingerprintFormat {
+		pf := t.pristine[c.Name()]
+		if !t.copied[c.Name()] || t.formats[c.Name()] != state.FingerprintFormat {
 			continue
 		}
 		if d := state.Diff(now[c.Name()], pf); len(d) > 0 {

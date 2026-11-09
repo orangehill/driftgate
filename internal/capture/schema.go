@@ -128,11 +128,11 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		r, ok, err := readSchemaRecord(t.records[c.Name()])
+		r, hasRecord, err := readSchemaRecord(t.records[c.Name()])
 		if err != nil {
 			return envErr("state %s: %v", c.Name(), err)
 		}
-		if ok {
+		if hasRecord {
 			found = append(found, t.records[c.Name()])
 		}
 		w, err := s.SchemaFingerprint(ctx, false)
@@ -142,7 +142,7 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 		// The schema the seed recorded spares the read of the pristine
 		// copy when nothing is recorded and the working schema equals it;
 		// any difference is judged on the pristine copy as it is now.
-		if p := t.schemas[c.Name()]; !ok && w != nil && p != nil && len(state.Diff(w, p)) == 0 {
+		if p := t.schemas[c.Name()]; !hasRecord && w != nil && p != nil && len(state.Diff(w, p)) == 0 {
 			continue
 		}
 		p, err := s.SchemaFingerprint(ctx, true)
@@ -204,7 +204,7 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 	switch {
 	case t.missingOnly:
 		fix = fixMissing
-	case t.run == runMigrateState && t.prepare:
+	case t.run == runMigrateState:
 		fix = fixSeed
 	}
 	msg := schemaUndone

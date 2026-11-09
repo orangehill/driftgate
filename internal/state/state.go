@@ -208,7 +208,8 @@ type Schemer interface {
 }
 
 // SchemaFormat numbers the way SchemaFingerprint hashes: a schema recorded
-// in another format is read anew.
+// in another format is read anew. Raise it when any driver's schema mode
+// hashes differently.
 const SchemaFormat = 1
 
 // SessionEnder is a Component whose Restore may end the application's own
