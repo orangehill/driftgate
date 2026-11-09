@@ -132,7 +132,7 @@ func (e *engine) stage(ctx context.Context, src, dst Database, replace bool) (*D
 		return nil, err
 	}
 	defer admin.Close()
-	st, err := e.dl.inspect(ctx, admin, dst)
+	st, err := e.inspect(ctx, admin, dst)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +151,20 @@ func (e *engine) stage(ctx context.Context, src, dst Database, replace bool) (*D
 	staging := dst
 	staging.Name = name
 	return &staging, nil
+}
+
+// inspect reads what the target holds, again when the server stops the
+// read for a lock (retryRead): it reads information_schema, whose ROUTINES
+// and EVENTS a Galera node aborts when another session creates a routine
+// or an event.
+func (e *engine) inspect(ctx context.Context, admin *sql.DB, dst Database) (st dbState, err error) {
+	err = retryRead(ctx, nil, "target", func() error {
+		if st, err = e.dl.inspect(ctx, admin, dst); err != nil {
+			return err
+		}
+		return fault("inspect")
+	})
+	return st, err
 }
 
 // discard drops the staging database, also after the context of the run
@@ -175,7 +189,7 @@ func (e *engine) publish(ctx context.Context, staging, dst Database, replace boo
 		return err
 	}
 	defer admin.Close()
-	st, err := e.dl.inspect(ctx, admin, dst)
+	st, err := e.inspect(ctx, admin, dst)
 	if err != nil {
 		return err
 	}

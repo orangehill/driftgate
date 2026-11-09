@@ -1,0 +1,164 @@
+package data
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+)
+
+func TestLockStopped(t *testing.T) {
+	for err, want := range map[error]bool{
+		&mysql.MySQLError{Number: 1213}:                                    true,
+		&mysql.MySQLError{Number: 1205}:                                    true,
+		errors.Join(errors.New("source"), &mysql.MySQLError{Number: 1213}): true,
+		&mysql.MySQLError{Number: 1146}:                                    false,
+		context.Canceled:                                                   false,
+	} {
+		if lockStopped(err) != want {
+			t.Errorf("%v: %v", err, !want)
+		}
+	}
+}
+
+// TestMySQLRetrySourceRead: the source phase of anonymize (with a subset
+// and an index of originals), of verify (source and target) and of
+// classify, stopped for a lock (1213, injected once each try has built its
+// state), runs again and then gives exactly what a run without the stop
+// gives: the same dump byte for byte, the same reports; so do the reads
+// of the target before it is written. Stopped every
+// time, anonymize returns the server's error and writes no target.
+func TestMySQLRetrySourceRead(t *testing.T) {
+	eachMySQL(t, testRetrySourceRead)
+}
+
+func testRetrySourceRead(t *testing.T, s *server) {
+	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
+	lockRetryWait = time.Millisecond
+	defer func() { readFault = nil }()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock; try restarting transaction"}
+	ctx := context.Background()
+	const src, dst = "dgretry_src", "dgretry_dst"
+	t.Cleanup(func() { s.drop(src, dst) })
+	var version string
+	s.admin.QueryRow("SELECT VERSION()").Scan(&version)
+	mariadb := strings.Contains(strings.ToLower(version), "mariadb")
+	ps := people(testUsers())
+	s.create(t, src)
+	s.drop(dst)
+	s.exec(t, src, append(seedStatements(s.driver, ps, invoiceSequence(s, mariadb)), subsetSeed(s.driver, ps)...)...)
+	rules, err := ParseRules([]byte(testRules + subsetRules))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// stop fails the first n tries of what.
+	tries := 0
+	stop := func(what string, n int) {
+		tries = 0
+		readFault = func(w string) error {
+			if w != what {
+				return nil
+			}
+			tries++
+			if tries <= n {
+				return deadlock
+			}
+			return nil
+		}
+	}
+	type run struct {
+		dump  []byte
+		rep   *Report
+		index VerifyIndex
+		log   string
+	}
+	anonymize := func(target *Database) (run, error) {
+		var r run
+		var dump, log bytes.Buffer
+		rep, err := Anonymize(ctx, Options{Source: s.db(src), Target: target, Replace: true, Dump: &dump, Rules: rules, Key: testKey,
+			Filter: &Subset{}, Index: &r.index, Log: &log})
+		r.dump, r.rep, r.log = dump.Bytes(), rep, log.String()
+		return r, err
+	}
+
+	readFault = nil
+	clean, err := anonymize(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop("source", 2)
+	retried, err := anonymize(nil)
+	if err != nil || tries != 3 {
+		t.Fatalf("anonymize: %v after %d tries", err, tries)
+	}
+	if !bytes.Equal(clean.dump, retried.dump) {
+		t.Fatalf("the dump after a retry differs:\n%s", firstDifference(clean.dump, retried.dump))
+	}
+	clean.rep.Seconds, retried.rep.Seconds = 0, 0
+	if !reflect.DeepEqual(clean.rep.Tables, retried.rep.Tables) {
+		t.Errorf("reports differ:\n%+v\n%+v", clean.rep.Tables, retried.rep.Tables)
+	}
+	if strings.Count(retried.log, "stopped the read for a lock") != 1 ||
+		strings.Count(retried.log, "subset:") != strings.Count(clean.log, "subset:") {
+		t.Errorf("log after a retry:\n%s\nwithout:\n%s", retried.log, clean.log)
+	}
+	if clean.index.x.count() != retried.index.x.count() {
+		t.Errorf("index of originals: %d values, %d after a retry", clean.index.x.count(), retried.index.x.count())
+	}
+
+	// Stopped every time: the server's error, after lockRetries more
+	// tries, and no target, staging database or dump.
+	stop("source", 1000)
+	target := s.db(dst)
+	failed, err := anonymize(&target)
+	if !errors.Is(err, deadlock) || tries != lockRetries+1 {
+		t.Fatalf("anonymize: %v after %d tries", err, tries)
+	}
+	if len(failed.dump) != 0 {
+		t.Errorf("a dump was written: %d bytes", len(failed.dump))
+	}
+	if n := s.query(t, "", "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE '"+dst+"%'"); n != "0" {
+		t.Errorf("%s databases named like the target", n)
+	}
+
+	// The reads of the target before the staging database is made and
+	// before it replaces the target (stage, publish).
+	stop("inspect", 2)
+	if _, err := anonymize(&target); err != nil || tries != 4 {
+		t.Fatalf("anonymize, inspect stopped: %v after %d tries", err, tries)
+	}
+
+	// Verify: its own read of the source, and its scan of the target.
+	verify := func() *VerifyReport {
+		t.Helper()
+		rep, err := Verify(ctx, VerifyOptions{Source: s.db(src), Target: &target, Rules: rules, Key: testKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep.Seconds = 0
+		return rep
+	}
+	want := verify()
+	for _, what := range []string{"source", "target"} {
+		stop(what, 2)
+		if got := verify(); tries != 3 || !reflect.DeepEqual(got, want) {
+			t.Errorf("verify, %s stopped: %d tries, %+v, want %+v", what, tries, got, want)
+		}
+	}
+
+	// Classify.
+	readFault = nil
+	cls, err := Classify(ctx, s.db(src), rules, nil, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop("source", 2)
+	if got, err := Classify(ctx, s.db(src), rules, nil, 5); err != nil || tries != 3 || !reflect.DeepEqual(got, cls) {
+		t.Errorf("classify: %v after %d tries", err, tries)
+	}
+}

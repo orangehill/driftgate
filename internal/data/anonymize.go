@@ -2,6 +2,7 @@ package data
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -364,44 +365,73 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 		return nil, err
 	}
 	defer srcDB.Close()
-	src, err := srcDB.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	defer src.Close()
-	if err := e.dl.session(ctx, src); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	if err := e.dl.snapshot(ctx, src); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	defer src.ExecContext(context.Background(), "ROLLBACK")
-	schema, err := e.dl.schema(ctx, src, opt.Source.Name)
-	if err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	if err := opt.Rules.Check(schema, opt.Files != nil); err != nil {
-		return nil, err
-	}
-	if err := opt.Rules.CheckSchema(schema, e.text.pii); err != nil {
-		return nil, err
-	}
-	var x *leakIndex
-	if opt.Index != nil {
-		if x, err = newLeakIndex(opt.Key, e.text.pii); err != nil {
-			return nil, err
+	// The source phase: a snapshot, the schema, the checks, the stand-ins
+	// reserved for the originals, the index of originals and the sample.
+	// Nothing is written before it ends. A try the server stops for a lock
+	// (retryRead) starts again from a new snapshot and a new engine, index
+	// and sample, so nothing of it reaches the next try.
+	var src *sql.Conn
+	defer func() {
+		if src != nil {
+			src.ExecContext(context.Background(), "ROLLBACK")
+			src.Close()
 		}
-	}
-	if err := e.r.prepare(ctx, src, e.dl, e.text.pii, schema, opt.Rules, x); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
+	}()
+	var schema *Schema
+	var x *leakIndex
+	var sampleLog bytes.Buffer
+	det := e.text.pii
+	err = retryRead(ctx, opt.Log, "source", func() error {
+		if src != nil {
+			src.ExecContext(context.Background(), "ROLLBACK")
+			src.Close()
+			src = nil
+		}
+		sampleLog.Reset()
+		var err error
+		if e, err = newEngine(opt.Source.Driver, opt.Key, det, opt.Files); err != nil {
+			return err
+		}
+		if src, err = srcDB.Conn(ctx); err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		if err := e.dl.session(ctx, src); err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		if err := e.dl.snapshot(ctx, src); err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		if schema, err = e.dl.schema(ctx, src, opt.Source.Name); err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		if err := opt.Rules.Check(schema, opt.Files != nil); err != nil {
+			return err
+		}
+		if err := opt.Rules.CheckSchema(schema, e.text.pii); err != nil {
+			return err
+		}
+		x = nil
+		if opt.Index != nil {
+			if x, err = newLeakIndex(opt.Key, e.text.pii); err != nil {
+				return err
+			}
+		}
+		if err := e.r.prepare(ctx, src, e.dl, e.text.pii, schema, opt.Rules, x); err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		if p, ok := opt.Filter.(preparer); ok {
+			if err := p.prepare(ctx, src, e.dl, schema, opt.Rules, &sampleLog); err != nil {
+				return err
+			}
+		}
+		return fault("source")
+	})
+	opt.Log.Write(sampleLog.Bytes())
+	if err != nil {
+		return nil, err
 	}
 	if x != nil {
 		*opt.Index = VerifyIndex{key: opt.Key, x: x, schema: schema}
-	}
-	if p, ok := opt.Filter.(preparer); ok {
-		if err := p.prepare(ctx, src, e.dl, schema, opt.Rules, opt.Log); err != nil {
-			return nil, err
-		}
 	}
 
 	var staging *Database

@@ -160,21 +160,29 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 				return nil, err
 			}
 		}
-		var err error
-		if x, err = newLeakIndex(opt.Key, det); err != nil {
-			return nil, err
-		}
 		dl, err := dialectFor(opt.Source.Driver)
 		if err != nil {
 			return nil, err
 		}
-		schema, err = inSnapshot(ctx, opt.Source, opt.Rules, func(c *sql.Conn, s *Schema) error {
-			return x.fill(func(fn func(PersonalValue) error) error {
-				return eachPersonal(ctx, c, dl, det, s, opt.Rules, x.ahead, fn)
-			}, nil)
+		// A try the server stops for a lock starts again from a new
+		// snapshot and a new index (retryRead).
+		err = retryRead(ctx, opt.Log, "source", func() error {
+			var err error
+			if x, err = newLeakIndex(opt.Key, det); err != nil {
+				return err
+			}
+			schema, err = inSnapshot(ctx, opt.Source, opt.Rules, func(c *sql.Conn, s *Schema) error {
+				return x.fill(func(fn func(PersonalValue) error) error {
+					return eachPersonal(ctx, c, dl, det, s, opt.Rules, x.ahead, fn)
+				}, nil)
+			})
+			if err != nil {
+				return fmt.Errorf("source: %w", err)
+			}
+			return fault("source")
 		})
 		if err != nil {
-			return nil, fmt.Errorf("source: %w", err)
+			return nil, err
 		}
 	}
 	x.rules = opt.Rules
@@ -202,7 +210,28 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 		}()
 	}
 	if opt.Target != nil {
-		scan(&db, "database "+opt.Target.Name, func(sc *scanner) error { return sc.database(ctx, *opt.Target, log) })
+		// A scan the server stops for a lock starts again with a new
+		// scanner and snapshot (retryRead); its log is kept until it ends.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var buf bytes.Buffer
+			output := "database " + opt.Target.Name
+			db.err = retryRead(ctx, log, "target", func() error {
+				buf.Reset()
+				sc := x.scanner(output)
+				defer sc.close()
+				if err := sc.database(ctx, *opt.Target, &buf); err != nil {
+					return err
+				}
+				if err := fault("target"); err != nil {
+					return err
+				}
+				db.values, db.findings = sc.values, sc.findings()
+				return nil
+			})
+			log.Write(buf.Bytes())
+		}()
 	}
 	if opt.Dump != nil {
 		scan(&dump, "dump", func(sc *scanner) error { return sc.dump(opt.Dump, schema, log) })
