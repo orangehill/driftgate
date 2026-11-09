@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/routes"
 	"github.com/orangehill/driftgate/internal/secret"
 )
@@ -160,11 +161,25 @@ func TestKnownFailuresOfOtherServices(t *testing.T) {
 		{Request: "get-gone", Reason: "renamed"},
 	}}
 	var b strings.Builder
-	c, _, err := checkCoverage(selection{"api": true}, cat, inv, excl, nil, "text", &b)
+	c, _, err := checkCoverage(selection{"api": true}, cat, inv, excl, nil, config.Evolve, "text", &b)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(c.Health.Stale, []string{"get-gone (no request)"}) {
 		t.Errorf("stale %v\n%s", c.Health.Stale, b.String())
+	}
+}
+
+// TestFailedTitlesByMode: in mode freeze, what to do with a failure the
+// baseline keeps never suggests accept, which freeze refuses; it says how
+// the fixed answer gets into the baseline instead.
+func TestFailedTitlesByMode(t *testing.T) {
+	for _, title := range []string{failedRoutesTitle(config.Freeze), failedRequestsTitle(config.Freeze)} {
+		if strings.Contains(title, "accept the new") || !strings.Contains(title, "driftgate baselines rebase <name> --from <tag> --allow-freeze") || !strings.Contains(title, "mode freeze takes no accept") {
+			t.Errorf("freeze: %s", title)
+		}
+	}
+	if !strings.Contains(failedRoutesTitle(config.Evolve), "fix them and accept the new answers") || !strings.Contains(failedRequestsTitle(config.Evolve), "fix it and accept the new answer") {
+		t.Errorf("evolve: %s / %s", failedRoutesTitle(config.Evolve), failedRequestsTitle(config.Evolve))
 	}
 }

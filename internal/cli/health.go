@@ -127,11 +127,29 @@ func failedRouteLines(rs []routes.FailedRoute) []string {
 }
 
 const (
-	failedRoutesTitle   = "Routes whose requests meant to succeed all failed in the baseline (not covered: fix them and accept the new answers, or acknowledge them under known_failures: in exclusions.yaml with a reason)"
-	failedRequestsTitle = "Requests meant to succeed that failed in the baseline (an error the baseline keeps green: fix it and accept the new answer)"
 	knownTitle          = "Known failures (known_failures: in exclusions.yaml; still compared)"
 	staleKnownTitle     = "Known failures that are stale (remove them from exclusions.yaml)"
 )
+
+// failedRoutesTitle heads the routes whose requests all failed in the
+// baseline, and failedRequestsTitle the requests that did: how their fixed
+// answers get into the baseline depends on the mode, and mode freeze takes
+// no accept.
+func failedRoutesTitle(mode string) string {
+	return "Routes whose requests meant to succeed all failed in the baseline (not covered: " + fixInBaseline(mode, "them", "answers") + ", or acknowledge them under known_failures: in exclusions.yaml with a reason)"
+}
+
+func failedRequestsTitle(mode string) string {
+	return "Requests meant to succeed that failed in the baseline (an error the baseline keeps green: " + fixInBaseline(mode, "it", "answer") + ")"
+}
+
+// fixInBaseline says how a fixed answer gets into the baseline.
+func fixInBaseline(mode, it, answers string) string {
+	if mode == config.Freeze {
+		return "fix " + it + ", then make the baseline again, or rebase it on a capture of the fix with driftgate baselines rebase <name> --from <tag> --allow-freeze; mode freeze takes no accept"
+	}
+	return "fix " + it + " and accept the new " + answers
+}
 
 // baselineHealth checks a baseline just made (ids nil) or the requests just
 // accepted into it (ids): requests meant to succeed whose answer is an
@@ -167,12 +185,12 @@ func baselineHealth(p *config.Project, inv *routes.Inventory, excl *routes.Exclu
 	} else {
 		h = routes.CheckHealth(cat, answers, excl.KnownFailures)
 	}
-	section(out, fmt.Sprintf("%s, baseline %s", failedRequestsTitle, name), failureLines(h.Failed))
+	section(out, fmt.Sprintf("%s, baseline %s", failedRequestsTitle(p.Mode), name), failureLines(h.Failed))
 	section(out, knownTitle, failureLines(h.Known))
 	if len(failed) == 0 {
 		return ExitClean, nil
 	}
-	section(out, failedRoutesTitle, failedRouteLines(failed))
+	section(out, failedRoutesTitle(p.Mode), failedRouteLines(failed))
 	return ExitDrift, []string{"requests meant to succeed failed in the baseline (see above)"}
 }
 

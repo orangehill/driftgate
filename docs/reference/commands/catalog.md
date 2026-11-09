@@ -108,7 +108,7 @@ it is listed as a route without a sample body.
 
 ### What coverage lists
 
-- Routes whose requests meant to succeed all failed in the baseline, with those requests and their statuses: not covered (exit 1). Fix the route and `accept` the new answer, or acknowledge it as a known failure.
+- Routes whose requests meant to succeed all failed in the baseline, with those requests and their statuses: not covered (exit 1). Fix the route, then `accept` the new answer in mode `evolve`. In mode `freeze`, make the baseline again or rebase it on a capture of the fix (`baselines rebase --allow-freeze`). Or acknowledge it as a known failure.
 - Requests that failed in the baseline, also on routes another request covers (a warning).
 - Known failures (`known_failures:` in [exclusions.yaml](../exclusions-yaml.md)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
 - Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../exclusions-yaml.md) describes. A stale one also matches no request of any service.

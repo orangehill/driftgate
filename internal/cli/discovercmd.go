@@ -441,15 +441,16 @@ func coverageCmd(args []string, out io.Writer) (int, error) {
 			return 0, configErr("baseline %s does not exist (coverage --baseline none checks the catalog alone)", name)
 		}
 	}
-	_, code, err := checkCoverage(sel, cat, inv, excl, answers, *format, out)
+	_, code, err := checkCoverage(sel, cat, inv, excl, answers, p.Mode, *format, out)
 	return code, err
 }
 
 // checkCoverage prints which routes of the selected services the catalog
-// covers, in format text or json; uncovered routes are exit 1. answers are
+// covers, in format text or json; uncovered routes are exit 1. mode is the
+// project's (what to do with a failure in the baseline). answers are
 // a baseline's by request ID (nil without one): a request covers its route
 // only when it did not fail there.
-func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer, format string, out io.Writer) (*routes.Coverage, int, error) {
+func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer, mode, format string, out io.Writer) (*routes.Coverage, int, error) {
 	c := coverageOf(sel, cat, inv, excl, answers)
 	inv = sel.routes(inv)
 	code := ExitClean
@@ -488,8 +489,8 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 	}
 	section(out, "Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
 	section(out, "Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
-	section(out, failedRoutesTitle, failedRouteLines(c.Failed))
-	section(out, failedRequestsTitle, failureLines(h.Failed))
+	section(out, failedRoutesTitle(mode), failedRouteLines(c.Failed))
+	section(out, failedRequestsTitle(mode), failureLines(h.Failed))
 	section(out, "Routes reached only by requests that answered an error (written by hand; covered, but nothing shows the route works)", c.ErrorOnly)
 	section(out, knownTitle, failureLines(h.Known))
 	section(out, staleKnownTitle, h.Stale)
