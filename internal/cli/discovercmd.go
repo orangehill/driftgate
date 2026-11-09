@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -97,14 +98,7 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 	for _, r := range inv.Routes {
 		bySource[r.Source]++
 	}
-	var counts []string
-	for _, a := range p.Discover {
-		if n, ok := bySource[a.Adapter]; ok {
-			counts = append(counts, fmt.Sprintf("%s %d", a.Adapter, n))
-			delete(bySource, a.Adapter)
-		}
-	}
-	fmt.Fprintf(out, "%d routes (%s)\n", len(inv.Routes), strings.Join(counts, ", "))
+	fmt.Fprintln(out, routeCount(len(inv.Routes), p.Discover, bySource))
 	changes := routes.DiffInventories(old, inv)
 	for _, c := range changes {
 		line := fmt.Sprintf("  %-13s %s", c.Kind, report.Printable(c.Route))
@@ -203,10 +197,35 @@ func withExclusions(p *config.Project, inv *routes.Inventory, source string) (*r
 		}
 		excl.Routes[i].Target = p.Canonical(x.Target)
 	}
+	byAccept := map[string]bool{} // services with a framework that negotiates errors by Accept
+	for _, a := range p.Discover {
+		if slices.Contains(errorsByAccept, a.Adapter) {
+			byAccept[p.Canonical(a.Target)] = true
+		}
+	}
 	for i := range inv.Routes {
 		inv.Routes[i].Target = p.Canonical(inv.Routes[i].Target)
+		inv.Routes[i].ErrorsByAccept = byAccept[inv.Routes[i].Target]
 	}
 	return inv, excl, nil
+}
+
+// routeCount says how many routes discover found, and how many each
+// adapter gave: "13 routes (13 from laravel)", never "laravel 13", which
+// reads as a version.
+func routeCount(total int, adapters []discover.Adapter, bySource map[string]int) string {
+	var counts []string
+	seen := map[string]bool{}
+	for _, a := range adapters {
+		if n, ok := bySource[a.Adapter]; ok && !seen[a.Adapter] {
+			seen[a.Adapter] = true
+			counts = append(counts, fmt.Sprintf("%d from %s", n, a.Adapter))
+		}
+	}
+	if len(counts) == 0 {
+		return fmt.Sprintf("%d routes", total)
+	}
+	return fmt.Sprintf("%d routes (%s)", total, strings.Join(counts, ", "))
 }
 
 func generateCmd(args []string, out, errOut io.Writer) (int, error) {
@@ -303,6 +322,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	for _, n := range res.Notes {
 		fmt.Fprintf(out, "\nnote: %s\n", n)
 	}
+	printReplaced(out, res.Replaced)
 	jsonErrorsNote(p, out, o.check)
 	literalIDNote(out, res.Catalog, "")
 	for _, u := range res.Unused {
@@ -326,6 +346,25 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		return ExitDrift, nil
 	}
 	return ExitClean, nil
+}
+
+// printReplaced names the route methods that entries written by hand
+// reach, whose generated requests they take the place of: a request the
+// generator would make there (an error variant, the JSON twin) is not in
+// the catalog, and generate --all adds them.
+func printReplaced(out io.Writer, replaced []generate.Replaced) {
+	if len(replaced) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\nnote: entries written by hand take the place of the generated requests of %d route %s (generate --all makes those too):\n",
+		len(replaced), plural(len(replaced), "method", "methods"))
+	for _, r := range replaced {
+		instead := "its generated requests"
+		if len(r.Generated) > 0 {
+			instead = strings.Join(r.Generated, ", ")
+		}
+		fmt.Fprintf(out, "  %s: %s instead of %s\n", report.Printable(r.Route), strings.Join(r.ByHand, ", "), instead)
+	}
 }
 
 // diffCatalogs lists request IDs added, removed and changed.
@@ -426,7 +465,7 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 			"only_error_cases": c.Negative, "unknown_requests": c.Unknown, "stale_exclusions": c.Stale, "routes_without_body": c.NoBody,
 			"baseline_checked": answers != nil, "failed_in_baseline": c.Failed, "requests_failed_in_baseline": h.Failed,
 			"known_failure_routes": c.Known, "known_failures": h.Known, "stale_known_failures": h.Stale, "broad_known_failures": h.Broad,
-			"only_error_answers": c.ErrorOnly,
+			"only_error_answers": c.ErrorOnly, "routes_without_invalid_body": c.NoInvalidBody,
 		})
 	}
 	known := ""
@@ -458,11 +497,16 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 	section(out, "Catalog requests that reach no route", c.Unknown)
 	section(out, "Exclusions that match no route", c.Stale)
 	section(out, "Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
+	section(out, noInvalidBodyTitle, c.NoInvalidBody)
 	if code == ExitClean {
 		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
 	}
 	return c, code, nil
 }
+
+// noInvalidBodyTitle heads the covered routes whose validation error no
+// request checks.
+const noInvalidBodyTitle = "Routes whose body is validated but no request shows their validation error (a changed message passes unseen): add " + routes.EmptyBody + " to templates:, and " + routes.JSONErrors + " for Laravel, Symfony, Rails and Spring Boot, which answer a request without Accept: application/json with a redirect; then run driftgate generate --write"
 
 // coverageOf is the coverage of the selected services' routes by their
 // requests; answers are a baseline's by request ID (nil without one).

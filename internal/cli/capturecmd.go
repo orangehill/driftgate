@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/capture"
@@ -19,6 +20,7 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/generate"
 	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
@@ -547,7 +549,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		if len(headerNames) > 0 {
 			fmt.Fprintln(out, "headers:")
 			for _, n := range headerNames {
-				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(headers[n]))), reason)
+				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(n, headers[n]))), reason)
 			}
 		}
 		if len(keys) > 0 {
@@ -560,7 +562,8 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 	if len(other) > 0 {
 		fmt.Fprintf(out, "\nDifferences without a proposal (structure, types, side effects or a body that is neither JSON nor HTML):\n")
 		for _, d := range other {
-			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(short(d.Baseline)), report.Printable(short(d.Current)))
+			b, c := report.ShortPair(d.Baseline, d.Current, 100)
+			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(b), report.Printable(c))
 		}
 		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
 	}
@@ -627,28 +630,82 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 
 // headerFormat is one format for every value of a header: a pattern per
 // position, joined with | when they differ (one cookie name per position).
-func headerFormat(positions [][]string) string {
+// A header is recorded masked where it may carry a credential (letters
+// become x and X, digits 0: httpx.MaskHeader), and no format is derived
+// from what the mask left: a cookie's value is any text up to the first
+// ;, and a header masked whole is any text.
+func headerFormat(name string, positions [][]string) string {
 	var parts []string
 	seen := map[string]bool{}
 	for _, vals := range positions {
-		p := infer.Pattern(vals)
-		if p == "" {
-			p = regexp.QuoteMeta(vals[0]) // this one did not change
+		var ps []string
+		switch {
+		case name == "set-cookie":
+			ps = cookieFormats(vals)
+		case httpx.MasksWhole(name):
+			ps = []string{".+"}
+		default:
+			ps = []string{valuesFormat(vals)}
 		}
-		if !seen[p] {
-			seen[p] = true
-			parts = append(parts, p)
+		for _, p := range ps {
+			if !seen[p] {
+				seen[p] = true
+				parts = append(parts, p)
+			}
 		}
 	}
 	return strings.Join(parts, "|")
 }
 
-// short keeps long values readable in a list.
-func short(s string) string {
-	if len(s) <= 100 {
-		return s
+// valuesFormat is a pattern for values, or the value itself when it did
+// not change.
+func valuesFormat(vals []string) string {
+	if p := infer.Pattern(vals); p != "" {
+		return p
 	}
-	return s[:60] + " … " + s[len(s)-30:]
+	return regexp.QuoteMeta(vals[0])
+}
+
+// cookieFormats are the formats of Set-Cookie values, one per cookie name:
+// the name as it is, its value (masked when recorded, which keeps its
+// length) as text without a ; of the lengths seen, and the attributes
+// after it (expiry, path, flags), which are recorded as sent, inferred as
+// any other value. A cookie that is emptied or set to "deleted" does not
+// match.
+func cookieFormats(vals []string) []string {
+	var names []string
+	attrs := map[string][]string{}
+	lengths := map[string][2]int{} // shortest and longest value, in characters
+	for _, v := range vals {
+		first, rest, _ := strings.Cut(v, ";")
+		cookie, value, ok := strings.Cut(first, "=")
+		if !ok {
+			return []string{valuesFormat(vals)} // not a cookie: as recorded
+		}
+		n := utf8.RuneCountInString(value)
+		if l, ok := lengths[cookie]; !ok {
+			names = append(names, cookie)
+			lengths[cookie] = [2]int{n, n}
+		} else {
+			lengths[cookie] = [2]int{min(l[0], n), max(l[1], n)}
+		}
+		if strings.Contains(v, ";") {
+			rest = ";" + rest
+		}
+		attrs[cookie] = append(attrs[cookie], rest)
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		l, length := lengths[n], fmt.Sprintf("{%d}", lengths[n][0])
+		switch {
+		case l[1] == 0:
+			length = "{0}" // only ever empty
+		case l[0] != l[1]:
+			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
+		}
+		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+valuesFormat(attrs[n]))
+	}
+	return out
 }
 
 var yamlQuote = compare.YAMLQuote

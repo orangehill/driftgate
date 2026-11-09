@@ -45,6 +45,10 @@ type Route struct {
 	BodyType   string            `json:"body_type,omitempty"` // media type of the body when not application/json
 	Files      []FileField       `json:"files,omitempty"`     // file fields of a multipart/form-data body
 	Source     string            `json:"source"`              // adapter that found it
+	// ErrorsByAccept: the route's framework answers an error as a page or
+	// a redirect for a browser and as JSON for an API client (Laravel,
+	// Symfony, Rails, Spring Boot); from the configuration, not stored.
+	ErrorsByAccept bool `json:"-"`
 }
 
 // Key identifies a route within its service: its methods and path.

@@ -10,15 +10,19 @@ import (
 )
 
 // TestJSONErrorsTemplate: init writes json-errors for a framework that
-// renders errors by Accept, not for others; a project of such a framework
-// without it gets a note, once per store.
+// renders errors by Accept, not for others, and empty-body for a framework
+// whose discovery reads the rules it validates bodies against (a changed
+// validation error must not pass unseen); a project of such a framework
+// without json-errors gets a note, once per store.
 func TestJSONErrorsTemplate(t *testing.T) {
 	for files, want := range map[[2]string]string{
-		{"composer.json", `{"require":{"symfony/framework-bundle":"7.1"}}`}: "templates: [ok, not-found, json, json-errors]",
-		{"pyproject.toml", "dependencies = [\"fastapi>=0.110\"]"}:           "templates: [ok, not-found, json]\n",
+		{"composer.json", `{"require":{"symfony/framework-bundle":"7.1"}}`}: "templates: [ok, not-found, json, json-errors]\n",
+		{"pyproject.toml", "dependencies = [\"fastapi>=0.110\"]"}:           "templates: [ok, not-found, json, empty-body]\n",
+		{"composer.json", `{"require":{"laravel/framework":"^13.0"}}`}:      "templates: [ok, not-found, json, empty-body, json-errors]\n",
 	} {
 		root := t.TempDir()
 		write(t, filepath.Join(root, files[0]), files[1])
+		write(t, filepath.Join(root, "artisan"), "<?php\n")
 		cfg := filepath.Join(root, "driftgate.yaml")
 		if code, out, errOut := runCLI(t, "init", "--config", cfg); code != 0 {
 			t.Fatalf("init: %d\n%s\n%s", code, out, errOut)

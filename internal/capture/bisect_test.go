@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -271,6 +272,53 @@ func TestFindWritersSameAsHalving(t *testing.T) {
 			}
 			t.Logf("requests sent by the search: previous %d, new %d (read-only requests %d); fingerprints: previous %d, new %d",
 				old.extra, cur.extra, n, old.sum.Time.Fingerprints, cur.sum.Time.Fingerprints)
+		})
+	}
+}
+
+// TestFindWritersUnrepeatableTokens: a tokens command that writes a new
+// token on every run leaves the state after each restore other than the
+// read-only phase started from. The search compares each run with the
+// state it started from and still finds the request that wrote; a write
+// that the other starting state hides stops the capture, naming both the
+// change and what is not repeatable, instead of passing as an order effect.
+func TestFindWritersUnrepeatableTokens(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		writes  map[string]string
+		armed   map[string]string // writes only while the flag the first tokens run makes exists
+		writers map[string][]string
+		err     string
+	}{
+		{name: "writer found", writes: map[string]string{"r007": "t1"}, writers: map[string][]string{"r007": {"t1/t1"}}},
+		{name: "write hidden by the other start", armed: map[string]string{"r010": "t2"},
+			err: "read-only requests changed [t2/t2], and no single one of them does it when sent again"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, p, cat := newLab(t, 40, 1)
+			ctr := filepath.Join(t.TempDir(), "counter")
+			// Each run appends another token to t3; the first one also sets
+			// the flag, which the restores remove.
+			p.Tokens = config.Tokens{Command: []string{"sh", "-c", fmt.Sprintf(
+				`n=$(cat %[1]s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %[1]s; echo token$n >> %[2]s/t3; [ $n = 1 ] && touch %[2]s/flag; echo '{}'`, ctr, l.dir)}}
+			l.set(c.writes, "", c.armed)
+			var out strings.Builder
+			sum, err := Run(context.Background(), p, cat, Options{Tag: "c", Out: &out})
+			if c.err != "" {
+				if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), c.err) || !strings.Contains(err.Error(), "leave [t3/t3] different each time") {
+					t.Fatalf("want an environment error %q, got %v", c.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out.String())
+			}
+			if !reflect.DeepEqual(sum.Writers, c.writers) || len(sum.Unattributed) > 0 {
+				t.Errorf("writers %v, unattributed %v; want %v", sum.Writers, sum.Unattributed, c.writers)
+			}
+			if !strings.Contains(out.String(), "note: after a restore, prepare and the tokens command the state differs from the one before the read-only requests ([t3/t3])") {
+				t.Errorf("no note:\n%s", out.String())
+			}
 		})
 	}
 }

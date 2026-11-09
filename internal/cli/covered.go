@@ -3,6 +3,7 @@ package cli
 import (
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/orangehill/driftgate/internal/catalog"
@@ -76,6 +77,7 @@ func notCovered(p *config.Project, sel selection, cat *catalog.Catalog, reqs []c
 			}
 		}
 		n.NoRequest = report.NewGap(none)
+		n.NoInvalidBody = report.NewGap(cov.NoInvalidBody)
 	}
 	ids := func(fs []routes.Failure) []string {
 		var out []string
@@ -87,17 +89,39 @@ func notCovered(p *config.Project, sel selection, cat *catalog.Catalog, reqs []c
 	if h != nil {
 		n.FailedInBaseline, n.KnownFailures = report.NewGap(ids(h.Failed)), report.NewGap(ids(h.Known))
 	}
-	var observed, skipped []string
+	var observed []string
+	type skipKey struct{ what, reason string }
+	var order []skipKey
+	skipped := map[skipKey][]string{}
 	for _, res := range results {
 		req := byID[res.ID]
 		switch {
 		case res.Outcome == report.Observed:
 			observed = append(observed, res.ID)
-		case res.Outcome == report.Skipped && (req.Mutating() || req.IsCommand()):
-			skipped = append(skipped, res.ID)
+		case res.Outcome == report.Skipped:
+			// Every skipped request is named, whatever the reason.
+			k := skipKey{report.SkippedRead, res.Note}
+			switch {
+			case req.IsCommand():
+				k.what = report.SkippedCommand
+			case req.Mutating():
+				k.what = report.SkippedMutating
+			}
+			if k.reason == "" {
+				k.reason = "not compared"
+			}
+			if _, ok := skipped[k]; !ok {
+				order = append(order, k)
+			}
+			skipped[k] = append(skipped[k], res.ID)
 		}
 	}
-	n.Observed, n.MutatingSkipped = report.NewGap(observed), report.NewGap(skipped)
+	n.Observed = report.NewGap(observed)
+	rank := map[string]int{report.SkippedMutating: 0, report.SkippedRead: 1, report.SkippedCommand: 2}
+	sort.SliceStable(order, func(i, j int) bool { return rank[order[i].what] < rank[order[j].what] })
+	for _, k := range order {
+		n.Skipped = append(n.Skipped, report.SkippedGap{What: k.what, Reason: k.reason, Gap: *report.NewGap(skipped[k])})
+	}
 	return n
 }
 

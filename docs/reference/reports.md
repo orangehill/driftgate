@@ -23,6 +23,15 @@ requests whose status changed) come after the ones it lists, so the
 listed groups start at [1]. `review --group N` and `accept group:N` use
 the same numbers.
 
+## Long values
+
+A drift line shows at most 80 characters of each value; `review` and
+`review --group` show 100. When either value is longer, both are cut to
+the same window around the first character where they differ, with `…`
+where text is left out. Two long texts that differ in the middle show
+that difference. The group's explanation does the same with fewer
+characters.
+
 ## A request whose status changed
 
 When a request's status changes, what follows from it is summarized in
@@ -103,16 +112,17 @@ routes):` it gives a count, and up to five names (`and N more`), for
 each gap:
 
 - route methods without a request meant to succeed, with a route inventory (`routes.json`) and without `--only`;
+- route methods whose body is validated but whose validation errors no request checks (template `empty-body`), on the same terms;
 - requests meant to succeed whose answer in the set compared against is an error, which the comparison keeps green (`failed in baseline:local`, or the capture compared against);
 - requests observed: measured, not compared;
-- requests that change data, and command steps, that were skipped;
+- every request that was skipped, not compared, by what it is: a request that changes data, a read, or a command step. Each line gives the reason, such as no baseline, or not sent by `capture --read-only` (also a read in a sequence with a write);
 - known failures (`known_failures:` in `exclusions.yaml`).
 
 There is no list when there is no gap. `run` uses the coverage its
 coverage step found; `compare` takes it once from `routes.json` and the
 records it read already.
 
-- JSON: `not_covered`, with `catalog` (`requests`, `reads`, `mutating`, `commands`, and `multipart` among them), `only`, `against` and `routes_checked`. Then `no_request`, `failed_in_baseline`, `observed`, `mutating_skipped` and `known_failures`, each with a `count` and up to ten `names` (request IDs or routes), left out when empty.
+- JSON: `not_covered`, with `catalog` (`requests`, `reads`, `mutating`, `commands`, and `multipart` among them), `only`, `against` and `routes_checked`. Then `no_request`, `no_invalid_body`, `failed_in_baseline`, `observed` and `known_failures`, each with a `count` and up to ten `names` (request IDs or routes), left out when empty. `skipped` is a list of the same, each with `what` (`mutating`, `read` or `command`) and `reason`.
 - Markdown: a short list.
 - JUnit: the lines in the suite's `system-out`.
 
@@ -145,10 +155,15 @@ request's test case.
 ## Requests without a baseline response
 
 Requests the baseline has no response for are skipped, and listed in
-every format: `no_baseline` in JSON, a line in text and markdown. A new
-request joins the baseline with `accept`. They do not make the result
-incomplete while other requests were compared, since every new request
-starts without a baseline.
+every format: `no_baseline` in JSON, a line in text and markdown. They
+do not make the result incomplete while other requests were compared,
+since every new request starts without a baseline.
+
+The line says how a new request joins the baseline, in the mode of the
+comparison, and `review` repeats it:
+
+- mode `evolve`: `driftgate accept <request>... --reason "…"`;
+- mode `freeze`, which refuses `accept`: `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`, with the baseline and capture of the comparison. The rebase takes the whole capture, its drifts too. So the command is printed only when nothing else drifted, an expected drift included; otherwise the line says to fix or expect the drifts first. After `run --only`, it first needs a capture of the whole catalog. A comparison that is not of a capture against a baseline gets the general form, `driftgate baselines rebase <baseline> --from <capture> --allow-freeze`; `accept` is never named in mode `freeze`.
 
 ## Requests sent again after a restore
 

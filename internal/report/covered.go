@@ -24,13 +24,18 @@ type NotCovered struct {
 	// Route methods no request meant to succeed reaches, apart from those
 	// whose requests failed in the set compared against.
 	NoRequest *Gap `json:"no_request,omitempty"`
+	// Route methods whose body is validated (a sample from its rules) that
+	// no request sends an invalid body: their validation errors are not
+	// compared.
+	NoInvalidBody *Gap `json:"no_invalid_body,omitempty"`
 	// Requests meant to succeed whose answer in the set compared against is
 	// an error: the comparison keeps the error green.
 	FailedInBaseline *Gap `json:"failed_in_baseline,omitempty"`
 	// Requests measured and never compared (observe: true).
 	Observed *Gap `json:"observed,omitempty"`
-	// Requests that change data (or command steps) that were skipped.
-	MutatingSkipped *Gap `json:"mutating_skipped,omitempty"`
+	// Every request the comparison skipped (not compared), by what it is
+	// and why: none is left unnamed.
+	Skipped []SkippedGap `json:"skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
 }
@@ -52,6 +57,21 @@ type Gap struct {
 	Names []string `json:"names"`
 }
 
+// What a skipped request is, for SkippedGap.What.
+const (
+	SkippedRead     = "read"
+	SkippedMutating = "mutating"
+	SkippedCommand  = "command"
+)
+
+// SkippedGap is the skipped requests of one kind with one reason (the
+// result's note: no baseline, not sent by a read-only capture …).
+type SkippedGap struct {
+	What   string `json:"what"` // read, mutating or command
+	Reason string `json:"reason"`
+	Gap
+}
+
 // gapNames is how many names a Gap keeps; text shows fewer.
 const gapNames = 10
 
@@ -65,7 +85,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.FailedInBaseline == nil && n.Observed == nil && n.MutatingSkipped == nil && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -121,9 +141,20 @@ func (n *NotCovered) NotCoveredLines() []string {
 		against = "the baseline"
 	}
 	add(n.NoRequest, "route method without a request meant to succeed", "route methods without a request meant to succeed")
+	add(n.NoInvalidBody, "route method whose validation error no request checks (templates empty-body and json-errors)", "route methods whose validation errors no request checks (templates empty-body and json-errors)")
 	add(n.FailedInBaseline, "request meant to succeed that failed in "+against, "requests meant to succeed that failed in "+against)
 	add(n.Observed, "request observed (measured, not compared)", "requests observed (measured, not compared)")
-	add(n.MutatingSkipped, "request that changes data skipped", "requests that change data skipped")
+	for _, s := range n.Skipped {
+		one, many := "read", "reads"
+		switch s.What {
+		case SkippedMutating:
+			one, many = "request that changes data", "requests that change data"
+		case SkippedCommand:
+			one, many = "command step", "command steps"
+		}
+		g := s.Gap
+		add(&g, one+" skipped ("+s.Reason+")", many+" skipped ("+s.Reason+")")
+	}
 	add(n.KnownFailures, "known failure (exclusions.yaml)", "known failures (exclusions.yaml)")
 	return out
 }

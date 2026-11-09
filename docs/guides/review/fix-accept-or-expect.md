@@ -61,7 +61,9 @@ driftgate accept get-api-reports --reason "New report endpoint"
 A request the baseline has no answer for is skipped and listed, not
 failed. `accept` it by its ID to add its answer to the baseline. A
 request the capture no longer has (`not-captured`) leaves the baseline
-the same way, by its ID.
+the same way, by its ID. Mode `freeze` refuses `accept`; there `run`
+prints the [rebase](../../reference/commands/review.md#rebase-in-freeze-mode)
+that adds new requests.
 
 ## Keep a failing request without hiding it
 

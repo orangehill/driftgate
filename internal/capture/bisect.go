@@ -25,19 +25,28 @@ import (
 // compares the whole state, so a change that depends on the order of the
 // requests (and so did not show in the read-only phase) is still seen and
 // restored afterwards.
+//
+// A run starts from a restore, prepare and the tokens command. When that
+// does not lead to the state the read-only phase started from (a tokens
+// command that writes a new token on every run, a guard that logged
+// itself), each run is compared with the state it started from instead:
+// what the group changed is still all that differs. The runs then start
+// from another state than the read-only phase did, so a change of that
+// phase that no request is found to make stops the capture (exit 3),
+// naming both, rather than pass as an order effect.
 func (r *runner) findWriters(ctx context.Context, reqs []catalog.Request, before states, changed map[string][]string) error {
 	fmt.Fprintf(r.out, "read-only requests changed %v; finding which …\n", limit(flatten(changed), 10))
 	covered := map[string]bool{}
+	var unrepeatable []string // what a restore, prepare and tokens left other than before the read-only phase
 
 	run := func(group []catalog.Request) (map[string][]string, []snapshot.RowChange, error) {
 		now, err := r.reset(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		// After a restore, prepare must lead to the same state as before the
-		// read-only phase, or the search compares different starting points.
-		if d := flatten(diffStates(before, now)); len(d) > 0 {
-			return nil, nil, envErr("after a restore and prepare the state differs from the one before the read-only requests (%v); prepare is not repeatable", limit(d, 10))
+		if d := flatten(diffStates(before, now)); len(d) > 0 && unrepeatable == nil {
+			unrepeatable = d
+			fmt.Fprintf(r.out, "note: after a restore, prepare and the tokens command the state differs from the one before the read-only requests (%v): they are not repeatable, so each run of the search is compared with the state it started from\n", limit(d, 10))
 		}
 		var rowsBefore map[string]state.Rows
 		if len(group) == 1 {
@@ -54,7 +63,8 @@ func (r *runner) findWriters(ctx context.Context, reqs []catalog.Request, before
 		if err != nil {
 			return nil, nil, err
 		}
-		d := diffStates(before, after)
+		r.tr.markDirty(diffStates(before, after))
+		d := diffStates(now, after) // what the group changed
 		r.tr.markDirty(d)
 		var rows []snapshot.RowChange
 		if len(d) > 0 && rowsBefore != nil {
@@ -118,11 +128,16 @@ func (r *runner) findWriters(ctx context.Context, reqs []catalog.Request, before
 	if err != nil {
 		return err
 	}
+	var open []string
 	for _, it := range flatten(changed) {
 		if !covered[it] {
-			r.sum.Unattributed = append(r.sum.Unattributed, it)
+			open = append(open, it)
 		}
 	}
+	if len(open) > 0 && unrepeatable != nil {
+		return envErr("read-only requests changed %v, and no single one of them does it when sent again: the search could not start from the state the read-only requests had, as a restore, prepare and the tokens command leave %v different each time (a tokens command that writes a new token on every run?); make them repeatable, or mark the request that writes mutates: true", limit(open, 10), limit(unrepeatable, 10))
+	}
+	r.sum.Unattributed = append(r.sum.Unattributed, open...)
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
@@ -210,7 +211,36 @@ func (r *Report) NoBaselineNote() string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s without a baseline, not compared: %s; new requests join the baseline with driftgate accept", plural(n, "request"), listIDs(r.NoBaseline))
+	return fmt.Sprintf("%s without a baseline, not compared: %s; %s", plural(n, "request"), listIDs(r.NoBaseline), r.JoinAdvice())
+}
+
+// JoinAdvice says how new requests join the baseline in the comparison's
+// mode. Mode freeze refuses accept: there a rebase on the capture adds
+// them, with --allow-freeze; it takes the whole capture, so its command is
+// given only when nothing else drifted.
+func (r *Report) JoinAdvice() string {
+	capture, ok := strings.CutPrefix(r.Tag, "capture:")
+	switch {
+	case r.Mode != "freeze":
+		return "new requests join the baseline with driftgate accept"
+	case r.Baseline == "" || !ok:
+		// Not a capture against a baseline (two captures, two baselines):
+		// there is nothing to rebase on, and freeze refuses accept.
+		return "in mode freeze accept is refused; new requests join a baseline with driftgate baselines rebase <baseline> --from <capture> --allow-freeze, after a capture compared against it shows no other drift"
+	}
+	// A rebase takes the whole capture: next to a drift it would take a
+	// regression into the baseline, so its command is given only when
+	// nothing else drifted (an expected drift included).
+	for _, res := range r.Results {
+		if res.Outcome == Drift || len(res.Drifts) > 0 {
+			return "in mode freeze accept is refused; fix or expect the drifts first, then rebase to add the new requests (driftgate baselines rebase " + r.Baseline + " --allow-freeze takes the whole capture)"
+		}
+	}
+	rebase := fmt.Sprintf(`driftgate baselines rebase %s --from %s --reason "…" --allow-freeze`, r.Baseline, capture)
+	if r.NotCovered != nil && r.NotCovered.Only {
+		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (run without --only, then " + rebase + "), which takes the whole capture, its drifts too"
+	}
+	return "in mode freeze new requests join the baseline with " + rebase + ", which takes the whole capture, its drifts too"
 }
 
 // ResentNote counts the requests sent again after a restore (Resent), so
@@ -472,7 +502,8 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		s += fmt.Sprintf("  %s → %s", Printable(short(d.Baseline)), Printable(short(d.Current)))
+		b, c := ShortPair(d.Baseline, d.Current, shortMax)
+		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
 }
@@ -512,6 +543,69 @@ func short(s string) string {
 		return string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+const zwj = '\u200d' // zero width joiner
+
+// extends reports a rune that belongs to the character before it: a
+// combining mark, a variation selector, an emoji skin tone or a joiner.
+// It approximates grapheme cluster boundaries with the standard library
+// (no regional-indicator pairs or Hangul syllable rules).
+func extends(c rune) bool {
+	return unicode.In(c, unicode.Mn, unicode.Me, unicode.Mc) || c == zwj ||
+		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
+}
+
+// shortMax is how many characters of a drift's values a line shows.
+const shortMax = 80
+
+// ShortPair shortens the two values of a drift alike. When either is
+// longer than max characters, both are cut to the same window around the
+// first character where they differ, with … where text is left out: two
+// long texts that differ in the middle show that difference, not two equal
+// beginnings.
+func ShortPair(a, b string, max int) (string, string) {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) <= max && len(rb) <= max {
+		return a, b
+	}
+	first := 0
+	for first < len(ra) && first < len(rb) && ra[first] == rb[first] {
+		first++
+	}
+	// A third of the window before the difference, the rest after it.
+	from := 0
+	if lead := max / 3; first > lead {
+		from = first - lead
+	}
+	cut := func(r []rune) string {
+		if len(r) <= max {
+			return string(r) // short enough as it is
+		}
+		start := min(from, len(r))
+		end := min(len(r), start+max-1)
+		if start > 0 {
+			end = min(len(r), start+max-2) // room for both marks
+		}
+		// Not inside a character the eye sees as one: an accent, a
+		// variation selector, a skin tone or a joined emoji stays with
+		// the character it belongs to.
+		for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
+			start--
+		}
+		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
+			end++
+		}
+		s := string(r[start:end])
+		if start > 0 {
+			s = "…" + s
+		}
+		if end < len(r) {
+			s += "…"
+		}
+		return s
+	}
+	return cut(ra), cut(rb)
 }
 
 // Text writes a readable report: every drifted request with up to maxDrifts

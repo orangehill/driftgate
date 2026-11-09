@@ -43,6 +43,12 @@ func TestBodyDrifts(t *testing.T) {
 		{"int to float", `{"n":1}`, `{"n":1.0}`, KindType, "$.n"},
 		{"null to empty string", `{"a":null}`, `{"a":""}`, KindType, "$.a"},
 		{"number literal", `{"n":1.0}`, `{"n":1.00}`, KindNumberLiteral, "$.n"},
+		// The examples of drift-kinds.md: a whole number that gains a
+		// fraction changes type; the same type in another spelling is a
+		// number literal.
+		{"int to float, 7 to 7.0", `{"n":7}`, `{"n":7.0}`, KindType, "$.n"},
+		{"number literal, exponent", `{"n":1250.5}`, `{"n":1.2505e3}`, KindNumberLiteral, "$.n"},
+		{"number literal, negative zero", `{"n":0}`, `{"n":-0}`, KindNumberLiteral, "$.n"},
 		{"value", `{"a":"x"}`, `{"a":"y"}`, KindValue, "$.a"},
 		{"key missing", `{"a":1,"b":2}`, `{"a":1}`, KindKeyMissing, "$.b"},
 		{"key extra", `{"a":1}`, `{"a":1,"b":2}`, KindKeyExtra, "$.b"},

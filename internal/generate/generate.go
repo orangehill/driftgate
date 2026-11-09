@@ -59,6 +59,17 @@ type Result struct {
 	Unused []string
 	// Notes are remarks on the configuration, once per run.
 	Notes []string
+	// Replaced are the route methods that entries written by hand reach,
+	// whose generated requests they take the place of (without --all).
+	Replaced []Replaced
+}
+
+// Replaced is a route method generate makes no requests for, as entries
+// written by hand or imported reach it.
+type Replaced struct {
+	Route     string   // method and route ("GET /api/limited"), with its service
+	ByHand    []string // the entries that reach it
+	Generated []string // the requests generate would make for it
 }
 
 // ErrSetting is an entry of requests: in the configuration that generate
@@ -96,9 +107,11 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	// Each method of a route is generated unless it is excluded or (without
 	// --all) a hand-written entry already reaches it.
-	byHand := reached(o.Inventory, manual)
 	g.skipUnit = func(route routes.Route, unit string) bool {
-		return o.Exclusions.ExcludedUnit(route, unit) != nil || (!o.All && byHand[reachKey(route, unit)])
+		return o.Exclusions.ExcludedUnit(route, unit) != nil
+	}
+	if !o.All {
+		g.byHand = reached(o.Inventory, manual)
 	}
 	g.assignBases(o.Inventory.Routes)
 	var generated []catalog.Request
@@ -119,14 +132,15 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	return g.res, nil
 }
 
-// reached is the route methods the entries written by hand reach, by
-// reachKey.
-func reached(inv *routes.Inventory, cat *catalog.Catalog) map[string]bool {
+// reached is the IDs of the entries written by hand that reach each route
+// method, by reachKey.
+func reached(inv *routes.Inventory, cat *catalog.Catalog) map[string][]string {
 	m := routes.NewMatcher(inv)
-	out := map[string]bool{}
+	out := map[string][]string{}
 	for _, r := range cat.Requests {
 		if route := m.Match(r); route != nil {
-			out[reachKey(*route, route.UnitOf(r.Method))] = true
+			k := reachKey(*route, route.UnitOf(r.Method))
+			out[k] = append(out[k], r.ID)
 		}
 	}
 	return out
@@ -143,8 +157,9 @@ type generator struct {
 	values   map[string][]string // query results, by state and SQL
 	bases    map[string]string   // ID base of each route and method
 	skipUnit func(routes.Route, string) bool
-	from     []catalog.Request // generated requests that take a value from a response
-	hits     []settingHits     // what each entry of requests: named
+	byHand   map[string][]string // route method → entries written by hand that reach it (nil with --all)
+	from     []catalog.Request   // generated requests that take a value from a response
+	hits     []settingHits       // what each entry of requests: named
 }
 
 // settingHits are the routes and methods an entry of requests: named.
@@ -512,6 +527,10 @@ func (g *generator) route(ctx context.Context, route routes.Route, templates []s
 		if g.skipUnit != nil && g.skipUnit(route, m) {
 			continue
 		}
+		if hand := g.byHand[reachKey(route, m)]; len(hand) > 0 {
+			g.replaced(ctx, route, m, templates, hand)
+			continue
+		}
 		reqs, err := g.routeMethod(ctx, route, m, templates)
 		if err != nil {
 			return nil, err
@@ -519,6 +538,32 @@ func (g *generator) route(ctx context.Context, route routes.Route, templates []s
 		out = append(out, reqs...)
 	}
 	return out, nil
+}
+
+// replaced notes a route method that entries written by hand reach, with
+// the requests generate would make for it: their IDs come from a copy of
+// the generator, so nothing of this one (IDs taken, the entries of
+// requests: named, sequences, skips) changes. A query for a parameter
+// value that fails here only leaves the generated IDs out: the route is
+// not generated, so it never fails generate.
+func (g *generator) replaced(ctx context.Context, route routes.Route, m string, templates []string, hand []string) {
+	scratch := &generator{o: g.o, res: &Result{}, ids: maps.Clone(g.ids), values: g.values, bases: g.bases}
+	reqs, err := scratch.routeMethod(ctx, route, m, templates)
+	if err == nil && len(reqs) == 0 {
+		return // generate would make nothing here: nothing is replaced
+	}
+	label := m + " " + route.Path
+	if route.Domain != "" {
+		label = route.Domain + " " + label
+	}
+	if route.Target != "" {
+		label = route.Target + ": " + label
+	}
+	r := Replaced{Route: label, ByHand: hand}
+	for _, req := range reqs {
+		r.Generated = append(r.Generated, req.ID)
+	}
+	g.res.Replaced = append(g.res.Replaced, r)
 }
 
 func (g *generator) routeMethod(ctx context.Context, route routes.Route, m string, templates []string) ([]catalog.Request, error) {

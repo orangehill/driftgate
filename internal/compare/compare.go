@@ -79,7 +79,7 @@ var kinds = []KindInfo{
 	{KindArrayLength, "an array has more or fewer items"},
 	{KindItemOrder, "the same items of an array in another order"},
 	{KindType, "a value's type changed, in JSON or in a spreadsheet cell"},
-	{KindNumberLiteral, "the same number written differently, such as 1.0 for 1"},
+	{KindNumberLiteral, "the same number of the same type written differently, such as 1.00 for 1.0"},
 	{KindValue, "a JSON value changed"},
 	{KindFormat, "a value an allowlist rule covers no longer matches its format"},
 	{KindEncoding, "the same values in other bytes: layout, escapes, byte order mark, charset"},
@@ -122,7 +122,8 @@ type Drift struct {
 	// Texts holds a changed scalar or single header value as the allowlist
 	// sees it (strings without quotes), for proposing a format.
 	Texts [2]string `json:"-"`
-	// Values holds the values of a changed header (baseline, current).
+	// Values holds the values of a changed header (baseline, current); of
+	// a format drift of a header, only when their number changed.
 	Values [2][]string `json:"-"`
 	// Witness is the SHA-256 of what the description leaves out: the
 	// source of a key, item, element or worksheet only one side has, the
@@ -662,6 +663,11 @@ func (c *comparer) headers(base, cur [][2]string) {
 			}
 			if !ok {
 				c.add(KindFormat, where, listText(b), listText(v))
+				if len(b) != len(v) {
+					// A value came or went (a cookie no longer set): the
+					// explanation says so rather than call it a format.
+					c.drifts[len(c.drifts)-1].Values = [2][]string{b, v}
+				}
 				if c.witnessing {
 					c.headerWitness(n, b, v)
 				}

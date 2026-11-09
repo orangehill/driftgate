@@ -39,7 +39,8 @@ func what(d compare.Drift, same bool) string {
 		if d.Baseline == "" && d.Current == "" {
 			return ""
 		}
-		v := clip(d.Baseline, max) + " → " + clip(d.Current, max)
+		b, c := ShortPair(d.Baseline, d.Current, max)
+		v := b + " → " + c
 		if same {
 			return " (" + v + ")"
 		}
@@ -72,6 +73,9 @@ func what(d compare.Drift, same bool) string {
 	case compare.KindNumberLiteral:
 		return where + " is the same number written differently" + values(40)
 	case compare.KindFormat:
+		if s := countChange(where, d.Values); s != "" {
+			return s
+		}
 		return where + " no longer matches its allowlist format" + values(40)
 	case compare.KindValue:
 		return where + " changed value" + values(40)
@@ -136,14 +140,6 @@ func what(d compare.Drift, same bool) string {
 		return d.Kind
 	}
 	return d.Kind + " at " + where
-}
-
-// clip shortens a value for an explanation.
-func clip(s string, max int) string {
-	if r := []rune(s); len(r) > max {
-		return string(r[:max-1]) + "…"
-	}
-	return s
 }
 
 // Locate attaches to every group the routes its drifts touch. find returns
@@ -219,4 +215,63 @@ func (l Location) describe(sep string) string {
 		parts = append(parts, l.File)
 	}
 	return strings.Join(parts, sep)
+}
+
+// countChange says that a header with an allowlist format gained or lost
+// values (a cookie no longer set), naming the cookies of Set-Cookie: a
+// rule lets the values change, not their number. Empty when the number
+// did not change.
+func countChange(where string, values [2][]string) string {
+	b, c := len(values[0]), len(values[1])
+	if b == c {
+		return ""
+	}
+	s := fmt.Sprintf("%s has %s instead of %d", where, plural(c, "value"), b)
+	if where == "header:set-cookie" {
+		gone, added := cookieNames(values[0]), cookieNames(values[1])
+		for n := range added {
+			if gone[n] > 0 {
+				k := min(gone[n], added[n])
+				gone[n] -= k
+				added[n] -= k
+			}
+		}
+		if names := countedNames(gone); names != "" {
+			s += ": " + names + " removed"
+		}
+		if names := countedNames(added); names != "" {
+			if strings.Contains(s, " removed") {
+				s += ", "
+			} else {
+				s += ": "
+			}
+			s += names + " new"
+		}
+		return s
+	}
+	if c < b {
+		return s + ": " + plural(b-c, "value") + " removed"
+	}
+	return s + ": " + plural(c-b, "value") + " new"
+}
+
+// cookieNames counts the cookies of Set-Cookie values by name.
+func cookieNames(values []string) map[string]int {
+	out := map[string]int{}
+	for _, v := range values {
+		name, _, _ := strings.Cut(v, "=")
+		out[strings.TrimSpace(name)]++
+	}
+	return out
+}
+
+func countedNames(m map[string]int) string {
+	var names []string
+	for n, k := range m {
+		for range k {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
