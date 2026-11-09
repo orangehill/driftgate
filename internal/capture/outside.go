@@ -127,8 +127,9 @@ var rowKinds = map[string]bool{"table": true, "matview": true, "sequence": true}
 // of the pristine copy's changed tables is kept for redone.
 func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 	var out []outsideChange
-	t.found = states{}
+	t.found, t.foundRO = states{}, states{}
 	t.outsideDefs, t.outsideRows = states{}, states{}
+	t.outsideRO = map[string]map[string]bool{}
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -181,14 +182,31 @@ func (t *tracker) survey(ctx context.Context) ([]outsideChange, error) {
 		// restore without being fingerprinted: their definitions are
 		// compared every time (their rows never are).
 		restoreOnly := map[string]bool{}
-		if definer {
-			for it := range t.ro[c.Name()] {
+		if want, ok := t.ro[c.Name()]; ok && definer {
+			for it := range want {
 				if kind, _, _ := strings.Cut(it, ":"); kind == "table" {
 					tables = append(tables, it)
 					restoreOnly[it] = true
 				}
 			}
+			// One made since the seed: from the fingerprint of the
+			// restore_only tables the first restore reads anyway (kept
+			// for it).
+			start := time.Now()
+			now, err := c.(state.RestoreOnly).RestoreOnlyFingerprint(ctx, false)
+			t.time.Restore += time.Since(start)
+			if err != nil {
+				return nil, envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			}
+			t.foundRO[c.Name()] = now
+			for it := range now {
+				if kind, _, _ := strings.Cut(it, ":"); kind == "table" && !restoreOnly[it] {
+					out = append(out, outsideChange{c.Name(), it, outsideNew})
+					restoreOnly[it] = true
+				}
+			}
 		}
+		t.outsideRO[c.Name()] = restoreOnly
 		if len(tables) == 0 {
 			continue
 		}
@@ -273,7 +291,7 @@ func sortChanges(list []outsideChange) {
 // after prepare.
 func (t *tracker) redone(ctx context.Context, changes []outsideChange, after states) ([]outsideChange, error) {
 	var left []outsideChange
-	defs, rows := map[string][]string{}, map[string][]string{}
+	defs, rows := map[string][]outsideChange{}, map[string][]outsideChange{}
 	for _, ch := range changes {
 		pf := t.pristine[ch.component]
 		now, inNow := after[ch.component][ch.item]
@@ -281,10 +299,12 @@ func (t *tracker) redone(ctx context.Context, changes []outsideChange, after sta
 		kind, _, _ := strings.Cut(ch.item, ":")
 		_, definer := t.outsideDefs[ch.component]
 		switch {
-		case ch.how == outsideDefinition && rowKinds[kind]:
-			defs[ch.component] = append(defs[ch.component], ch.item)
+		case ch.how == outsideDefinition && rowKinds[kind], t.outsideRO[ch.component][ch.item]:
+			// A restore_only table, made, dropped or changed, is in no
+			// fingerprint: its definition (none when it is gone) tells.
+			defs[ch.component] = append(defs[ch.component], ch)
 		case ch.how == outsideMigrations && definer:
-			rows[ch.component] = append(rows[ch.component], ch.item)
+			rows[ch.component] = append(rows[ch.component], ch)
 		case inNow == inThen && now == then:
 			left = append(left, ch)
 		}
@@ -296,24 +316,29 @@ func (t *tracker) redone(ctx context.Context, changes []outsideChange, after sta
 		}
 		start := time.Now()
 		for _, x := range []struct {
-			items []string
-			read  func(context.Context, []string, bool) (state.Fingerprint, error)
-			pris  state.Fingerprint
-			how   string
+			changes []outsideChange
+			read    func(context.Context, []string, bool) (state.Fingerprint, error)
+			pris    state.Fingerprint
 		}{
-			{defs[c.Name()], d.Definitions, t.outsideDefs[c.Name()], outsideDefinition},
-			{rows[c.Name()], d.Contents, t.outsideRows[c.Name()], outsideMigrations},
+			{defs[c.Name()], d.Definitions, t.outsideDefs[c.Name()]},
+			{rows[c.Name()], d.Contents, t.outsideRows[c.Name()]},
 		} {
-			if len(x.items) == 0 {
+			if len(x.changes) == 0 {
 				continue
 			}
-			work, err := x.read(ctx, x.items, false)
+			items := make([]string, len(x.changes))
+			for i, ch := range x.changes {
+				items[i] = ch.item
+			}
+			work, err := x.read(ctx, items, false)
 			if err != nil {
 				return nil, envErr("state %s: %v", c.Name(), err)
 			}
-			for _, it := range x.items {
-				if work[it] == x.pris[it] {
-					left = append(left, outsideChange{c.Name(), it, x.how})
+			// The same as the pristine copy (both absent for a table made
+			// outside and not made again): prepare did not make it.
+			for _, ch := range x.changes {
+				if work[ch.item] == x.pris[ch.item] {
+					left = append(left, ch)
 				}
 			}
 		}

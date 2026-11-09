@@ -185,7 +185,8 @@ type tracker struct {
 	// survey compared, and outsideRows the rows of its migrations tables
 	// (outside.go); pristineDefs the definitions the record of the
 	// pristine copy has.
-	found                    states
+	found, foundRO           states // foundRO: of the restore_only tables
+	outsideRO                map[string]map[string]bool
 	outsideDefs, outsideRows states
 	pristineDefs             states
 	// migrations are the project's migrations tables (migrationNames).
@@ -448,9 +449,12 @@ func (t *tracker) restore(ctx context.Context) error {
 		// tell what changed: they are read now, every time.
 		var ro []string
 		if want, ok := t.ro[c.Name()]; ok {
-			cur, err := c.(state.RestoreOnly).RestoreOnlyFingerprint(ctx, false)
-			if err != nil {
-				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			cur, ok := t.foundRO[c.Name()]
+			if !ok {
+				var err error
+				if cur, err = c.(state.RestoreOnly).RestoreOnlyFingerprint(ctx, false); err != nil {
+					return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+				}
 			}
 			ro = state.Diff(cur, want)
 		}
@@ -491,7 +495,7 @@ func (t *tracker) restore(ctx context.Context) error {
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
 	t.dirty = map[string][]string{}
-	t.found = nil
+	t.found, t.foundRO = nil, nil
 	return nil
 }
 

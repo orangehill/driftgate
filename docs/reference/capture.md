@@ -91,9 +91,9 @@ restore, the capture compares the working database with the pristine
 copy, and stops with exit 3 when a migration ran on it since the seed:
 
 - a table, view, trigger or other object was made or dropped;
-- the definition of a table changed: its columns, keys or indexes, also of a `restore_only` or `restore_empty` table;
+- the definition of a table changed: its columns, keys or indexes, also of a `restore_only` or `restore_empty` table, or one was made or dropped;
 - the definition of a view, trigger, function or type changed, or a sequence's parameters, such as its increment;
-- the rows of a migrations table changed, such as Laravel's `migrations`, Rails' `schema_migrations` or Django's `django_migrations`. When `discover:` names one of these frameworks, only its own table counts.
+- the rows of a migrations table changed, such as Laravel's `migrations`, Rails' `schema_migrations` or Django's `django_migrations`. When `discover:` names one of these frameworks, only its own table counts; other adapters (`openapi`, `nextjs`, `command` …) use every known name.
 
 The restore would undo that change, and the capture would run on the old
 schema. Rows the application wrote never stop a capture, nor does a

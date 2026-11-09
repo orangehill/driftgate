@@ -665,3 +665,71 @@ func TestChangedOutsideOlderFormat(t *testing.T) {
 		t.Fatalf("capture: %v", err)
 	}
 }
+
+// TestChangedOutsideRestoreOnlyPrepare: a restore_only or restore_empty
+// table dropped or made outside DriftGate (a migration that renames
+// password_resets) is in no fingerprint. With prepare: that drops or makes
+// it again, the capture goes on; with one that does not, it stops.
+func TestChangedOutsideRestoreOnlyPrepare(t *testing.T) {
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl not found")
+	}
+	for _, c := range []struct {
+		name, change, prepare string
+		stop                  string // "": the capture runs
+	}{
+		{"dropped, dropped again", "DROP TABLE tokens", "DROP TABLE IF EXISTS tokens", ""},
+		{"dropped, not again", "DROP TABLE tokens", "SELECT 1", "db/table:tokens (dropped since the pristine copy)"},
+		{"made, made again", "CREATE TABLE cache_new (k TEXT)", "CREATE TABLE IF NOT EXISTS cache_new (k TEXT)", ""},
+		{"made, not again", "CREATE TABLE cache_new (k TEXT)", "SELECT 1", "db/table:cache_new (made since the pristine copy)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, _ := outsideApp(t, root)
+			mux := http.NewServeMux()
+			mux.Handle("/", app)
+			mux.HandleFunc("POST /exec", func(w http.ResponseWriter, r *http.Request) {
+				app.mu.Lock()
+				defer app.mu.Unlock()
+				app.db.Exec("SELECT count(*) FROM sqlite_schema") // read the schema a restore changed
+				if _, err := app.db.Exec(r.FormValue("sql")); err != nil {
+					http.Error(w, err.Error(), 500)
+				}
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			for _, s := range []string{"CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT)", "CREATE TABLE tokens (id INTEGER PRIMARY KEY, token TEXT)"} {
+				if _, err := app.db.Exec(s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+				Target: config.Target{BaseURL: srv.URL},
+				State: map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"},
+					RestoreOnly: []string{"tokens"}, RestoreEmpty: []string{"cache*"}}},
+				Prepare: []config.Command{{Run: []string{curl, "-sf", "-X", "POST", "--data-urlencode", "sql=" + c.prepare, srv.URL + "/exec"}}}}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := app.db.Exec(c.change); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+			if c.stop == "" {
+				if err != nil {
+					t.Fatalf("capture: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), c.stop+". The restore at the start of the capture undid that, and prepare did not make it again") {
+				t.Fatalf("capture: %v", err)
+			}
+		})
+	}
+}
