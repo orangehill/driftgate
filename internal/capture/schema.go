@@ -58,20 +58,31 @@ func readSchemaRecord(path string) (r schemaRecord, found bool, err error) {
 // A recorded item is still expected as recorded where the working database
 // has it so, as the pristine copy has it, as the earlier run's prepare
 // made it, or not at all; any other definition has changed again since
-// (again). An item that differs now and is not recorded is expected as it
-// is.
-func expect(r schemaRecord, w, p state.Fingerprint) (rec schemaRecord, again []string) {
-	rec = schemaRecord{Items: slices.Clone(r.Items), Working: state.Fingerprint{}}
+// (again); undone are the recorded items the working database no longer
+// has as recorded. What the earlier prepare made stays recorded for the
+// items kept. An item that differs now and is not recorded is expected as
+// it is. Accepted: a change by hand that equals what an earlier prepare
+// made passes when prepare now makes the recorded definition; it cannot be
+// told from that prepare's own result without a false stop.
+func expect(r schemaRecord, w, p state.Fingerprint) (rec schemaRecord, again, undone []string) {
+	rec = schemaRecord{Items: slices.Clone(r.Items), Working: state.Fingerprint{}, Prepared: state.Fingerprint{}}
 	for _, it := range r.Items {
-		if v, ok := w[it]; ok && v != r.Working[it] && v != p[it] && v != r.Prepared[it] {
+		v, ok := w[it]
+		if ok && v != r.Working[it] && v != p[it] && v != r.Prepared[it] {
 			again = append(again, it)
+		}
+		if v != r.Working[it] {
+			undone = append(undone, it)
 		}
 		if v, ok := r.Working[it]; ok {
 			rec.Working[it] = v
 		}
+		if v, ok := r.Prepared[it]; ok {
+			rec.Prepared[it] = v
+		}
 	}
 	if w == nil {
-		return rec, again
+		return rec, again, undone
 	}
 	for _, it := range state.Diff(w, p) {
 		if !slices.Contains(r.Items, it) {
@@ -81,12 +92,12 @@ func expect(r schemaRecord, w, p state.Fingerprint) (rec schemaRecord, again []s
 			}
 		}
 	}
-	return rec, again
+	return rec, again, undone
 }
 
 const (
-	schemaChanged   = "the schema of the working database changed since the pristine copy was made: %s; %snothing was restored. %s%s"
-	wouldUndo       = "the restore would undo it, so "
+	schemaChanged   = "the schema of the working database changed since the pristine copy was made: %s; the restore would undo it, so nothing was restored. %s%s"
+	schemaUndone    = "the schema of the working database changed since the pristine copy was made: %s; nothing was restored. %s%s"
 	changedAgain    = "the schema of the working database changed again since an earlier run whose restore it outlived: %s; nothing was restored. %s%s"
 	notMadeAgain    = "the schema of the working database changed since the pristine copy was made: %s; the restore undid it, and prepare did not make it again, or made it otherwise (another migration may change it too): it comes from another branch, or was made by hand. %s%s"
 	fixPrepare      = "Fix: add the command that runs the migrations to prepare: in %s, so the capture makes the change again after the restore; or run driftgate seed to make the working database the new pristine copy"
@@ -132,7 +143,7 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 		if err != nil {
 			return envErr("state %s: schema: %v", c.Name(), err)
 		}
-		rec, changed := expect(r, w, p)
+		rec, changed, undone := expect(r, w, p)
 		for _, it := range changed {
 			again = append(again, c.Name()+"/"+it)
 		}
@@ -145,7 +156,7 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 			_, inP := p[it]
 			how := "changed"
 			switch {
-			case slices.Contains(r.Items, it) && w[it] != rec.Working[it]:
+			case slices.Contains(undone, it):
 				how = undoneEarlier
 			case !inP:
 				how = "new"
@@ -190,11 +201,11 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 	case t.run == runMigrateState && t.prepare:
 		fix = fixCaptureFirst
 	}
-	head := ""
+	msg := schemaUndone
 	if fresh {
-		head = wouldUndo
+		msg = schemaChanged
 	}
-	return envErr(schemaChanged, strings.Join(limit(items, 30), ", "), head, fix, undo+stale)
+	return envErr(msg, strings.Join(limit(items, 30), ", "), fix, undo+stale)
 }
 
 // checkPrepared, after the first prepare, checks that the working schema

@@ -659,6 +659,35 @@ func TestChangedOutsidePreparedOtherwise(t *testing.T) {
 	}
 }
 
+// TestChangedOutsidePreparedOtherwiseThenStopped: after a check that
+// found prepare made the change otherwise, a run whose prepare makes it
+// so again and then fails leaves that schema; the next run repeats the
+// stop after prepare, not "changed again".
+func TestChangedOutsidePreparedOtherwiseThenStopped(t *testing.T) {
+	const slug, other = "ALTER TABLE users ADD COLUMN slug TEXT", "ALTER TABLE users ADD COLUMN other TEXT"
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	p := outsideProject(t, root, srv.URL, slug, other)
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	app.exec(t, slug)
+	const stop = "db/table:users; the restore undid it, and prepare did not make it again, or made it otherwise"
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "first"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), stop) {
+		t.Fatalf("first run: %v", err)
+	}
+	failing := outsideProject(t, root, srv.URL, slug, other)
+	failing.Prepare = append(failing.Prepare, config.Command{Run: []string{"false"}})
+	if _, err := Run(ctx, failing, sqliteCatalog(), Options{Tag: "second"}); err == nil || !strings.Contains(err.Error(), "prepare:") {
+		t.Fatalf("second run, its prepare failing: %v", err)
+	}
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "third"}); !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), stop) {
+		t.Fatalf("third run: %v", err)
+	}
+}
+
 // TestExpect: the merge of an earlier run's record with the working and
 // pristine schemas, without a database.
 func TestExpect(t *testing.T) {
@@ -683,7 +712,7 @@ func TestExpect(t *testing.T) {
 		{"a new difference besides", r, state.Fingerprint{"table:a": "p", "table:c": "pc", "table:n": "n"}, []string{"table:a", "table:n"}, state.Fingerprint{"table:a": "w", "table:n": "n"}, false},
 		{"one dropped besides", r, state.Fingerprint{"table:a": "p"}, []string{"table:a", "table:c"}, state.Fingerprint{"table:a": "w"}, false},
 	} {
-		rec, again := expect(c.r, c.w, p)
+		rec, again, _ := expect(c.r, c.w, p)
 		if !slices.Equal(rec.Items, c.items) || !maps.Equal(rec.Working, c.want) || (len(again) > 0) != c.again {
 			t.Errorf("%s: %+v, again %v", c.name, rec, again)
 		}
