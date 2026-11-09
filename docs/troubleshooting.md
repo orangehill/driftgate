@@ -43,7 +43,7 @@ The restored data does not match the pristine copy's fingerprint. The message sa
 A guard's check did not succeed, such as mail not going to a log. Fix the setting it checks ([guards](reference/driftgate-yaml.md#seed-prepare-guards)).
 
 ### "baseline … changed outside driftgate accept …; run driftgate verify"
-`compare`, `run` or `accept` refuses a baseline whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git, or [rebase](reference/commands/review.md#driftgate-baselines-rebase) it on a new capture ([driftgate verify](reference/commands/review.md#driftgate-verify)).
+Every command that reads the baseline (`capture`, `compare`, `run`, `accept`, `expect`, `rebase`, `bisect`) refuses one whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git ([driftgate verify](reference/commands/review.md#driftgate-verify)).
 
 ### A command stops: a baseline is in `.tmp-old-*`
 An `accept` or a first `run` was killed while it replaced the baseline. Put `.tmp-old-*/baseline` back, or restore it from git ([Ctrl-C](reference/cli.md#what-happens-when-you-press-ctrl-c)).
