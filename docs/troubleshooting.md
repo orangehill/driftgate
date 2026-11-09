@@ -43,7 +43,7 @@ The restored data does not match the pristine copy's fingerprint. The message sa
 A guard's check did not succeed, such as mail not going to a log. Fix the setting it checks ([guards](reference/driftgate-yaml.md#seed-prepare-guards)).
 
 ### "baseline … changed outside driftgate accept …; run driftgate verify"
-`compare`, `run` or `accept` refuses a baseline whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git, or [rebase](reference/commands/review.md#driftgate-baselines-rebase) it on a new capture ([driftgate verify](reference/commands/review.md#driftgate-verify)).
+Every command that reads the baseline (`capture`, `compare`, `run`, `accept`, `expect`, `rebase`, `bisect`) refuses one whose files no longer match its manifest. Run `driftgate verify`: it names the hand edit, the deleted file or the edited log line, and exits 1. Then restore the baseline from git ([driftgate verify](reference/commands/review.md#driftgate-verify)).
 
 ### A command stops: a baseline is in `.tmp-old-*`
 An `accept` or a first `run` was killed while it replaced the baseline. Put `.tmp-old-*/baseline` back, or restore it from git ([Ctrl-C](reference/cli.md#what-happens-when-you-press-ctrl-c)).
@@ -158,6 +158,15 @@ SQL Server 2019 and earlier stopped the command for another database of the serv
 On SQL Server 2019 and earlier, another database of the server was being restored, created or renamed at that moment ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
 
 ## Databases
+
+### "… is a Galera cluster node, which creates no sequence with a cache …"
+A Galera node cannot create these MariaDB sequences, so a seed, a restore, or `data anonymize` and `subset` to such a target stop before they change anything. Make the sequences `NOCACHE` or `INCREMENT BY 0` and InnoDB, or exclude them ([MySQL and MariaDB](reference/databases/mysql-mariadb.md#how-seed-and-restore-work)).
+
+### "not a dump of driftgate data anonymize or subset for …"
+`data verify --dump` reads only a dump that `anonymize` or `subset` wrote, with its header line. Check that dump, or the target database ([data verify](reference/commands/data.md#driftgate-data-verify)).
+
+### "a statement runs into the next one …"
+A dump made by an earlier release hid a `;` behind a comment. Make the dump again with this release ([data verify](reference/commands/data.md#driftgate-data-verify)).
 
 ### seed fails: the user may not create a database
 Grant the rights setup prints ([what the database user needs](reference/state.md#what-the-database-user-needs)).

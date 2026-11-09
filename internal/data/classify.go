@@ -70,8 +70,19 @@ func (c *Classification) Changed() bool {
 // Classify proposes rules for every table and column of the source that
 // classify.yaml does not cover, from the names and types of the columns and
 // from up to sample values of each (in primary-key order, so the proposal
-// is the same every time). Existing rules are never changed.
-func Classify(ctx context.Context, src Database, rules *Rules, det *pii.Detector, sample int) (*Classification, error) {
+// is the same every time). Existing rules are never changed. A read the
+// server stops for a lock runs again from a new snapshot (retryRead).
+func Classify(ctx context.Context, src Database, rules *Rules, det *pii.Detector, sample int) (out *Classification, err error) {
+	err = retryRead(ctx, nil, "source", func() error {
+		if out, err = classify(ctx, src, rules, det, sample); err != nil {
+			return err
+		}
+		return fault("source")
+	})
+	return out, err
+}
+
+func classify(ctx context.Context, src Database, rules *Rules, det *pii.Detector, sample int) (*Classification, error) {
 	dl, err := dialectFor(src.Driver)
 	if err != nil {
 		return nil, err

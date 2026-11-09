@@ -5,6 +5,13 @@ need [`data:`](../driftgate-yaml.md#data) in `driftgate.yaml` and the
 rules of [classify.yaml](../classify-yaml.md). The task
 is in [anonymized test data](../../guides/ci/test-data.md).
 
+
+On MySQL and MariaDB, the server may stop a read of the source for a
+lock (error 1213 or 1205). The data commands then read it again from the
+start, in a new transaction, up to three times, before anything is
+written. A Galera node stops a read this way when another session alters
+a table.
+
 ## driftgate data classify
 
 ```
@@ -90,11 +97,15 @@ for.
 | Flag | Meaning |
 |---|---|
 | `--target <database>` | the database to check (default `data.target`) |
-| `--dump <file>` | the dump to check |
+| `--dump <file>` | the dump to check: one that `anonymize` or `subset` wrote, with its header line (below) |
 | `--format text\|json` | output format (default text) |
 
 Exit 1 when it finds personal data. `anonymize` and `subset` run the
 same checks before they make their output.
+
+- A dump must start with the header line `anonymize` and `subset` write, for the source's database type: `dump format 1` or `2`. Any other file, such as a `mysqldump` or `pg_dump` output, is refused: "not a dump of driftgate data anonymize or subset for …".
+- Dumps with CRLF line endings are read. MySQL `#` comments are read as comments.
+- A dump of format 1 whose statement ends in a comment hid the `;` after it. `data verify` then says "a statement runs into the next one…": make the dump again with this release.
 
 ```sh
 driftgate data verify --dump out/shop-sample.sql
