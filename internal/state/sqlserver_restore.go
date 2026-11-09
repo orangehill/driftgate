@@ -67,7 +67,11 @@ var ssInteger = lazy.Regexp(`^-?[0-9]{1,38}$`)
 // database's own state stops a statement on another one (workingStopped).
 func (s *SQLServer) Restore(ctx context.Context, items []string) error {
 	s.ended = nil // over the runs: each may end sessions, a run stopped before it ended them counts them again
-	return s.retryWhile(ctx, s.workingStopped, func() error { return s.restore(ctx, items) })
+	try := s.restore
+	if s.hooks != nil && s.hooks.restore != nil {
+		try = s.hooks.restore
+	}
+	return s.retryWhile(ctx, s.workingStopped, func() error { return try(ctx, items) })
 }
 
 func (s *SQLServer) restore(ctx context.Context, items []string) (err error) {

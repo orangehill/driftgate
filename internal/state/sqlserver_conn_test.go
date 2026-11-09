@@ -530,3 +530,71 @@ func TestSQLServerWorkingOffline(t *testing.T) {
 		}
 	}
 }
+
+// TestSQLServerRestoreRetried: Restore runs a try again that a 942 or 927
+// about the working database stopped (workingStopped), as one another
+// database's transition stopped; never one about another database of
+// this component. Without a database: each try is the hook's.
+func TestSQLServerRestoreRetried(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, c := range []struct {
+		err   error
+		tries int
+	}{
+		{mssql.Error{Number: 942, Message: "Database 'Shop' cannot be opened because it is offline."}, 2},
+		{mssql.Error{Number: 927, Message: "Database 'Shop' cannot be opened. It is in the middle of a restore."}, 2},
+		{mssql.Error{Number: 927, Message: "Database 'other' cannot be opened. It is in the middle of a restore."}, 2},
+		{mssql.Error{Number: 942, Message: "Database 'Shop_pristine' cannot be opened because it is offline."}, 1},
+		{mssql.Error{Number: 924, Message: "Database 'Shop' is already open and can only have one user at a time."}, 1},
+	} {
+		tries := 0
+		s.hooks = &ssHooks{restore: func(context.Context, []string) error {
+			if tries++; tries == 1 {
+				return c.err
+			}
+			return nil
+		}}
+		err := s.Restore(context.Background(), nil)
+		if want := c.tries == 2; tries != c.tries || (err == nil) != want {
+			t.Errorf("%v: %d tries, %v", c.err, tries, err)
+		}
+	}
+}
+
+// TestSQLServerRetryGivesUp: after the wait, the error names the database
+// that stayed in transition and says it may be so for good; an operation
+// around one that gave up does not wait again.
+func TestSQLServerRetryGivesUp(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer func(w time.Duration) { sqlServerOthersWait = w }(sqlServerOthersWait)
+	sqlServerOthersWait = 30 * time.Millisecond
+	stuck := mssql.Error{Number: 927, Message: "Database 'left_restoring' cannot be opened. It is in the middle of a restore."}
+	inner, outer := 0, 0
+	err = s.retryOthers(context.Background(), func() error {
+		outer++
+		return s.retryOthers(context.Background(), func() error { inner++; return stuck })
+	})
+	if sqlServerNumber(err) != 927 || !strings.Contains(err.Error(), "left_restoring") || !strings.Contains(err.Error(), "for good") || outer != 1 || inner < 2 {
+		t.Fatalf("%d outer, %d inner tries: %v", outer, inner, err)
+	}
+	if strings.Count(err.Error(), "tried again") != 1 {
+		t.Fatalf("said twice: %v", err)
+	}
+	if _, ok := s.othersTransition(err); !ok {
+		t.Fatalf("the 927 is still told: %v", err)
+	}
+	s.hooks = &ssHooks{restore: func(context.Context, []string) error {
+		return mssql.Error{Number: 942, Message: "Database 'Shop' cannot be opened because it is offline."}
+	}}
+	if err := s.Restore(context.Background(), nil); !strings.Contains(err.Error(), "working database Shop stays offline or restoring") {
+		t.Fatalf("working database: %v", err)
+	}
+}

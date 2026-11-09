@@ -602,8 +602,12 @@ func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string,
 		if deadline.IsZero() {
 			deadline = time.Now().Add(sqlServerOthersWait)
 		}
-		if !ok || time.Now().After(deadline) || ctx.Err() != nil {
+		var gaveUp *ssGaveUp
+		if !ok || ctx.Err() != nil || errors.As(err, &gaveUp) { // an operation within f waited the whole time already
 			return err
+		}
+		if time.Now().After(deadline) {
+			return s.stillInTransition(err, name)
 		}
 		s.retried.Add(1)
 		switch {
@@ -622,6 +626,23 @@ func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string,
 		wait = min(2*wait, time.Second)
 	}
 }
+
+// stillInTransition is the error of an operation retryWhile gave up on:
+// the database named stayed in transition for the whole wait, and may be
+// so for good (left restoring, offline or single-user).
+func (s *SQLServer) stillInTransition(err error, name string) error {
+	if strings.EqualFold(name, s.o.Working) {
+		return &ssGaveUp{fmt.Errorf("%w (tried again for %s: the working database %s stays offline or restoring while other databases of the server change; run the command again once they are done)", err, sqlServerOthersWait, name)}
+	}
+	return &ssGaveUp{fmt.Errorf("%w (tried again for %s: database %s of the same server stayed in the middle of a restore, offline, single-user or in transition; if it stays so for good, which SQL Server 2019 and earlier let stop statements of other databases, bring it online, give it MULTI_USER back, complete its restore or drop it)", err, sqlServerOthersWait, name)}
+}
+
+// ssGaveUp is the error of an operation retryWhile gave up on
+// (stillInTransition).
+type ssGaveUp struct{ err error }
+
+func (e *ssGaveUp) Error() string { return e.err.Error() }
+func (e *ssGaveUp) Unwrap() error { return e.err }
 
 // sqlServerNoReason reports a request SQL Server failed without saying
 // why: the driver's error of a DONE token with its error flag and no error

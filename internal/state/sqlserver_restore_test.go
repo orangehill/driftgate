@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1980,5 +1981,58 @@ func TestSQLServerEndedSessionsOnce(t *testing.T) {
 	s.countSessions(ctx, m, id) // the next one
 	if got := s.EndedSessions(); got != 2 {
 		t.Fatalf("%d sessions ended, want 2", got)
+	}
+}
+
+// TestSQLServerWhileOtherSeeds: generate's query of the pristine copy and
+// restores of one component work while another component of the server
+// seeds now and then, as another checkout does; on SQL Server 2019 and
+// earlier its RESTORE may stop their statements (927, 952), which they
+// wait out (retryOthers). The packages run one at a time in CI, so this
+// is the parallel load their other tests no longer see.
+func TestSQLServerWhileOtherSeeds(t *testing.T) {
+	ctx := context.Background()
+	s, db, log := newSQLServerSeeded(t, Options{}, "CREATE TABLE news (id int PRIMARY KEY, n int NOT NULL)", "INSERT INTO news VALUES (1, 1), (2, 2)")
+	o, _, _ := newSQLServerSeeded(t, Options{}, "CREATE TABLE other (id int PRIMARY KEY)", "INSERT INTO other VALUES (1)")
+	p := pristineSQLServer(t, s)
+	stop := make(chan struct{})
+	done := make(chan int, 1)
+	var seeds atomic.Int32
+	go func() {
+		for {
+			select {
+			case <-stop:
+				done <- int(seeds.Load())
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			if o.Seed(ctx) == nil {
+				seeds.Add(1)
+			}
+		}
+	}()
+	var once sync.Once
+	halt := func() int {
+		n := -1
+		once.Do(func() { close(stop); n = <-done })
+		return n
+	}
+	t.Cleanup(func() { halt() }) // before the databases are dropped
+	// At least 8 rounds and 3 seeds meanwhile, at most 30 rounds: well
+	// within the minute any one operation may wait.
+	for i := 0; i < 30 && (i < 8 || seeds.Load() < 3); i++ {
+		got, err := s.Query(ctx, "SELECT CAST(id AS nvarchar(10)) FROM news ORDER BY id")
+		if err != nil || strings.Join(got, ",") != "1,2" {
+			t.Fatalf("%d: query: %v %v", i, got, err)
+		}
+		sqlServerExec(t, db, fmt.Sprintf("UPDATE news SET n = %d WHERE id = 1", i+10))
+		if restoreSQLServer(t, s, db, log, p) {
+			t.Fatalf("%d: restored the whole database for a changed row", i)
+		}
+	}
+	if n := halt(); n == 0 {
+		t.Fatal("no seed of the other component ran meanwhile")
+	} else {
+		t.Logf("%d seeds of another component ran meanwhile; run again %d times", n, s.retried.Load())
 	}
 }
