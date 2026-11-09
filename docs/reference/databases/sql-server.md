@@ -497,6 +497,7 @@ database.
 - It runs again for up to one minute, counted from the first such failure. After that it fails with the last error, which names the database. A database left in that state for good (restoring, offline or single-user) fails it every time: complete its restore, bring it online, give it `MULTI_USER` back, or drop it.
 - A restore also runs again when the error names its own working database that a stopped restore left offline or restoring, within the same minute.
 - Each stops in a state the next run completes.
+- One that the server chooses as a deadlock victim (error 1205) runs again up to three times.
 - The application's own queries can fail the same way on those versions.
 
 ### The application's login

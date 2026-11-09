@@ -580,15 +580,42 @@ func (s *SQLServer) retryOthers(ctx context.Context, f func() error) error {
 	return s.retryWhile(ctx, s.othersTransition, f)
 }
 
+// sqlServerDeadlockTries bounds how many times retryWhile runs f again
+// after a deadlock.
+var sqlServerDeadlockTries = 3
+
 // retryWhile is retryOthers with the errors that make f run again told by
-// stopped (othersTransition, workingStopped).
+// stopped (othersTransition, workingStopped). A try the server chose as a
+// deadlock victim (1205) runs again too, up to sqlServerDeadlockTries
+// times: as another restore's or seed's DDL of the server's catalog, or
+// the application's writes, may make it one. Each operation verifies its
+// result (a restore, by the fingerprint after it), so a try again never
+// passes what failed; one that keeps losing fails with that error.
 func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string, bool), f func() error) error {
 	var deadline time.Time
 	wait := 20 * time.Millisecond
 	told := false
 	last := "" // the database whose transition stopped the last try
+	deadlocks := 0
 	for {
 		err := f()
+		var gaveUp *ssGaveUp
+		if sqlServerNumber(err) == 1205 && !errors.As(err, &gaveUp) && ctx.Err() == nil {
+			// Chosen as a deadlock victim: the server rolled the try's
+			// transaction back, and a try stops in a state the next one
+			// completes. A few more tries; then the error as it is.
+			if deadlocks++; deadlocks > sqlServerDeadlockTries {
+				return &ssGaveUp{fmt.Errorf("%w (tried %d times)", err, deadlocks)}
+			}
+			s.retried.Add(1)
+			fmt.Fprintf(s.o.Log, "state %s: the server chose a statement of DriftGate as a deadlock victim; trying again\n", s.o.Name)
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(deadlocks) * 100 * time.Millisecond):
+			}
+			continue
+		}
 		name, ok := stopped(err)
 		if !ok && last != "" && sqlServerNoReason(err) {
 			// A try after one another database stopped failed without a
@@ -602,7 +629,6 @@ func (s *SQLServer) retryWhile(ctx context.Context, stopped func(error) (string,
 		if deadline.IsZero() {
 			deadline = time.Now().Add(sqlServerOthersWait)
 		}
-		var gaveUp *ssGaveUp
 		if !ok || ctx.Err() != nil || errors.As(err, &gaveUp) { // an operation within f waited the whole time already
 			return err
 		}

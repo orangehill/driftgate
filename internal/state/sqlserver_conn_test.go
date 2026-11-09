@@ -598,3 +598,40 @@ func TestSQLServerRetryGivesUp(t *testing.T) {
 		t.Fatalf("working database: %v", err)
 	}
 }
+
+// TestSQLServerDeadlockRetried: a try chosen as a deadlock victim (1205)
+// runs again, up to sqlServerDeadlockTries times, also within another
+// retry, never more; another error is not retried.
+func TestSQLServerDeadlockRetried(t *testing.T) {
+	s, err := NewSQLServer(Options{Name: "db", DSN: "sqlserver://u:p@127.0.0.1:1?encrypt=true", Working: "Shop", Pristine: "Shop_pristine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	deadlock := mssql.Error{Number: 1205, Message: "Transaction (Process ID 68) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction."}
+	calls := 0
+	err = s.retryOthers(context.Background(), func() error {
+		if calls++; calls < 3 {
+			return fmt.Errorf("restore: %w", deadlock)
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Errorf("deadlocked twice: %d calls, %v", calls, err)
+	}
+	inner, outer := 0, 0
+	err = s.retryOthers(context.Background(), func() error {
+		outer++
+		return s.retryOthers(context.Background(), func() error { inner++; return deadlock })
+	})
+	if sqlServerNumber(err) != 1205 || inner != sqlServerDeadlockTries+1 || outer != 1 || !strings.Contains(err.Error(), "tried 4 times") {
+		t.Errorf("deadlocked every time: %d inner, %d outer calls, %v", inner, outer, err)
+	}
+	calls = 0
+	if err := s.retryOthers(context.Background(), func() error {
+		calls++
+		return mssql.Error{Number: 1222, Message: "Lock request time out period exceeded."}
+	}); err == nil || calls != 1 {
+		t.Errorf("a lock timeout: %d calls, %v", calls, err)
+	}
+}
