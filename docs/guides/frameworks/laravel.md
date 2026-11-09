@@ -90,7 +90,7 @@ Every capture restores `working`, so it must be a database you can rewrite.
 - Exclude logs, sessions and queued jobs, and make the cache `restore_empty`; `setup` proposes them ([the framework's own tables](../../reference/state.md#the-frameworks-own-tables)). A large `failed_jobs` slows fingerprints: empty it in a seed command, or exclude it.
 - A Redis cache or session store is a component of its own: `redis: { restore: ["redis-cli", "FLUSHALL"] }`. A view counter in Redis that is not restored makes the second capture differ.
 - Laravel's default seeder writes `Hash::make()` and `now()`, which differ on every run. Seeding again then makes other data, and the next capture stops (exit 3): the state differs from the baseline's. Write a fixed password hash and a fixed time (`Carbon::setTestNow()`) in the seeder, or seed from a fixed dump with `driftgate seed --skip-commands`.
-- A migration you run on the working database is undone by the next restore: seed again after it.
+- A migration you run on the working database is undone by the next restore: seed again after it ([what to do next](../catalog/side-checks.md#compare-the-output-of-a-command)).
 
 ### SQLite
 
@@ -156,13 +156,31 @@ identities:
   user: {}
 generate:
   identity: admin
-templates: [ok, not-found, json, anonymous, identities]
+templates: [ok, not-found, json, empty-body, json-errors, anonymous, identities]
 ```
 
 The tokens command runs after every restore, and must leave the same
-state each time. One that issues new tokens writes new rows, so captures
-differ. Print tokens issued once, such as Sanctum tokens the seeder
-creates with fixed values, or use a [tokens file](../catalog/logins.md).
+state each time. One that issues new tokens writes rows with new values
+and times on every run, so a response that shows them differs. Print
+tokens issued once, such as Sanctum tokens (`php artisan install:api`) the
+seeder creates with fixed values, or use a [tokens file](../catalog/logins.md):
+
+```php
+// database/seeders/DatabaseSeeder.php, after the test users
+User::where('email', 'admin@shop.example')->first()->tokens()->create([
+    'name' => 'driftgate', 'token' => hash('sha256', 'dg-admin-token'), 'abilities' => ['*'],
+]);
+
+// routes/console.php
+Artisan::command('driftgate:tokens', function () {
+    $this->line(json_encode(['admin' => 'dg-admin-token', 'user' => 'dg-user-token']));
+});
+```
+
+Sanctum keeps only the hash, so the seeder writes the same row each time,
+and the command prints the plain text. A token without `id|` is looked up
+by its hash. Seed the `user` token the same way.
+
 A cookie-session application needs a token too
 ([sessions with cookies](../catalog/logins.md#sessions-with-cookies)).
 
@@ -175,7 +193,25 @@ requests:
 
 The generated login sends sample values and answers 401 or 422, so its
 route counts as failed and `run` exits 1. Give it a real test user under
-[`requests`](../../reference/driftgate-yaml.md#requests).
+[`requests`](../../reference/driftgate-yaml.md#requests). That keeps its
+generated variants, its 422 check included; a
+[hand-written login](../catalog/hand-written-requests.md#check-the-login-itself) replaces them.
+
+## Web forms answer 419
+
+```php
+// bootstrap/app.php
+->withMiddleware(function (Middleware $middleware) {
+    $middleware->validateCsrfTokens(except: ['contact', 'orders/*']);
+})
+```
+
+Every POST, PUT, PATCH or DELETE to a `routes/web.php` route answers 419:
+DriftGate keeps no session, so it has no CSRF token. Routes in
+`routes/api.php` have no CSRF check.
+
+- Exempt the web routes the catalog writes to, as above (Laravel 11 and later; before, the `$except` list of `VerifyCsrfToken`). The check is then off wherever that code runs: keep it out of what you deploy.
+- Or keep the check: both sides then compare only the 419.
 
 ## The first run
 
@@ -186,6 +222,7 @@ driftgate run
 Session cookies differ on a fresh application, so the first run proposes
 allowlist entries; a masked cookie value by its length. Add reasons, run again.
 
+- The `/up` page prints its render time in whole milliseconds. Keep the rule `run` proposes for it, even when later comparisons list it as [unused](../../reference/reports.md#allowlist-rules-that-changed-nothing): the time is often the same.
 - Routes that upload files get a synthetic file of a kind their rules accept (`file`, `image`, `mimes:`, `mimetypes:`). A real import needs a [real file](../catalog/hand-written-requests.md#upload-a-file).
 - A queued job runs as a [command step](../catalog/hand-written-requests.md#run-a-queue-worker-or-another-command): `["php", "artisan", "queue:work", "--stop-when-empty"]`.
 - Schema dumps, settings, files and mail are checked as [side checks](../catalog/side-checks.md).

@@ -124,7 +124,7 @@ SQL Server writes new `rowversion` values on every write. Add the allowlist rule
 A `prepare` command writes data before every capture ([what belongs in prepare](reference/driftgate-yaml.md#what-belongs-in-prepare)).
 
 ### An allowlist rule is listed as unused
-The value it names was renamed, removed, or did not change this time ([find rules that cannot apply](guides/review/changing-values.md#find-rules-that-cannot-apply)).
+The value it names was renamed, removed, or did not change this time, like a render time that is often the same ([find rules that cannot apply](guides/review/changing-values.md#find-rules-that-cannot-apply)).
 
 ## A green result that misses something
 
@@ -139,6 +139,9 @@ The catalog has no request or command step for them ([what a pass does not check
 
 ### A request that needs a cookie session answers 401
 DriftGate keeps no cookies between requests. Give the identity a token ([sessions with cookies](guides/catalog/logins.md#sessions-with-cookies)).
+
+### Every web POST answers 419
+DriftGate keeps no session, so it sends no CSRF token. Exempt those routes, or compare only the 419 ([Laravel](guides/frameworks/laravel.md#web-forms-answer-419)).
 
 ## Slow or stuck
 

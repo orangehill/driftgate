@@ -31,7 +31,7 @@ docs/guides/review/read-the-report.md 100
 docs/guides/review/fix-accept-or-expect.md 90
 docs/guides/review/changing-values.md 130
 docs/guides/review/find-the-commit.md 80
-docs/guides/frameworks/laravel.md 200
+docs/guides/frameworks/laravel.md 260
 docs/guides/frameworks/aspnet-core.md 180
 docs/guides/frameworks/nextjs-nuxt.md 130
 docs/guides/frameworks/openapi.md 130

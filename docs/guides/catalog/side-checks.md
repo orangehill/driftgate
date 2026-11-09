@@ -31,7 +31,7 @@ A [command step](../../reference/catalog-json.md#command-steps) with
 `output_ignore` matches. Its exit code is compared too.
 
 - A schema dump shows a column type, index or default a step changed. Leave out what changes by itself: `AUTO_INCREMENT` counters, dated comments.
-- A migration run on the working database is undone by the next restore: after a framework upgrade, seed again with `driftgate seed` to see it.
+- A migration run on the working database is undone by the next restore: after a framework upgrade, seed again with `driftgate seed` to see it. The next capture then stops with exit 3, as the state differs from the baseline's ([why](../../reference/capture.md#when-the-state-does-not-match-the-baseline)). Capture and compare with `--skip-fingerprint-check`, as when [comparing two stacks](../workflow/server-upgrade.md#compare-the-old-and-the-new-stack).
 - On SQLite, order the schema (`ORDER BY type, name`). A restore re-creates a changed table at the end of `sqlite_schema`: the order changes, not the schema ([how a restore writes](../../reference/databases/sqlite.md#how-a-restore-writes-inside-the-file)).
 - For a compiler or static checker, the warnings are the output. Remove only a timing line, anchored on both ends: a looser pattern such as `\d+s` also removes numbers that matter.
 - Command steps run after the read-only requests, one at a time, on the restored state.
