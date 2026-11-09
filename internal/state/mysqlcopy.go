@@ -68,6 +68,11 @@ type tableInfo struct {
 // database of the server (EXPLAIN: "Scanned all databases"), opening every
 // table there, which a Galera node aborts when another session alters one
 // of them (1213).
+//
+// Table names are compared as bytes (CAST … AS BINARY): information_schema
+// compares them without case, so with lower_case_table_names=0, where
+// users and Users are two tables, a join or a list of names would mix the
+// columns, keys and rows of the two, or drop one of them.
 func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (map[string]*tableInfo, error) {
 	out := map[string]*tableInfo{}
 	if len(tables) == 0 {
@@ -82,14 +87,15 @@ func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (m
 	args := append(append(append([]any{db}, db), names...), db)
 	args = append(args, names...)
 	rows, err := c.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA,
-			(c.TABLE_NAME, c.COLUMN_NAME) IN (SELECT k.TABLE_NAME, k.COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE k
-				WHERE k.TABLE_SCHEMA = ? AND k.CONSTRAINT_NAME = 'PRIMARY'),
+			(CAST(c.TABLE_NAME AS BINARY), c.COLUMN_NAME) IN (SELECT CAST(k.TABLE_NAME AS BINARY), k.COLUMN_NAME
+				FROM information_schema.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA = ? AND k.CONSTRAINT_NAME = 'PRIMARY'),
 			COALESCE(t.n, 0)
 		FROM information_schema.COLUMNS c
-		JOIN (SELECT TABLE_NAME, MAX(TABLE_ROWS) AS n FROM information_schema.TABLES
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (`+in+`) GROUP BY TABLE_NAME) t ON t.TABLE_NAME = c.TABLE_NAME
-		WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME IN (`+in+`)
-		ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`, args...)
+		JOIN (SELECT CAST(TABLE_NAME AS BINARY) AS name, MAX(TABLE_ROWS) AS n FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = ? AND CAST(TABLE_NAME AS BINARY) IN (`+in+`) GROUP BY CAST(TABLE_NAME AS BINARY)) t
+			ON t.name = CAST(c.TABLE_NAME AS BINARY)
+		WHERE c.TABLE_SCHEMA = ? AND CAST(c.TABLE_NAME AS BINARY) IN (`+in+`)
+		ORDER BY CAST(c.TABLE_NAME AS BINARY), c.ORDINAL_POSITION`, args...)
 	if err != nil {
 		return nil, err
 	}
