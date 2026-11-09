@@ -175,12 +175,12 @@ type tracker struct {
 	databases map[string]endedDatabase
 	endedBy   []endedDatabase
 	// The schema check (schema.go).
-	run          runKind
-	prepare      bool
-	config       string
-	schema       map[string]schemaDiff
-	missingOnly  bool
-	prepareCheck bool
+	run         runKind
+	prepare     bool
+	config      string
+	records     map[string]string // the schemaRecord file of every database component, by name
+	schema      map[string]schemaRecord
+	missingOnly bool
 }
 
 // openComponents connects to every state component, in name order.
@@ -239,9 +239,13 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			}
 		}
 		if seed {
+			// A new pristine copy takes the working schema in: an earlier
+			// run's schemaRecord no longer applies.
 			o.Replacing = func() error {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
+				for _, f := range []string{path, schemaPath(path)} {
+					if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
 				}
 				return nil
 			}
@@ -287,7 +291,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		return nil, err
 	}
 	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
-		prepare: len(p.Prepare) > 0, config: configPath(p)}
+		prepare: len(p.Prepare) > 0, config: configPath(p), records: map[string]string{}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -340,6 +344,12 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
 			}
 		}
+		path, err := pristinePath(p, c.Name(), servers[c.Name()])
+		if err != nil {
+			t.close()
+			return nil, err
+		}
+		t.records[c.Name()] = schemaPath(path)
 		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)

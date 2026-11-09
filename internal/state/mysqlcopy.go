@@ -126,11 +126,11 @@ func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (m
 	return out, rows.Err()
 }
 
-// copyTables runs the jobs on c and on extra connections of its own. It
-// returns the statement counters (Com_) the extra connections moved, which
-// the write check must count as DriftGate's own (see afterRestore), or nil
-// when they are not known.
-func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jobs []tableJob) (map[string]int64, error) {
+// copyTables runs the jobs on c and on extra connections of its own, whose
+// CONNECTION_ID() it adds to ids. It returns the statement counters (Com_)
+// the extra connections moved, which the write check must count as
+// DriftGate's own (see afterRestore), or nil when they are not known.
+func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jobs []tableJob, ids *[]int64) (map[string]int64, error) {
 	if _, err := m.mariadb(ctx, c); err != nil { // before the connections read it
 		return nil, err
 	}
@@ -175,6 +175,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 	next := make(chan []tableJob)
 	errs := make([]error, conns)
 	moved := make([]map[string]int64, conns)
+	connIDs := make([]int64, conns)
 	var wg sync.WaitGroup
 	for k := range conns {
 		wg.Add(1)
@@ -200,6 +201,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 					errs[k] = err
 					return
 				}
+				conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connIDs[k])
 				before, _ = sessionWrites(ctx, conn)
 			}
 			for g := range next {
@@ -230,6 +232,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 	}
 	close(next)
 	wg.Wait()
+	*ids = append(*ids, connIDs[1:]...)
 	// The first error that is not another connection giving up after it.
 	var first error
 	for _, err := range errs {

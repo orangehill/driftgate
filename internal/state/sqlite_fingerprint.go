@@ -304,13 +304,13 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 	}
 	var tables []*sqliteTable
 	for _, name := range objs.order {
-		if (mode == fpSchema || objs.tables[name].restoreOnly == (mode == fpRestoreOnly)) && want("table:"+name) {
+		if mode.takes(objs.tables[name].restoreOnly) && want("table:"+name) {
 			tables = append(tables, objs.tables[name])
 		}
 	}
 	var got map[string]sqliteSum
 	var read []string
-	if mode != fpSchema {
+	if mode.rows() {
 		if got, read, err = s.tableSums(ctx, conns, schema, tables, sums); err != nil {
 			return nil, nil, err
 		}
@@ -328,7 +328,7 @@ func (s *SQLite) fingerprint(ctx context.Context, conns []*sql.Conn, schema stri
 		for _, ix := range t.indexes {
 			writeFields(h, ix)
 		}
-		if mode == fpSchema {
+		if !mode.rows() {
 			f["table:"+t.name] = hex.EncodeToString(h.Sum(nil))
 			continue
 		}

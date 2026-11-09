@@ -433,6 +433,18 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	if format < 2 {
 		queries = queries[:4] // no row security, policies, rules, privileges…
 	}
+	if mode == fpSchema {
+		// What a migration changes that the fingerprint leaves to the rows:
+		// a trigger disabled, a partition's bounds, storage options (of a
+		// materialized view too, whose definition schemaItems adds).
+		queries = append(queries,
+			`SELECT n.nspname || '.' || c.relname, 'trigger ' || t.tgname || ' enabled ' || t.tgenabled::text
+			   FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE NOT t.tgisinternal AND t.tgenabled <> 'O' AND `+schemaFilter("n.nspname")+` ORDER BY 1, 2`,
+			`SELECT n.nspname || '.' || c.relname, coalesce('partition ' || pg_get_expr(c.relpartbound, c.oid), '') || coalesce(' options ' || array_to_string(c.reloptions, ','), '')
+			   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE c.relkind IN ('r', 'p', 'v', 'm') AND (c.relispartition OR c.reloptions IS NOT NULL) AND `+schemaFilter("n.nspname")+` ORDER BY 1, 2`)
+	}
 	for _, q := range queries {
 		rows, err := d.QueryContext(ctx, q, args...)
 		if err != nil {
@@ -462,14 +474,14 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 				continue
 			}
 		}
-		if mode != fpSchema && p.restoreOnlyQualified(t) != (mode == fpRestoreOnly) || !want("table:"+t) {
+		if !mode.takes(p.restoreOnlyQualified(t)) || !want("table:"+t) {
 			continue
 		}
 		def := ""
 		if defs[t] != nil {
 			def = defs[t].String()
 		}
-		if mode == fpSchema {
+		if !mode.rows() {
 			f["table:"+t] = hash([]byte(def))
 			continue
 		}
@@ -516,7 +528,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	if format < 2 {
 		return f, nil
 	}
-	if err := p.schemaItems(ctx, d, f, want, mode); err != nil {
+	if err := p.schemaItems(ctx, d, f, want, mode, defs); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -542,7 +554,7 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 		own = `CASE WHEN last_value IS NULL THEN format('SELECT %L, %s FROM %I.%I WHERE last_value <> %s',
 		            schemaname || '.' || sequencename, 'last_value', schemaname, sequencename, start_value) END`
 	}
-	if mode == fpSchema {
+	if !mode.rows() {
 		value, own = "", "NULL"
 	}
 	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || sequencename, `+value+params+`, `+own+`
@@ -604,9 +616,11 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 // attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other than public, and
 // materialized views with their rows (REFRESH). Objects of extensions
 // are left out: CREATE EXTENSION makes them, and a library such as PostGIS
-// has thousands. fpSchema leaves out the rows, keeps excluded materialized
-// views, and adds every extension with its version (CREATE EXTENSION).
-func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, mode fpMode) error {
+// has thousands. fpSchema adds aggregates and every extension with its
+// version (CREATE EXTENSION), and hashes a materialized view, excluded too,
+// by its definition with its indexes and options (rels, by relation), not
+// its rows or whether it is populated.
+func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, mode fpMode, rels map[string]*strings.Builder) error {
 	queries := []string{
 		`SELECT 'function:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')', pg_get_functiondef(f.oid)
 		   FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
@@ -630,7 +644,11 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		`SELECT 'matview:' || schemaname || '.' || matviewname, definition || ' ' || ispopulated::text FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
 	}
 	if mode == fpSchema {
-		queries = append(queries, `SELECT 'extension:' || extname, extversion FROM pg_extension`)
+		queries = append(queries, `SELECT 'extension:' || extname, extversion FROM pg_extension`,
+			`SELECT 'aggregate:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')',
+			        format('%s %s %s %s %s %s', a.aggkind, a.aggtransfn, a.aggfinalfn, a.aggcombinefn, format_type(a.aggtranstype, NULL), a.agginitval)
+			   FROM pg_aggregate a JOIN pg_proc f ON f.oid = a.aggfnoid JOIN pg_namespace n ON n.oid = f.pronamespace
+			  WHERE `+schemaFilter("n.nspname")+` AND `+dbx.PostgresNotExtension("f.oid", "pg_proc"))
 	}
 	defs := map[string]string{}
 	for _, q := range queries {
@@ -661,9 +679,14 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 	for item, def := range defs {
 		kind, name, _ := strings.Cut(item, ":")
 		sum := ""
-		if kind == "matview" {
+		if kind == "matview" && !mode.rows() {
+			def = def[:strings.LastIndexByte(def, ' ')] // not ispopulated
+			if rels[name] != nil {
+				sum = rels[name].String()
+			}
+		} else if kind == "matview" {
 			sum = "not populated"
-			if strings.HasSuffix(def, " true") && mode != fpSchema {
+			if strings.HasSuffix(def, " true") {
 				schema, rel, _ := strings.Cut(name, ".")
 				var count int64
 				var rowsSum string

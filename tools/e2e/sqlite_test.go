@@ -297,3 +297,26 @@ func TestCrashSeedSQLite(t *testing.T) {
 		})
 	}
 }
+
+// TestCrashPrepareSQLite: a capture killed (SIGKILL) in prepare, after its
+// restore undid a migration run since the seed, leaves the record of what
+// prepare must make again: the next capture, whose prepare does not make
+// it, stops before any request instead of passing on the old schema.
+func TestCrashPrepareSQLite(t *testing.T) {
+	p := sqliteProject(t, "wal", stateCatalog)
+	p.must(t, 0, "seed")
+	sqlExec(t, p.db, "ALTER TABLE news ADD COLUMN title TEXT")
+	cfg := filepath.Join(p.root, "driftgate.yaml")
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, cfg, string(raw)+"prepare:\n  - [\"sh\", \"-c\", \"kill -9 $PPID\"]\n")
+	if r := p.run(t, "", "capture", "c1"); r.code != killed {
+		t.Fatalf("not killed: %v", r)
+	}
+	write(t, cfg, string(raw)+"prepare:\n  - [\"true\"]\n")
+	if r := p.must(t, 3, "capture", "c1", "--force"); !strings.Contains(r.err, "db/table:news; the restore undid it, and prepare did not make it again") {
+		t.Fatalf("capture after the kill: %v", r)
+	}
+}

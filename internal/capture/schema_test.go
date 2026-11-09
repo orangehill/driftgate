@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -452,5 +454,172 @@ func TestChangedOutsideMissingOnly(t *testing.T) {
 	if !changedOutside(err, "db/trigger:notes_log (missing)") || !strings.Contains(err.Error(), "make them again in the working database as the pristine copy has them") ||
 		strings.Contains(err.Error(), "seed") {
 		t.Fatalf("capture: %v", err)
+	}
+}
+
+// schemaRecordOf is the path of the schemaRecord of component db.
+func schemaRecordOf(t *testing.T, p *config.Project) string {
+	t.Helper()
+	server, err := serverOf(p, p.State["db"], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := pristinePath(p, "db", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schemaPath(path)
+}
+
+// TestChangedOutsideRecord: a run whose prepare fails or is cancelled
+// after its restore undid a migration leaves the record of what prepare
+// must make again, and the next run checks it:
+//   - the working database as the restore left it (the pristine schema),
+//     or with the migration again (the mirror case): prepare must make it;
+//   - another definition of a recorded item since: the run stops before
+//     the restore, the record kept;
+//   - a change since that the record does not name is added to it;
+//   - a seed removes the record; a passing check removes it too.
+func TestChangedOutsideRecord(t *testing.T) {
+	const slug, posts = "ALTER TABLE users ADD COLUMN slug TEXT", "CREATE TABLE posts (id INTEGER PRIMARY KEY)"
+	for _, c := range []struct {
+		name    string
+		stop    func(t *testing.T, root, url string) // the run that leaves the record
+		since   []string                             // changes after it
+		prepare []string
+		want    string // the stop; "": the capture runs
+	}{
+		{"prepare failed, made again", failingPrepare, nil, []string{slug}, ""},
+		{"prepare failed, not made again", failingPrepare, nil, []string{"SELECT 1"}, "db/table:users; the restore undid it, and prepare did not make it again"},
+		{"cancelled, not made again", cancelledPrepare, nil, []string{"SELECT 1"}, "db/table:users; the restore undid it, and prepare did not make it again"},
+		{"the migration again (mirror), made again", failingPrepare, []string{slug}, []string{slug}, ""},
+		{"the migration again (mirror), not made again", failingPrepare, []string{slug}, []string{"SELECT 1"}, "db/table:users; the restore undid it"},
+		{"changed again", failingPrepare, []string{"ALTER TABLE users ADD COLUMN other TEXT"}, []string{slug}, "changed again since an earlier run whose restore it outlived: db/table:users; nothing was restored"},
+		{"a new change, both made", failingPrepare, []string{posts}, []string{slug, posts}, ""},
+		{"a new change, one made", failingPrepare, []string{posts}, []string{slug}, "db/table:posts; the restore undid it"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, srv := outsideApp(t, root)
+			ctx := context.Background()
+			if err := Seed(ctx, outsideProject(t, root, srv.URL), SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			app.exec(t, slug)
+			p := outsideProject(t, root, srv.URL, c.prepare...)
+			c.stop(t, root, srv.URL)
+			record := schemaRecordOf(t, p)
+			if _, err := os.Stat(record); err != nil {
+				t.Fatalf("no record after the stopped run: %v", err)
+			}
+			app.exec(t, c.since...)
+			_, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+			_, kept := os.Stat(record)
+			if c.want == "" {
+				if err != nil || kept == nil {
+					t.Fatalf("capture: %v; record kept: %v", err, kept == nil)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "or delete "+record+" to accept that a restore undid it") || kept != nil {
+				t.Fatalf("capture: %v; record kept: %v", err, kept == nil)
+			}
+		})
+	}
+
+	t.Run("seed removes it", func(t *testing.T) {
+		t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+		root := t.TempDir()
+		app, srv := outsideApp(t, root)
+		p := outsideProject(t, root, srv.URL, "SELECT 1")
+		ctx := context.Background()
+		if err := Seed(ctx, p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		app.exec(t, slug)
+		failingPrepare(t, root, srv.URL)
+		if err := Seed(ctx, p, SeedOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(schemaRecordOf(t, p)); err == nil {
+			t.Fatal("the record is left after a seed")
+		}
+		if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "seeded"}); err != nil {
+			t.Fatalf("capture after the seed: %v", err)
+		}
+	})
+}
+
+// failingPrepare runs a capture of outsideApp whose prepare fails after
+// the restore.
+func failingPrepare(t *testing.T, root, url string) {
+	t.Helper()
+	q := outsideProject(t, root, url)
+	q.Prepare = []config.Command{{Run: []string{"false"}}}
+	if _, err := Run(context.Background(), q, sqliteCatalog(), Options{Tag: "failed"}); err == nil || !strings.Contains(err.Error(), "prepare:") {
+		t.Fatalf("capture with a failing prepare: %v", err)
+	}
+}
+
+// cancelledPrepare runs a capture of outsideApp that is cancelled in
+// prepare, after the restore.
+func cancelledPrepare(t *testing.T, root, url string) {
+	t.Helper()
+	q := outsideProject(t, root, url)
+	q.Prepare = []config.Command{{Run: []string{"sleep", "30"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Second, cancel)
+	if _, err := Run(ctx, q, sqliteCatalog(), Options{Tag: "cancelled"}); err == nil {
+		t.Fatal("a cancelled capture passed")
+	}
+}
+
+// TestChangedOutsideMigrateState: verify --migrate-state restores without
+// prepare: with prepare: configured, a migration since the seed asks for
+// a capture first, whose prepare makes it again.
+func TestChangedOutsideMigrateState(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	p := outsideProject(t, root, srv.URL, "SELECT 1")
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	app.exec(t, "ALTER TABLE users ADD COLUMN slug TEXT")
+	_, err := MigrateState(ctx, p, &snapshot.Meta{}, io.Discard, io.Discard)
+	if !changedOutside(err, "db/table:users (changed)") || !strings.Contains(err.Error(), "Fix: run a capture first; its prepare: makes the change again") {
+		t.Fatalf("migrate-state: %v", err)
+	}
+}
+
+// TestChangedOutsideTwoComponents: every component is checked before any
+// is restored: a migration in the second stops the run before the rows
+// written to the first are restored.
+func TestChangedOutsideTwoComponents(t *testing.T) {
+	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+	root := t.TempDir()
+	app, srv := outsideApp(t, root)
+	other := newSQLiteApp(t, filepath.Join(root, "other.sqlite"), "wal")
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values",
+		Target: config.Target{BaseURL: srv.URL},
+		State: map[string]config.Component{
+			"a": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}},
+			"b": {Driver: config.SQLite, Working: "other.sqlite", Exclude: []string{"sessions"}}}}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Seed(ctx, p, SeedOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	app.exec(t, "INSERT INTO users (email) VALUES ('kept@x')")
+	other.exec(t, "ALTER TABLE users ADD COLUMN slug TEXT")
+	if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "now"}); !changedOutside(err, "b/table:users (changed)") {
+		t.Fatalf("capture: %v", err)
+	}
+	if n := app.count(t, "users WHERE email = 'kept@x'"); n != 1 {
+		t.Errorf("component a was restored before b was checked")
 	}
 }

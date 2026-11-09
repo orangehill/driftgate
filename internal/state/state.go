@@ -58,6 +58,22 @@ const (
 	fpSchema                    // every item Restore takes, by its definition only (Schemer)
 )
 
+// takes reports whether the mode reads a table that is restore_only (ro)
+// or one that is not.
+func (m fpMode) takes(ro bool) bool { return m == fpSchema || ro == (m == fpRestoreOnly) }
+
+// rows reports whether the mode reads rows and counters, not only
+// definitions.
+func (m fpMode) rows() bool { return m != fpSchema }
+
+// MissingAfterStop reports whether an item the working database lacks may
+// be what a restore that stopped left: MySQL/MariaDB drop the triggers of
+// the tables they copy, and a sequence they restore, and make them again
+// after the copy (copyObjects).
+func MissingAfterStop(item string) bool {
+	return strings.HasPrefix(item, "trigger:") || strings.HasPrefix(item, "sequence:")
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string

@@ -58,7 +58,7 @@ type ssFingerprint struct {
 // with fpRestoreOnly they are all it hashes.
 func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, items []string, inv *ssInventory, vals *ssValues, reuse func(t *ssTable, def string) (string, bool), mode fpMode) (*ssFingerprint, error) {
 	var err error
-	if vals == nil && mode != fpSchema {
+	if vals == nil {
 		if vals, err = values(ctx, c); err != nil {
 			return nil, err
 		}
@@ -68,13 +68,6 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 			return nil, err
 		}
 	}
-	if mode == fpSchema { // the definitions without the values
-		out := &ssFingerprint{f: Fingerprint{}, inv: inv}
-		for item, def := range inv.base {
-			out.f[item] = hash([]byte(def))
-		}
-		return out, nil
-	}
 	if vals, err = s.readOnlyValues(ctx, db, vals); err != nil {
 		return nil, err
 	}
@@ -83,7 +76,7 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 	out := &ssFingerprint{f: Fingerprint{}, inv: inv, content: map[int64]string{}}
 	var tasks []ssTask
 	for _, t := range inv.Tables {
-		if t.Excluded || t.RestoreOnly != (mode == fpRestoreOnly) || !want(t.Item) {
+		if t.Excluded || !mode.takes(t.RestoreOnly) || !want(t.Item) {
 			continue
 		}
 		if reuse != nil {
@@ -132,7 +125,7 @@ func (s *SQLServer) fingerprint(ctx context.Context, c *sql.Conn, db string, ite
 	}
 	for item, def := range inv.Defs {
 		t := inv.ByItem[item]
-		if !want(item) || (t != nil && t.RestoreOnly) != (mode == fpRestoreOnly) {
+		if !want(item) || !mode.takes(t != nil && t.RestoreOnly) {
 			continue
 		}
 		if t != nil {

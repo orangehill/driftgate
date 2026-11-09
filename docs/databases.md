@@ -20,6 +20,7 @@ capture. This page covers the four built-in drivers. The keys are in
 - `seed` replaces only a pristine copy it made itself; it never drops a database it did not mark.
 - A capture checks the restored data against the pristine fingerprint. Different data stops it with exit 3.
 - Before its first restore, a run compares the working schema with the pristine copy's. A migration run since the seed stops it with exit 3. With `prepare:` it goes on when `prepare` makes the change again. Rows and counters never count.
+- The schema check does not cover data-only migrations, command components, MySQL routines and events, or an index on an excluded SQL Server table. On PostgreSQL it does not cover default privileges, publications, event triggers, large objects, database settings, statistics or comments on materialized views.
 - Fingerprints are comparable only on the same server version. A server upgrade needs a new seed and baseline ([server upgrade](workflows.md#server-upgrade)).
 - `driftgate clean` removes the pristine copies seed made ([clean](commands.md#clean)).
 
@@ -100,6 +101,7 @@ Limits to know:
 - A write to a `restore_only` table makes the next restore copy the whole database. `restore_empty` tables are emptied in place.
 - A `restore_empty` table with a `TRUNCATE` trigger, or one another table inherits from, stops the seed.
 - The fingerprint also covers functions, enums, domains, schemas, materialized views and policies. Extension objects are left out.
+- A partition the application creates at run time is a new table to the schema check. Seed after it, or let `prepare` create it.
 
 ## SQLite
 
@@ -175,5 +177,6 @@ Limits to know:
 - Refused: availability groups, replication, change data capture, ledger databases, Always Encrypted and row-level security policies.
 - A non-excluded table with a foreign key to an excluded table stops the seed.
 - Use the `SIMPLE` recovery model; restores are fully logged.
+- A working database in `RECOVERY_PENDING`, `SUSPECT` or another state that is not online, offline or restoring stops the run. Repair it first.
 - Seed keeps two backup files, `driftgate-*.bak`, in the backup folder. Remove them yourself after dropping the pristine copy.
 - On Apple Silicon, run the `linux/amd64` image; 2017 and 2019 may stop under emulation.

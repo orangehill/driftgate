@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 // schemaCase is a change of the working database: what SchemaFingerprint
@@ -139,7 +140,7 @@ func TestSchemaFingerprintPostgres(t *testing.T) {
 	}
 	work, pristine := "dgt_schema", "dgt_schema_pristine"
 	p, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine,
-		Exclude: []string{"sessions"}, RestoreOnly: []string{"tokens"}, RestoreEmpty: []string{"cache"}})
+		Exclude: []string{"sessions*"}, RestoreOnly: []string{"tokens"}, RestoreEmpty: []string{"cache"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,12 @@ func TestSchemaFingerprintPostgres(t *testing.T) {
 	}
 	exec(t, "CREATE TABLE users (id serial PRIMARY KEY, email text)", "CREATE TABLE notes (id int PRIMARY KEY, body text)",
 		"CREATE TABLE cache (k text PRIMARY KEY, v text)", "CREATE TABLE tokens (id serial PRIMARY KEY, token text)",
-		"CREATE TABLE sessions (id text)", "CREATE SEQUENCE numbers", "INSERT INTO users (email) VALUES ('a@x')")
+		"CREATE TABLE sessions (id text)", "CREATE SEQUENCE numbers", "INSERT INTO users (email) VALUES ('a@x')",
+		"CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'",
+		"CREATE TRIGGER users_touch BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION touch()",
+		"CREATE TABLE events (id int, at date) PARTITION BY RANGE (at)",
+		"CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+		"CREATE MATERIALIZED VIEW emails_mv AS SELECT id, email FROM users WITH NO DATA")
 	testSchemaFingerprint(t, p, exec, []schemaCase{
 		{"rows", []string{"INSERT INTO users (email) VALUES ('b@x')", "UPDATE users SET email = 'z'", "DELETE FROM notes",
 			"INSERT INTO cache VALUES ('k', 'v')", "INSERT INTO tokens (token) VALUES ('t')", "INSERT INTO sessions VALUES ('s')"}, ""},
@@ -178,6 +184,16 @@ func TestSchemaFingerprintPostgres(t *testing.T) {
 		{"a restore_empty index", []string{"CREATE INDEX cache_v ON cache (v)"}, "table:public.cache"},
 		{"an excluded table's column", []string{"ALTER TABLE sessions ADD COLUMN extra int"}, "table:public.sessions"},
 		{"an extension", []string{"CREATE EXTENSION pgcrypto"}, "extension:pgcrypto"},
+		{"an excluded view", []string{"CREATE VIEW sessions_v AS SELECT id FROM sessions"}, "view:public.sessions_v"},
+		{"an excluded sequence", []string{"CREATE SEQUENCE sessions_seq"}, "sequence:public.sessions_seq"},
+		{"a materialized view refreshed", []string{"REFRESH MATERIALIZED VIEW emails_mv"}, ""},
+		{"a trigger disabled", []string{"ALTER TABLE users DISABLE TRIGGER users_touch"}, "table:public.users"},
+		{"a partition's bounds", []string{"ALTER TABLE events DETACH PARTITION events_2024",
+			"ALTER TABLE events ATTACH PARTITION events_2024 FOR VALUES FROM ('2024-01-01') TO ('2024-07-01')"}, "table:public.events_2024"},
+		{"storage options", []string{"ALTER TABLE users SET (fillfactor = 70)"}, "table:public.users"},
+		{"a materialized view's index", []string{"CREATE INDEX emails_mv_id ON emails_mv (id)"}, "matview:public.emails_mv"},
+		{"a materialized view's options", []string{"ALTER MATERIALIZED VIEW emails_mv SET (fillfactor = 50)"}, "matview:public.emails_mv"},
+		{"an aggregate", []string{"CREATE AGGREGATE total (int) (SFUNC = int4pl, STYPE = int)"}, "aggregate:public.total(integer)"},
 	})
 }
 
@@ -276,5 +292,68 @@ func TestSQLServerSchemaOffline(t *testing.T) {
 	}
 	if d := Diff(w, p); !slices.Equal(d, []string{"table:dbo.users"}) {
 		t.Errorf("after OFFLINE: %v", d)
+	}
+}
+
+// TestMySQLKillCopy: a restore cancelled while the server runs the copy
+// of a table ends that statement on the server (KILL QUERY), whose lock
+// would otherwise hold back the triggers it makes again, and returns at
+// once with the working schema the pristine copy's. The copy is held on
+// the server by a row of the pristine table another session locks: it
+// reads the pristine rows with shared locks.
+func TestMySQLKillCopy(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "killcopy", nil, []string{
+				// No integer key: the table is copied in one statement.
+				"CREATE TABLE big (id VARCHAR(20) PRIMARY KEY, v TEXT)", "CREATE TABLE log (id VARCHAR(20))",
+				"INSERT INTO big VALUES ('a', 'x'), ('b', 'y')",
+				"CREATE TRIGGER big_log AFTER INSERT ON big FOR EACH ROW INSERT INTO log VALUES (NEW.id)"})
+			m := f.open(t, f.dsn, Options{})
+			ctx := context.Background()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, f.rootWork, "DELETE FROM big WHERE id = 'a'")
+			lock, err := mysqlAdmin(t, dsn, "").Begin() // a session of its own
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Rollback()
+			if _, err := lock.Exec("SELECT * FROM " + f.pristine + ".big WHERE id = 'a' FOR UPDATE"); err != nil {
+				t.Fatal(err)
+			}
+			stop, cancel := context.WithCancel(ctx)
+			var at time.Time
+			go func() { // cancel once the server runs the copy of big
+				defer func() { at = time.Now(); cancel() }()
+				for range 600 {
+					var n int
+					f.root.QueryRow("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND INFO LIKE 'INSERT INTO `" + f.work + "`.`big`%'").Scan(&n)
+					if n > 0 {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				t.Error("the copy of big was never seen")
+			}()
+			err = m.Restore(stop, []string{"table:big"})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("restore: %v", err)
+			}
+			if took := time.Since(at); took > 5*time.Second {
+				t.Errorf("the restore returned %s after the cancel: it waited for the copy", took)
+			}
+			lock.Rollback()
+			p, err := m.SchemaFingerprint(ctx, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := m.SchemaFingerprint(ctx, false)
+			if err != nil || len(Diff(w, p)) != 0 {
+				t.Fatalf("after the cancel: %v %v", Diff(w, p), err)
+			}
+		})
 	}
 }

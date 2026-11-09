@@ -300,7 +300,7 @@ func (s *SQLServer) readOnce(ctx context.Context, pristine bool, mode fpMode) (F
 		if err != nil {
 			return nil, err
 		}
-		if mode == fpSchema {
+		if !mode.rows() {
 			if ok, err := s.schemaReadable(ctx, d); !ok || err != nil {
 				return nil, err
 			}
@@ -313,6 +313,18 @@ func (s *SQLServer) readOnce(ctx context.Context, pristine bool, mode fpMode) (F
 		return nil, s.denied(err)
 	}
 	defer c.Close()
+	if !mode.rows() { // the definitions, without where identities and sequences stand
+		if inv == nil {
+			if inv, err = s.inventory(ctx, c); err != nil {
+				return nil, err
+			}
+		}
+		f := Fingerprint{}
+		for item, def := range inv.base {
+			f[item] = hash([]byte(def))
+		}
+		return f, nil
+	}
 	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, mode)
 	if err != nil {
 		return nil, err

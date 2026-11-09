@@ -684,7 +684,7 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 			return nil, err
 		}
 		var next string
-		if mode != fpSchema {
+		if mode.rows() {
 			if next, err = sequenceNext(ctx, c, db, s); err != nil {
 				return nil, err
 			}
@@ -715,11 +715,11 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 			return err
 		}
 		creates[t] = def
-		if mode == fpSchema {
+		if !mode.rows() {
 			f["table:"+t] = hash([]byte(autoIncrement().ReplaceAllString(def, "")))
 		}
 	}
-	if mode == fpSchema {
+	if !mode.rows() {
 		return nil
 	}
 	sums, err := m.checksums(ctx, c, db, tables, creates)
@@ -1215,11 +1215,39 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
 	}
+	// ids are the connections of the copy (CONNECTION_ID()): the server
+	// may still run their statements after a cancel.
+	ids := []int64{0}
+	if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&ids[0]); err != nil {
+		return nil, err
+	}
+	// onBackground goes on after a failure or a cancel on a session of its
+	// own that no cancel stops: it ends what the copy's connections still
+	// run (KILL QUERY), so their locks go, and waits 30 s at most for a
+	// lock. It rebinds ctx and c, which create, makeSeq and makeObjects
+	// read when they run, so they run there; done gives the session up.
+	onBackground := func() (done func()) {
+		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		s, err := m.session(bg)
+		if err != nil {
+			return cancel
+		}
+		for _, id := range ids {
+			if id != 0 { // a connection whose id was not read
+				s.ExecContext(bg, fmt.Sprintf("KILL QUERY %d", id))
+			}
+		}
+		s.ExecContext(bg, "SET SESSION lock_wait_timeout = 30")
+		s.ExecContext(bg, "USE "+qi(dst))
+		ctx, c = bg, s
+		return func() { discardConn(s); cancel() }
+	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
 	// makeObjects makes the sequences of seqs, the triggers of trigDefs (in
 	// firing order per table) and the views of pending, and takes each
 	// made off its list: what a failure leaves on them is missing from
-	// dst. A closure: it shares create's session, collation and lost.
+	// dst. A closure: it shares create's collation and lost, and reads ctx
+	// and c when it runs, which onBackground rebinds.
 	makeObjects := func() error {
 		for len(seqs) > 0 {
 			if err := makeSeq(seqs[0]); err != nil {
@@ -1275,6 +1303,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost != nil {
 				return nil, lost
 			}
+			defer onBackground()()
 			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
@@ -1286,23 +1315,16 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if m.hooks != nil && m.hooks.copyFails != nil {
 		err = m.hooks.copyFails()
 	} else {
-		extra, err = m.copyTables(ctx, c, src, dst, jobs)
+		extra, err = m.copyTables(ctx, c, src, dst, jobs, &ids)
 	}
 	if err == nil {
 		err = makeObjects()
 	}
 	if err != nil && lost == nil && dst == m.o.Working {
-		// A failed or stopped restore makes them again, on a session no
-		// cancel stops: the working schema stays the pristine copy's.
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-		defer cancel()
-		if s, serr := m.session(bg); serr == nil {
-			defer s.Close()
-			if _, serr = s.ExecContext(bg, "USE "+qi(dst)); serr == nil {
-				ctx, c = bg, s
-				makeObjects()
-			}
-		}
+		// A failed or stopped restore makes them again: the working schema
+		// stays the pristine copy's.
+		defer onBackground()()
+		makeObjects()
 	}
 	if err != nil {
 		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
