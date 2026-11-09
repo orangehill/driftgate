@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -196,8 +197,15 @@ func withExclusions(p *config.Project, inv *routes.Inventory, source string) (*r
 		}
 		excl.Routes[i].Target = p.Canonical(x.Target)
 	}
+	byAccept := map[string]bool{} // services with a framework that negotiates errors by Accept
+	for _, a := range p.Discover {
+		if slices.Contains(errorsByAccept, a.Adapter) {
+			byAccept[p.Canonical(a.Target)] = true
+		}
+	}
 	for i := range inv.Routes {
 		inv.Routes[i].Target = p.Canonical(inv.Routes[i].Target)
+		inv.Routes[i].ErrorsByAccept = byAccept[inv.Routes[i].Target]
 	}
 	return inv, excl, nil
 }
@@ -498,7 +506,7 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 
 // noInvalidBodyTitle heads the covered routes whose validation error no
 // request checks.
-const noInvalidBodyTitle = "Routes whose body is validated but no request sends an invalid one (a changed validation error passes unseen): add " + routes.EmptyBody + " to templates: and run driftgate generate --write"
+const noInvalidBodyTitle = "Routes whose body is validated but no request shows their validation error (a changed message passes unseen): add " + routes.EmptyBody + " to templates:, and " + routes.JSONErrors + " for Laravel, Symfony, Rails and Spring Boot, which answer a request without Accept: application/json with a redirect; then run driftgate generate --write"
 
 // coverageOf is the coverage of the selected services' routes by their
 // requests; answers are a baseline's by request ID (nil without one).

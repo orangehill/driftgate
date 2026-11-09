@@ -113,7 +113,10 @@ it is listed as a route without a sample body.
 - Known failures (`known_failures:` in [exclusions.yaml](../exclusions-yaml.md)): the request stays in the catalog and is compared as usual. Its route is neither covered nor failed (`… with known failures` in the summary).
 - Known failures that are stale, no longer match their `status`, or are broad, as [exclusions.yaml](../exclusions-yaml.md) describes. A stale one also matches no request of any service.
 - Requests that reach no route, stale exclusions, and routes without a sample body.
-- Covered routes whose body is validated (they have a sample body, from validation rules or OpenAPI) but that no request sends an invalid body. Their validation errors are not compared, so a changed validation message passes. A request of the `empty-body` template counts, and so does one written by hand or imported that the baseline recorded as refused (400 or 422). Add `empty-body` to `templates:` and run `driftgate generate --write`. The list never changes the exit code.
+- Covered routes whose body is validated (they have a sample body, from validation rules or OpenAPI) but whose validation error no request shows. Their validation errors are not compared, so a changed validation message passes. The list never changes the exit code.
+  - A request counts when the baseline recorded it as refused (400 or 422): one of the `empty-body` template, its `json-errors` twin, or one written by hand or imported.
+  - Without a baseline answer, an `empty-body` request counts. For Laravel, Symfony, Rails and Spring Boot only its JSON twin does: they answer a request without `Accept: application/json` with a redirect back.
+  - Add `empty-body` to `templates:`, and `json-errors` for those four frameworks. Then run `driftgate generate --write`.
 
 An exclusion that `init` wrote for the framework (Debugbar, Telescope,
 Horizon …) is not reported stale while it keeps `init`'s route and

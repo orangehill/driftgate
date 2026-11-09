@@ -33,7 +33,7 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 	}
 	catalogLine := "catalog: 19 requests: 18 reads, 1 mutating, 0 command steps; 0 of them multipart"
 	gaps := []string{"1 route method without a request meant to succeed: GET /api/extra",
-		"1 route method whose validation error no request checks (template empty-body): POST /api/posts", "1 request meant to succeed that failed in baseline:local: get-tree",
+		"1 route method whose validation error no request checks (templates empty-body and json-errors): POST /api/posts", "1 request meant to succeed that failed in baseline:local: get-tree",
 		"12 requests observed (measured, not compared): get-r-0, get-r-1, get-r-2, get-r-3, get-r-4 and 7 more", "1 request that changes data skipped (no baseline): post-import", "1 read skipped (" + NoteNotSent + "): get-in-seq", "1 command step skipped (no baseline): schema",
 		"1 known failure (exclusions.yaml): get-old"}
 	dominant := "one change in 5 of 5 drifted requests: header x-a is new; set aside, 0 of 5 drift in something else; fix it, or take it with driftgate accept group:1"

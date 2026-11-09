@@ -43,16 +43,40 @@ func meantToSucceed(r catalog.Request) bool {
 // body an empty one: a validation error.
 const EmptyBody = "empty-body"
 
-// sendsInvalidBody reports a request that checks the validation error of
-// its route: one of the empty-body template, or one written by hand or
-// imported whose answer in the baseline is 400 or 422 (a body the route
-// refused). Other error cases (not-found, anonymous) are answered before
-// the body is validated.
-func sendsInvalidBody(r catalog.Request, a Answer, answered bool) bool {
-	if r.Source != nil && r.Source.Template != "" {
-		return r.Source.Template == EmptyBody
+// sendsInvalidBody reports a request whose answer is the validation error
+// of its route, so that a changed message is compared. Other error cases
+// (not-found, anonymous) are answered before the body is validated.
+//
+//   - With a baseline answer: an empty-body request or its JSON twin, or
+//     one written by hand or imported, that answered 400 or 422. A
+//     framework that answers a browser with a redirect back (Laravel's
+//     302) has not shown its message.
+//   - Without one: an empty-body request, and on a route of a framework
+//     that negotiates errors by Accept (Route.ErrorsByAccept) only one
+//     that asks for JSON, such as the json-errors twin. A request written
+//     by hand is not known to be refused.
+func sendsInvalidBody(r catalog.Request, route *Route, a Answer, answered bool) bool {
+	generated := r.Source != nil && r.Source.Template != ""
+	invalid := !generated || r.Source.Template == EmptyBody || r.Source.Template == JSONErrors && emptyBody(r.Body)
+	switch {
+	case !invalid:
+		return false
+	case answered:
+		return a.Status == 400 || a.Status == 422
+	case !generated:
+		return false
 	}
-	return answered && (a.Status == 400 || a.Status == 422)
+	return !route.ErrorsByAccept || acceptsJSON(r)
+}
+
+// acceptsJSON reports a request that asks for JSON (Accept).
+func acceptsJSON(r catalog.Request) bool {
+	for _, h := range r.Headers {
+		if strings.EqualFold(h[0], "accept") && strings.Contains(strings.ToLower(h[1]), "json") {
+			return true
+		}
+	}
+	return false
 }
 
 func emptyBody(b json.RawMessage) bool {
@@ -344,7 +368,7 @@ func CheckWith(inv *Inventory, cat *catalog.Catalog, excl *Exclusions, answers m
 		k := unitKey(r, r.UnitOf(req.Method))
 		c.Requests[k] = append(c.Requests[k], req.ID)
 		a, ok := answers[req.ID]
-		if sendsInvalidBody(req, a, ok) {
+		if sendsInvalidBody(req, r, a, ok) {
 			invalid[k] = true
 		}
 		if expectsError(req) {

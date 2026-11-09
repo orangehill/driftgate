@@ -92,7 +92,7 @@ invalid body.
 
 To check them:
 
-1. Add `empty-body` to `templates:` (before `json-errors`, as `init` writes it).
+1. Add `empty-body` to `templates:`. For Laravel, Symfony, Rails and Spring Boot add `json-errors` too, after it, as `init` writes them. These frameworks answer an empty body sent without `Accept: application/json` with a redirect back, and only the JSON twin shows the message.
 2. Run `driftgate generate --write`.
 3. Run `driftgate run`. The new requests have no baseline yet and are not compared; the output names them.
 4. Add them to the baseline. In mode `evolve`: `driftgate accept <request>... --reason "…"`. In mode `freeze`: `driftgate baselines rebase local --from <capture> --reason "…" --allow-freeze`, which takes the whole capture, so only when nothing else drifted.

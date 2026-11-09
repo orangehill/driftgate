@@ -559,9 +559,11 @@ A rate limit is not generated: write a
 [repeated request](catalog-json.md#repeat) by hand.
 
 Without `empty-body`, no request checks a validation error: a changed
-validation message passes. `coverage` lists the covered routes whose
-body is validated (they have a sample) and that no request sends an
-invalid body.
+validation message passes. Laravel, Symfony, Rails and Spring Boot
+answer the `empty-body` request with a redirect back; its
+[`json-errors`](#json-errors) twin gets the message. `coverage` lists the
+covered routes whose body is validated (they have a sample) and whose
+validation error no request shows.
 
 ### json-errors
 

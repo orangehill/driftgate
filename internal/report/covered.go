@@ -141,7 +141,7 @@ func (n *NotCovered) NotCoveredLines() []string {
 		against = "the baseline"
 	}
 	add(n.NoRequest, "route method without a request meant to succeed", "route methods without a request meant to succeed")
-	add(n.NoInvalidBody, "route method whose validation error no request checks (template empty-body)", "route methods whose validation errors no request checks (template empty-body)")
+	add(n.NoInvalidBody, "route method whose validation error no request checks (templates empty-body and json-errors)", "route methods whose validation errors no request checks (templates empty-body and json-errors)")
 	add(n.FailedInBaseline, "request meant to succeed that failed in "+against, "requests meant to succeed that failed in "+against)
 	add(n.Observed, "request observed (measured, not compared)", "requests observed (measured, not compared)")
 	for _, s := range n.Skipped {

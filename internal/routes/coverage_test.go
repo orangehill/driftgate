@@ -240,3 +240,41 @@ func TestNoInvalidBody(t *testing.T) {
 		t.Errorf("excluded: %v", c.NoInvalidBody)
 	}
 }
+
+// TestNoInvalidBodyByAccept: on a framework that answers a browser with a
+// redirect back (Laravel's 302 for a validation error), an empty-body
+// request without Accept: application/json shows no message; only its
+// JSON twin, or a request answered 400 or 422, checks it.
+func TestNoInvalidBodyByAccept(t *testing.T) {
+	inv := &Inventory{Routes: []Route{{Methods: []string{"POST"}, Path: "/posts", Body: json.RawMessage(`{"title":"a"}`), ErrorsByAccept: true}}}
+	body := func(r catalog.Request, b string) catalog.Request { r.Body = json.RawMessage(b); return r }
+	ok := body(generated("posts", "POST", "/posts", "ok", nil), `{"title":"a"}`)
+	empty := body(generated("posts-empty-body", "POST", "/posts", "empty-body", nil), `{}`)
+	twin := body(generated("posts-empty-body-json", "POST", "/posts", "json-errors", nil), `{}`)
+	twin.Headers = [][2]string{{"accept", "application/json"}}
+	anonTwin := body(generated("posts-anonymous-json", "POST", "/posts", "json-errors", nil), `{"title":"a"}`)
+	anonTwin.Headers = twin.Headers
+	for _, c := range []struct {
+		name    string
+		reqs    []catalog.Request
+		answers map[string]Answer
+		listed  bool
+	}{
+		{"empty-body alone, no baseline", []catalog.Request{ok, empty}, nil, true},
+		{"empty-body answered with a redirect", []catalog.Request{ok, empty}, map[string]Answer{"posts": {Status: 201}, "posts-empty-body": {Status: 302}}, true},
+		{"the JSON twin of another error", []catalog.Request{ok, empty, anonTwin}, nil, true},
+		{"with its JSON twin, no baseline", []catalog.Request{ok, empty, twin}, nil, false},
+		{"its JSON twin answered 422", []catalog.Request{ok, empty, twin}, map[string]Answer{"posts": {Status: 201}, "posts-empty-body": {Status: 302}, "posts-empty-body-json": {Status: 422}}, false},
+		{"its JSON twin answered 302 too", []catalog.Request{ok, empty, twin}, map[string]Answer{"posts": {Status: 201}, "posts-empty-body": {Status: 302}, "posts-empty-body-json": {Status: 302}}, true},
+	} {
+		c2 := CheckWith(inv, &catalog.Catalog{Requests: c.reqs}, &Exclusions{}, c.answers)
+		if listed := len(c2.NoInvalidBody) == 1; listed != c.listed {
+			t.Errorf("%s: listed %v, want %v", c.name, c2.NoInvalidBody, c.listed)
+		}
+	}
+	// A framework that answers JSON anyway: the empty-body request is enough.
+	inv.Routes[0].ErrorsByAccept = false
+	if c := CheckWith(inv, &catalog.Catalog{Requests: []catalog.Request{ok, empty}}, &Exclusions{}, nil); len(c.NoInvalidBody) != 0 {
+		t.Errorf("without negotiation: %v", c.NoInvalidBody)
+	}
+}
