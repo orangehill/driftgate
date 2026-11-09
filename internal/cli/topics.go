@@ -21,15 +21,19 @@ type topic struct {
 // releaseTag is the Version of a release build.
 var releaseTag = lazy.Regexp(`^v\d+\.\d+\.\d+$`)
 
-// docsBase is where the documentation is read: the pages of the git ref
+// repoBase is where the repository's files are read: those of the git ref
 // docsRef picks for this build.
-func docsBase() string {
+func repoBase() string {
 	module := ""
 	if info, ok := debug.ReadBuildInfo(); ok {
 		module = info.Main.Version
 	}
-	return "https://github.com/orangehill/driftgate/blob/" + docsRef(Version, module) + "/docs/"
+	return "https://github.com/orangehill/driftgate/blob/" + docsRef(Version, module) + "/"
 }
+
+// docsBase is where the documentation is read: the docs/ folder of the
+// git ref docsRef picks for this build.
+func docsBase() string { return repoBase() + "docs/" }
 
 // docsRef is the git ref whose pages a build links, from its Version and
 // the module version Go recorded: a release tag in either (a release, or
@@ -51,13 +55,12 @@ func docsRef(version, module string) string {
 	return "main"
 }
 
-// tasksDoc is the page of what DriftGate can do: every feature, when to
-// use it, its guide and its reference, under docsBase.
-const tasksDoc = "capabilities.md"
+// commandsDoc is the page of every command and its flags, under docsBase.
+const commandsDoc = "commands.md"
 
 var topics = []topic{
 	{name: "catalog", summary: "catalog.json (beside driftgate.yaml: .driftgate/catalog.json, or driftgate/catalog.json with baselines: git) lists the requests every capture sends; generate writes it, entries may be written by hand. Its keys:",
-		doc: "reference/catalog-json.md#request-fields", fields: [][2]string{
+		doc: "catalog.md#request-fields", fields: [][2]string{
 			{"version", "1"},
 			{"requests", "the requests, in order; each has the keys below"},
 			{"id", "the request's name, unique; reports, --only and globs use it"},
@@ -83,7 +86,7 @@ var topics = []topic{
 			{"sequences", "requests that run in order: id, requests (IDs), restore: before"},
 		}},
 	{name: "allowlist", summary: "allowlist.yaml (beside driftgate.yaml) names what may change between responses, each rule with a reason. Its keys:",
-		doc: "reference/allowlist-yaml.md", fields: [][2]string{
+		doc: "review.md#allowlist-rules", fields: [][2]string{
 			{"version", "1"},
 			{"headers:", "a header's value may change: name, and format or ignore_case"},
 			{"body:", "a value in a body may change: path, format, parts; any_length for arrays"},
@@ -92,7 +95,7 @@ var topics = []topic{
 			{"reason", "on every rule, required"},
 		}},
 	{name: "exclusions", summary: "exclusions.yaml (beside driftgate.yaml) names routes that are deliberately not checked, and requests that fail in the baseline, each with a reason. Its keys:",
-		doc: "reference/exclusions-yaml.md", fields: [][2]string{
+		doc: "catalog.md#coverage-and-exclusions", fields: [][2]string{
 			{"version", "1"},
 			{"routes:", "routes not checked: generate makes no requests for them, coverage counts them as excluded"},
 			{"route", "of routes: a METHOD /path glob; without a method it matches every method"},
@@ -104,7 +107,7 @@ var topics = []topic{
 			{"reason", "on every entry, required"},
 		}},
 	{name: "classify", summary: "classify.yaml (beside driftgate.yaml) holds a rule for every column of the data module's source database; data classify proposes them. Its keys:",
-		doc: "reference/classify-yaml.md", fields: [][2]string{
+		doc: "workflows.md#test-data", fields: [][2]string{
 			{"version", "1"},
 			{"tables:", "table name → its rule"},
 			{"action", "of a table: copy (default), empty or skip; of a serialized-php column: empty-table (default: the rows are left out) or null (the column is NULL)"},
@@ -118,7 +121,7 @@ var topics = []topic{
 			{"reason, proposed", "on tables, columns and schema entries; proposed until a person checks the rule"},
 		}},
 	{name: "config", summary: "driftgate.yaml (.driftgate/driftgate.yaml, or driftgate.yaml at the root with baselines: git) configures the project. Its top-level keys:",
-		doc: "reference/driftgate-yaml.md#top-level-keys", fields: [][2]string{
+		doc: "configuration.md#keys", fields: [][2]string{
 			{"version, project", "1, and the project's name"},
 			{"mode, level", "freeze or evolve; how far a comparison goes (status, shape, types, values)"},
 			{"baselines, store, key", "the layout (local or git), the local store, the project key"},
@@ -136,7 +139,7 @@ var topics = []topic{
 			{"data", "the data module"},
 		}},
 	{name: "kinds", summary: "Every drift has a kind: the first word of a drift line, and \"kind\" in JSON. The names are stable. The kinds:",
-		doc: "reference/drift-kinds.md", fields: kindFields()},
+		doc: "review.md#drift-kinds", fields: kindFields()},
 }
 
 // kindFields are the drift kinds of compare.Kinds(), one line each.
@@ -169,6 +172,6 @@ func writeTopic(w io.Writer, t *topic) {
 	for _, f := range t.fields {
 		b.WriteString(wrap(strings.Fields(f[1]), fmt.Sprintf("  %-*s  ", width, f[0]), strings.Repeat(" ", width+4), 80))
 	}
-	fmt.Fprintf(&b, "\nRead %s; what to use for a task: %s\n", docsBase()+t.doc, docsBase()+tasksDoc)
+	fmt.Fprintf(&b, "\nRead %s; every command: %s\n", docsBase()+t.doc, docsBase()+commandsDoc)
 	fmt.Fprint(w, b.String())
 }

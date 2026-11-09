@@ -22,7 +22,7 @@ var (
 	Date    = "unknown"
 )
 
-// Exit codes (docs/reference/cli.md#exit-codes).
+// Exit codes (docs/commands.md#exit-codes).
 const (
 	ExitClean  = 0
 	ExitDrift  = 1
@@ -187,7 +187,7 @@ func dispatch(args []string, stdout, stderr io.Writer) (int, error) {
 	case "help", "-h", "--help":
 		err = helpCmd(args[1:], stdout)
 	default:
-		err = configErr("unknown command %q (run 'driftgate help'; what to use for a task: %s)", args[0], docsBase()+tasksDoc)
+		err = configErr("unknown command %q (run 'driftgate help'; every command: %s)", args[0], docsBase()+commandsDoc)
 	}
 	return code, err
 }
