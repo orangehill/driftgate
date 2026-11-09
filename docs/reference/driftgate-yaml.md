@@ -359,8 +359,6 @@ seed:
     stdin: ~/Data/shop.sql
   - run: ["php", "artisan", "migrate", "--force"]
     dir: api
-  - run: ["docker", "compose", "exec", "-T", "db", "mysql", "shop"]
-    stdin: ~/Data/shop.sql
 guards:
   - name: mail goes to the log
     command: { run: ["grep", "-q", "^MAIL_MAILER=log"], stdin: api/.env }
@@ -372,7 +370,7 @@ list, `dir` the folder it runs in (default the project folder), and
 
 - Both paths are relative to the project folder; `~` and `~/` are the home folder.
 - A missing folder or file stops the command before the first of its list runs (exit 3), so a seed never stops halfway for it.
-- A program in a container needs its standard input passed on: `docker exec -i`, or `docker compose exec -T`.
+- A program in a container needs its standard input passed on: `docker exec -i`, or `docker compose exec -T`. For the first step above, that is `run: ["docker", "compose", "exec", "-T", "db", "mysql", "shop"]` with the same `stdin`.
 - A release before this form refuses it ([keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses)).
 
 ### What belongs in prepare

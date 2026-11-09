@@ -28,8 +28,8 @@ DB_DATABASE=shop_api7
 ```
 
 Give the worktree's application a database and an address of its own,
-in its own settings, before you run setup there. Setup then uses them,
-and makes that database's pristine copy. Without them it stops: its runs
+in its own settings, before you run setup there. Setup then asks to use
+them (`--yes` agrees), and makes that database's pristine copy. Without them it stops: its runs
 would restore the main worktree's database.
 
 ## Carry expectations to another worktree

@@ -162,8 +162,8 @@ On SQL Server 2019 and earlier, another database of the server was being restore
 
 ## Databases
 
-### "… is a Galera cluster node, which creates no sequence with a cache …"
-A Galera node cannot create these MariaDB sequences, so a seed, a restore, or `data anonymize` and `subset` to such a target stop before they change anything. Make the sequences `NOCACHE` or `INCREMENT BY 0` and InnoDB, or exclude them ([MySQL and MariaDB](reference/databases/mysql-mariadb.md#how-seed-and-restore-work)).
+### "… Galera cluster node, which creates no sequence with a cache …"
+A Galera node cannot create these MariaDB sequences, so a seed or a restore stops before it changes anything. So do `data anonymize` and `subset` when their target is on such a node ("target … is on a Galera cluster node"). For the state, make the sequences `NOCACHE` or `INCREMENT BY 0` and InnoDB, or exclude them. For the data module, change them so in the source, or write to a server without Galera ([MySQL and MariaDB](reference/databases/mysql-mariadb.md#how-seed-and-restore-work)).
 
 ### "not a dump of driftgate data anonymize or subset for …"
 `data verify --dump` reads only a dump that `anonymize` or `subset` wrote, with its header line. Check that dump, or the target database ([data verify](reference/commands/data.md#driftgate-data-verify)).
