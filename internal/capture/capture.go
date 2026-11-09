@@ -325,6 +325,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err != nil {
 		return nil, err
 	}
+	if err := tr.checkWhole(ctx, start); err != nil {
+		return nil, err
+	}
 	r.sum.Tracked = len(start) > 0
 	r.start = start
 	if opt.Baseline != nil && !opt.SkipFingerprintCheck {

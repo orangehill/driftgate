@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -589,7 +590,7 @@ func cancelledPrepare(t *testing.T, root, url string) {
 
 // TestChangedOutsideMigrateState: verify --migrate-state restores without
 // prepare: with prepare: configured, a migration since the seed asks for
-// a capture first, whose prepare makes it again.
+// a seed.
 func TestChangedOutsideMigrateState(t *testing.T) {
 	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
 	root := t.TempDir()
@@ -601,7 +602,7 @@ func TestChangedOutsideMigrateState(t *testing.T) {
 	}
 	app.exec(t, "ALTER TABLE users ADD COLUMN slug TEXT")
 	_, err := MigrateState(ctx, p, &snapshot.Meta{}, io.Discard, io.Discard)
-	if !changedOutside(err, "db/table:users (changed)") || !strings.Contains(err.Error(), "Fix: run a capture first; its prepare: makes the change again") {
+	if !changedOutside(err, "db/table:users (changed)") || !strings.Contains(err.Error(), "Fix: run driftgate seed to make the working database the new pristine copy") {
 		t.Fatalf("migrate-state: %v", err)
 	}
 }
@@ -716,5 +717,198 @@ func TestExpect(t *testing.T) {
 		if !slices.Equal(rec.Items, c.items) || !maps.Equal(rec.Working, c.want) || (len(again) > 0) != c.again {
 			t.Errorf("%s: %+v, again %v", c.name, rec, again)
 		}
+	}
+}
+
+// TestChangedOutsideMissingPrepared: with prepare:, a trigger the working
+// database lacks (what a restore stopped while it made it again leaves)
+// is made again by the restore, which prepare does not undo: the run
+// stops, and keeps stopping, with the two ways on. Deleting the record
+// (the restore had stopped) goes on, as does a seed (the trigger was
+// dropped on purpose).
+func TestChangedOutsideMissingPrepared(t *testing.T) {
+	for _, way := range []string{"delete the record", "seed"} {
+		t.Run(way, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, srv := outsideApp(t, root)
+			app.exec(t, "CREATE TRIGGER notes_log AFTER INSERT ON notes BEGIN SELECT 1; END")
+			p := outsideProject(t, root, srv.URL, "SELECT 1")
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			app.exec(t, "DROP TRIGGER notes_log")
+			record := schemaRecordOf(t, p)
+			if !filepath.IsAbs(record) {
+				t.Fatalf("record path %s is not absolute", record)
+			}
+			for _, run := range []string{"first", "again"} {
+				_, err := Run(ctx, p, sqliteCatalog(), Options{Tag: run})
+				if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "the working database lacked db/trigger:notes_log before the restore, which made them again from the pristine copy. If an earlier run was stopped while it restored, delete "+record+" to go on; if they were dropped on purpose, add the migration that drops them to prepare:, or run driftgate seed") {
+					t.Fatalf("%s run: %v", run, err)
+				}
+			}
+			if way == "seed" {
+				app.exec(t, "DROP TRIGGER notes_log") // dropped on purpose
+				if err := Seed(ctx, p, SeedOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(record); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "on"}); err != nil {
+				t.Fatalf("capture after the record was deleted: %v", err)
+			}
+		})
+	}
+}
+
+// TestChangedOutsideSchemaCache: the schema the seed records spares the
+// read of the pristine copy only when the working schema equals it. A
+// cache that differs from the pristine copy, or one of another
+// SchemaFormat, never stops a run on its own: the pristine copy is read.
+// A record without it (an earlier release) reads the pristine copy too.
+func TestChangedOutsideSchemaCache(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		edit   func(record map[string]any)
+		change string
+		want   string // "": the capture runs
+	}{
+		{"stale cache, no change", func(r map[string]any) { r["schema"].(map[string]any)["table:users"] = "stale" }, "", ""},
+		{"another format, no change", func(r map[string]any) { r["schema_format"] = 99 }, "", ""},
+		{"stale cache, a migration", func(r map[string]any) { r["schema"].(map[string]any)["table:users"] = "stale" }, "ALTER TABLE users ADD COLUMN slug TEXT", "db/table:users (changed)"},
+		{"no cache, a migration", func(r map[string]any) { delete(r, "schema"); delete(r, "schema_format") }, "ALTER TABLE users ADD COLUMN slug TEXT", "db/table:users (changed)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app, srv := outsideApp(t, root)
+			p := outsideProject(t, root, srv.URL)
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			server, err := serverOf(p, p.State["db"], "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := pristinePath(p, "db", server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record map[string]any
+			raw, err := os.ReadFile(path)
+			if err != nil || json.Unmarshal(raw, &record) != nil || record["schema"] == nil || record["schema_format"] == nil {
+				t.Fatalf("record of the seed: %s %v", raw, err)
+			}
+			c.edit(record)
+			if err := snapshot.WriteJSON(path, record); err != nil {
+				t.Fatal(err)
+			}
+			if c.change != "" {
+				app.exec(t, c.change)
+			}
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "now"})
+			if c.want == "" && err != nil || c.want != "" && !changedOutside(err, c.want) {
+				t.Fatalf("capture: %v", err)
+			}
+		})
+	}
+}
+
+// TestWholeRestoreDrift: PostgreSQL restores the whole database, as its
+// pristine copy is now. A pristine copy changed behind its record, in an
+// item the restore did not find different, stops the run with the
+// restore's message, from the fingerprint the run reads anyway; with a
+// record of an older fingerprint format it is not compared.
+func TestWholeRestoreDrift(t *testing.T) {
+	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
+	}
+	for _, older := range []bool{false, true} {
+		t.Run(fmt.Sprintf("older format %v", older), func(t *testing.T) {
+			ctx := context.Background()
+			t.Setenv(config.EnvStore, t.TempDir())
+			t.Setenv("DG_DRIFT_DSN", dsn)
+			work, pristine := "dgt_drift", "dgt_drift_pristine"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"ok":true}`)) }))
+			t.Cleanup(srv.Close)
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+				Target: config.Target{BaseURL: srv.URL},
+				State:  map[string]config.Component{"db": {Driver: config.Postgres, DSN: config.Secret{Env: "DG_DRIFT_DSN"}, Working: work, Pristine: pristine}}}, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			admin, err := dbx.OpenPostgres(dsn, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drop := func() {
+				admin.Exec("DROP DATABASE IF EXISTS " + work + " WITH (FORCE)")
+				admin.Exec("DROP DATABASE IF EXISTS " + pristine + " WITH (FORCE)")
+			}
+			drop()
+			t.Cleanup(func() { drop(); admin.Close() })
+			exec := func(db string, stmts ...string) {
+				t.Helper()
+				c, err := dbx.OpenPostgres(dsn, db, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer c.Close()
+				for _, s := range stmts {
+					if _, err := c.Exec(s); err != nil {
+						t.Fatalf("%s: %v", s, err)
+					}
+				}
+			}
+			if _, err := admin.Exec("CREATE DATABASE " + work); err != nil {
+				t.Fatal(err)
+			}
+			exec(work, "CREATE TABLE a (id int PRIMARY KEY)", "CREATE TABLE b (id int PRIMARY KEY)", "INSERT INTO b VALUES (1)")
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if older {
+				server, err := serverOf(p, p.State["db"], dsn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path, err := pristinePath(p, "db", server)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var record map[string]any
+				if raw, err := os.ReadFile(path); err != nil || json.Unmarshal(raw, &record) != nil {
+					t.Fatalf("record: %v", err)
+				}
+				delete(record, "format")
+				if err := snapshot.WriteJSON(path, record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Another hand changes the pristine copy's b; the application
+			// writes a, which the restore finds different.
+			if _, err := admin.Exec("ALTER DATABASE " + pristine + " ALLOW_CONNECTIONS true"); err != nil {
+				t.Fatal(err)
+			}
+			exec(pristine, "INSERT INTO b VALUES (2)")
+			admin.Exec("ALTER DATABASE " + pristine + " ALLOW_CONNECTIONS false")
+			exec(work, "INSERT INTO a VALUES (1)")
+			cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}}}
+			_, err = Run(ctx, p, cat, Options{Tag: "now"})
+			if older {
+				if err != nil {
+					t.Fatalf("capture with a record of an older format: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnv) || !strings.Contains(err.Error(), "restore of db left 1 items different from the fingerprint driftgate seed recorded of the pristine copy: [table:public.b]") {
+				t.Fatalf("capture: %v", err)
+			}
+		})
 	}
 }

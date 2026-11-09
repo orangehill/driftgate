@@ -96,17 +96,17 @@ func expect(r schemaRecord, w, p state.Fingerprint) (rec schemaRecord, again, un
 }
 
 const (
-	schemaChanged   = "the schema of the working database changed since the pristine copy was made: %s; the restore would undo it, so nothing was restored. %s%s"
-	schemaUndone    = "the schema of the working database changed since the pristine copy was made: %s; nothing was restored. %s%s"
-	changedAgain    = "the schema of the working database changed again since an earlier run whose restore it outlived: %s; nothing was restored. %s%s"
-	notMadeAgain    = "the schema of the working database changed since the pristine copy was made: %s; the restore undid it, and prepare did not make it again, or made it otherwise (another migration may change it too): it comes from another branch, or was made by hand. %s%s"
-	fixPrepare      = "Fix: add the command that runs the migrations to prepare: in %s, so the capture makes the change again after the restore; or run driftgate seed to make the working database the new pristine copy"
-	fixSeed         = "Fix: run driftgate seed to make the working database the new pristine copy"
-	fixUndone       = "Fix: the working database no longer has it: to keep it, make it again (run the migration), then run driftgate seed"
-	fixCaptureFirst = "Fix: run a capture first; its prepare: makes the change again"
-	fixMissing      = "Fix: a restore that stopped may have left them missing; make them again in the working database as the pristine copy has them, then run again"
-	acceptUndo      = "; seeding now, or deleting %s, accepts that it was undone"
-	undoneEarlier   = "undone by an earlier run's restore"
+	schemaChanged    = "the schema of the working database changed since the pristine copy was made: %s; the restore would undo it, so nothing was restored. %s%s"
+	schemaUndone     = "the schema of the working database changed since the pristine copy was made: %s; nothing was restored. %s%s"
+	changedAgain     = "the schema of the working database changed again since an earlier run whose restore it outlived: %s; nothing was restored. %s%s"
+	notMadeAgain     = "the schema of the working database changed since the pristine copy was made: %s; the restore undid it, and prepare did not make it again, or made it otherwise (another migration may change it too): it comes from another branch, or was made by hand. %s%s"
+	fixPrepare       = "Fix: add the command that runs the migrations to prepare: in %s, so the capture makes the change again after the restore; or run driftgate seed to make the working database the new pristine copy"
+	fixSeed          = "Fix: run driftgate seed to make the working database the new pristine copy"
+	fixUndone        = "Fix: the working database no longer has it: to keep it, make it again (run the migration), then run driftgate seed"
+	fixMissing       = "Fix: a restore that stopped may have left them missing; make them again in the working database as the pristine copy has them, then run again"
+	acceptUndo       = "; seeding now, or deleting %s, accepts that it was undone"
+	missingMadeAgain = "the working database lacked %s before the restore, which made them again from the pristine copy. If an earlier run was stopped while it restored, delete %s to go on; if they were dropped on purpose, add the migration that drops them to prepare:, or run driftgate seed"
+	undoneEarlier    = "undone by an earlier run's restore"
 )
 
 // checkSchema compares the schema of every working database with its
@@ -135,13 +135,19 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 		if ok {
 			found = append(found, t.records[c.Name()])
 		}
-		p, err := s.SchemaFingerprint(ctx, true)
-		if err != nil {
-			return envErr("state %s: schema of the pristine copy: %v", c.Name(), err)
-		}
 		w, err := s.SchemaFingerprint(ctx, false)
 		if err != nil {
 			return envErr("state %s: schema: %v", c.Name(), err)
+		}
+		// The schema the seed recorded spares the read of the pristine
+		// copy when nothing is recorded and the working schema equals it;
+		// any difference is judged on the pristine copy as it is now.
+		if p := t.schemas[c.Name()]; !ok && w != nil && p != nil && len(state.Diff(w, p)) == 0 {
+			continue
+		}
+		p, err := s.SchemaFingerprint(ctx, true)
+		if err != nil {
+			return envErr("state %s: schema of the pristine copy: %v", c.Name(), err)
 		}
 		rec, changed, undone := expect(r, w, p)
 		for _, it := range changed {
@@ -199,7 +205,7 @@ func (t *tracker) checkSchema(ctx context.Context) error {
 	case t.missingOnly:
 		fix = fixMissing
 	case t.run == runMigrateState && t.prepare:
-		fix = fixCaptureFirst
+		fix = fixSeed
 	}
 	msg := schemaUndone
 	if fresh {
@@ -238,12 +244,11 @@ func (t *tracker) checkPrepared(ctx context.Context) error {
 			items = append(items, c.Name()+"/"+it)
 		}
 	}
-	if len(items) > 0 {
-		fix := fixUndone
-		if t.missingOnly {
-			fix = fixMissing
-		}
-		return envErr(notMadeAgain, strings.Join(limit(items, 30), ", "), fix, fmt.Sprintf(acceptUndo, strings.Join(found, ", ")))
+	switch {
+	case len(items) > 0 && t.missingOnly:
+		return envErr(missingMadeAgain, strings.Join(limit(items, 30), ", "), strings.Join(found, ", "))
+	case len(items) > 0:
+		return envErr(notMadeAgain, strings.Join(limit(items, 30), ", "), fixUndone, fmt.Sprintf(acceptUndo, strings.Join(found, ", ")))
 	}
 	for _, path := range found {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

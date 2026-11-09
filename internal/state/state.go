@@ -207,6 +207,10 @@ type Schemer interface {
 	SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
 }
 
+// SchemaFormat numbers the way SchemaFingerprint hashes: a schema recorded
+// in another format is read anew.
+const SchemaFormat = 1
+
 // SessionEnder is a Component whose Restore may end the application's own
 // sessions with the database (SQL Server's restore of the whole database
 // takes it offline): the application's pooled connections then fail once

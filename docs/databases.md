@@ -21,6 +21,7 @@ capture. This page covers the four built-in drivers. The keys are in
 - A capture checks the restored data against the pristine fingerprint. Different data stops it with exit 3.
 - Before its first restore, a run compares the working schema with the pristine copy's. A migration run since the seed stops it with exit 3. With `prepare:` it goes on when `prepare` makes the change again. Rows and counters never count.
 - The schema check does not cover data-only migrations, command components, MySQL routines and events, or an index on an excluded SQL Server table. On PostgreSQL it does not cover default privileges, publications, event triggers, large objects, database settings, statistics or comments on materialized views.
+- PostgreSQL restores the whole database: a capture and `verify --migrate-state` also compare the restored database with the seed's record, which a pristine copy changed since fails. The throughput probe does not.
 - Fingerprints are comparable only on the same server version. A server upgrade needs a new seed and baseline ([server upgrade](workflows.md#server-upgrade)).
 - `driftgate clean` removes the pristine copies seed made ([clean](commands.md#clean)).
 
