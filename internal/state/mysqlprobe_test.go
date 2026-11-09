@@ -404,10 +404,6 @@ func TestMySQLUndoSequences(t *testing.T) {
 			if !f.mariadb {
 				t.Skip("sequences are MariaDB's")
 			}
-			var wsrep int
-			if f.root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
-				t.Skip("a Galera node copies no cached sequence (1235)")
-			}
 			mustExec(t, f.rootWork, "CREATE SEQUENCE s START WITH 5 NOCACHE")
 			m := f.open(t, f.dsn, Options{})
 			if err := m.Seed(context.Background()); err != nil {

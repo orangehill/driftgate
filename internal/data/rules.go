@@ -126,10 +126,9 @@ type TableRule struct {
 type ColumnRule struct {
 	Kind     string            `yaml:"kind"`
 	Strategy string            `yaml:"strategy,omitempty"`
-	Paths    map[string]string `yaml:"paths,omitempty"`   // json: JSON path glob → strategy (or keep)
-	Other    string            `yaml:"other,omitempty"`   // json: strings under no path; default free-text
-	Action   string            `yaml:"action,omitempty"`  // serialized-php: empty-table (default) or null
-	Options  map[string]string `yaml:"options,omitempty"` // file: passed to the FilePlaceholder
+	Paths    map[string]string `yaml:"paths,omitempty"`  // json: JSON path glob → strategy (or keep)
+	Other    string            `yaml:"other,omitempty"`  // json: strings under no path; default free-text
+	Action   string            `yaml:"action,omitempty"` // serialized-php: empty-table (default) or null
 	Reason   string            `yaml:"reason,omitempty"`
 	Proposed bool              `yaml:"proposed,omitempty"` // written by data classify; a person removes it
 }
@@ -235,7 +234,7 @@ func strictDecode(n *yaml.Node, v any) error {
 
 // short is the one-word form of a rule, or "" when it needs a mapping.
 func (c *ColumnRule) short() string {
-	if c.Paths != nil || c.Other != "" || c.Action != "" || c.Options != nil || c.Reason != "" || c.Proposed {
+	if c.Paths != nil || c.Other != "" || c.Action != "" || c.Reason != "" || c.Proposed {
 		return ""
 	}
 	if c.Kind == KindPersonal {
@@ -342,24 +341,21 @@ func (c *ColumnRule) validate() error {
 		if c.Strategy != "" || c.Paths != nil || c.Other != "" || c.Action != "" {
 			return fmt.Errorf("kind %s takes no strategy, paths, other or action", c.Kind)
 		}
-		if c.Options != nil {
-			return fmt.Errorf("kind %s takes no options", c.Kind)
-		}
 	case KindSerializedPHP:
 		switch c.Action {
 		case "", SerializedEmptyTable, SerializedNull:
 		default:
 			return fmt.Errorf("serialized-php action must be %s or %s", SerializedEmptyTable, SerializedNull)
 		}
-		if c.Strategy != "" || c.Paths != nil || c.Other != "" || c.Options != nil {
+		if c.Strategy != "" || c.Paths != nil || c.Other != "" {
 			return errors.New("kind serialized-php takes only action")
 		}
 	case KindPersonal:
 		if !knownStrategy(c.Strategy) {
 			return fmt.Errorf("unknown strategy %q (%s)", c.Strategy, strings.Join(strategies, ", "))
 		}
-		if c.Action != "" || c.Options != nil {
-			return errors.New("a personal column takes no action or options")
+		if c.Action != "" {
+			return errors.New("a personal column takes no action")
 		}
 		if c.Strategy != StrategyJSON && (c.Paths != nil || c.Other != "") {
 			return errors.New("paths and other are for strategy json")
@@ -564,7 +560,7 @@ func sameRule(child, parent *ColumnRule) bool {
 		return true
 	}
 	return child.Kind == parent.Kind && child.Strategy == parent.Strategy && child.Action == parent.Action &&
-		reflect.DeepEqual(child.Paths, parent.Paths) && child.Other == parent.Other && reflect.DeepEqual(child.Options, parent.Options)
+		reflect.DeepEqual(child.Paths, parent.Paths) && child.Other == parent.Other
 }
 
 func (c *ColumnRule) describe() string {

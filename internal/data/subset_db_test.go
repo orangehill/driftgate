@@ -96,7 +96,7 @@ func testSubset(t *testing.T, s *server) {
 	ps := people(testUsers())
 	s.create(t, src)
 	s.drop(dst, loaded)
-	s.exec(t, src, append(seedStatements(s.driver, ps, mariadb), subsetSeed(s.driver, ps)...)...)
+	s.exec(t, src, append(seedStatements(s.driver, ps, invoiceSequence(s, mariadb)), subsetSeed(s.driver, ps)...)...)
 
 	rulesText := testRules + subsetRules
 	if s.driver == Postgres {

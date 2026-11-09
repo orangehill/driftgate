@@ -607,8 +607,17 @@ func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items [
 }
 
 // fingerprintAs is fingerprint in a format: format 1 hashed views and
-// triggers without the collation they were made with.
-func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
+// triggers without the collation they were made with. A read the server
+// stops for a lock is read again in full (retryLocked).
+func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (f Fingerprint, err error) {
+	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
+		f, err = m.fingerprintOnce(ctx, c, db, items, format)
+		return err
+	})
+	return f, err
+}
+
+func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
 	objs, err := m.objects(ctx, c, db)
 	if err != nil {
 		return nil, err
@@ -727,7 +736,15 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
 // database, or of the pristine one (RestoreOnly). It leaves the last
 // fingerprint and its counters as they were.
-func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
+		f, err = m.restoreOnlyFingerprint(ctx, pristine)
+		return err
+	})
+	return f, err
+}
+
+func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -1116,6 +1133,18 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		}
 	}
 
+	// The sequences made below, in order: those src has. A Galera node
+	// refuses some of them; that is told before dst is changed.
+	var seqs []string
+	for _, q := range sequences {
+		if srcObjs.kind[q] == "sequence" {
+			seqs = append(seqs, q)
+		}
+	}
+	if err := m.galeraSequences(ctx, c, src, seqs); err != nil {
+		return nil, err
+	}
+
 	// The login is first tried on each DEFINER of what is made again
 	// (definerProbe), so a refusal leaves dst as it was.
 	var probes []probeItem
@@ -1178,13 +1207,6 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
-	}
-	// The sequences made below, in order: those src has.
-	var seqs []string
-	for _, q := range sequences {
-		if srcObjs.kind[q] == "sequence" {
-			seqs = append(seqs, q)
-		}
 	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
 	// What makes again what a failure leaves missing: a restore of the
@@ -1319,9 +1341,33 @@ func refusedText(kind, name, db, stmt, login string, me *mysql.MySQLError) error
 type mysqlHooks struct {
 	dropRefused func(kind, name string) bool
 	copyFails   func() error
+	lockStop    func(what string) error // before each try of retryLocked
+}
+
+// galeraSequences refuses, on a Galera node, to copy a sequence of src the
+// node would refuse to create (1235): one with a cache and an increment
+// other than 0, or one not stored by InnoDB. Copied without its cache or
+// with another engine, it would be another object, so it is named instead.
+func (m *MySQL) galeraSequences(ctx context.Context, c *sql.Conn, src string, seqs []string) error {
+	if len(seqs) == 0 {
+		return nil
+	}
+	if galera, err := dbx.GaleraNode(ctx, c); err != nil || !galera {
+		return err
+	}
+	refused, err := dbx.GaleraRefusedSequences(ctx, c, src, seqs)
+	if err != nil || len(refused) == 0 {
+		return err
+	}
+	return fmt.Errorf("state %s: the server is a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of %s cannot be copied: %s; %s, or add them to exclude", m.o.Name, src, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
 }
 
 // copySequence makes sequence q of dst as src has it, where it goes on.
+//
+// The ALTER that sets where it goes on states the increment and the cache
+// again, as they are: a Galera node checks an ALTER SEQUENCE against the
+// cache of the statement, not the sequence's, and refuses a bare RESTART
+// (1235, "CACHE without INCREMENT BY 0").
 func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	def, err := showCreate(ctx, c, "SEQUENCE", src, q)
 	if err != nil {
@@ -1330,12 +1376,24 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 	if _, err := c.ExecContext(ctx, def); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
 	}
-	var next int64
-	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value FROM "+qi(src)+"."+qi(q)).Scan(&next); err != nil {
+	var next, increment, cycles int64
+	var cache uint64
+	if err := c.QueryRowContext(ctx, "SELECT next_not_cached_value, increment, cache_size, cycle_count FROM "+qi(src)+"."+qi(q)).Scan(&next, &increment, &cache, &cycles); err != nil {
 		return err
 	}
-	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", qi(dst), qi(q), next)); err != nil {
+	caching := "NOCACHE"
+	if cache != 0 {
+		caching = fmt.Sprintf("CACHE %d", cache)
+	}
+	if _, err := c.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s.%s INCREMENT BY %d %s RESTART WITH %d", qi(dst), qi(q), increment, caching, next)); err != nil {
 		return fmt.Errorf("sequence %s: %w", q, err)
+	}
+	// RESTART counts no cycle; one that has cycled gets its count back
+	// (SETVAL's round), at the same next value.
+	if cycles != 0 {
+		if _, err := c.ExecContext(ctx, fmt.Sprintf("SELECT SETVAL(%s.%s, %d, 0, %d)", qi(dst), qi(q), next, cycles)); err != nil {
+			return fmt.Errorf("sequence %s: %w", q, err)
+		}
 	}
 	return nil
 }
@@ -1579,7 +1637,16 @@ func splitItems(items []string) (tables, views, sequences, triggers []string) {
 	return
 }
 
+// Restore makes the items of the working database as the pristine one has
+// them; with nil, every item that differs. A restore the server stops for
+// a lock runs again as a whole
+// (retryLocked): it copies the items from the pristine database whatever
+// the try before left.
 func (m *MySQL) Restore(ctx context.Context, items []string) error {
+	return m.retryLocked(ctx, "restore", func(ctx context.Context) error { return m.restore(ctx, items) })
+}
+
+func (m *MySQL) restore(ctx context.Context, items []string) error {
 	c, err := m.session(ctx)
 	if err != nil {
 		return err
@@ -1636,8 +1703,13 @@ func mysqlMarkNote(working string) string {
 // mark (pristineTable) is made first, so a seed that stops halfway leaves a
 // database the next seed may drop; DriftGate's record of the pristine
 // fingerprint is removed before a seed (capture.Seed), so such a database is
-// not taken for a pristine copy.
+// not taken for a pristine copy. A seed the server stops for a lock runs
+// again as a whole (retryLocked), as a second seed would.
 func (m *MySQL) Seed(ctx context.Context) error {
+	return m.retryLocked(ctx, "seed", m.seed)
+}
+
+func (m *MySQL) seed(ctx context.Context) error {
 	c, err := m.session(ctx)
 	if err != nil {
 		return err
@@ -1655,6 +1727,11 @@ func (m *MySQL) Seed(ctx context.Context) error {
 		return err
 	}
 	if err := m.checkPristine(ctx, c); err != nil {
+		return err
+	}
+	// A sequence a Galera node cannot copy is told before the old copy is
+	// dropped (copyObjects checks again).
+	if err := m.galeraSequences(ctx, c, m.o.Working, objs.sequences); err != nil {
 		return err
 	}
 	// The triggers and views are made again in the pristine copy: the
@@ -1791,7 +1868,15 @@ func (m *MySQL) checkPristine(ctx context.Context, c *sql.Conn) error {
 	return fmt.Errorf("state %s: database %s, named as the pristine copy, was not made by driftgate seed and holds %d objects, so it is not dropped; drop it yourself or name another pristine database", m.o.Name, db, objects)
 }
 
-func (m *MySQL) Rows(ctx context.Context, items []string) (Rows, error) {
+func (m *MySQL) Rows(ctx context.Context, items []string) (out Rows, err error) {
+	err = m.retryLocked(ctx, "read of rows", func(ctx context.Context) error {
+		out, err = m.rows(ctx, items)
+		return err
+	})
+	return out, err
+}
+
+func (m *MySQL) rows(ctx context.Context, items []string) (Rows, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -1874,10 +1959,18 @@ func readRows(ctx context.Context, c *sql.Conn, query string, pk []string) (map[
 }
 
 // Query runs a read-only query (see CheckQuery) on the pristine database.
-func (m *MySQL) Query(ctx context.Context, query string) ([]string, error) {
+func (m *MySQL) Query(ctx context.Context, query string) (out []string, err error) {
 	if err := CheckQuery(query); err != nil {
 		return nil, err
 	}
+	err = m.retryLocked(ctx, "query", func(ctx context.Context) error {
+		out, err = m.query(ctx, query)
+		return err
+	})
+	return out, err
+}
+
+func (m *MySQL) query(ctx context.Context, query string) ([]string, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err

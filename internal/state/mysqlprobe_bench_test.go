@@ -12,7 +12,8 @@ import (
 // DRIFTGATE_TEST_MYSQL: first, a restore by a new component, which probes
 // both DEFINERs; probed, the same restore once they are probed; lock, the
 // named lock taken and released (probeLock). Put a latency proxy in front
-// of the server to see the cost of the round trips.
+// of the server to see the cost of the round trips: tools/latencyproxy,
+// whose doc comment shows how.
 func BenchmarkMySQLProbe(b *testing.B) {
 	servers := os.Getenv("DRIFTGATE_TEST_MYSQL")
 	if servers == "" {

@@ -116,6 +116,13 @@ func TestRulesReject(t *testing.T) {
 			t.Errorf("accepted %q", bad)
 		}
 	}
+	// options is no key of a column rule, for any kind.
+	for _, kind := range []string{"keep", "file", "serialized-php", "personal, strategy: email"} {
+		bad := "version: 1\ntables:\n  t:\n    columns:\n      c: {kind: " + kind + ", options: {a: b}}\n"
+		if _, err := ParseRules([]byte(bad)); err == nil || !strings.Contains(err.Error(), `unknown key "options"`) {
+			t.Errorf("%s: %v", kind, err)
+		}
+	}
 }
 
 func TestMergeRulesKeepsConfirmedRules(t *testing.T) {
