@@ -46,12 +46,14 @@ response. Then run `driftgate generate --write`
 
 <!-- check: config-fragment -->
 ```yaml
-templates: [ok, not-found, json, json-errors, anonymous]
+templates: [ok, not-found, json, empty-body, json-errors, anonymous]
 ```
 
 Each template makes one more request per route method. `json` sends
 `Accept: application/json`; the same error can look different without it.
-`anonymous` sends a route that needs a login without one. Add the variants
+`empty-body` sends an empty body, so a changed validation message drifts;
+`coverage` lists the routes no such request checks. `anonymous` sends a
+route that needs a login without one. Add the variants
 your clients use, then run `driftgate generate --write`
 ([templates](../../reference/driftgate-yaml.md#templates)).
 

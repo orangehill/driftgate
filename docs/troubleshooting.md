@@ -127,9 +127,12 @@ SQL Server writes new `rowversion` values on every write. Add the allowlist rule
 A `prepare` command writes data before every capture ([what belongs in prepare](reference/driftgate-yaml.md#what-belongs-in-prepare)).
 
 ### An allowlist rule is listed as unused
-The value it names was renamed, removed, or did not change this time ([find rules that cannot apply](guides/review/changing-values.md#find-rules-that-cannot-apply)).
+The value it names was renamed, removed, or did not change this time, like a render time that is often the same ([find rules that cannot apply](guides/review/changing-values.md#find-rules-that-cannot-apply)).
 
 ## A green result that misses something
+
+### A validation message changed, but the run passed
+No request sends an invalid body to that route, so its validation errors are not compared. `coverage` and `run` list such routes. Add `empty-body` to `templates:` (and `json-errors` for Laravel, Symfony, Rails and Spring Boot), run `driftgate generate --write`, and add the new requests to the baseline ([validation errors](reference/upgrading-driftgate.md#validation-errors-in-a-project-made-before-empty-body)).
 
 ### Requests the frontend sends are not checked
 They are not in the catalog. Record them ([record](guides/catalog/record.md)).
@@ -139,6 +142,9 @@ The catalog has no request or command step for them ([what a pass does not check
 
 ### A request that needs a cookie session answers 401
 DriftGate keeps no cookies between requests. Give the identity a token ([sessions with cookies](guides/catalog/logins.md#sessions-with-cookies)).
+
+### Every web POST answers 419
+DriftGate keeps no session, so it sends no CSRF token. Exempt those routes, or compare only the 419 ([Laravel](guides/frameworks/laravel.md#web-forms-answer-419)).
 
 ## Slow or stuck
 
@@ -154,10 +160,22 @@ The application held a lock for longer than DriftGate waits, 10 seconds ([locks]
 ### A command waits for another process
 Another command holds the lock on the local store. Wait for it, or stop it; Ctrl-C stops the wait ([when a command waits](reference/cli.md#when-a-command-waits-for-another-one)).
 
+### "… stayed in the middle of a restore, offline, single-user or in transition"
+SQL Server 2019 and earlier stopped the command for another database of the server, and it tried again for a minute. Bring that database online, give it `MULTI_USER` back, complete its restore, or drop it ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
+
 ### Errors 927 or 952 on SQL Server
 On SQL Server 2019 and earlier, another database of the server was being restored, created or renamed at that moment ([errors 927 and 952](reference/databases/sql-server.md#errors-927-and-952)).
 
 ## Databases
+
+### "… Galera cluster node, which creates no sequence with a cache …"
+A Galera node cannot create these MariaDB sequences, so a seed or a restore stops before it changes anything. So do `data anonymize` and `subset` when their target is on such a node ("target … is on a Galera cluster node"). For the state, make the sequences `NOCACHE` or `INCREMENT BY 0` and InnoDB, or exclude them. For the data module, change them so in the source, or write to a server without Galera ([MySQL and MariaDB](reference/databases/mysql-mariadb.md#how-seed-and-restore-work)).
+
+### "not a dump of driftgate data anonymize or subset for …"
+`data verify --dump` reads only a dump that `anonymize` or `subset` wrote, with its header line. Check that dump, or the target database ([data verify](reference/commands/data.md#driftgate-data-verify)).
+
+### "a statement runs into the next one …"
+A dump made by an earlier release hid a `;` behind a comment. Make the dump again with this release ([data verify](reference/commands/data.md#driftgate-data-verify)).
 
 ### seed fails: the user may not create a database
 Grant the rights setup prints ([what the database user needs](reference/state.md#what-the-database-user-needs)).

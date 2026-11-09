@@ -566,7 +566,8 @@ func sentences(para string) []string {
 }
 
 // TestBudgets (a warning unless DRIFTGATE_DOCS_STRICT=1): every page within
-// its line budget (testdata/budgets.txt: path and the most lines).
+// its line budget (testdata/budgets.txt: path and the most lines), and all
+// pages together within TOTAL.
 func TestBudgets(t *testing.T) {
 	root, err := Root()
 	if err != nil {
@@ -584,6 +585,14 @@ func TestBudgets(t *testing.T) {
 		budget, err := strconv.Atoi(f[len(f)-1])
 		if len(f) != 2 || err != nil {
 			t.Fatalf("budgets.txt: %q is not <path> <lines>", line)
+		}
+		if f[0] == "TOTAL" {
+			n := totalLines(t, root)
+			t.Logf("docs: %d lines, without the index pages (budget %d)", n, budget)
+			if n > budget {
+				warn(t, "docs: %d lines in all, without the index pages (budget %d)", n, budget)
+			}
+			continue
 		}
 		page, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f[0])))
 		if os.IsNotExist(err) {
@@ -707,4 +716,27 @@ func TestGlossaryWords(t *testing.T) {
 	if got := proseFindings(probe, banned); len(got) != 2 {
 		t.Errorf("the probe gives %v, want mutating and snapshot", got)
 	}
+}
+
+// totalLines counts the lines of every page of the documentation (docs/
+// and README.md), without the index pages, which only keep old headings.
+func totalLines(t *testing.T, root string) int {
+	t.Helper()
+	index := indexPages(t)
+	files, err := Files(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range files {
+		if (!strings.HasPrefix(f, "docs/") && f != "README.md") || index[f] {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += strings.Count(string(b), "\n")
+	}
+	return n
 }
