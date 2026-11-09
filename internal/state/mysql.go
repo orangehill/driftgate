@@ -1238,7 +1238,10 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			}
 		}
 		s.ExecContext(bg, "SET SESSION lock_wait_timeout = 30")
-		s.ExecContext(bg, "USE "+qi(dst))
+		if _, err := s.ExecContext(bg, "USE "+qi(dst)); err != nil {
+			discardConn(s)
+			return cancel
+		}
 		ctx, c = bg, s
 		return func() { discardConn(s); cancel() }
 	}
@@ -1303,7 +1306,10 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost != nil {
 				return nil, lost
 			}
-			defer onBackground()()
+			// On a pristine copy too: a seed cancelled after its drops
+			// makes the objects again all the same.
+			done := onBackground()
+			defer done()
 			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
@@ -1315,7 +1321,9 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if m.hooks != nil && m.hooks.copyFails != nil {
 		err = m.hooks.copyFails()
 	} else {
-		extra, err = m.copyTables(ctx, c, src, dst, jobs, &ids)
+		var more []int64
+		extra, more, err = m.copyTables(ctx, c, src, dst, jobs)
+		ids = append(ids, more...)
 	}
 	if err == nil {
 		err = makeObjects()
@@ -1323,7 +1331,8 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err != nil && lost == nil && dst == m.o.Working {
 		// A failed or stopped restore makes them again: the working schema
 		// stays the pristine copy's.
-		defer onBackground()()
+		done := onBackground()
+		defer done()
 		makeObjects()
 	}
 	if err != nil {

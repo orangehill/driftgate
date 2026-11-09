@@ -352,6 +352,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	}
 	defer d.Close()
 	want := func(item string) bool { return items == nil || contains(items, item) }
+	keepExcluded := mode == fpSchema // excluded objects count by their definition
 	tables, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname")+` ORDER BY 1`)
 	if err != nil {
 		return nil, err
@@ -470,7 +471,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			if p.restoreOnlyQualified(t) {
 				return nil, p.o.bothErr(t)
 			}
-			if mode != fpSchema { // the schema mode has them by definition
+			if !keepExcluded {
 				continue
 			}
 		}
@@ -512,7 +513,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			rows.Close()
 			return nil, err
 		}
-		if (mode == fpSchema || !p.excludedQualified(v)) && want("view:"+v) {
+		if (keepExcluded || !p.excludedQualified(v)) && want("view:"+v) {
 			if defs[v] != nil {
 				def += "\x00" + defs[v].String()
 			}
@@ -546,6 +547,7 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 // excluded sequences too.
 func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, format int, mode fpMode) error {
 	value, params, own := "coalesce(last_value::text, 'not called') || ", "''", "NULL"
+	keepExcluded := mode == fpSchema
 	if format >= 2 {
 		params = `CASE WHEN start_value = 1 AND min_value = 1 AND increment_by = 1 AND NOT cycle AND cache_size = 1 AND
 		                 max_value = CASE data_type WHEN 'smallint'::regtype THEN 32767 WHEN 'integer'::regtype THEN 2147483647 ELSE 9223372036854775807 END
@@ -570,7 +572,7 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 			rows.Close()
 			return err
 		}
-		if mode != fpSchema && p.excludedQualified(s) || !want("sequence:"+s) {
+		if (!keepExcluded && p.excludedQualified(s)) || !want("sequence:"+s) {
 			continue
 		}
 		f["sequence:"+s] = v // hashed below, with the value of unused
@@ -621,6 +623,11 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 // by its definition with its indexes and options (rels, by relation), not
 // its rows or whether it is populated.
 func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, mode fpMode, rels map[string]*strings.Builder) error {
+	keepExcluded := mode == fpSchema
+	matview := "definition || ' ' || ispopulated::text"
+	if !mode.rows() {
+		matview = "definition"
+	}
 	queries := []string{
 		`SELECT 'function:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')', pg_get_functiondef(f.oid)
 		   FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
@@ -641,7 +648,7 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		  WHERE ` + schemaFilter("n.nspname") + ` AND ` + dbx.PostgresNotExtension("t.oid", "pg_type") + ` GROUP BY 1`,
 		`SELECT 'schema:' || n.nspname, '' FROM pg_namespace n
 		  WHERE n.nspname <> 'public' AND ` + schemaFilter("n.nspname") + ` AND ` + dbx.PostgresNotExtension("n.oid", "pg_namespace"),
-		`SELECT 'matview:' || schemaname || '.' || matviewname, definition || ' ' || ispopulated::text FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
+		`SELECT 'matview:' || schemaname || '.' || matviewname, ` + matview + ` FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
 	}
 	if mode == fpSchema {
 		queries = append(queries, `SELECT 'extension:' || extname, extversion FROM pg_extension`,
@@ -666,7 +673,7 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 				continue
 			}
 			kind, name, _ := strings.Cut(item, ":")
-			if kind == "matview" && mode != fpSchema && p.excludedQualified(name) {
+			if kind == "matview" && !keepExcluded && p.excludedQualified(name) {
 				continue
 			}
 			defs[item] = def
@@ -680,7 +687,6 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		kind, name, _ := strings.Cut(item, ":")
 		sum := ""
 		if kind == "matview" && !mode.rows() {
-			def = def[:strings.LastIndexByte(def, ' ')] // not ispopulated
 			if rels[name] != nil {
 				sum = rels[name].String()
 			}

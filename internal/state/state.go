@@ -67,9 +67,10 @@ func (m fpMode) takes(ro bool) bool { return m == fpSchema || ro == (m == fpRest
 func (m fpMode) rows() bool { return m != fpSchema }
 
 // MissingAfterStop reports whether an item the working database lacks may
-// be what a restore that stopped left: MySQL/MariaDB drop the triggers of
-// the tables they copy, and a sequence they restore, and make them again
-// after the copy (copyObjects).
+// be what a restore that stopped left. It is a heuristic, the same for
+// every driver: MySQL/MariaDB drop the triggers of the tables they copy,
+// and a sequence they restore, and make them again after the copy
+// (copyObjects); on the others such an item is missing for another reason.
 func MissingAfterStop(item string) bool {
 	return strings.HasPrefix(item, "trigger:") || strings.HasPrefix(item, "sequence:")
 }

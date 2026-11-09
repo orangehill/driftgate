@@ -300,7 +300,7 @@ func (s *SQLServer) readOnce(ctx context.Context, pristine bool, mode fpMode) (F
 		if err != nil {
 			return nil, err
 		}
-		if !mode.rows() {
+		if mode == fpSchema {
 			if ok, err := s.schemaReadable(ctx, d); !ok || err != nil {
 				return nil, err
 			}
