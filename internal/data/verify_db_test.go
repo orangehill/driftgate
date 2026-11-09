@@ -48,7 +48,7 @@ func testVerify(t *testing.T, s *server) {
 	ps := people(testUsers())
 	s.create(t, src)
 	s.drop(dst)
-	s.exec(t, src, seedStatements(s.driver, ps, mariadb)...)
+	s.exec(t, src, seedStatements(s.driver, ps, invoiceSequence(s, mariadb))...)
 
 	// The settings keep $.public as it is.
 	rulesText := strings.Replace(testRules, `"$.phone": universal`, `"$.phone": universal

@@ -142,8 +142,8 @@ type Schema struct {
 // on the target after the rows.
 type sequence struct {
 	name string
-	read string                  // query for the value (one row)
-	set  func(v []string) string // statement that sets it
+	read string                    // query for the value (one row)
+	set  func(v []string) []string // statements that set it
 	uses []string
 }
 

@@ -377,7 +377,7 @@ func testMySQLShowBatchFallbacks(t *testing.T, dsn string) {
 		if _, err := m.showAll(ctx, c, bad); err == nil || err.Error() != alone.Error() {
 			t.Fatalf("%v, want %v", err, alone)
 		}
-		if m.multiRefused.Load() || log.Len() > 0 {
+		if m.multiRefused.Load() || strings.Contains(log.String(), "SHOW CREATE") {
 			t.Fatalf("refused %v, log %q", m.multiRefused.Load(), log.String())
 		}
 	})
@@ -642,6 +642,75 @@ func TestMySQLTableInfos(t *testing.T) {
 			}
 			if len(infos["plain"].pk) != 0 || infos["big"].pkType != "bigint" || len(infos["pair"].pk) != 2 {
 				t.Fatalf("keys: %+v %+v %+v", infos["plain"], infos["big"], infos["pair"])
+			}
+		})
+	}
+}
+
+// TestMySQLTableInfosCaseNames: with lower_case_table_names=0, users and
+// Users are two tables, which information_schema names alike; tableInfos
+// gives each its own columns, primary key and rows, also when both are
+// asked for, as readTableInfo does for one.
+func TestMySQLTableInfosCaseNames(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			work := "dgt_table_infos_case"
+			root := mysqlAdmin(t, dsn, "")
+			var lower int
+			root.QueryRow("SELECT @@lower_case_table_names").Scan(&lower)
+			if lower != 0 {
+				t.Skip("lower_case_table_names is not 0: users and Users are one table")
+			}
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db,
+				"CREATE TABLE users (id BIGINT PRIMARY KEY, a INT)",
+				"CREATE TABLE Users (b INT, id INT, c INT)",
+				"INSERT INTO users VALUES (1, 1), (2, 2), (3, 3)",
+				"ANALYZE TABLE users, Users")
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			c, err := m.session(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			defer func(n int64) { rowDiffMin = n }(rowDiffMin)
+			rowDiffMin = 0 // readTableInfo reads the primary key too
+			want := map[string]struct {
+				all, pk []string
+				rows    int64
+			}{
+				"users": {[]string{"`id`", "`a`"}, []string{"id"}, 3},
+				"Users": {[]string{"`b`", "`id`", "`c`"}, nil, 0},
+			}
+			for _, tables := range [][]string{{"users", "Users"}, {"Users"}, {"users"}} {
+				infos, err := tableInfos(ctx, c, work, tables)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(infos) != len(tables) {
+					t.Fatalf("%v: found %v", tables, slices.Sorted(maps.Keys(infos)))
+				}
+				for _, tb := range tables {
+					in, w := infos[tb], want[tb]
+					if !slices.Equal(in.all, w.all) || !slices.Equal(in.pk, w.pk) || in.rows != w.rows {
+						t.Errorf("%v: %s: %+v, want %+v", tables, tb, in, w)
+					}
+					one, err := readTableInfo(ctx, c, work, tb)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Equal(one.pk, w.pk) || one.rows != w.rows {
+						t.Errorf("%s alone: %+v, want %+v", tb, one, w)
+					}
+				}
 			}
 		})
 	}

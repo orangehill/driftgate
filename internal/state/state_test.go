@@ -396,6 +396,18 @@ func TestRestoreSpeed(t *testing.T) {
 	}
 }
 
+// galeraSequence returns what a CREATE SEQUENCE needs on a Galera node to
+// keep MariaDB's default cache: an increment of 0 (auto_increment_increment),
+// as Galera creates no cached sequence with another one (1235).
+func galeraSequence(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var wsrep int
+	if db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+		return " INCREMENT BY 0"
+	}
+	return ""
+}
+
 // TestMySQLEdgeCases covers what a review found: columns with default
 // expressions, triggers during a restore, their SQL mode and firing order,
 // views on excluded tables, an object that changes kind, a dot in a table
@@ -436,7 +448,7 @@ func testMySQLEdgeCases(t *testing.T, dsn string) {
 		"INSERT INTO t (n) VALUES (1), (2)",
 	)
 	if mariadb {
-		mustExec(t, db, "CREATE SEQUENCE seq1")
+		mustExec(t, db, "CREATE SEQUENCE seq1"+galeraSequence(t, db))
 	}
 	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine, Exclude: []string{"excl*"}})
 	if err != nil {
@@ -1055,7 +1067,7 @@ func testMySQLWriteCheck(t *testing.T, dsn string, noTables bool) {
 			sql   string
 			read  []string
 			alone bool
-		}{"CREATE SEQUENCE s", nil, false}, struct {
+		}{"CREATE SEQUENCE s" + galeraSequence(t, db), nil, false}, struct {
 			sql   string
 			read  []string
 			alone bool
@@ -1431,5 +1443,176 @@ func TestRunErrorHidesSecrets(t *testing.T) {
 	err := Run(context.Background(), t.TempDir(), []string{"sh", "-c", "exit 3", "PGPASSWORD=S3cret", "-pS3cret"}, nil, nil)
 	if err == nil || strings.Contains(err.Error(), "S3cret") || !strings.Contains(err.Error(), "PGPASSWORD=***") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// TestMySQLGaleraSequences (MariaDB Galera): a sequence the node cannot
+// create (a cache with an increment other than 0, another engine than
+// InnoDB) is named before the pristine copy is dropped, not copied as
+// another object; a cached sequence with INCREMENT BY 0 and a NOCACHE one
+// are copied and restored as they were.
+func TestMySQLGaleraSequences(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			var wsrep int
+			if root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) != nil || wsrep == 0 {
+				t.Skip("not a Galera node")
+			}
+			work, pristine := "dgt_galseq", "dgt_galseq_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db, "CREATE SEQUENCE auto START WITH 5 INCREMENT BY 0 CACHE 10", "CREATE SEQUENCE plain START WITH 5 NOCACHE",
+				"CREATE TABLE t (id INT PRIMARY KEY)")
+			// Only a session without wsrep makes what the node refuses.
+			c, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []string{"SET SESSION wsrep_on = 0", "CREATE SEQUENCE cached CACHE 10", "CREATE SEQUENCE aria NOCACHE ENGINE=Aria", "SET SESSION wsrep_on = 1"} {
+				if _, err := c.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			c.Close()
+
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			err = m.Seed(ctx)
+			if err == nil || !strings.Contains(err.Error(), "cached (CACHE 10, INCREMENT BY 1)") || !strings.Contains(err.Error(), "aria (ENGINE=Aria)") ||
+				strings.Contains(err.Error(), "auto") || strings.Contains(err.Error(), "plain") {
+				t.Fatalf("seed: %v", err)
+			}
+			var n int
+			root.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", pristine).Scan(&n)
+			if n != 0 {
+				t.Fatal("a refused seed made the pristine copy")
+			}
+
+			mustExec(t, db, "DROP SEQUENCE cached", "DROP SEQUENCE aria")
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			fp0 := mustFingerprint(t, m)
+			mustExec(t, db, "SELECT NEXTVAL(auto)", "SELECT NEXTVAL(plain)", "SELECT NEXTVAL(plain)")
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if !contains(changed, "sequence:auto") || !contains(changed, "sequence:plain") {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			var next int64
+			db.QueryRow("SELECT NEXTVAL(plain)").Scan(&next)
+			if next != 5 {
+				t.Fatalf("plain goes on at %d, want 5", next)
+			}
+		})
+	}
+}
+
+// TestMySQLSequenceCycles (MariaDB, Galera too): a sequence that has cycled
+// is seeded and restored with its count of cycles (cycle_count), which the
+// fingerprint reads: the pristine copy equals the working database, and a
+// restore makes it as it was, going on at the same value.
+func TestMySQLSequenceCycles(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			var version string
+			root.QueryRow("SELECT VERSION()").Scan(&version)
+			if !strings.Contains(version, "MariaDB") {
+				t.Skip("sequences are MariaDB's")
+			}
+			work, pristine := "dgt_seqcycle", "dgt_seqcycle_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db,
+				"CREATE SEQUENCE up MINVALUE 1 MAXVALUE 3 NOCACHE CYCLE",
+				"CREATE SEQUENCE down START WITH -1 MINVALUE -3 MAXVALUE -1 INCREMENT BY -1 NOCACHE CYCLE",
+				"CREATE SEQUENCE cached MINVALUE 1 MAXVALUE 30 CACHE 5 CYCLE"+galeraSequence(t, db))
+			nextvals := func(seq string, n int) {
+				for i := 0; i < n; i++ {
+					mustExec(t, db, "SELECT NEXTVAL("+seq+")")
+				}
+			}
+			state := func(database, seq string) (next, cycles int64) {
+				t.Helper()
+				if err := root.QueryRow("SELECT next_not_cached_value, cycle_count FROM "+database+"."+seq).Scan(&next, &cycles); err != nil {
+					t.Fatal(err)
+				}
+				return next, cycles
+			}
+			nextvals("up", 8)      // two cycles, next 3
+			nextvals("down", 4)    // one cycle
+			nextvals("cached", 40) // one cycle at least
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for _, seq := range []string{"up", "down", "cached"} {
+				wn, wc := state(work, seq)
+				pn, pc := state(pristine, seq)
+				if wc == 0 || wn != pn || wc != pc {
+					t.Errorf("%s: working %d/%d, pristine %d/%d", seq, wn, wc, pn, pc)
+				}
+			}
+			c, err := m.session(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			fp0, err := m.fingerprint(ctx, c, work, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fpPristine, err := m.fingerprint(ctx, c, pristine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, fpPristine); len(d) > 0 {
+				t.Fatalf("pristine copy differs: %v", d)
+			}
+			wantNext := map[string]int64{}
+			for _, seq := range []string{"up", "down"} {
+				wantNext[seq], _ = state(work, seq)
+			}
+			nextvals("up", 3)
+			nextvals("down", 1)
+			nextvals("cached", 30)
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if len(changed) != 3 {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			for seq, want := range wantNext {
+				var got int64
+				db.QueryRow("SELECT NEXTVAL(" + seq + ")").Scan(&got)
+				if got != want {
+					t.Errorf("%s goes on at %d, want %d", seq, got, want)
+				}
+			}
+		})
 	}
 }

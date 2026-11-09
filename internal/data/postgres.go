@@ -164,8 +164,8 @@ func (d postgresDialect) schema(ctx context.Context, c *sql.Conn, db string) (*S
 		}
 		name := r[0]
 		s.sequences = append(s.sequences, sequence{name: name, read: "SELECT last_value::text, is_called::text FROM " + name,
-			set: func(v []string) string {
-				return fmt.Sprintf("SELECT pg_catalog.setval(%s, %s, %s)", quoteLiteral(name), v[0], v[1])
+			set: func(v []string) []string {
+				return []string{fmt.Sprintf("SELECT pg_catalog.setval(%s, %s, %s)", quoteLiteral(name), v[0], v[1])}
 			}})
 	}
 
@@ -351,8 +351,8 @@ func (d postgresDialect) schema(ctx context.Context, c *sql.Conn, db string) (*S
 		}
 		target := fmt.Sprintf("pg_catalog.pg_get_serial_sequence(%s, %s)", quoteLiteral(t.quoted), quoteLiteral(r[1]))
 		s.sequences = append(s.sequences, sequence{name: r[2], read: "SELECT last_value::text, is_called::text FROM " + r[2], uses: []string{t.Name},
-			set: func(v []string) string {
-				return fmt.Sprintf("SELECT pg_catalog.setval(%s, %s, %s)", target, v[0], v[1])
+			set: func(v []string) []string {
+				return []string{fmt.Sprintf("SELECT pg_catalog.setval(%s, %s, %s)", target, v[0], v[1])}
 			}})
 	}
 
