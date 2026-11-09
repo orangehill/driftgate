@@ -79,13 +79,13 @@ state:
     restore_empty: [cache, cache_locks]
 seed:
   - ["php", "artisan", "migrate:fresh", "--seed", "--force"]
+prepare:
+  - ["php", "artisan", "migrate", "--force"]   # setup writes it with state:
 guards:
-  - name: mail goes to the log
-    command: ["sh", "-c", "grep -q '^MAIL_MAILER=log' .env"]
+  - { name: mail goes to the log, command: ["sh", "-c", "grep -q '^MAIL_MAILER=log' .env"] }
 ```
 
-Every capture restores `working`, so it must be a database you can rewrite.
-
+- Every capture restores `working`, so it must be a database you can rewrite. `prepare:` then runs the migrations a step adds ([why](../../reference/capture.md#a-migration-run-outside-driftgate)).
 - `driftgate seed`, or the first `run`, runs the seed commands and keeps `shop_pristine`. To start from a dump: `["sh", "-c", "gunzip -c ~/Data/shop.sql.gz | mysql shop"]`, then `migrate --force`.
 - Exclude logs, sessions and queued jobs, and make the cache `restore_empty`; `setup` proposes them ([the framework's own tables](../../reference/state.md#the-frameworks-own-tables)). A large `failed_jobs` slows fingerprints: empty it in a seed command, or exclude it.
 - A Redis cache or session store is a component of its own: `redis: { restore: ["redis-cli", "FLUSHALL"] }`. A view counter in Redis that is not restored makes the second capture differ.

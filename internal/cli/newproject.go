@@ -446,11 +446,26 @@ func (dr *draft) configText() string {
 	} else if slices.Contains(d.kinds, "laravel") {
 		text = strings.Replace(text, mysqlSeed, seedExample(appconf.Database{}, true), 1)
 	}
+	if slices.Contains(d.kinds, "laravel") && (strings.Contains(text, "\nstate:\n") || strings.Contains(text, "\nstate: ")) {
+		// Laravel's migrate does nothing when no migration is pending, in
+		// a tenth of a second: on with state:, every capture runs the
+		// migrations a step adds after its restore, instead of stopping
+		// for them (capture: a migration run outside DriftGate). Without
+		// state: it would write to a database nothing restores.
+		text = strings.Replace(text, laravelPrepareOff, laravelPrepareOn, 1)
+	}
 	if d.block != "" {
 		text += "\n# Found: " + strings.Join(d.kinds, ", ") + "\n" + d.block
 	}
 	return text
 }
+
+// laravelPrepareOff is prepare: as the configuration has it commented out,
+// and laravelPrepareOn as init writes it for Laravel with state: on.
+const (
+	laravelPrepareOff = "# prepare:                                  # after every restore\n#   - [\"php\", \"artisan\", \"migrate\", \"--force\"]\n"
+	laravelPrepareOn  = "prepare:                                    # after every restore: the migrations the pristine copy lacks (none: nothing to do)\n  - [\"php\", \"artisan\", \"migrate\", \"--force\"]\n"
+)
 
 // baseURL is the address of the single target: the one chosen, else the
 // framework's default.

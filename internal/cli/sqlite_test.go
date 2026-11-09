@@ -323,3 +323,38 @@ func TestSetupSQLiteWorktreeFromPristine(t *testing.T) {
 		t.Fatalf("setup in the worktree's project without the file: %d\n%s\n%s", code, out, errOut)
 	}
 }
+
+// TestLaravelPrepareMigrate: for Laravel with state: on (setup), init
+// writes prepare: with the migrate command, so every capture runs the
+// migrations a step adds after its restore; with state: commented out
+// (init), prepare: stays commented out: it would write to a database
+// nothing restores. Another framework gets no prepare:.
+func TestLaravelPrepareMigrate(t *testing.T) {
+	const on = "\nprepare:                                    # after every restore: the migrations the pristine copy lacks (none: nothing to do)\n  - [\"php\", \"artisan\", \"migrate\", \"--force\"]\n"
+	laravel := map[string]string{"artisan": "", "composer.json": `{"require":{"laravel/framework":"^13.0"}}`, ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))}
+	root := setupDir(t, laravel)
+	if code, out, errOut := runCLI(t, "setup", "--yes"); code != ExitConfig || !strings.Contains(out, "state: db sqlite") {
+		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
+	}
+	cfg := filepath.Join(root, ".driftgate", "driftgate.yaml")
+	if raw := mustRead(t, cfg); !strings.Contains(raw, on) {
+		t.Errorf("setup, configuration:\n%s", raw)
+	}
+	if p, err := config.Load(cfg); err != nil || len(p.Prepare) != 1 || strings.Join(p.Prepare[0].Run, " ") != "php artisan migrate --force" {
+		t.Errorf("prepare: %+v %v", p, err)
+	}
+
+	root = setupDir(t, laravel)
+	if code, out, errOut := runCLI(t, "init"); code != ExitClean {
+		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
+	}
+	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); strings.Contains(raw, "\nprepare:") || !strings.Contains(raw, "\n# prepare:") {
+		t.Errorf("init, configuration:\n%s", raw)
+	}
+
+	root = setupDir(t, map[string]string{".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
+	runCLI(t, "setup", "--yes")
+	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); strings.Contains(raw, "\nprepare:") {
+		t.Errorf("another framework, configuration:\n%s", raw)
+	}
+}

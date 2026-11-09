@@ -44,6 +44,7 @@ compose files and the others under
 
 - `state: db` names the setting (`dsn: { dotenv: .env }`), never its value. `base_url` is the address found.
 - `state:` is written **commented out**: a `run` would otherwise create the pristine database unasked. `driftgate setup` turns it on after asking, or you uncomment it.
+- For Laravel, `prepare:` runs `php artisan migrate --force` after every restore when `state:` is written on, as `setup` writes it ([why](../capture.md#a-migration-run-outside-driftgate)). With `state:` commented out, `prepare:` is too.
 - With several settings, it takes the one `setup --yes` would, and lists the others above `state:`.
 - For every driver, it writes the tables the framework keeps its own state in (sessions, cache, jobs; Hangfire, Solid) as `exclude:` and `restore_empty:` ([the framework's own tables](../state.md#the-frameworks-own-tables)).
 
