@@ -217,7 +217,7 @@ A certificate file is a CA (go-mssqldb's `certificate`, Prisma's
 
 What each reads:
 
-- **ASP.NET, EF Core**: the connection string, as above, and the client from the `.csproj` ([the ASP.NET Core guide](../../guides/aspnet-core.md)).
+- **ASP.NET, EF Core**: the connection string, as above, and the client from the `.csproj` ([the ASP.NET Core guide](../../guides/frameworks/aspnet-core.md)).
 - **Laravel**: `DB_CONNECTION=sqlsrv`, `DB_HOST` (also `host\instance` or `host,port`), `DB_PORT` (default 1433), `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD`, with `DB_URL` (`sqlsrv://`) over them.
 - Laravel's `DB_ENCRYPT` and `DB_TRUST_SERVER_CERTIFICATE` count only when `config/database.php` passes them on; Laravel ships those lines commented out. Without a `config/database.php`, a value that weakens TLS is left out, with a note.
 - **Spring, Quarkus, Micronaut**: `jdbc:sqlserver://host:1433;databaseName=…;encrypt=…` (also `serverName`, `portNumber`, `instanceName`), with the user and password keys.
@@ -487,9 +487,26 @@ server is restored, created or renamed at that moment, even for a
 statement that names only its own database: another checkout's seed, or
 a restore elsewhere.
 
-- A seed, restore, fingerprint or read of rows that fails so about another database runs again, for up to a minute; the log says so once.
+The same happens with error 924 ("can only have one user at a time")
+when another database is set single-user, as a seed or a drop does, and
+with error 942 ("cannot be opened because it is offline") when another
+database is offline, as a restore of the whole database takes its working
+database.
+
+- A seed, restore, fingerprint, `clean`, `generate` query or read of rows that fails so about another database runs again; the log says so once.
+- It runs again for up to one minute, counted from the first such failure. After that it fails with the last error, which names the database. A database left in that state for good (restoring, offline or single-user) fails it every time: complete its restore, bring it online, give it `MULTI_USER` back, or drop it.
+- A restore also runs again when the error names its own working database that a stopped restore left offline or restoring, within the same minute.
 - Each stops in a state the next run completes.
 - The application's own queries can fail the same way on those versions.
+
+### Deadlocks
+
+On every SQL Server version, a seed, restore, fingerprint, `clean` or
+`generate` query that the server chooses as a deadlock victim (error
+1205) runs again, up to three times. A retry that already gave up
+inside another operation is not run again by it, so the total stays
+bounded. The server rolled its transaction back, and a restore is still checked against the pristine copy's
+fingerprint. One that keeps losing fails with error 1205.
 
 ### The application's login
 
@@ -549,4 +566,4 @@ TLS weaker than the application's.
 - For a certificate that names another host, set `hostNameInCertificate=<that name>`.
 
 ---
-**Related:** [State: restoring the data](../state.md) · [Database connection settings](../database-settings.md) · [ASP.NET Core guide](../../guides/aspnet-core.md) · [Security model](../../security.md)
+**Related:** [State: restoring the data](../state.md) · [Database connection settings](../database-settings.md) · [ASP.NET Core guide](../../guides/frameworks/aspnet-core.md) · [Security model](../../security.md)

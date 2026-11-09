@@ -104,7 +104,7 @@ What `mutates` does:
  "version": 1,
  "requests": [
   {"id": "post-api-auth-login", "method": "POST", "path": "/api/auth/login", "mutates": true, "storage": "private"},
-  {"id": "get-api-me", "method": "GET", "path": "/api/me", "storage": "private"}
+  {"id": "get-api-me", "method": "GET", "path": "/api/me", "identity": "admin", "storage": "private"}
  ],
  "sequences": [
   {"id": "login", "restore": "before", "requests": ["post-api-auth-login", "get-api-me"]}
@@ -116,6 +116,7 @@ Sequences run their requests in order, together.
 
 - `restore: "before"` restores the state before the sequence; `capture --restore each` does that for every sequence.
 - A request is in at most one sequence.
+- DriftGate keeps no cookies between requests: a later request signs in with its `identity`, not with the login's session ([logins](../guides/catalog/logins.md#sessions-with-cookies)).
 
 ## multipart
 
@@ -229,7 +230,7 @@ queue worker inside a sequence.
 - `dir` is the folder the step runs in, and `stdin` a file given as its standard input. Both are relative to the project folder, as for [seed and prepare](driftgate-yaml.md#commands-with-a-folder-or-standard-input).
 - A missing `dir` or `stdin` stops the capture before anything is sent.
 - When a step fails, the log shows the last lines it wrote to standard error, never its standard output. That is its body: private, or public but not yet scanned for personal data.
-- [Side checks](../guides/side-checks.md) has recipes for a schema dump, compiler and mail output.
+- [Side checks](../guides/catalog/side-checks.md) has recipes for a schema dump, compiler and mail output.
 
 A release before `dir` and `stdin` refuses a catalog that uses them, as
 an unknown field ([keys an earlier release refuses](upgrading-driftgate.md#keys-an-earlier-release-refuses)).

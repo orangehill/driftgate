@@ -78,18 +78,6 @@ func (f Fingerprint) Subset(items []string) Fingerprint {
 	return out
 }
 
-// Merge returns f with the hashes of g written over it.
-func (f Fingerprint) Merge(g Fingerprint) Fingerprint {
-	out := Fingerprint{}
-	for k, v := range f {
-		out[k] = v
-	}
-	for k, v := range g {
-		out[k] = v
-	}
-	return out
-}
-
 // RowChange is one row of a tracked table that a request inserted, deleted or
 // updated. Key is the primary key, written as column=value pairs.
 type RowChange struct {

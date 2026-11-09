@@ -49,6 +49,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
+- `data verify --dump` reads only a dump that starts with the header line `data anonymize` and `data subset` write (format 1 or 2, for the source's database type). Other files, such as a `mysqldump` or `pg_dump` output, are refused unless they carry that line. Dumps with CRLF line endings are read. A format 1 dump in which a comment at the end of a statement hid its `;` is refused with a message to make the dump again, instead of being read with the next statements' rows as text.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))
 - MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing. ([#22](https://github.com/orangehill/driftgate/pull/22))
 - Allowlist proposals are narrower: enum values as the words seen, digit widths kept, a stable UUID kept literal. ([#10](https://github.com/orangehill/driftgate/pull/10), [#15](https://github.com/orangehill/driftgate/pull/15))
@@ -60,6 +61,8 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `data anonymize` and `data subset` dumps: a statement whose last line ends in a comment (`--`, or `#` on MySQL), such as a trigger or routine definition, no longer hides the `;` after it, which made `mysql`/`psql` and `data verify` read it together with the next statements. Dumps now say `dump format 2`. `data verify` also reads MySQL `#` comments as comments: an apostrophe in one no longer opens a string.
+- `data verify` with a dump: an empty string at the start of an INSERT's rows, before any other quoted value, was read as NULL. An empty value holds nothing to check, so no finding was missed.
 - `classify.yaml`: `action: null` written without quotes on a `serialized-php` column now sets the column to NULL. It was read as no action, the default `empty-table`, and the copy lost all rows of the table. `action:` with nothing after it, or an empty string, is now refused; only a missing `action` means `empty-table`. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - `seed` records the fingerprint of the pristine copy itself (MySQL, MariaDB, PostgreSQL). A write during the seed no longer stops every later capture. ([#13](https://github.com/orangehill/driftgate/pull/13))
 - MySQL 8: tables with a collation that is not the charset's default restore correctly. ([#14](https://github.com/orangehill/driftgate/pull/14))
@@ -77,6 +80,12 @@ versioning. Read **Upgrading** before you update an existing project.
 - No fixed-id warning for an API version or a date in a path, such as `/api/2/users` or `/posts/2024/05/17`. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - `generate` no longer lists `json-errors` as skipped for a route without a parameter value when it still makes the JSON twins of the `not-found` or `invalid-param` requests. Configured without any error template, `json-errors` gets one note instead of making nothing silently. ([#25](https://github.com/orangehill/driftgate/pull/25))
 - SQL Server 2017 and 2019: `clean` no longer fails with error 927 or 952 when another database of the same server is being restored at that moment. It tries again for up to a minute, as seeds and restores do. ([#30](https://github.com/orangehill/driftgate/pull/30))
+- SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` that another database's restore stopped is now tried again also when its first try took longer than a minute, such as the seed of a large database. The minute counts from the first such stop.
+- SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` is also tried again when another database of the same server is being set single-user (error 924) or taken offline (error 942), as another checkout's seed, restore or `clean` does. Before, the command failed at once.
+- SQL Server 2017 and 2019: after a restore of the whole database stopped and left the working database offline or restoring (a killed capture), the next capture's restore no longer fails with error 942 or 927 about the working database while other databases of the server are being restored. It tries again, bounded by the same minute, and the restore completes.
+- SQL Server 2017 and 2019: a seed, restore, fingerprint or `clean` that another database's restore stopped no longer fails when its next try gets an error without a reason ("Request failed but didn't provide reason"). That try is waited out as the stop before it, within the same minute.
+- SQL Server 2017 and 2019: `generate`'s `params` query of the pristine copy is tried again, as seeds and restores are, when another database's restore stops it (927, 952). When a retry gives up after the minute, the error names the database that stayed restoring, offline or single-user and says how to end that.
+- SQL Server: a seed, restore, fingerprint, `clean` or `generate` query that the server chose as a deadlock victim (error 1205) runs again, up to three more times per retry (bounded in total when one operation runs inside another), instead of failing at once. A restore is still checked against the pristine copy's fingerprint after it.
 
 ### Security
 

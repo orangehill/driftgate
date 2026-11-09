@@ -266,7 +266,7 @@ targets:
 
 `target:` describes the application. With several services (an API, a
 frontend, microservices), use `targets:` instead, with one entry per
-service name ([several services](../guides/multi-service.md)).
+service name ([several services](../guides/frameworks/multi-service.md)).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -734,7 +734,7 @@ data:
 
 The data module ([`driftgate data …`](commands/data.md)) makes a copy of
 a database with personal values replaced
-([anonymized test data](../guides/test-data.md)).
+([anonymized test data](../guides/ci/test-data.md)).
 
 | Key | Meaning |
 |---|---|

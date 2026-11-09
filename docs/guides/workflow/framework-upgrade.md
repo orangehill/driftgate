@@ -13,7 +13,7 @@ driftgate setup        # configuration, key, pristine copy, routes, catalog, the
 ```
 
 Run it on the version in production, with data that stands for
-production: a dump, or an [anonymized copy](../test-data.md). Keep
+production: a dump, or an [anonymized copy](../ci/test-data.md). Keep
 `mode: freeze` while nothing is meant to change. To go step by step
 instead, see [set up step by step with init](../../start/your-project.md#set-up-step-by-step-with-init).
 
@@ -84,7 +84,7 @@ Locally, `driftgate run` before each pull request is the check. To let CI
 run it too:
 
 1. Move the baseline into git, and commit it ([share a baseline](share-baselines.md)).
-2. Run the [GitHub Action](../github-actions.md) on every pull request of the upgrade, with `--skip-private`.
+2. Run the [GitHub Action](../ci/github-actions.md) on every pull request of the upgrade, with `--skip-private`.
 
 The job needs no key, and never gets the project key
 ([keep secrets out of pull-request jobs](../../security.md#keep-secrets-out-of-pull-request-jobs)).
