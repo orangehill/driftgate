@@ -49,6 +49,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
+- `data verify --dump` reads only a dump that `data anonymize` or `data subset` wrote (format 1 or 2, for the source's database type), and refuses any other file, such as a `mysqldump` or `pg_dump` output, instead of reading it in part.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))
 - MySQL/MariaDB: state fingerprints and restores take far fewer round trips; over a link with 55 ms latency a full fingerprint takes 1.7 s instead of 10.6 s. Results are the same. The log says why the per-table counters are off and which grant is missing. ([#22](https://github.com/orangehill/driftgate/pull/22))
 - Allowlist proposals are narrower: enum values as the words seen, digit widths kept, a stable UUID kept literal. ([#10](https://github.com/orangehill/driftgate/pull/10), [#15](https://github.com/orangehill/driftgate/pull/15))
@@ -60,6 +61,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `data anonymize` and `data subset` dumps: a statement whose last line ends in a comment (`--`, or `#` on MySQL), such as a trigger or routine definition, no longer hides the `;` after it, which made `mysql`/`psql` and `data verify` read it together with the next statements. Dumps now say `dump format 2`. `data verify` also reads MySQL `#` comments as comments: an apostrophe in one no longer opens a string.
 - `data verify` with a dump: an empty string at the start of an INSERT's rows, before any other quoted value, was read as NULL. An empty value holds nothing to check, so no finding was missed.
 - `classify.yaml`: `action: null` written without quotes on a `serialized-php` column now sets the column to NULL. It was read as no action, the default `empty-table`, and the copy lost all rows of the table. `action:` with nothing after it, or an empty string, is now refused; only a missing `action` means `empty-table`. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - `seed` records the fingerprint of the pristine copy itself (MySQL, MariaDB, PostgreSQL). A write during the seed no longer stops every later capture. ([#13](https://github.com/orangehill/driftgate/pull/13))

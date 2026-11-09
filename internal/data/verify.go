@@ -1527,6 +1527,9 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 		heads[dl.insert(t, cols)] = &dumpTable{t: t, cols: cols, label: newRowLabel(t, cols)}
 	}
 	st := newStatements(r, schema.Driver)
+	if err := st.header(schema.Driver); err != nil {
+		return err
+	}
 	var last *dumpTable
 	for {
 		q, err := st.next()
@@ -1583,6 +1586,25 @@ func newStatements(r io.Reader, driver string) *statements {
 	return &statements{r: bufio.NewReaderSize(r, 1<<20), driver: driver, delim: ";"}
 }
 
+// header reads the first line of the dump, which must be the header
+// Anonymize writes: the tokenizer follows how mysql and psql split the
+// statements this module writes, and a dump of another tool (mysqldump,
+// pg_dump's COPY) would not have its rows read as rows.
+func (st *statements) header(driver string) error {
+	l, err := st.r.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return err
+	}
+	for format := 1; format <= DumpFormat; format++ {
+		for _, d := range []string{driver, st.driver, "mariadb"} {
+			if (d != "mariadb" || st.driver == MySQL) && l == dumpHeader(format, d) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("not a dump of driftgate data anonymize or subset for %s (the first line is %.80q)", driver, strings.TrimSuffix(l, "\n"))
+}
+
 func isIdentByte(c byte) bool {
 	return c == '_' || c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
@@ -1602,7 +1624,7 @@ func (st *statements) next() (string, error) {
 			st.r.ReadByte()
 			continue
 		}
-		if p, _ := st.r.Peek(2); string(p) == "--" {
+		if p, _ := st.r.Peek(2); string(p) == "--" || (st.driver == MySQL && len(p) > 0 && p[0] == '#') {
 			if _, err := st.r.ReadString('\n'); err != nil {
 				return "", err
 			}
@@ -1689,9 +1711,10 @@ func (st *statements) next() (string, error) {
 					continue
 				}
 			}
-		case c == '-' && n >= 2 && st.b[n-2] == '-':
-			// A comment to the end of the line (MySQL: "-- " with a space).
-			if p, _ := st.r.Peek(1); st.driver != MySQL || len(p) == 0 || p[0] == ' ' || p[0] == '\t' || p[0] == '\n' || p[0] == '\r' {
+		case c == '#' && st.driver == MySQL,
+			c == '-' && n >= 2 && st.b[n-2] == '-':
+			// A comment to the end of the line (MySQL: # or "-- " with a space).
+			if p, _ := st.r.Peek(1); c == '#' || st.driver != MySQL || len(p) == 0 || p[0] == ' ' || p[0] == '\t' || p[0] == '\n' || p[0] == '\r' {
 				l, err := st.r.ReadString('\n')
 				st.b = append(st.b, l...)
 				if err != nil && err != io.EOF {

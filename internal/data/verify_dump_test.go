@@ -106,6 +106,15 @@ func pgString(r *rand.Rand) string {
 	return "e'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
+// lineComment is a comment to the end of the line: "-- …", or MySQL's
+// "#…", with quotes and delimiters in it.
+func lineComment(r *rand.Rand, driver string) string {
+	if driver == MySQL && r.IntN(2) == 0 {
+		return "#" + without(r, "\n", "\r")
+	}
+	return "-- " + without(r, "\n", "\r")
+}
+
 // dollarBody is the text of a dollar quote with the given tag: pieces that
 // overlap the tag ($a$a$), contain part of it ($a $), or nest another
 // tag, but end the quote only at its closing tag (as PostgreSQL reads it:
@@ -136,8 +145,18 @@ func dollarBody(r *rand.Rand, tag string) string {
 }
 
 // randSchemaStmt is a statement other than an INSERT of rows, with strings,
-// quoted names, comments and (PostgreSQL) dollar quotes in it.
+// quoted names, comments and (PostgreSQL) dollar quotes in it. Some end in
+// a comment to the end of the line, which must not hide the delimiter.
 func randSchemaStmt(r *rand.Rand, driver string) Stmt {
+	st := schemaStmt(r, driver)
+	if r.IntN(4) == 0 {
+		// The reader trims a statement, as the writer's never ends in a space.
+		st.SQL = strings.TrimSpace(st.SQL + " " + lineComment(r, driver))
+	}
+	return st
+}
+
+func schemaStmt(r *rand.Rand, driver string) Stmt {
 	if driver == MySQL {
 		q := (mysqlDialect{}).quote
 		switch r.IntN(5) {
@@ -146,11 +165,11 @@ func randSchemaStmt(r *rand.Rand, driver string) Stmt {
 		case 1:
 			return Stmt{SQL: "CREATE TABLE " + q(randName(r)) + " (\n  `id` int NOT NULL COMMENT " + mysqlString(r) +
 				",\n  `v` text /* " + without(r, "*/") + " */ DEFAULT " + mysqlString(r) +
-				" -- " + without(r, "\n", "\r") + "\n) ENGINE=InnoDB"}
+				" " + lineComment(r, driver) + "\n) ENGINE=InnoDB"}
 		case 2:
 			return Stmt{SQL: "CREATE TRIGGER " + q(randName(r)) + " AFTER INSERT ON " + q(randName(r)) +
-				" FOR EACH ROW BEGIN\n  SET @a = " + mysqlString(r) + "; /* " + without(r, "*/") + " */\n  SET @b = " +
-				mysqlString(r) + ";\nEND", Compound: true}
+				" FOR EACH ROW BEGIN\n  # don't; it's " + without(r, "\n", "\r") + "\n  SET @a = " + mysqlString(r) + "; /* " + without(r, "*/") + " */\n  SET @b = " +
+				mysqlString(r) + "; " + lineComment(r, driver) + "\nEND", Compound: true}
 		case 3:
 			return Stmt{SQL: "CREATE VIEW " + q(randName(r)) + " AS select " + mysqlString(r) + " AS " + q(randName(r))}
 		}
@@ -245,7 +264,7 @@ func randValue(r *rand.Rand, c *Column) []byte {
 func writeDump(t testing.TB, driver string, items []any) []byte {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
-	fmt.Fprintf(w, "-- DriftGate anonymized data, dump format %d (%s)\n", DumpFormat, driver)
+	w.WriteString(dumpHeader(DumpFormat, driver))
 	fmt.Fprintf(w, "-- Pseudonymised: personal values replaced by rules in classify.yaml under a project key.\n\n")
 	out := newWriter(context.Background(), &dumpSink{w: w}, nil)
 	for _, it := range items {
@@ -310,6 +329,9 @@ func randDumpCase(t testing.TB, r *rand.Rand, driver string) *dumpCase {
 func readDump(r io.Reader, driver string, ncols func(i int, q string) int) (stmts []string, rows map[int][][][]byte, err error) {
 	rows = map[int][][][]byte{}
 	st := newStatements(r, driver)
+	if err := st.header(driver); err != nil {
+		return nil, rows, err
+	}
 	for {
 		q, err := st.next()
 		if err == io.EOF {
@@ -514,4 +536,43 @@ func FuzzStatements(f *testing.F) {
 			t.Fatalf("%v\ndump:\n%q", err, dc.dump)
 		}
 	})
+}
+
+// TestDumpHeader: data verify reads only a dump Anonymize wrote (this
+// format or an earlier one, for the same driver), since the tokenizer
+// follows how mysql and psql split the statements it writes. A dump of
+// another tool is refused, not read in part.
+func TestDumpHeader(t *testing.T) {
+	ok := []struct{ driver, dump string }{
+		{MySQL, dumpHeader(DumpFormat, MySQL)},
+		{MySQL, dumpHeader(1, MySQL)},
+		{MySQL, dumpHeader(DumpFormat, "mariadb")},
+		{"mariadb", dumpHeader(DumpFormat, MySQL)},
+		{Postgres, dumpHeader(1, Postgres) + "SET x = 1;\n"},
+	}
+	for _, c := range ok {
+		if err := newStatements(strings.NewReader(c.dump), c.driver).header(c.driver); err != nil {
+			t.Errorf("%s %q: %v", c.driver, c.dump, err)
+		}
+	}
+	refused := []struct{ driver, dump string }{
+		{MySQL, ""},
+		{MySQL, "-- MySQL dump 10.13  Distrib 8.0.36\nINSERT INTO `t` VALUES (1,'a');\n"},
+		{Postgres, "--\n-- PostgreSQL database dump\n--\nCOPY public.t (v) FROM stdin;\na\n\\.\n"},
+		{Postgres, dumpHeader(DumpFormat, MySQL)},
+		{MySQL, dumpHeader(DumpFormat+1, MySQL)},
+		{MySQL, "\n" + dumpHeader(DumpFormat, MySQL)},
+	}
+	for _, c := range refused {
+		if err := newStatements(strings.NewReader(c.dump), c.driver).header(c.driver); err == nil {
+			t.Errorf("%s %q: accepted", c.driver, c.dump)
+		}
+	}
+	// scanner.dump refuses it before reading a statement.
+	sc := (&leakIndex{}).scanner("dump")
+	defer sc.close()
+	err := sc.dump(strings.NewReader(refused[1].dump), &Schema{Driver: MySQL}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "not a dump of driftgate") {
+		t.Errorf("scanner.dump: %v", err)
+	}
 }
