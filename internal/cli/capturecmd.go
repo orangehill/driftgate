@@ -674,7 +674,8 @@ func valuesFormat(vals []string) string {
 // attribute takes cookieAttrFormat. A deleted cookie does not match a
 // group of set ones, nor a set one a group of deleted ones. A delete that
 // keeps a value, has no Max-Age and has an expiry in the past shares the
-// group of the set cookie, as before.
+// group of the set cookie, as before. Values that are not a cookie (no =)
+// get one format of their own.
 func cookieFormats(vals []string) []string {
 	type groupKey struct {
 		name, skeleton, expires string
@@ -688,12 +689,14 @@ func cookieFormats(vals []string) []string {
 		attrs  [][]string // the attributes, split at ;
 	}
 	var groups []*group
+	var other []string // values that are not a cookie
 	index := map[groupKey]*group{}
 	for _, v := range vals {
 		first, rest, _ := strings.Cut(v, ";")
 		cookie, value, ok := strings.Cut(first, "=")
 		if !ok {
-			return []string{valuesFormat(vals)} // not a cookie: as recorded
+			other = append(other, v)
+			continue
 		}
 		var attrs, skeleton []string
 		if strings.Contains(v, ";") {
@@ -760,6 +763,9 @@ func cookieFormats(vals []string) []string {
 			}
 		}
 		out = append(out, f)
+	}
+	if other != nil {
+		out = append(out, valuesFormat(other)) // not a cookie: as recorded
 	}
 	return out
 }

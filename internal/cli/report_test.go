@@ -297,6 +297,8 @@ func TestCookieFormats(t *testing.T) {
 			[]string{"s=abc; expires=Fri, 30-Oct-2026 10:00:01 GMT; Max-Age=7199; path=/"}, []string{"s=abc; expires=Fri, 30 Oct 2026 10:00:01 GMT; Max-Age=7199; path=/"}},
 		{"expiry in another form", []string{"s=abc; expires=2026-10-30; path=/", "s=xyz; expires=2026-10-30; path=/"}, 1,
 			nil, []string{"s=abc; expires=2026-10-31; path=/"}},
+		{"not a cookie", []string{"s=abc; path=/; httponly", "weird", "s=xyz; path=/; httponly", "weird"}, 2,
+			nil, []string{"s=deleted; path=/", "s=abc; path=/", "weirder"}},
 		{"flags", []string{"s=abc; path=/; secure; httponly; samesite=lax", "s=xyz; path=/; secure; httponly; samesite=lax"}, 1,
 			nil, []string{"s=abc; path=/; httponly; samesite=lax", "s=abc; path=/; secure; httponly; samesite=strict"}},
 	} {
