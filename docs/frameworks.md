@@ -71,8 +71,9 @@ Artisan::command('driftgate:tokens', function () {
 ```
 
 Sanctum writes `last_used_at` on every authenticated request. So
-`personal_access_tokens` is `restore_only`: restored before every
-capture, never fingerprinted or compared.
+`personal_access_tokens` is `restore_only`: restored at every restore,
+its writes never fingerprinted or compared. `init` and `setup` propose
+it when `composer.json` requires `laravel/sanctum`.
 
 The generated login sends sample values and fails: give it a real test user under
 `requests:` ([configuration](configuration.md#storage-observe-and-requests)).
