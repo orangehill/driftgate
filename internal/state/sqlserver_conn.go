@@ -694,6 +694,12 @@ func sqlServerNoReason(err error) bool {
 // up to 30 seconds: for the queries of tests and test applications on a
 // server where other databases are restored meanwhile, which SQL Server
 // 2019 and earlier let stop a statement of any database (retryOthers).
+// It takes only 927 and 952 of the errors ssInTransition takes, and no
+// 924 or 942: it has no check of the database the message names
+// (othersTransition), and a 924 (single user) or 942 (offline) about the
+// database the caller itself uses is that database's real state, which
+// trying again would only turn into a 30-second wait. A restore and a
+// transition end by themselves.
 func RetryInTransition(f func() error) error {
 	deadline := time.Now().Add(30 * time.Second)
 	wait := 20 * time.Millisecond
