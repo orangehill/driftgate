@@ -3,13 +3,9 @@ package data
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/orangehill/driftgate/internal/dbx"
 )
@@ -520,24 +516,10 @@ func (d postgresDialect) create(ctx context.Context, admin *sql.DB, src Database
 	return err
 }
 
-// publish renames the staging database, which needs it to have no
-// sessions: the run's own are closed, but their server processes may take
-// a moment to end, and others are ended.
+// publish gives the staging database the target's name. RENAME needs it
+// to have no other sessions: the run's own are closed, and the server
+// waits for their processes to end; others are ended where the role may
+// (dbx.PostgresAlone).
 func (d postgresDialect) publish(ctx context.Context, admin *sql.DB, staging, target Database) error {
-	var err error
-	for try := 0; try < 50; try++ {
-		if _, err = admin.ExecContext(ctx, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = $1 AND pid <> pg_catalog.pg_backend_pid()", staging.Name); err != nil {
-			return err
-		}
-		_, err = admin.ExecContext(ctx, "ALTER DATABASE "+d.quote(staging.Name)+" RENAME TO "+d.quote(target.Name))
-		if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return err
+	return dbx.PostgresAlone(ctx, admin, staging.Name, "ALTER DATABASE "+d.quote(staging.Name)+" RENAME TO "+d.quote(target.Name))
 }

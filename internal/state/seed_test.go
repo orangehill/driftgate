@@ -374,8 +374,8 @@ func TestPostgresSafeCopy(t *testing.T) {
 // database it copies or renames away. A role that is not a superuser may
 // not end a superuser's: when the session stays, it gets that error (42501)
 // after one wait of the server (5 s), not after five; when the session ends
-// within that wait, the copy succeeds. A cancel while a session is in the
-// way returns at once.
+// within that wait, the copy succeeds. dbx.PostgresAlone's own test covers
+// the tries, the filter and a cancel.
 func TestPostgresOtherSessions(t *testing.T) {
 	dsn := postgresServer(t)
 	ctx := context.Background()
@@ -439,12 +439,6 @@ func TestPostgresOtherSessions(t *testing.T) {
 		t.Run(db, func(t *testing.T) {
 			// A session that stays: the error that says why it stays.
 			_, release := hold(db, "SELECT pg_sleep(60)")
-			// pgTerminate's filter (no autovacuum workers) keeps it, also
-			// for a role that may not see the superuser's session.
-			var n int
-			if err := p.admin.QueryRow(strings.Replace(pgTerminate, "pg_catalog.pg_terminate_backend(pid)", "count(*)", 1), db).Scan(&n); err != nil || n != 1 {
-				t.Fatalf("sessions pgTerminate ends: %d, %v", n, err)
-			}
 			start := time.Now()
 			err := p.copyDatabase(ctx, pristine, work, nil, nil)
 			took := time.Since(start)
@@ -473,39 +467,6 @@ func TestPostgresOtherSessions(t *testing.T) {
 		})
 	}
 
-	// A cancel while a session is in the way (one that is not ended here)
-	// returns at once. alone is tested itself, as the copy and the rename
-	// share it, and what copyDatabase does after it (the drop of its copy,
-	// which may checkpoint) is not part of the wait.
-	defer func(q string) { pgTerminate = q }(pgTerminate)
-	pgTerminate = "SELECT $1::text"
-	_, release := hold(pristine, "SELECT pg_sleep(60)")
-	defer release()
-	create := "CREATE DATABASE " + qp(newName(work)) + " TEMPLATE " + qp(pristine)
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	at := make(chan time.Time, 1)
-	go func() {
-		// Cancel once the first attempt failed: in the wait before the
-		// next one.
-		for seen := false; cctx.Err() == nil; time.Sleep(5 * time.Millisecond) {
-			var n int
-			su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query = $1", create).Scan(&n)
-			if n > 0 {
-				seen = true
-			} else if seen {
-				at <- time.Now()
-				cancel()
-			}
-		}
-	}()
-	err = p.alone(cctx, pristine, create)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("copy cancelled: %v", err)
-	}
-	if took := time.Since(<-at); took > 150*time.Millisecond {
-		t.Fatalf("returned %v after the cancel", took)
-	}
 }
 
 func TestNewName(t *testing.T) {
