@@ -443,6 +443,11 @@ func (dr *draft) configText() string {
 		}
 		text = text[:start] + others.String() + stateBlock(*dr.db, dr.enable, dr.frameworkTables()) + "\n" + text[end:]
 		text = strings.Replace(text, mysqlSeed, seedExample(*dr.db, slices.Contains(d.kinds, "laravel")), 1)
+		if dr.enable && slices.Contains(d.kinds, "laravel") {
+			// A migration run since the seed is made again after every
+			// restore; without it a capture stops before the restore.
+			text = strings.Replace(text, "# prepare:                                  # after every restore\n#   - [", "prepare:                                    # after every restore\n  - [", 1)
+		}
 	} else if slices.Contains(d.kinds, "laravel") {
 		text = strings.Replace(text, mysqlSeed, seedExample(appconf.Database{}, true), 1)
 	}

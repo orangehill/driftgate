@@ -25,11 +25,14 @@ vary. Exit codes are under [exit codes](commands.md#exit-codes).
 | `the catalog has requests that change data (…), but no state with a restore command is configured` | No `state:` component can restore the data. | Configure [`state:`](configuration.md#state), or pass `--allow-mutating-without-restore`. |
 | `state … has no pristine copy yet; run driftgate seed` | The database was never seeded. | Run `driftgate seed`; `run` seeds by itself. |
 | `restore of … left … items different from the fingerprint driftgate seed recorded of the pristine copy` | The application wrote during the seed or the restore. | Stop queue workers and schedulers, then run `driftgate seed` again. |
+| `the schema of the working database changed since the pristine copy was made: …` | A migration ran since the seed; the restore would undo it. | Add the migrate command to `prepare:`, or run `driftgate seed` ([databases](databases.md#what-every-database-needs)). |
+| `… the restore undid it, and prepare did not make it again …` | The change comes from another branch or was made by hand. | Make it again, then seed; seeding now, or deleting the named record, accepts the undo. |
+| `… changed again since an earlier run whose restore it outlived …` | The schema changed again after a run stopped between its restore and its check. | Run `driftgate seed`, or delete the named record to accept the undo. |
 | `the state differs from the one the baseline was captured from (…)` | The pristine copy holds other data than the baseline's. | Seed the baseline's data, or make a new baseline. |
 | `guard "…" failed: …` | A guard's check did not pass, such as mail not going to a log. | Fix the setting it checks ([guards](configuration.md#seed-prepare-and-guards)). |
 | `read-only requests changed …; finding which …` | A `GET` or another read-only request writes data. | Mark it `mutates: true` under [`requests:`](configuration.md#storage-observe-and-requests), then `driftgate generate --write`. |
 | `warning: the state changed between the restore and the end of prepare: …` | A `prepare` command writes data before every capture. | Move it to `seed`. |
-| `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
+| `--read-only covers the requests only, not the project's commands: prepare: …` | `prepare:` may write to a server that must not change, and no `state:` restores it. | Leave `prepare:` out for a [live server](workflows.md#live-server). |
 | `… incomplete … (interrupted?); capture it again with --force` | The capture was interrupted. | Capture again with `--force`. |
 | `another driftgate is using the store …; waiting until it is done (Ctrl-C to stop)` | Another command holds the local store. | Wait for it, or stop it. |
 | `personal data or credentials found in … responses marked public; they were stored as private …` | The detector found personal data in a public body. | Mark the request private, or allow the value ([private bodies](security.md#private-bodies)). |

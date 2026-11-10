@@ -129,10 +129,11 @@ func tableInfos(ctx context.Context, c *sql.Conn, db string, tables []string) (m
 // copyTables runs the jobs on c and on extra connections of its own. It
 // returns the statement counters (Com_) the extra connections moved, which
 // the write check must count as DriftGate's own (see afterRestore), or nil
-// when they are not known.
-func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jobs []tableJob) (map[string]int64, error) {
+// when they are not known; and the CONNECTION_ID() of the extra
+// connections (not c's, connection 0, which the caller has).
+func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jobs []tableJob) (map[string]int64, []int64, error) {
 	if _, err := m.mariadb(ctx, c); err != nil { // before the connections read it
-		return nil, err
+		return nil, nil, err
 	}
 	// One read of what copying reads of each table; a table it does not
 	// find, or all of them when it fails, are read as before.
@@ -145,7 +146,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 			jobs[i].info = infos[jobs[i].t]
 		}
 	} else if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
 	groups := [][]tableJob{jobs}
 	if copyConns > 1 && len(jobs) > 1 {
@@ -154,11 +155,11 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 	if len(groups) <= 1 {
 		for _, j := range jobs {
 			if err := m.copyOne(ctx, c, src, dst, j); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			chaos.Point("state.copy")
 		}
-		return map[string]int64{}, nil
+		return map[string]int64{}, nil, nil
 	}
 	// Largest group first, each to the next free connection.
 	sizes, _ := tableSizes(ctx, c, src)
@@ -175,6 +176,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 	next := make(chan []tableJob)
 	errs := make([]error, conns)
 	moved := make([]map[string]int64, conns)
+	connIDs := make([]int64, conns)
 	var wg sync.WaitGroup
 	for k := range conns {
 		wg.Add(1)
@@ -200,6 +202,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 					errs[k] = err
 					return
 				}
+				conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connIDs[k])
 				before, _ = sessionWrites(ctx, conn)
 			}
 			for g := range next {
@@ -230,6 +233,7 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 	}
 	close(next)
 	wg.Wait()
+	ids := connIDs[1:]
 	// The first error that is not another connection giving up after it.
 	var first error
 	for _, err := range errs {
@@ -238,18 +242,18 @@ func (m *MySQL) copyTables(ctx context.Context, c *sql.Conn, src, dst string, jo
 		}
 	}
 	if first != nil {
-		return nil, first
+		return nil, ids, first
 	}
 	extra := map[string]int64{}
 	for k := 1; k < conns; k++ {
 		if moved[k] == nil {
-			return nil, nil
+			return nil, ids, nil
 		}
 		for n, v := range moved[k] {
 			extra[n] += v
 		}
 	}
-	return extra, nil
+	return extra, ids, nil
 }
 
 // fkGroups splits the jobs into groups of tables that foreign keys join, in

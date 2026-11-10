@@ -340,7 +340,7 @@ func TestMySQLUndoMessages(t *testing.T) {
 			m.hooks = nil
 			mustExec(t, f.rootWork, "RENAME TABLE items TO items_old")
 			err = m.Restore(context.Background(), []string{"view:v2"})
-			if err == nil || !strings.Contains(err.Error(), "Not made, so missing from "+f.work+" until the next successful restore: view v2") {
+			if err == nil || !strings.Contains(err.Error(), "Not made, so missing from "+f.work+" until they are made again from the pristine copy: view v2") {
 				t.Fatalf("restore: %v", err)
 			}
 		})
@@ -392,8 +392,7 @@ func TestMySQLProbeViewRefusedInRestore(t *testing.T) {
 
 // TestMySQLUndoSequences (MariaDB): a sequence dropped before a refused
 // drop is made again from the pristine copy; one the pristine copy lacks
-// is named as gone; a copy that fails after the drops names the sequences
-// not made.
+// is named as gone; a copy that fails after the drops makes them again.
 func TestMySQLUndoSequences(t *testing.T) {
 	for _, dsn := range mysqlServers(t) {
 		u, _ := url.Parse(dsn)
@@ -422,8 +421,15 @@ func TestMySQLUndoSequences(t *testing.T) {
 			}
 			m.hooks = &mysqlHooks{copyFails: func() error { return errors.New("copy failed") }}
 			err = m.Restore(context.Background(), []string{"sequence:s", "table:items"})
-			if err == nil || !strings.Contains(err.Error(), "copy failed. Not made, so missing from "+f.work+" until the next successful restore: sequence s, trigger t1") {
+			// A copy that fails after the drops makes them again (change A).
+			if err == nil || err.Error() != "copy failed" {
 				t.Fatalf("restore: %v", err)
+			}
+			if got := definerObjects(t, f.root, f.work); got != "trigger t1 root@%" {
+				t.Fatalf("after the failed copy: %s", got)
+			}
+			if err := f.rootWork.QueryRow("SELECT NEXTVAL(s)").Scan(&n); err != nil {
+				t.Fatalf("sequence s: %v", err)
 			}
 		})
 	}

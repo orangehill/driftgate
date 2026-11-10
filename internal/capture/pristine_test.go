@@ -128,7 +128,7 @@ func TestSeedKeepsAdoption(t *testing.T) {
 	if err := Seed(ctx, p, SeedOptions{}); err != nil {
 		t.Fatalf("seed over the adopted copy: %v", err)
 	}
-	pf, err := readPristine(p, "db", server)
+	pf, _, err := readPristine(p, "db", server)
 	if err != nil || pf.Format != state.FingerprintFormat || len(pf.Fingerprint) != 1 {
 		t.Fatalf("record after the seed: %+v %v", pf, err)
 	}

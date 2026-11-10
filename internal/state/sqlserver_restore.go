@@ -262,15 +262,28 @@ func (s *SQLServer) seededFingerprint(ctx context.Context) (Fingerprint, error) 
 // database, or of the pristine copy (RestoreOnly), read anew: the last
 // fingerprint and its signals stay as they were. A working database that
 // is not online has none of them, so the restore brings them all back.
-func (s *SQLServer) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+func (s *SQLServer) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return s.read(ctx, pristine, fpRestoreOnly)
+}
+
+// SchemaFingerprint hashes the definitions of the working database, or of
+// the pristine copy (Schemer): nil for a working database a restore of
+// the whole database left unusable (schemaReadable).
+func (s *SQLServer) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return s.read(ctx, pristine, fpSchema)
+}
+
+// read fingerprints the working database, or the pristine copy, as mode
+// reads it, retried as Fingerprint is (retryOthers).
+func (s *SQLServer) read(ctx context.Context, pristine bool, mode fpMode) (f Fingerprint, err error) {
 	err = s.retryOthers(ctx, func() error {
-		f, err = s.restoreOnlyFingerprint(ctx, pristine)
+		f, err = s.readOnce(ctx, pristine, mode)
 		return err
 	})
 	return f, err
 }
 
-func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+func (s *SQLServer) readOnce(ctx context.Context, pristine bool, mode fpMode) (Fingerprint, error) {
 	db := s.o.Working
 	var inv *ssInventory
 	if pristine {
@@ -287,7 +300,11 @@ func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (
 		if err != nil {
 			return nil, err
 		}
-		if d == nil || d.State != "ONLINE" {
+		if mode == fpSchema {
+			if ok, err := s.schemaReadable(ctx, d); !ok || err != nil {
+				return nil, err
+			}
+		} else if d == nil || d.State != "ONLINE" {
 			return Fingerprint{}, nil
 		}
 	}
@@ -296,11 +313,41 @@ func (s *SQLServer) restoreOnlyFingerprint(ctx context.Context, pristine bool) (
 		return nil, s.denied(err)
 	}
 	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, true)
+	if !mode.rows() { // the definitions, without where identities and sequences stand
+		if inv == nil {
+			if inv, err = s.inventory(ctx, c); err != nil {
+				return nil, err
+			}
+		}
+		f := Fingerprint{}
+		for item, def := range inv.base {
+			f[item] = hash([]byte(def))
+		}
+		return f, nil
+	}
+	fp, err := s.fingerprint(ctx, c, db, nil, inv, nil, nil, mode)
 	if err != nil {
 		return nil, err
 	}
 	return fp.f, nil
+}
+
+// schemaReadable reports whether the schema of the working database d can
+// be read. One a restore of the whole database that stopped left unusable
+// (its excluded rows saved, or RESTORING with nothing excluded) cannot;
+// one taken offline is brought online first (notOnline); any other state
+// is an error.
+func (s *SQLServer) schemaReadable(ctx context.Context, d *sqlServerDatabase) (bool, error) {
+	switch {
+	case d == nil:
+		return false, fmt.Errorf("state %s: working database %s does not exist", s.o.Name, s.o.Working)
+	case d.State == "ONLINE":
+		return true, nil
+	case d.State != "OFFLINE" && d.State != "RESTORING":
+		return false, fmt.Errorf("state %s: working database %s is %s", s.o.Name, s.o.Working, d.State)
+	}
+	whole, err := s.notOnline(ctx, d)
+	return !whole && err == nil, err
 }
 
 // PristineID names the pristine copy: the backup set GUID in its mark,
@@ -332,7 +379,7 @@ func (s *SQLServer) pristineFingerprint(ctx context.Context, mark *sqlServerMark
 		return nil, err
 	}
 	defer c.Close()
-	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil, false)
+	fp, err := s.fingerprint(ctx, c, s.o.Pristine, nil, inv, nil, nil, fpRows)
 	if err != nil {
 		return nil, err
 	}

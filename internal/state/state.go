@@ -49,6 +49,32 @@ type PristineFingerprinter interface {
 	PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error)
 }
 
+// fpMode is what a driver's fingerprint of a database reads.
+type fpMode int
+
+const (
+	fpRows        fpMode = iota // every item but the restore_only tables, with their rows
+	fpRestoreOnly               // the restore_only tables only, with their rows
+	fpSchema                    // every item Restore takes, by its definition only (Schemer)
+)
+
+// takes reports whether the mode reads a table that is restore_only (ro)
+// or one that is not.
+func (m fpMode) takes(ro bool) bool { return m == fpSchema || ro == (m == fpRestoreOnly) }
+
+// rows reports whether the mode reads rows and counters, not only
+// definitions.
+func (m fpMode) rows() bool { return m != fpSchema }
+
+// MissingAfterStop reports whether an item the working database lacks may
+// be what a restore that stopped left. It is a heuristic, the same for
+// every driver: MySQL/MariaDB drop the triggers of the tables they copy,
+// and a sequence they restore, and make them again after the copy
+// (copyObjects); on the others such an item is missing for another reason.
+func MissingAfterStop(item string) bool {
+	return strings.HasPrefix(item, "trigger:") || strings.HasPrefix(item, "sequence:")
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string
@@ -173,6 +199,18 @@ type RestoreOnly interface {
 	// takes. It reads them every time: no fingerprint keeps them.
 	RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
 }
+
+// Schemer hashes the definitions of the items Restore takes, without rows
+// or counters: the schema a restore brings back. A working database a
+// stopped restore left unreadable gives nil; the pristine copy never does.
+type Schemer interface {
+	SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
+}
+
+// SchemaFormat numbers the way SchemaFingerprint hashes: a schema recorded
+// in another format is read anew. Raise it when any driver's schema mode
+// hashes differently.
+const SchemaFormat = 1
 
 // SessionEnder is a Component whose Restore may end the application's own
 // sessions with the database (SQL Server's restore of the whole database
