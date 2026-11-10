@@ -1281,7 +1281,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			// makes the objects again all the same.
 			done := onBackground()
 			defer done()
-			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, dbx.MySQLLockCause(caller, err))
+			return nil, undoDrops(caller, dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
 	}
@@ -1307,8 +1307,8 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		makeObjects()
 	}
 	if err != nil {
-		// After a cancel the cause is the cancel, not the lock it stopped
-		// (dbx.MySQLLockCause), and the list is kept.
+		// Named once the objects were made again above: after a cancel the
+		// cause is the cancel, not the lock it stopped (dbx.MySQLLockCause).
 		return nil, notMade(dst, recovery, dbx.MySQLLockCause(caller, err), dbx.MySQLLockCause(caller, lost), seqs, trigDefs, pending)
 	}
 	return extra, nil
@@ -1444,8 +1444,9 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 // made again; what is missing until it is made again from the pristine copy
 // (its creation failed, or it is of another kind in the pristine copy);
 // and what is gone, which no restore makes again (the pristine copy has
-// nothing of that name).
-func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]string, srcTriggers, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
+// nothing of that name). refused is named with run, the run's context, once
+// that work is done (dbx.MySQLLockCause): a cancel during it counts too.
+func undoDrops(run context.Context, dst, recovery string, dropped []dropItem, srcKind map[string]string, srcTriggers, dstTriggers []dbx.MySQLTrigger, trigDefs []map[string]string, views map[string]viewDef,
 	create func(stmt, mode, collation string) error, makeSeq func(string) error, refused error) error {
 	var again, missing, gone []string
 	isDropped := map[string]bool{}
@@ -1559,7 +1560,7 @@ func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]stri
 	if len(gone) > 0 {
 		more += fmt.Sprintf(". Dropped from %s, as the pristine copy has nothing of that name, which no restore makes again: %s", dst, strings.Join(gone, ", "))
 	}
-	return fmt.Errorf("%w%s", refused, more)
+	return fmt.Errorf("%w%s", dbx.MySQLLockCause(run, refused), more)
 }
 
 // notMade adds to err, a failure after the drops, the sequences (seqs),

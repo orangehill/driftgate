@@ -106,6 +106,9 @@ func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string
 	}()
 	for name, kind := range stale {
 		if err := dropObject(ctx, c, db, name, kind); err != nil {
+			if ctx.Err() != nil {
+				return err // the cancel's doing: the next seed or restore drops it
+			}
 			return fmt.Errorf("a probe left behind, %s %s in %s, cannot be dropped: %w; drop it by hand", kind, name, db, err)
 		}
 	}

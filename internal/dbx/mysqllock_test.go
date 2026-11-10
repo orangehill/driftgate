@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,24 +28,32 @@ func TestMySQLLockStopped(t *testing.T) {
 	}
 }
 
-// TestMySQLLockCause: only a lock stop is replaced, and only once ctx
-// has ended.
+// TestMySQLLockCause: once ctx has ended, a bare lock error becomes ctx's
+// error, and a wrapped one keeps its text with ctx's error added (once);
+// any other error, and any error while ctx runs, stays as it is.
 func TestMySQLLockCause(t *testing.T) {
-	deadlock := fmt.Errorf("t: %w", &mysql.MySQLError{Number: 1213})
+	bare := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	wrapped := fmt.Errorf("%w. Dropped from db: view old", bare)
 	other := &mysql.MySQLError{Number: 1146}
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
+	if got := MySQLLockCause(ended, bare); got != context.Canceled {
+		t.Errorf("bare: %v", got)
+	}
+	got := MySQLLockCause(ended, wrapped)
+	if !errors.Is(got, context.Canceled) || !errors.Is(got, bare) ||
+		got.Error() != "Error 1213: Deadlock. Dropped from db: view old (interrupted: context canceled)" {
+		t.Errorf("wrapped: %v", got)
+	}
+	if again := MySQLLockCause(ended, got); again != got {
+		t.Errorf("wrapped twice: %v", again)
+	}
 	for _, c := range []struct {
-		ctx       context.Context
-		err, want error
-	}{
-		{ended, deadlock, context.Canceled},
-		{ended, other, other},
-		{ended, nil, nil},
-		{context.Background(), deadlock, deadlock},
-	} {
-		if got := MySQLLockCause(c.ctx, c.err); got != c.want {
-			t.Errorf("%v (ctx %v): %v, want %v", c.err, c.ctx.Err(), got, c.want)
+		ctx context.Context
+		err error
+	}{{ended, other}, {ended, nil}, {context.Background(), bare}, {context.Background(), wrapped}} {
+		if got := MySQLLockCause(c.ctx, c.err); got != c.err {
+			t.Errorf("%v (ctx %v): %v", c.err, c.ctx.Err(), got)
 		}
 	}
 }
@@ -54,7 +63,8 @@ func TestMySQLLockCause(t *testing.T) {
 // as long each time. A context that ends while a lock is in the way stops
 // the retries at once with its own error, not the lock error: when it ends
 // before the first try, during a try (also the last), before a wait or
-// during one; a try stopped after it ended is not noted.
+// during one; a try stopped after it ended is not noted. A lock error
+// wrapped with more to say keeps that text, with the cancel added.
 func TestRetryMySQLLock(t *testing.T) {
 	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
 	// run calls RetryMySQLLock with an f that is stopped every time, records
@@ -109,6 +119,17 @@ func TestRetryMySQLLock(t *testing.T) {
 	calls, err = run(ctx, time.Hour, nothing, cancel)
 	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"f", "note"}) {
 		t.Errorf("cancelled before the wait: %v after %v", err, calls)
+	}
+
+	// A lock error wrapped with what the step left undone keeps that text
+	// after a cancel, and still reports it.
+	ctx, cancel = context.WithCancel(context.Background())
+	err = RetryMySQLLock(ctx, time.Hour, func() error {
+		cancel()
+		return fmt.Errorf("%w. Dropped from db: view old", deadlock)
+	}, func(error) { t.Error("noted") })
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Dropped from db: view old") {
+		t.Errorf("cancelled, wrapped: %v", err)
 	}
 
 	// Cancelled during the last try: the cancel, not the lock error of a
