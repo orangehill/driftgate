@@ -585,6 +585,19 @@ func TestDriftPairCompactsCookies(t *testing.T) {
 	if b, c := DriftPair(laravel, shortMax); !strings.Contains(b, "laravel_session=…(320); path=/; httponly") || !strings.Contains(c, "laravel_session=…(320); path=/; httponly; samesite=lax") {
 		t.Errorf("laravel: %s → %s", b, c)
 	}
+	// With expires, the window starts at the name of the cookie that
+	// changed: the line shows it and the attribute it gained, and the
+	// explanation a session cookie whose masked value changed shape.
+	expires := "; expires=Tue, 10 Nov 2026 16:00:00 GMT; path=/"
+	xsrf, session = "XSRF-TOKEN="+token+expires, "laravel_session="+token+expires+"; httponly"
+	laravel = drift("r", compare.KindHeaderValue, "header:set-cookie", `["`+xsrf+`","`+session+`"]`, `["`+xsrf+`; samesite=lax","`+session+`"]`)
+	if b, c := DriftPair(laravel, shortMax); !strings.Contains(b, "XSRF-TOKEN=…(320)") || !strings.HasPrefix(c, "…XSRF-TOKEN=…(320)") || !strings.Contains(c, "samesite=lax") {
+		t.Errorf("laravel with expires: %s → %s", b, c)
+	}
+	laravel = drift("r", compare.KindHeaderValue, "header:set-cookie", `["`+xsrf+`","`+session+`"]`, `["`+xsrf+`","laravel_session=0`+token[1:]+expires+`; httponly"]`)
+	if b, c := DriftPair(laravel, 40); !strings.HasPrefix(b, "…laravel_session=x") || !strings.HasPrefix(c, "…laravel_session=0") {
+		t.Errorf("laravel, shape only: %s → %s", b, c)
+	}
 
 	private := drift("r", compare.KindHeaderValue, "header:set-cookie", "(private)", "(private)")
 	r = Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{private}}})

@@ -565,10 +565,22 @@ const setCookie = "header:set-cookie"
 // leave the cookie that changed or its attributes out of the window.
 func DriftPair(d compare.Drift, max int) (string, string) {
 	a, b := d.Baseline, d.Current
+	lead := max / 3
 	if d.Where == setCookie {
 		a, b = compactCookies(a, b)
+		// The window starts at the name of the cookie that changed when
+		// the difference still fits, with both marks and a \uXXXX after it.
+		ra := []rune(a)
+		first := firstDiff(ra, []rune(b))
+		name := first
+		for name > 0 && ra[name-1] != '"' {
+			name--
+		}
+		if n := first - name; n+8 < max {
+			lead = n
+		}
 	}
-	return ShortPair(a, b, max)
+	return shortPair(a, b, max, lead)
 }
 
 // compactCookies shortens two lists of Set-Cookie values. When both have
@@ -647,18 +659,21 @@ const shortMax = 80
 // first character where they differ, with … where text is left out: two
 // long texts that differ in the middle show that difference, not two equal
 // beginnings. A quoted value keeps its quotes outside the marks: "…x…".
+// Escapes stay whole for a max of 15 or more; below it, a difference
+// inside \uXXXX can leave the window's start in that escape.
 func ShortPair(a, b string, max int) (string, string) {
+	return shortPair(a, b, max, max/3) // a third before the difference
+}
+
+// shortPair is ShortPair with lead characters before the first difference.
+func shortPair(a, b string, max, lead int) (string, string) {
 	ra, rb := []rune(a), []rune(b)
 	if len(ra) <= max && len(rb) <= max {
 		return a, b
 	}
-	first := 0
-	for first < len(ra) && first < len(rb) && ra[first] == rb[first] {
-		first++
-	}
-	// A third of the window before the difference, the rest after it.
+	first := firstDiff(ra, rb)
 	from := 0
-	if lead := max / 3; first > lead {
+	if first > lead {
 		from = first - lead
 	}
 	cut := func(r []rune) string {
@@ -704,6 +719,16 @@ func ShortPair(a, b string, max int) (string, string) {
 		return s
 	}
 	return cut(ra), cut(rb)
+}
+
+// firstDiff is the index of the first character where a and b differ, or
+// the length of the shorter.
+func firstDiff(a, b []rune) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	return i
 }
 
 // inEscape reports that r[i] is inside a backslash escape, after its
