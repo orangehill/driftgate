@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -629,29 +631,26 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 }
 
 // headerFormat is one format for every value of a header: a pattern per
-// position, joined with | when they differ (one cookie name per position).
+// position, joined with | when they differ. A Set-Cookie header has one
+// pattern per cookie name, whatever its position.
 // A header is recorded masked where it may carry a credential (letters
 // become x and X, digits 0: httpx.MaskHeader), and no format is derived
 // from what the mask left: a cookie's value is any text up to the first
 // ;, and a header masked whole is any text.
 func headerFormat(name string, positions [][]string) string {
+	if name == "set-cookie" {
+		return strings.Join(cookieFormats(slices.Concat(positions...)), "|")
+	}
 	var parts []string
 	seen := map[string]bool{}
 	for _, vals := range positions {
-		var ps []string
-		switch {
-		case name == "set-cookie":
-			ps = cookieFormats(vals)
-		case httpx.MasksWhole(name):
-			ps = []string{".+"}
-		default:
-			ps = []string{valuesFormat(vals)}
+		p := ".+"
+		if !httpx.MasksWhole(name) {
+			p = valuesFormat(vals)
 		}
-		for _, p := range ps {
-			if !seen[p] {
-				seen[p] = true
-				parts = append(parts, p)
-			}
+		if !seen[p] {
+			seen[p] = true
+			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, "|")
@@ -669,9 +668,8 @@ func valuesFormat(vals []string) string {
 // cookieFormats are the formats of Set-Cookie values, one per cookie name:
 // the name as it is, its value (masked when recorded, which keeps its
 // length) as text without a ; of the lengths seen, and the attributes
-// after it (expiry, path, flags), which are recorded as sent, inferred as
-// any other value. A cookie that is emptied or set to "deleted" does not
-// match.
+// after it (expiry, path, flags), which are recorded as sent (attrsFormat).
+// A cookie that is emptied or set to "deleted" does not match.
 func cookieFormats(vals []string) []string {
 	var names []string
 	attrs := map[string][]string{}
@@ -703,9 +701,72 @@ func cookieFormats(vals []string) []string {
 		case l[0] != l[1]:
 			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
 		}
-		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+valuesFormat(attrs[n]))
+		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+attrsFormat(attrs[n]))
 	}
 	return out
+}
+
+// attrsFormat is the format of a cookie's attributes, with an expiry
+// written as an HTTP date taking any HTTP date: runs within the same
+// second agree on it only by chance. The date is set aside (dateMark)
+// while the rest is inferred, and the format takes httpDate in its place
+// only where the mark stayed a character of its own; otherwise, as for an
+// expiry in any other form, the attributes are inferred as they are.
+func attrsFormat(attrs []string) string {
+	marked := make([]string, len(attrs))
+	for i, a := range attrs {
+		if strings.Contains(a, dateMark) {
+			return valuesFormat(attrs)
+		}
+		marked[i] = expiresDate().ReplaceAllString(a, "${1}"+dateMark)
+	}
+	p := valuesFormat(marked)
+	if !markLiteral(p) {
+		return valuesFormat(attrs)
+	}
+	f := strings.ReplaceAll(p, dateMark, httpDate)
+	re, err := regexp.Compile(`^(?:` + f + `)$`)
+	if err != nil {
+		return valuesFormat(attrs)
+	}
+	for _, a := range attrs {
+		if !re.MatchString(a) {
+			return valuesFormat(attrs)
+		}
+	}
+	return f
+}
+
+// dateMark stands for an expiry's HTTP date in attrsFormat. A header value
+// cannot hold it, and regexp.QuoteMeta and infer keep it as it is.
+const dateMark = "\x00"
+
+var expiresDate = lazy.Regexp(`(;\s*(?i:expires)=)` + httpDate)
+
+// markLiteral reports whether dateMark is only ever a literal character in
+// the pattern, never one of a class ([…]) that infer made of mixed values.
+func markLiteral(p string) bool {
+	re, err := syntax.Parse(p, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	var literal func(*syntax.Regexp) bool
+	literal = func(n *syntax.Regexp) bool {
+		if n.Op == syntax.OpCharClass {
+			for i := 0; i < len(n.Rune); i += 2 {
+				if n.Rune[i] == 0 {
+					return false
+				}
+			}
+		}
+		for _, s := range n.Sub {
+			if !literal(s) {
+				return false
+			}
+		}
+		return true
+	}
+	return literal(re)
 }
 
 var yamlQuote = compare.YAMLQuote
@@ -874,12 +935,15 @@ func rel(root, path string) string {
 	return path
 }
 
+// httpDate is the format of an HTTP date (Sun, 09 Nov 2026 01:23:45 GMT).
+const httpDate = `[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`
+
 // initAllowlist allows the Date header, which every response carries and
 // which changes every second.
 const initAllowlist = `version: 1
 headers:
   - name: date
-    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    format: '` + httpDate + `'
     reason: Time of the response; changes with every request.
 body: []
 `

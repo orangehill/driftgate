@@ -217,17 +217,24 @@ func TestRouteCount(t *testing.T) {
 
 // TestHeaderFormatNotFromMask: a cookie's value and a header masked whole
 // are recorded masked (x, X, 0), so the proposed format takes nothing from
-// what the mask left; it still matches every value recorded.
+// what the mask left; it still matches every value recorded. A cookie has
+// one format at every position, and its expiry is any HTTP date, also
+// where the runs fell within the same second.
 func TestHeaderFormatNotFromMask(t *testing.T) {
 	mask := func(name, v string) string { return httpx.MaskHeader(name, v) }
 	cookies := [][]string{
 		{mask("set-cookie", "XSRF-TOKEN=eyJpdiI6IkF%3D; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"),
 			mask("set-cookie", "XSRF-TOKEN=Qm9vbGVhbg%2F%3D; expires=Sun, 09 Nov 2026 01:23:47 GMT; Max-Age=7200; path=/")},
 		{mask("set-cookie", "laravel-session="+strings.Repeat("aB3", 13)+"%3D; path=/; httponly"), mask("set-cookie", "laravel-session="+strings.Repeat("Zz9", 14)+"%2B; path=/; httponly")},
+		{mask("set-cookie", "XSRF-TOKEN=eyJpdiI6IkG%3D; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"),
+			mask("set-cookie", "XSRF-TOKEN=eyJpdiI6IkH%3D; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/")},
 	}
 	f := headerFormat("set-cookie", cookies)
 	if strings.Contains(f, "X") && !strings.Contains(f, "XSRF") || strings.Contains(f, `%\d`) || strings.Contains(f, "[x") {
 		t.Errorf("format derived from the mask: %s", f)
+	}
+	if strings.Count(f, "XSRF-TOKEN=") != 1 || strings.Contains(f, "Nov 2026") || !strings.Contains(f, "; expires="+httpDate+"; Max-Age=7200; path=/") {
+		t.Errorf("one format per cookie, expiry any HTTP date: %s", f)
 	}
 	// The value's length is kept by the mask: the lengths seen bound it.
 	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]{14,16}; expires=`) || !strings.Contains(f, `|laravel-session=[^;]{42,45}; path=/; httponly`) {
@@ -242,7 +249,9 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 		}
 	}
 	// A cookie emptied or set to "deleted" (a logout) fails the format.
-	for _, v := range []string{"laravel-session=deleted; path=/; httponly", "laravel-session=; path=/; httponly", "XSRF-TOKEN=; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"} {
+	// So does an expiry in another form, or another lifetime.
+	for _, v := range []string{"laravel-session=deleted; path=/; httponly", "laravel-session=; path=/; httponly", "XSRF-TOKEN=; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/",
+		"XSRF-TOKEN=xxxxxxxxxxxxxx; expires=Sun, 09-Nov-2026 01:23:45 GMT; Max-Age=7200; path=/", "XSRF-TOKEN=xxxxxxxxxxxxxx; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=60; path=/"} {
 		if re.MatchString(v) {
 			t.Errorf("%q matches %s", v, f)
 		}
@@ -253,6 +262,21 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 	// A header that is not masked is inferred as before.
 	if f := headerFormat("x-request-time", [][]string{{"12", "345"}}); f != `\d+` && f != `\d{2,3}` {
 		t.Errorf("plain header: %s", f)
+	}
+}
+
+// TestAttrsFormatAsRecorded: an expiry that is not an HTTP date, and
+// attributes whose form differs between the runs (infer makes one class of
+// them, where the date could not stand), are inferred as they are.
+func TestAttrsFormatAsRecorded(t *testing.T) {
+	for _, attrs := range [][]string{
+		{"; expires=Fri, 30-Oct-2026 10:00:00 GMT; path=/", "; expires=Fri, 30-Oct-2026 10:00:00 GMT; path=/"},
+		{"; expires=Fri, 30-Oct-2026 10:00:00 GMT; path=/", "; expires=Fri, 30-Oct-2026 10:00:07 GMT; path=/"},
+		{"; expires=Sun, 09 Nov 2026 01:23:45 GMT; path=/", "; expires=Sun, 09 Nov 2026 01:23:47 GMT; path=/; secure"},
+	} {
+		if f, want := attrsFormat(attrs), valuesFormat(attrs); f != want {
+			t.Errorf("%q: %s, want %s", attrs, f, want)
+		}
 	}
 }
 
