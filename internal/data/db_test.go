@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // Integration tests on real servers: DRIFTGATE_TEST_MYSQL lists mysql://
@@ -69,11 +71,16 @@ func invoiceSequence(s *server, mariadb bool) string {
 		return ""
 	}
 	def := "CREATE SEQUENCE invoice_numbers START WITH 100"
-	var wsrep int
-	if s.admin.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+	if isGalera(s.admin) {
 		def += " INCREMENT BY 0"
 	}
 	return def
+}
+
+// isGalera reports whether the server is a Galera node (wsrep_on).
+func isGalera(db *sql.DB) bool {
+	var wsrep int
+	return db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0
 }
 
 func lit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
@@ -407,7 +414,7 @@ func testAnonymize(t *testing.T, s *server) {
 	if s.driver == MySQL {
 		var version string
 		s.admin.QueryRow("SELECT VERSION()").Scan(&version)
-		mariadb = strings.Contains(strings.ToLower(version), "mariadb")
+		mariadb = dbx.IsMariaDB(version)
 	}
 	ps := people(testUsers())
 	s.create(t, src)

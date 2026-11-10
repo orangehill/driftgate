@@ -402,7 +402,7 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 	}
 	var version string
 	admin.QueryRow("SELECT VERSION()").Scan(&version)
-	sequences := driver == config.Postgres || strings.Contains(version, "MariaDB")
+	sequences := driver == config.Postgres || dbx.IsMariaDB(version)
 	if sequences && driver != config.Postgres {
 		create = append(create, "CREATE SEQUENCE numbers")
 	}

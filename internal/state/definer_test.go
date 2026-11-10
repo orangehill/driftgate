@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // TestRefusedText: a trigger or view refused for a privilege names the
@@ -298,7 +300,7 @@ func dropOthersFirst(t *testing.T, dsn string, prep []string, says, want string)
 	err = m.Restore(ctx, []string{"view:a_view", "view:b_view"})
 	after := definerObjects(t, root, work)
 	t.Logf("%v: %s", err, after)
-	if strings.Contains(version, "MariaDB") {
+	if dbx.IsMariaDB(version) {
 		// No SYSTEM_USER: the drops are allowed.
 		if !strings.Contains(strings.Join(prep, " "), "DROP TABLE") && (err != nil || after != "view a_view dgt_order@%, view b_view dgt_order@%") {
 			t.Fatalf("restore: %v: %s", err, after)
@@ -328,8 +330,7 @@ func TestMySQLProbeWithoutCreate(t *testing.T) {
 			work, pristine := "dgt_nocreate", "dgt_nocreate_pristine"
 			var logBin int
 			root.QueryRow("SELECT @@log_bin").Scan(&logBin)
-			var wsrep int
-			if root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+			if isGalera(root) {
 				logBin = 1 // a Galera node checks triggers as with the binary log on
 			}
 			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "DROP USER IF EXISTS 'dgt_trig'@'%'",

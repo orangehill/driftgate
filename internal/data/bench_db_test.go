@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // BenchmarkData measures anonymize, subset and verify on a generated source
@@ -241,7 +243,7 @@ func benchSeed(b *testing.B, s *server, src string, users int) {
 	if s.driver == MySQL {
 		var version string
 		s.admin.QueryRow("SELECT VERSION()").Scan(&version)
-		mariadb = strings.Contains(strings.ToLower(version), "mariadb")
+		mariadb = dbx.IsMariaDB(version)
 	}
 	s.create(b, src)
 	first := min(users, 2000)

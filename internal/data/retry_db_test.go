@@ -80,7 +80,7 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	t.Cleanup(func() { s.drop(src, dst) })
 	var version string
 	s.admin.QueryRow("SELECT VERSION()").Scan(&version)
-	mariadb := strings.Contains(strings.ToLower(version), "mariadb")
+	mariadb := dbx.IsMariaDB(version)
 	ps := people(testUsers())
 	s.create(t, src)
 	s.drop(dst)
@@ -222,8 +222,7 @@ func testRetrySourceRead(t *testing.T, s *server) {
 func TestMySQLGaleraTargetSequences(t *testing.T) {
 	eachMySQL(t, func(t *testing.T, s *server) {
 		ctx := context.Background()
-		var wsrep int
-		if s.admin.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) != nil || wsrep == 0 {
+		if !isGalera(s.admin) {
 			t.Skip("not a Galera node")
 		}
 		const src, dst = "dggalera_src", "dggalera_dst"
