@@ -64,6 +64,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- Drift lines and group explanations: a long value is no longer cut inside a backslash escape, which showed a stray `"`, and a cut quoted value keeps its quotes (`"…` and `…"`). A `Set-Cookie` drift shows each cookie as `name=…(N)`, the length of its masked value, with its attributes in full, so a change such as an added `samesite=lax` shows. Reports and expectations are unchanged.
 - `data anonymize` and `data subset` dumps: a statement whose last line ends in a comment (`--`, or `#` on MySQL), such as a trigger or routine definition, no longer hides the `;` after it, which made `mysql`/`psql` and `data verify` read it together with the next statements. Dumps now say `dump format 2`. `data verify` also reads MySQL `#` comments as comments: an apostrophe in one no longer opens a string.
 - `data verify` with a dump: an empty string at the start of an INSERT's rows, before any other quoted value, was read as NULL. An empty value holds nothing to check, so no finding was missed.
 - `classify.yaml`: `action: null` written without quotes on a `serialized-php` column now sets the column to NULL. It was read as no action, the default `empty-table`, and the copy lost all rows of the table. `action:` with nothing after it, or an empty string, is now refused; only a missing `action` means `empty-table`. ([#26](https://github.com/orangehill/driftgate/pull/26))

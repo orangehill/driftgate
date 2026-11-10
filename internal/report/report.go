@@ -502,7 +502,7 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		b, c := ShortPair(d.Baseline, d.Current, shortMax)
+		b, c := DriftPair(d, shortMax)
 		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
@@ -556,6 +556,43 @@ func extends(c rune) bool {
 		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
 }
 
+// DriftPair shortens the two values of a drift for display, like
+// ShortPair. The cookies of a Set-Cookie drift are compacted first: their
+// masked values say no more than their length, and a long one would leave
+// the attributes after it out of the window.
+func DriftPair(d compare.Drift, max int) (string, string) {
+	a, b := d.Baseline, d.Current
+	if d.Where == "header:set-cookie" {
+		if ca, cb := compactCookies(a), compactCookies(b); ca != cb {
+			a, b = ca, cb
+		}
+	}
+	return ShortPair(a, b, max)
+}
+
+// compactCookies writes each cookie of a list of Set-Cookie values as
+// name=…(N), N the length of its value, with its attributes in full. A
+// value that is not such a list, such as (private), is returned as it is.
+func compactCookies(s string) string {
+	var vs []string
+	if json.Unmarshal([]byte(s), &vs) != nil {
+		return s
+	}
+	for i, v := range vs {
+		first, attrs, hasAttrs := strings.Cut(v, ";")
+		name, value, ok := strings.Cut(first, "=")
+		if !ok {
+			continue
+		}
+		vs[i] = fmt.Sprintf("%s=…(%d)", name, utf8.RuneCountInString(value))
+		if hasAttrs {
+			vs[i] += ";" + attrs
+		}
+	}
+	b, _ := json.Marshal(vs)
+	return string(b)
+}
+
 // shortMax is how many characters of a drift's values a line shows.
 const shortMax = 80
 
@@ -563,7 +600,7 @@ const shortMax = 80
 // longer than max characters, both are cut to the same window around the
 // first character where they differ, with … where text is left out: two
 // long texts that differ in the middle show that difference, not two equal
-// beginnings.
+// beginnings. A quoted value keeps its quotes outside the marks: "…x…".
 func ShortPair(a, b string, max int) (string, string) {
 	ra, rb := []rune(a), []rune(b)
 	if len(ra) <= max && len(rb) <= max {
@@ -583,29 +620,65 @@ func ShortPair(a, b string, max int) (string, string) {
 			return string(r) // short enough as it is
 		}
 		start := min(from, len(r))
-		end := min(len(r), start+max-1)
+		marks := 1 // room for …
 		if start > 0 {
-			end = min(len(r), start+max-2) // room for both marks
+			marks = 2 // for both
 		}
+		quoted := r[0] == '"'
+		if quoted {
+			marks *= 2 // and the quotes kept outside them
+		}
+		end := min(len(r), start+max-marks)
 		// Not inside a character the eye sees as one: an accent, a
 		// variation selector, a skin tone or a joined emoji stays with
-		// the character it belongs to.
-		for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
+		// the character it belongs to. Nor inside an escape: \" cut in
+		// two would show a quote of its own.
+		for start > 0 && (extends(r[start]) || r[start-1] == zwj || inEscape(r, start)) {
 			start--
 		}
-		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
+		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj || inEscape(r, end)) {
 			end++
 		}
 		s := string(r[start:end])
 		if start > 0 {
 			s = "…" + s
+			if quoted {
+				s = `"` + s
+			}
 		}
 		if end < len(r) {
 			s += "…"
+			if quoted {
+				s += `"`
+			}
 		}
 		return s
 	}
 	return cut(ra), cut(rb)
+}
+
+// inEscape reports that r[i] is inside a backslash escape, after its
+// backslash: the next character, or the rest of \uXXXX. An escape starts
+// at a backslash after an even number of backslashes.
+func inEscape(r []rune, i int) bool {
+	for j := i - 1; j >= 0 && j >= i-5; j-- {
+		if r[j] != '\\' {
+			continue
+		}
+		k := j
+		for k > 0 && r[k-1] == '\\' {
+			k--
+		}
+		if (j-k)%2 != 0 {
+			continue // the second backslash of \\
+		}
+		n := 2
+		if j+1 < len(r) && r[j+1] == 'u' {
+			n = 6
+		}
+		return i < j+n
+	}
+	return false
 }
 
 // Text writes a readable report: every drifted request with up to maxDrifts

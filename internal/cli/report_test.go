@@ -255,3 +255,16 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 		t.Errorf("plain header: %s", f)
 	}
 }
+
+// TestDriftLineCookies: review shows a Set-Cookie drift compacted to the
+// cookie's name and length, and a (private) value as it is.
+func TestDriftLineCookies(t *testing.T) {
+	d := compare.Drift{Kind: compare.KindHeaderValue, Where: "header:set-cookie", Baseline: `["XSRF-TOKEN=` + strings.Repeat("x", 300) + `"]`, Current: `["XSRF-TOKEN=` + strings.Repeat("x", 300) + `; samesite=lax"]`}
+	if l := driftLine(d); !strings.Contains(l, "XSRF-TOKEN=…(300)") || !strings.Contains(l, "samesite=lax") {
+		t.Errorf("drift line %q", l)
+	}
+	d.Baseline, d.Current = "(private)", "(private)"
+	if l := driftLine(d); !strings.HasSuffix(l, "(private) → (private)") {
+		t.Errorf("private drift line %q", l)
+	}
+}
