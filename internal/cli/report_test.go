@@ -233,11 +233,11 @@ func TestHeaderFormatNotFromMask(t *testing.T) {
 	if strings.Contains(f, "X") && !strings.Contains(f, "XSRF") || strings.Contains(f, `%\d`) || strings.Contains(f, "[x") {
 		t.Errorf("format derived from the mask: %s", f)
 	}
-	if strings.Count(f, "XSRF-TOKEN=") != 1 || strings.Contains(f, "Nov 2026") || !strings.Contains(f, "; expires=(?:"+httpDate+"); Max-Age=") {
+	if strings.Count(f, "XSRF-TOKEN=") != 1 || strings.Contains(f, "Nov 2026") || !strings.Contains(f, "; expires="+httpDate+"; Max-Age=") {
 		t.Errorf("one format per cookie, expiry any HTTP date: %s", f)
 	}
 	// The value's length is kept by the mask: the lengths seen bound it.
-	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]{14,16}; expires=`) || !strings.Contains(f, `|laravel-session=[^;]{42,45}; path=(?:/); httponly`) {
+	if !strings.HasPrefix(f, `XSRF-TOKEN=[^;]{14,16}; expires=`) || !strings.Contains(f, `|laravel-session=[^;]{42,45}; path=/; httponly`) {
 		t.Errorf("format %s", f)
 	}
 	re := regexp.MustCompile(`^(?:` + f + `)$`)
@@ -283,7 +283,11 @@ func TestCookieFormats(t *testing.T) {
 			[]string{"s=abc; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=60; path=/", "s=abc; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=0; path=/", "s=abc; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=-1; path=/",
 				"s=abc; expires=Sun, 09-Nov-2026 01:23:45 GMT; Max-Age=7200; path=/", "s=abc; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/x", "s=; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/"}},
 		{"power of ten", []string{"s=abc; Max-Age=1000", "s=xyz; Max-Age=1000"}, 1,
-			[]string{"s=abc; Max-Age=999"}, []string{"s=abc; Max-Age=99", "s=abc; Max-Age=0"}},
+			[]string{"s=abc; Max-Age=999"}, []string{"s=abc; Max-Age=99", "s=abc; Max-Age=0", "s=abc; Max-Age=0999"}},
+		{"ten", []string{"s=abc; Max-Age=10", "s=xyz; Max-Age=10"}, 1,
+			[]string{"s=abc; Max-Age=9"}, []string{"s=abc; Max-Age=0", "s=abc; Max-Age=00", "s=abc; Max-Age=-1"}},
+		{"deleted twice", []string{"s=deleted; Max-Age=0; path=/", "s=deleted; Max-Age=-1; path=/"}, 1,
+			nil, []string{"s=xxxxxxx; Max-Age=7200; path=/", "s=deleted; Max-Age=1; path=/", "s=deleted; Max-Age=-10; path=/"}},
 		{"deleted and set", []string{"s=abcdefg; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7200; path=/", "s=deleted; expires=Sat, 09 Nov 2025 01:23:44 GMT; Max-Age=0; path=/"}, 2,
 			[]string{"s=gfedcba; expires=Sun, 09 Nov 2026 01:23:46 GMT; Max-Age=7199; path=/", "s=deleted; expires=Sat, 09 Nov 2025 01:23:46 GMT; Max-Age=0; path=/"},
 			[]string{"s=deleted; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=7; path=/", "s=deleted; expires=Sun, 09 Nov 2026 01:23:45 GMT; Max-Age=72000; path=/"}},
@@ -314,12 +318,6 @@ func TestCookieFormats(t *testing.T) {
 				t.Errorf("%s: %q matches %q", c.name, v, fs)
 			}
 		}
-	}
-	// A group whose parts do not match all its values as a whole (a deleted
-	// cookie's Max-Age that differs) is inferred as one text, as recorded.
-	vals := []string{"s=; Max-Age=0; path=/", "s=; Max-Age=-1; path=/"}
-	if fs, want := cookieFormats(vals), `s=[^;]{0}`+valuesFormat([]string{"; Max-Age=0; path=/", "; Max-Age=-1; path=/"}); len(fs) != 1 || fs[0] != want {
-		t.Errorf("fallback %q, want %s", fs, want)
 	}
 }
 

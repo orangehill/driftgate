@@ -672,7 +672,9 @@ func valuesFormat(vals []string) string {
 // expiry. The name is as it is, the value (masked when recorded, which
 // keeps its length) is text without a ; of the lengths seen, and each
 // attribute takes cookieAttrFormat. A deleted cookie does not match a
-// group of set ones, nor a set one a group of deleted ones.
+// group of set ones, nor a set one a group of deleted ones. A delete that
+// keeps a value, has no Max-Age and has an expiry in the past shares the
+// group of the set cookie, as before.
 func cookieFormats(vals []string) []string {
 	type groupKey struct {
 		name, skeleton, expires string
@@ -745,15 +747,15 @@ func cookieFormats(vals []string) []string {
 			for j, attrs := range g.attrs {
 				_, col[j], _ = strings.Cut(attrs[i], "=")
 			}
-			b.WriteString("=(?:" + cookieAttrFormat(strings.ToLower(strings.TrimSpace(key)), col, g.expires, g.deleted) + ")")
+			b.WriteString("=" + cookieAttrFormat(strings.ToLower(strings.TrimSpace(key)), col, g.expires, g.deleted))
 		}
 		f := head + b.String()
-		// Each part matches its values; should the whole not match one, the
-		// attributes are inferred as one text.
+		// Each part matches its values; should the whole still not match
+		// one, the attributes are inferred as one text.
 		re, err := regexp.Compile(`^(?:` + f + `)$`)
 		for _, v := range g.vals {
 			if err != nil || !re.MatchString(v) {
-				f = head + valuesFormat(g.rests)
+				f = head + grouped(valuesFormat(g.rests))
 				break
 			}
 		}
@@ -767,9 +769,9 @@ func cookieFormats(vals []string) []string {
 // any dashed date: runs within the same second agree on it only by chance)
 // and a Max-Age of the widths seen (one width less from a power of ten:
 // 1000 is 999 a second later), never 0 or less. In a deleted cookie
-// Max-Age stays as it is, so that it never matches a set one; its expiry,
-// which frameworks put a year or more before the time of the response,
-// takes its form as well. Other attributes are inferred.
+// Max-Age is one of the values seen, so that it never matches a set one;
+// its expiry, which frameworks put a year or more before the time of the
+// response, takes its form as well. Other attributes are inferred.
 func cookieAttrFormat(key string, vals []string, expires string, deleted bool) string {
 	switch {
 	case key == "expires" && expires == "http":
@@ -777,12 +779,18 @@ func cookieAttrFormat(key string, vals []string, expires string, deleted bool) s
 	case key == "expires" && expires == "dashed":
 		return dashedDate
 	case key == "max-age" && deleted:
-		return regexp.QuoteMeta(vals[0])
+		var seen []string
+		for _, v := range vals {
+			if q := regexp.QuoteMeta(v); !slices.Contains(seen, q) {
+				seen = append(seen, q)
+			}
+		}
+		return grouped(strings.Join(seen, "|"))
 	case key == "max-age":
 		short, lo, hi := vals[0], len(vals[0]), 0
 		for _, v := range vals {
 			if !allDigits(v) {
-				return valuesFormat(vals)
+				return grouped(valuesFormat(vals))
 			}
 			if len(v) < len(short) || len(v) == len(short) && v < short {
 				short = v
@@ -792,12 +800,28 @@ func cookieAttrFormat(key string, vals []string, expires string, deleted bool) s
 		if len(short) > 1 && strings.TrimRight(short, "0") == "1" {
 			lo-- // a power of ten
 		}
-		if lo == hi {
-			return fmt.Sprintf(`\d{%d}`, lo)
+		// The first digit is never 0, so the format never takes 0.
+		switch {
+		case hi == 1:
+			return `[1-9]`
+		case lo == hi:
+			return fmt.Sprintf(`[1-9]\d{%d}`, hi-1)
 		}
-		return fmt.Sprintf(`\d{%d,%d}`, lo, hi)
+		return fmt.Sprintf(`[1-9]\d{%d,%d}`, lo-1, hi-1)
 	}
-	return valuesFormat(vals)
+	return grouped(valuesFormat(vals))
+}
+
+// grouped is a format that may hold a | of its own (an alternation),
+// inside (?:…) so that the text around it stays outside it; a plain
+// literal, which holds none, stays bare.
+func grouped(p string) string {
+	if re, err := regexp.Compile(p); err == nil {
+		if _, literal := re.LiteralPrefix(); literal {
+			return p
+		}
+	}
+	return "(?:" + p + ")"
 }
 
 // expiresForm is the form of a cookie's expiry: an HTTP date, a dashed
@@ -821,9 +845,14 @@ var (
 	dashedDateValue = lazy.Regexp(`^(?:` + dashedDate + `)$`)
 )
 
-// allDigits reports a run of digits only.
+// allDigits reports a run of digits only (as infer's allDigits).
 func allDigits(s string) bool {
-	return s != "" && strings.Trim(s, "0123456789") == ""
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 var yamlQuote = compare.YAMLQuote
