@@ -19,19 +19,6 @@ func dumpHeader(format int, driver string) string {
 	return fmt.Sprintf("-- DriftGate anonymized data, dump format %d (%s)\n", format, driver)
 }
 
-// splitInsert splits an INSERT of rows at its first " VALUES" line end:
-// the head (up to VALUES, as dialect.insert writes it) and the rows.
-func splitInsert(q string) (head, rows string, ok bool) {
-	i, end := strings.Index(q, " VALUES\n"), len(" VALUES\n")
-	if j := strings.Index(q, " VALUES\r\n"); j >= 0 && (i < 0 || j < i) {
-		i, end = j, len(" VALUES\r\n") // CRLF line endings
-	}
-	if i < 0 {
-		return "", "", false
-	}
-	return q[:i+len(" VALUES")], q[i+end:], true
-}
-
 // statements reads a dump statement by statement, the way mysql and psql
 // split it: quotes, PostgreSQL dollar quotes, comments and the DELIMITER
 // lines of MySQL. A statement is at most one INSERT batch (about 1 MiB), so
@@ -254,6 +241,19 @@ func (st *statements) next() (string, error) {
 			return s, nil
 		}
 	}
+}
+
+// splitInsert splits an INSERT of rows at its first " VALUES" line end:
+// the head (up to VALUES, as dialect.insert writes it) and the rows.
+func splitInsert(q string) (head, rows string, ok bool) {
+	i, end := strings.Index(q, " VALUES\n"), len(" VALUES\n")
+	if j := strings.Index(q, " VALUES\r\n"); j >= 0 && (i < 0 || j < i) {
+		i, end = j, len(" VALUES\r\n") // CRLF line endings
+	}
+	if i < 0 {
+		return "", "", false
+	}
+	return q[:i+len(" VALUES")], q[i+end:], true
 }
 
 // parseRows reads the rows of an INSERT as Anonymize writes them:
