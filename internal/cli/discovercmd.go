@@ -323,7 +323,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 		fmt.Fprintf(out, "\nnote: %s\n", n)
 	}
 	printReplaced(out, res.Replaced)
-	jsonErrorsNote(p, out, o.check)
+	templatesNote(p, out, o.check)
 	literalIDNote(out, res.Catalog, "")
 	for _, u := range res.Unused {
 		fmt.Fprintf(out, "note: %s in %s names no generated request (an entry written by hand says mutates and body in the catalog)\n", u, rel(p.Root, p.Layout.Config))
@@ -441,15 +441,16 @@ func coverageCmd(args []string, out io.Writer) (int, error) {
 			return 0, configErr("baseline %s does not exist (coverage --baseline none checks the catalog alone)", name)
 		}
 	}
-	_, code, err := checkCoverage(sel, cat, inv, excl, answers, *format, out)
+	_, code, err := checkCoverage(sel, cat, inv, excl, answers, p.Mode, *format, out)
 	return code, err
 }
 
 // checkCoverage prints which routes of the selected services the catalog
 // covers, in format text or json; uncovered routes are exit 1. answers are
 // a baseline's by request ID (nil without one): a request covers its route
-// only when it did not fail there.
-func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer, format string, out io.Writer) (*routes.Coverage, int, error) {
+// only when it did not fail there. mode is the project's: it says how a
+// failed request is fixed.
+func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, excl *routes.Exclusions, answers map[string]routes.Answer, mode, format string, out io.Writer) (*routes.Coverage, int, error) {
 	c := coverageOf(sel, cat, inv, excl, answers)
 	inv = sel.routes(inv)
 	code := ExitClean
@@ -486,20 +487,30 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 			none = append(none, k)
 		}
 	}
-	section(out, "Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
-	section(out, "Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
-	section(out, failedRoutesTitle, failedRouteLines(c.Failed))
-	section(out, failedRequestsTitle, failureLines(h.Failed))
-	section(out, "Routes reached only by requests that answered an error (written by hand; covered, but nothing shows the route works)", c.ErrorOnly)
+	// A gap is a list to act on; known failures are acknowledged already.
+	gaps := false
+	gap := func(title string, items []string) {
+		section(out, title, items)
+		gaps = gaps || len(items) > 0
+	}
+	gap("Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
+	gap("Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
+	gap(failedRoutesTitle(mode), failedRouteLines(c.Failed))
+	gap(failedRequestsTitle(mode), failureLines(h.Failed))
+	gap("Routes reached only by requests that answered an error (written by hand; covered, but nothing shows the route works)", c.ErrorOnly)
 	section(out, knownTitle, failureLines(h.Known))
-	section(out, staleKnownTitle, h.Stale)
-	section(out, fmt.Sprintf("Known failures that acknowledge failures on more than %d routes (a glob that broad also hides new failures: narrow it)", routes.BroadKnown), h.Broad)
-	section(out, "Catalog requests that reach no route", c.Unknown)
-	section(out, "Exclusions that match no route", c.Stale)
-	section(out, "Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
-	section(out, noInvalidBodyTitle, c.NoInvalidBody)
+	gap(staleKnownTitle, h.Stale)
+	gap(fmt.Sprintf("Known failures that acknowledge failures on more than %d routes (a glob that broad also hides new failures: narrow it)", routes.BroadKnown), h.Broad)
+	gap("Catalog requests that reach no route", c.Unknown)
+	gap("Exclusions that match no route", c.Stale)
+	gap("Routes that take a body but have no sample (from validation rules, OpenAPI or HAR)", c.NoBody)
+	gap(noInvalidBodyTitle, c.NoInvalidBody)
 	if code == ExitClean {
-		fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
+		if gaps {
+			fmt.Fprintln(out, "\nevery route is covered or excluded; close the gaps listed above")
+		} else {
+			fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
+		}
 	}
 	return c, code, nil
 }
