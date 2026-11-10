@@ -48,34 +48,53 @@ type Options struct {
 	Replacing func() error
 }
 
-func (o Options) excluded(table string) bool {
-	for _, g := range o.Exclude {
-		if glob.Match(g, table) {
-			return true
-		}
-	}
-	return false
-}
+// excluded, restoreOnly and restoreEmpty are MySQL's and PostgreSQL's:
+// they match table names as written (no fold), as both compare names
+// case-sensitively (MySQL and MariaDB with lower_case_table_names=0, as on
+// Linux, where users and Users are two tables; PostgreSQL once unquoted).
+// PostgreSQL passes a name with and without its schema.
+func (o Options) excluded(names ...string) bool { return matchAny(o.Exclude, nil, names...) }
 
 // restoreOnly reports whether a table is restore_only (Options.RestoreOnly
 // or RestoreEmpty).
-func (o Options) restoreOnly(table string) bool {
-	return matchAny(o.RestoreOnly, table) || matchAny(o.RestoreEmpty, table)
+func (o Options) restoreOnly(names ...string) bool {
+	return matchAny(o.RestoreOnly, nil, names...) || matchAny(o.RestoreEmpty, nil, names...)
 }
 
 // restoreEmpty reports whether a table is restored to no rows
 // (Options.RestoreEmpty).
-func (o Options) restoreEmpty(table string) bool { return matchAny(o.RestoreEmpty, table) }
+func (o Options) restoreEmpty(names ...string) bool { return matchAny(o.RestoreEmpty, nil, names...) }
 
 // restoreOnlyGlobs are the globs of RestoreOnly and RestoreEmpty.
 func (o Options) restoreOnlyGlobs() []string {
 	return append(append([]string{}, o.RestoreOnly...), o.RestoreEmpty...)
 }
 
-func matchAny(globs []string, table string) bool {
+// matchAny reports whether a glob matches one of names, the table names of
+// one table (each driver's own forms of it). fold, when not nil, folds the
+// globs and the names first (copies: the Options' globs stay as written):
+// it is the driver's letter-case rule. config's Component.matches applies
+// the same rules.
+func matchAny(globs []string, fold func(string) string, names ...string) bool {
+	if len(globs) == 0 {
+		return false
+	}
+	if fold != nil {
+		var buf [2]string // a name with and without its schema, on the stack
+		folded := buf[:0]
+		for _, n := range names {
+			folded = append(folded, fold(n))
+		}
+		names = folded
+	}
 	for _, g := range globs {
-		if glob.Match(g, table) {
-			return true
+		if fold != nil {
+			g = fold(g)
+		}
+		for _, n := range names {
+			if glob.Match(g, n) {
+				return true
+			}
 		}
 	}
 	return false

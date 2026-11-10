@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"modernc.org/sqlite" // registers the "sqlite" driver
-
-	"github.com/orangehill/driftgate/internal/glob"
 )
 
 // SQLite is an SQLite database file. The pristine copy is a second file,
@@ -430,34 +428,21 @@ func (o Options) restoreOnlyTable(name, owner string) bool {
 	if owner != "" {
 		name = owner
 	}
-	for _, g := range o.restoreOnlyGlobs() {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
+	return matchAny(o.restoreOnlyGlobs(), asciiLower, name)
 }
 
 // restoreEmptyTable reports whether a table is restored to no rows
 // (Options.RestoreEmpty), without letter case.
 func (o Options) restoreEmptyTable(name string) bool {
-	for _, g := range o.RestoreEmpty {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
+	return matchAny(o.RestoreEmpty, asciiLower, name)
 }
 
 // sqliteExcluded is excluded for SQLite, whose names are ASCII-case-
 // insensitive: exclude: sessions also names a table made as Sessions.
+// asciiLower, not strings.ToLower: SQLite folds A-Z only, so Été and été
+// are two tables and one glob must not name both.
 func (o Options) sqliteExcluded(name string) bool {
-	for _, g := range o.Exclude {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
+	return matchAny(o.Exclude, asciiLower, name)
 }
 
 // objects reads the schema of a database file (schema: main or the

@@ -5,6 +5,46 @@ import (
 	"testing"
 )
 
+// TestMatchAny: a glob matches one of the names, after the fold when there
+// is one; no glob matches nothing, an empty name only a glob that takes it.
+func TestMatchAny(t *testing.T) {
+	for _, c := range []struct {
+		globs []string
+		fold  func(string) string
+		names []string
+		want  bool
+	}{
+		{nil, nil, []string{"users"}, false},
+		{nil, strings.ToLower, []string{""}, false},
+		{[]string{"*"}, nil, []string{""}, true},
+		{[]string{"?"}, nil, []string{""}, false},
+		{[]string{"users"}, nil, nil, false},
+		{[]string{"users"}, nil, []string{"users"}, true},
+		{[]string{"users"}, nil, []string{"Users"}, false},
+		{[]string{"Users"}, strings.ToLower, []string{"USERS"}, true},
+		{[]string{"Été"}, strings.ToLower, []string{"ÉTÉ"}, true},
+		{[]string{"Été"}, asciiLower, []string{"ÉTÉ"}, false},
+		{[]string{"Été"}, asciiLower, []string{"ÉtÉ"}, false},
+		{[]string{"Été"}, asciiLower, []string{"ÉTé"}, true},
+		{[]string{"sess*", "job?"}, nil, []string{"public.jobs", "jobs"}, true},
+		{[]string{"sess*", "job?"}, nil, []string{"public.job", "job"}, false},
+		{[]string{"app.*"}, strings.ToLower, []string{"APP.users", "users"}, true},
+		{[]string{"[a]"}, nil, []string{"a"}, false},
+		{[]string{"[a]"}, asciiLower, []string{"[A]"}, true},
+		{[]string{"a[b"}, nil, []string{"a[b"}, true},
+	} {
+		if got := matchAny(c.globs, c.fold, c.names...); got != c.want {
+			t.Errorf("matchAny(%q, %q) = %v, want %v", c.globs, c.names, got, c.want)
+		}
+	}
+	// The fold leaves the globs and the names as they were.
+	globs, names := []string{"USERS"}, []string{"Users", "dbo.Users", "Users"}
+	matchAny(globs, strings.ToLower, names...)
+	if globs[0] != "USERS" || names[0] != "Users" || names[1] != "dbo.Users" {
+		t.Errorf("after matchAny: globs %q, names %q", globs, names)
+	}
+}
+
 // TestTableGlobs: each driver matches exclude, restore_only and
 // restore_empty as its database compares names. MySQL and PostgreSQL take
 // them as written (PostgreSQL with or without the schema), SQLite without

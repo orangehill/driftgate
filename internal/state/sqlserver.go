@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 
 	"github.com/microsoft/go-mssqldb/msdsn"
-
-	"github.com/orangehill/driftgate/internal/glob"
 )
 
 var _ interface {
@@ -134,40 +132,21 @@ func (s *SQLServer) setMode(mode string) {
 
 // excluded reports whether a table (schema.name) is excluded: a glob
 // matches it with or without its schema. SQL Server compares names
-// without case (in the usual collations), so the globs do too.
+// without case (in the usual collations), so the globs do too, in any
+// Unicode letter (strings.ToLower) and under every collation: under a
+// case-sensitive one, a glob names Users and users both.
 func (s *SQLServer) excluded(schema, name string) bool {
-	full, bare := strings.ToLower(schema+"."+name), strings.ToLower(name)
-	for _, g := range s.o.Exclude {
-		g = strings.ToLower(g)
-		if glob.Match(g, full) || glob.Match(g, bare) {
-			return true
-		}
-	}
-	return false
+	return matchAny(s.o.Exclude, strings.ToLower, schema+"."+name, name)
 }
 
 // restoreOnly is excluded for restore_only (Options.RestoreOnly).
 func (s *SQLServer) restoreOnly(schema, name string) bool {
-	full, bare := strings.ToLower(schema+"."+name), strings.ToLower(name)
-	for _, g := range s.o.restoreOnlyGlobs() {
-		g = strings.ToLower(g)
-		if glob.Match(g, full) || glob.Match(g, bare) {
-			return true
-		}
-	}
-	return false
+	return matchAny(s.o.restoreOnlyGlobs(), strings.ToLower, schema+"."+name, name)
 }
 
 // restoreEmpty is restoreOnly for Options.RestoreEmpty.
 func (s *SQLServer) restoreEmpty(schema, name string) bool {
-	full, bare := strings.ToLower(schema+"."+name), strings.ToLower(name)
-	for _, g := range s.o.RestoreEmpty {
-		g = strings.ToLower(g)
-		if glob.Match(g, full) || glob.Match(g, bare) {
-			return true
-		}
-	}
-	return false
+	return matchAny(s.o.RestoreEmpty, strings.ToLower, schema+"."+name, name)
 }
 
 // tracked reports whether a table (schema.name) tracks its rows: listed

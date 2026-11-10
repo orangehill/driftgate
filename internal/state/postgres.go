@@ -76,13 +76,13 @@ func (p *Postgres) open(db string) (*sql.DB, error) {
 
 func (p *Postgres) excludedQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.excluded(name) || p.o.excluded(table)
+	return p.o.excluded(name, table)
 }
 
 // restoreEmptyQualified is excludedQualified for restore_empty.
 func (p *Postgres) restoreEmptyQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.restoreEmpty(name) || p.o.restoreEmpty(table)
+	return p.o.restoreEmpty(name, table)
 }
 
 // emptyTables are the restore_empty tables of the database d is
@@ -249,7 +249,7 @@ func (p *Postgres) restoreEmpty(ctx context.Context, items []string) (ok bool, e
 // restoreOnlyQualified is excludedQualified for restore_only.
 func (p *Postgres) restoreOnlyQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.restoreOnly(name) || p.o.restoreOnly(table)
+	return p.o.restoreOnly(name, table)
 }
 
 // ownedSequences maps the sequences of serial and identity columns of
