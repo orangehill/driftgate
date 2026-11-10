@@ -48,6 +48,65 @@ func TestMaskHeaderCredentials(t *testing.T) {
 	}
 }
 
+// TestMasksWholeMatchesMaskHeader: MasksWhole(name) is true exactly for
+// the headers whose every value MaskHeader masks whole (maskChars of the
+// value); a header masked in part or not at all keeps some value as sent.
+func TestMasksWholeMatchesMaskHeader(t *testing.T) {
+	names := []string{
+		"authorization", "cookie", "proxy-authorization",
+		"set-cookie", "location", "content-location", "refresh", "link",
+		"x-csrf-token", "x-xsrf-token", "x-api-key", "api-key", "access-token", "token", "x-auth-token",
+		"access-control-allow-origin", "access-control-allow-headers", "x-request-id", "accept", "x-custom",
+	}
+	for n := range plainHeaders {
+		names = append(names, n)
+	}
+	values := []string{
+		"Bearer abcDEF123",
+		"laravel_session=eyJpdiI6Ik1; expires=Tue, 10-Nov-2026 12:00:00 GMT; Max-Age=7200; path=/; httponly; samesite=lax",
+		"https://app.test/reset?token=8c2f3e1d&page=2",
+		`<https://app.test/items?page=2>; rel="next"`,
+		"",
+	}
+	for _, n := range names {
+		whole := true
+		for _, v := range values {
+			whole = whole && MaskHeader(n, v) == maskChars(v)
+		}
+		if whole != MasksWhole(n) {
+			t.Errorf("%s: MaskHeader masks every value whole: %v, MasksWhole: %v", n, whole, MasksWhole(n))
+		}
+	}
+}
+
+// TestSplitSetCookie: the name is up to the first = before the first ;,
+// attrs keep that ; and everything after it as sent, and the three parts
+// joined with = are the value again; without = before the first ; it is
+// not a cookie.
+func TestSplitSetCookie(t *testing.T) {
+	for _, c := range []struct {
+		in, name, value, attrs string
+		ok                     bool
+	}{
+		{"a=b", "a", "b", "", true},
+		{"a=b; Path=/; HttpOnly", "a", "b", "; Path=/; HttpOnly", true},
+		{"a=; Max-Age=0", "a", "", "; Max-Age=0", true},
+		{"a=b=c==;", "a", "b=c==", ";", true},
+		{` a = "q;r"`, " a ", ` "q`, `;r"`, true},
+		{"=b", "", "b", "", true},
+		{"flag; a=b", "", "", "", false},
+		{"", "", "", "", false},
+	} {
+		name, value, attrs, ok := SplitSetCookie(c.in)
+		if name != c.name || value != c.value || attrs != c.attrs || ok != c.ok {
+			t.Errorf("%q: got %q %q %q %v", c.in, name, value, attrs, ok)
+		}
+		if ok && name+"="+value+attrs != c.in {
+			t.Errorf("%q: parts do not join back", c.in)
+		}
+	}
+}
+
 // TestCatalogHeaderReplacesDefault: a catalog header replaces the default
 // of its name instead of going next to it (Accept-Encoding: gzip and
 // identity at once); more of one name in the catalog are all sent.
