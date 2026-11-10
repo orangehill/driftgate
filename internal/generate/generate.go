@@ -105,8 +105,8 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	for _, r := range manual.Requests {
 		g.ids[r.ID] = true
 	}
-	// Each method of a route is generated unless it is excluded or (without
-	// --all) a hand-written entry already reaches it.
+	// Without --all, no requests are generated for a route method a
+	// hand-written entry already reaches.
 	if !o.All {
 		g.byHand = reached(o.Inventory, manual)
 	}
@@ -540,8 +540,8 @@ func (g *generator) route(ctx context.Context, route routes.Route, templates []s
 // the requests generate would make for it: their IDs come from a copy of
 // the generator, so the IDs taken, the entries of requests: named, the
 // sequences and the skips of this one do not change. The copy shares the
-// query results (values) and adds to them: a value queried here is not
-// queried again. A query for a parameter value that fails here only
+// query results (values) and adds to them: a value read here is not
+// read again. A query for a parameter value that fails here only
 // leaves the generated IDs out: the route is not generated, so it never
 // fails generate.
 func (g *generator) replaced(ctx context.Context, route routes.Route, m string, templates []string, hand []string) {

@@ -59,8 +59,8 @@ func TestStateValidation(t *testing.T) {
 	}
 }
 
-// TestDataDriver: data.driver mariadb becomes mysql, the only MySQL name
-// the data module knows.
+// TestDataDriver: data.driver mariadb becomes mysql, the only MySQL driver
+// name data opens.
 func TestDataDriver(t *testing.T) {
 	cfg := Config{Version: Version, Project: "p", Mode: Freeze, Level: "values",
 		Data: Data{Driver: "mariadb", Source: DataDB{DSN: Secret{Env: "X"}, Database: "a"}, Target: DataDB{Database: "b"}}}

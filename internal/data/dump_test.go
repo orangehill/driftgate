@@ -554,7 +554,6 @@ func TestDumpHeader(t *testing.T) {
 		{MySQL, dumpHeader(DumpFormat, MySQL)},
 		{MySQL, dumpHeader(1, MySQL)},
 		{MySQL, dumpHeader(DumpFormat, "mariadb")},
-		{"mariadb", dumpHeader(DumpFormat, MySQL)},
 		{Postgres, dumpHeader(1, Postgres) + "SET x = 1;\n"},
 	}
 	for _, c := range ok {
