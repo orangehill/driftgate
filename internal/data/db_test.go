@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Integration tests on real servers: DRIFTGATE_TEST_MYSQL lists mysql://
@@ -302,6 +304,99 @@ func TestPostgresAnonymize(t *testing.T) {
 		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
 	}
 	testAnonymize(t, newServer(t, Postgres, dsn))
+}
+
+// TestPostgresPublishOtherSessions: publish ends the other sessions on the
+// staging database before it renames it. The target's DSN names a role
+// that is not a superuser, which may not end a superuser's session: (a) a
+// session that ends within the server's wait (5 s) does not stop publish;
+// (b) one that stays stops it after that wait with "being accessed by
+// other users" and the permission error (42501), not at once with the
+// permission error alone.
+func TestPostgresPublishOtherSessions(t *testing.T) {
+	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
+	}
+	s := newServer(t, Postgres, dsn)
+	ctx := context.Background()
+	const role, staging, target = "dgdata_pub_app", "dgdata_pub_staging", "dgdata_pub_target"
+	drop := func() {
+		s.drop(staging, target)
+		s.admin.Exec("DROP ROLE IF EXISTS " + role)
+	}
+	drop()
+	t.Cleanup(drop)
+	if _, err := s.admin.Exec("CREATE ROLE " + role + " LOGIN PASSWORD 'app' CREATEDB"); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword(role, "app")
+	app := &server{driver: Postgres, dsn: u.String()}
+	e := &engine{dl: postgresDialect{}}
+
+	// publish runs while a superuser's session on the staging database
+	// runs q; done gets the session's error.
+	publish := func(t *testing.T, q string) (took time.Duration, done chan error, err error) {
+		t.Helper()
+		s.drop(staging, target)
+		if _, err := s.admin.Exec("CREATE DATABASE " + staging + " OWNER " + role); err != nil {
+			t.Fatal(err)
+		}
+		d, err := open(s.db(staging), staging)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done = make(chan error, 1)
+		go func() {
+			_, err := d.Exec(q)
+			d.Close()
+			done <- err
+		}()
+		for i := 0; ; i++ {
+			var n int
+			s.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND query = $2", staging, q).Scan(&n)
+			if n > 0 {
+				break
+			}
+			if i == 200 {
+				t.Fatalf("no session on %s", staging)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		start := time.Now()
+		err = e.publish(ctx, app.db(staging), app.db(target), false)
+		return time.Since(start), done, err
+	}
+
+	t.Run("a session that ends", func(t *testing.T) {
+		_, done, err := publish(t, "SELECT pg_sleep(1.5)")
+		if err != nil {
+			t.Fatalf("publish over a session that ends: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("the session was ended: %v", err)
+		}
+		var n int
+		if err := s.admin.QueryRow("SELECT count(*) FROM pg_database WHERE datname = $1", target).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("target after publish: %d, %v", n, err)
+		}
+	})
+	t.Run("a session that stays", func(t *testing.T) {
+		took, done, err := publish(t, "SELECT pg_sleep(60)")
+		s.admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", staging)
+		<-done
+		pe := (*pgconn.PgError)(nil)
+		if !errors.As(err, &pe) || pe.Code != "55006" || !strings.Contains(err.Error(), "SQLSTATE 42501") {
+			t.Fatalf("publish over a superuser's session: %v", err)
+		}
+		if took > 8*time.Second {
+			t.Fatalf("the error took %v", took)
+		}
+	})
 }
 
 func testAnonymize(t *testing.T, s *server) {

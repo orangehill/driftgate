@@ -786,7 +786,7 @@ func (p *Postgres) copyDatabase(ctx context.Context, src, dst string, prepare fu
 		create += " STRATEGY FILE_COPY"
 	}
 	// Sessions on the source block the copy.
-	err = p.alone(ctx, src, create)
+	err = dbx.PostgresAlone(ctx, p.admin, src, create)
 	if err == nil && keep != nil {
 		err = p.keep(ctx, tmp, keep)
 	}
@@ -823,7 +823,7 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 		if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS false"); err != nil {
 			return err
 		}
-		if err := p.alone(ctx, dst, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err != nil {
+		if err := dbx.PostgresAlone(ctx, p.admin, dst, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err != nil {
 			p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS "+strconv.FormatBool(keep.AllowConn))
 			return err
 		}
@@ -837,51 +837,6 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 		}
 	}
 	return err
-}
-
-// pgTerminate ends the other sessions on a database; a variable for the
-// tests. It leaves out autovacuum workers: a role that is not a superuser
-// may not end them (before PostgreSQL 18, or on 18 without
-// pg_signal_autovacuum_worker), and pg_terminate_backend's error aborts the
-// whole statement, so the sessions listed after one would stay. CREATE
-// DATABASE … TEMPLATE and RENAME end autovacuum workers themselves. They
-// are the sessions on a database without a role (usesysid); backend_type
-// cannot tell them, as it is NULL to a role for the sessions of roles it
-// may not see, which must stay in the list so that their error is returned.
-var pgTerminate = "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = $1 AND pid <> pg_catalog.pg_backend_pid() AND usesysid IS NOT NULL"
-
-// How often alone tries, and how long it waits between the tries.
-const (
-	pgAloneTries = 5
-	pgAloneWait  = 200 * time.Millisecond
-)
-
-// alone runs stmt, which needs db to have no other sessions (CREATE
-// DATABASE … TEMPLATE db, ALTER DATABASE db RENAME): it ends them first,
-// and tries again, at most pgAloneTries times, while stmt fails because a
-// session is still there (55006 object_in_use). A failure to end them is
-// returned with that 55006, so that it is not hidden behind "being
-// accessed by other users"; when stmt succeeds anyway (the session ended
-// by itself within the server's wait), it does not matter.
-func (p *Postgres) alone(ctx context.Context, db, stmt string) error {
-	for attempt := 1; ; attempt++ {
-		_, terr := p.admin.ExecContext(ctx, pgTerminate, db)
-		_, err := p.admin.ExecContext(ctx, stmt)
-		if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
-			return err
-		}
-		if terr != nil {
-			return fmt.Errorf("%w; ending the other sessions on %s: %w", err, db, terr)
-		}
-		if attempt == pgAloneTries {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pgAloneWait):
-		}
-	}
 }
 
 // wait waits for the drop of the database the last copy replaced.
