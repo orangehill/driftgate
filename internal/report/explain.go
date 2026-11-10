@@ -227,7 +227,7 @@ func countChange(where string, values [2][]string) string {
 		return ""
 	}
 	s := fmt.Sprintf("%s has %s instead of %d", where, plural(c, "value"), b)
-	if where == "header:set-cookie" {
+	if where == setCookie {
 		gone, added := cookieNames(values[0]), cookieNames(values[1])
 		for n := range added {
 			if gone[n] > 0 {
@@ -259,8 +259,8 @@ func countChange(where string, values [2][]string) string {
 func cookieNames(values []string) map[string]int {
 	out := map[string]int{}
 	for _, v := range values {
-		name, _, _ := strings.Cut(v, "=")
-		out[strings.TrimSpace(name)]++
+		name, _, _, _ := splitCookie(v)
+		out[name]++
 	}
 	return out
 }

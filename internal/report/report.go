@@ -556,41 +556,87 @@ func extends(c rune) bool {
 		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
 }
 
+// setCookie is where a drift of the Set-Cookie header is.
+const setCookie = "header:set-cookie"
+
 // DriftPair shortens the two values of a drift for display, like
 // ShortPair. The cookies of a Set-Cookie drift are compacted first: their
-// masked values say no more than their length, and a long one would leave
-// the attributes after it out of the window.
+// masked values say little more than their length, and a long one would
+// leave the cookie that changed or its attributes out of the window.
 func DriftPair(d compare.Drift, max int) (string, string) {
 	a, b := d.Baseline, d.Current
-	if d.Where == "header:set-cookie" {
-		if ca, cb := compactCookies(a), compactCookies(b); ca != cb {
-			a, b = ca, cb
-		}
+	if d.Where == setCookie {
+		a, b = compactCookies(a, b)
 	}
 	return ShortPair(a, b, max)
 }
 
-// compactCookies writes each cookie of a list of Set-Cookie values as
-// name=…(N), N the length of its value, with its attributes in full. A
-// value that is not such a list, such as (private), is returned as it is.
-func compactCookies(s string) string {
-	var vs []string
-	if json.Unmarshal([]byte(s), &vs) != nil {
-		return s
+// compactCookies shortens two lists of Set-Cookie values. When both have
+// as many cookies, a cookie the same on both sides becomes …, and one that
+// differs only in its masked value is kept as it is, to show what changed
+// in it. Any other cookie becomes name=…(N), N the length of its value,
+// with its attributes in full. A value that is not such a list, such as
+// (private), is returned as it is.
+func compactCookies(a, b string) (string, string) {
+	as, aok := cookieList(a)
+	bs, bok := cookieList(b)
+	if aok && bok && len(as) == len(bs) {
+		for i := range as {
+			switch {
+			case as[i] == bs[i]:
+				as[i], bs[i] = "…", "…"
+			case !onlyValueDiffers(as[i], bs[i]):
+				as[i], bs[i] = compactCookie(as[i]), compactCookie(bs[i])
+			}
+		}
+	} else {
+		for i := range as {
+			as[i] = compactCookie(as[i])
+		}
+		for i := range bs {
+			bs[i] = compactCookie(bs[i])
+		}
 	}
-	for i, v := range vs {
-		first, attrs, hasAttrs := strings.Cut(v, ";")
-		name, value, ok := strings.Cut(first, "=")
-		if !ok {
-			continue
-		}
-		vs[i] = fmt.Sprintf("%s=…(%d)", name, utf8.RuneCountInString(value))
-		if hasAttrs {
-			vs[i] += ";" + attrs
-		}
+	return listOr(as, aok, a), listOr(bs, bok, b)
+}
+
+// cookieList reads a header's values, written as a JSON list.
+func cookieList(s string) ([]string, bool) {
+	var vs []string
+	return vs, json.Unmarshal([]byte(s), &vs) == nil
+}
+
+// listOr writes vs as a JSON list, the way drifts hold a header's values,
+// or returns s when s was not a list.
+func listOr(vs []string, ok bool, s string) string {
+	if !ok {
+		return s
 	}
 	b, _ := json.Marshal(vs)
 	return string(b)
+}
+
+func compactCookie(v string) string {
+	name, value, attrs, ok := splitCookie(v)
+	if !ok {
+		return v
+	}
+	return fmt.Sprintf("%s=…(%d)%s", name, utf8.RuneCountInString(value), attrs)
+}
+
+func onlyValueDiffers(x, y string) bool {
+	xn, _, xa, xok := splitCookie(x)
+	yn, _, ya, yok := splitCookie(y)
+	return xok && yok && xn == yn && xa == ya
+}
+
+// splitCookie splits a Set-Cookie value into the cookie's name, its value
+// and its attributes, from the first ";" on. ok is false when no "="
+// comes before that ";".
+func splitCookie(v string) (name, value, attrs string, ok bool) {
+	first, _, _ := strings.Cut(v, ";")
+	name, value, ok = strings.Cut(first, "=")
+	return strings.TrimSpace(name), value, v[len(first):], ok
 }
 
 // shortMax is how many characters of a drift's values a line shows.
@@ -624,7 +670,7 @@ func ShortPair(a, b string, max int) (string, string) {
 		if start > 0 {
 			marks = 2 // for both
 		}
-		quoted := r[0] == '"'
+		quoted := len(r) >= 2 && r[0] == '"' && r[len(r)-1] == '"'
 		if quoted {
 			marks *= 2 // and the quotes kept outside them
 		}
@@ -632,12 +678,15 @@ func ShortPair(a, b string, max int) (string, string) {
 		// Not inside a character the eye sees as one: an accent, a
 		// variation selector, a skin tone or a joined emoji stays with
 		// the character it belongs to. Nor inside an escape: \" cut in
-		// two would show a quote of its own.
-		for start > 0 && (extends(r[start]) || r[start-1] == zwj || inEscape(r, start)) {
-			start--
+		// two would show a quote of its own. The window narrows to the
+		// next whole one, so it stays within max, and keeps the first
+		// different character.
+		inside := func(i int) bool { return extends(r[i]) || r[i-1] == zwj || inEscape(r, i) }
+		for start > 0 && start < first && inside(start) {
+			start++
 		}
-		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj || inEscape(r, end)) {
-			end++
+		for end < len(r) && end > first+1 && inside(end) {
+			end--
 		}
 		s := string(r[start:end])
 		if start > 0 {
@@ -659,7 +708,9 @@ func ShortPair(a, b string, max int) (string, string) {
 
 // inEscape reports that r[i] is inside a backslash escape, after its
 // backslash: the next character, or the rest of \uXXXX. An escape starts
-// at a backslash after an even number of backslashes.
+// at a backslash after an even number of backslashes. It applies to every
+// value, JSON or not: in another value it only moves a window's edge by a
+// few characters.
 func inEscape(r []rune, i int) bool {
 	for j := i - 1; j >= 0 && j >= i-5; j-- {
 		if r[j] != '\\' {
