@@ -33,14 +33,14 @@ const (
 
 // PostgresAlone runs stmt, a statement that needs db to have no other
 // sessions (CREATE DATABASE … TEMPLATE db, ALTER DATABASE db RENAME), on
-// admin: it ends them first, and tries again, at most pgAloneTries times, while
-// stmt fails because a session is still there (55006 object_in_use). Any
-// other error is returned at once. A failure to end them is returned with
-// that 55006, so that it is not hidden behind "being accessed by other
-// users"; when stmt succeeds anyway (the session ended by itself within
-// the server's wait), it does not matter. When ctx ends while a session is
-// in the way, ctx's error is returned at once, without a wait, not the
-// 55006, which would blame the sessions.
+// admin: it ends them first, and tries again, at most pgAloneTries times,
+// while stmt fails because a session is still there (55006 object_in_use).
+// Any other error is returned at once. A failure to end them is returned
+// with that 55006, so that it is not hidden behind "being accessed by other
+// users"; when stmt succeeds anyway (the session ended by itself within the
+// server's wait), it does not matter. When ctx ends while a session is in
+// the way, ctx's error is returned at once, without a wait, not the 55006,
+// which would blame the sessions.
 func PostgresAlone(ctx context.Context, admin *sql.DB, db, stmt string) error {
 	for try := 1; ; try++ {
 		_, terr := admin.ExecContext(ctx, pgTerminate, db)
