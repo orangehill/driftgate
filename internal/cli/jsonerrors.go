@@ -83,11 +83,8 @@ func templatesNote(p *config.Project, out io.Writer, check bool) {
 			return
 		}
 	}
-	why := map[string]string{
-		routes.EmptyBody:  firstOf(kinds, validatesBodies) + " validates request bodies (empty-body sends an invalid one, so a changed validation message does not pass unseen)",
-		routes.JSONErrors: firstOf(kinds, errorsByAccept) + " renders errors as JSON for API clients",
-	}
-	var names, reasons []string
+	var names []string
+	reasons, said := "", ""
 	for _, t := range missing {
 		mark := filepath.Join(p.Layout.Store, ".note-"+t)
 		if _, err := os.Stat(mark); err == nil {
@@ -96,13 +93,25 @@ func templatesNote(p *config.Project, out io.Writer, check bool) {
 		if os.WriteFile(mark, nil, 0o600) != nil {
 			continue // said once, or not at all
 		}
-		names, reasons = append(names, t), append(reasons, why[t])
+		framework, why := firstOf(kinds, errorsByAccept), "renders errors as JSON for API clients"
+		if t == routes.EmptyBody {
+			framework, why = firstOf(kinds, validatesBodies), "validates request bodies"
+		}
+		switch {
+		case framework == said: // a framework is named once
+			reasons += " and " + why
+		case reasons == "":
+			reasons = framework + " " + why
+		default:
+			reasons += "; " + framework + " " + why
+		}
+		names, said = append(names, t), framework
 	}
 	if len(names) == 0 {
 		return
 	}
 	fmt.Fprintf(out, "note: %s; add %s to templates: in %s and run driftgate generate --write to compare them too\n",
-		strings.Join(reasons, "; "), strings.Join(names, " and "), rel(p.Root, p.Layout.Config))
+		reasons, strings.Join(names, " and "), rel(p.Root, p.Layout.Config))
 }
 
 // countTemplate counts the generated requests of a template.

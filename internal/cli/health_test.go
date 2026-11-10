@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -189,8 +190,8 @@ func TestFailedTitlesByMode(t *testing.T) {
 	}
 }
 
-// TestCoverageGaps: coverage ticks its last line only when it lists no
-// gap; a clean exit with a gap listed says to close it.
+// TestCoverageGaps: coverage ticks its last line only when it lists
+// nothing to fix; a clean exit after such a list says to fix it.
 func TestCoverageGaps(t *testing.T) {
 	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/a"}}}
 	cat := &catalog.Catalog{Requests: []catalog.Request{{ID: "get-a", Method: "GET", Path: "/a"}}}
@@ -198,13 +199,28 @@ func TestCoverageGaps(t *testing.T) {
 	if _, code, _ := checkCoverage(nil, cat, inv, &routes.Exclusions{}, nil, config.Freeze, "text", &b); code != ExitClean || !strings.Contains(b.String(), "every route is covered or excluded ✓") {
 		t.Errorf("clean: %d\n%s", code, b.String())
 	}
-	// A validated body no request checks: covered, but a gap.
-	inv.Routes = append(inv.Routes, routes.Route{Methods: []string{"POST"}, Path: "/posts", Body: json.RawMessage(`{"title":"a"}`)})
-	cat.Requests = append(cat.Requests, catalog.Request{ID: "post-posts", Method: "POST", Path: "/posts", Body: json.RawMessage(`{"title":"a"}`)})
-	b.Reset()
-	_, code, _ := checkCoverage(nil, cat, inv, &routes.Exclusions{}, nil, config.Freeze, "text", &b)
-	if out := b.String(); code != ExitClean || !strings.Contains(out, noInvalidBodyTitle) || strings.Contains(out, "✓") ||
-		!strings.Contains(out, "every route is covered or excluded; close the gaps listed above") {
-		t.Errorf("with a gap: %d\n%s", code, out)
+	body := json.RawMessage(`{"title":"a"}`)
+	for _, c := range []struct {
+		name  string
+		route *routes.Route
+		excl  routes.Exclusions
+		title string
+	}{
+		// A validated body no request checks: covered, but listed.
+		{"no invalid body", &routes.Route{Methods: []string{"POST"}, Path: "/posts", Body: body}, routes.Exclusions{}, noInvalidBodyTitle},
+		{"stale known failure", nil, routes.Exclusions{KnownFailures: []routes.KnownFailure{{Request: "get-gone", Reason: "renamed"}}}, staleKnownTitle},
+		{"stale exclusion", nil, routes.Exclusions{Routes: []routes.Exclusion{{Route: "/gone", Reason: "removed"}}}, "Exclusions that match no route"},
+	} {
+		inv, cat := inv, cat
+		if c.route != nil {
+			inv = &routes.Inventory{Routes: append(slices.Clone(inv.Routes), *c.route)}
+			cat = &catalog.Catalog{Requests: append(slices.Clone(cat.Requests), catalog.Request{ID: "post-posts", Method: "POST", Path: "/posts", Body: body})}
+		}
+		b.Reset()
+		_, code, _ := checkCoverage(nil, cat, inv, &c.excl, nil, config.Freeze, "text", &b)
+		if out := b.String(); code != ExitClean || !strings.Contains(out, c.title) || strings.Contains(out, "✓") ||
+			!strings.Contains(out, "every route is covered or excluded; fix the lists above") {
+			t.Errorf("%s: %d\n%s", c.name, code, out)
+		}
 	}
 }

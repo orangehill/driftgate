@@ -99,15 +99,17 @@ func readAnswersOnce(dir string, ids []string) (map[string]routes.Answer, error)
 	return answers, nil
 }
 
-// section prints a titled list; nothing when it is empty.
-func section(out io.Writer, title string, items []string) {
+// section prints a titled list, and says whether it did: nothing when it
+// is empty.
+func section(out io.Writer, title string, items []string) bool {
 	if len(items) == 0 {
-		return
+		return false
 	}
 	fmt.Fprintf(out, "\n%s:\n", title)
 	for _, it := range items {
 		fmt.Fprintf(out, "  %s\n", it)
 	}
+	return true
 }
 
 func failureLines(fs []routes.Failure) []string {
@@ -132,10 +134,11 @@ const (
 )
 
 // fixAdvice is how the baseline takes the answers of requests fixed in
-// mode: evolve accepts them; freeze accepts nothing, so a rebase does.
+// mode: evolve accepts them; freeze accepts nothing, so a rebase does. A
+// rebase takes the whole capture, drifts included (as JoinAdvice says).
 func fixAdvice(mode string) string {
 	if mode == config.Freeze {
-		return "rebase the baseline on a capture that has them (driftgate baselines rebase … --allow-freeze)"
+		return `rebase the baseline on a capture with no other drift: driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`
 	}
 	return "accept the new answers"
 }

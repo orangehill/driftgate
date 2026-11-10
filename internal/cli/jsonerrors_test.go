@@ -70,9 +70,9 @@ func TestJSONErrorsTemplate(t *testing.T) {
 		marked    bool // .note-json-errors is there already
 		want      string
 	}{
-		{"neither", nil, false, "note: laravel validates request bodies (empty-body sends an invalid one, so a changed validation message does not pass unseen); laravel renders errors as JSON for API clients; add empty-body and json-errors to templates:"},
+		{"neither", nil, false, "note: laravel validates request bodies and renders errors as JSON for API clients; add empty-body and json-errors to templates:"},
 		{"empty-body present", []string{"empty-body"}, false, "note: laravel renders errors as JSON for API clients; add json-errors to templates:"},
-		{"json-errors said already", nil, true, "note: laravel validates request bodies (empty-body sends an invalid one, so a changed validation message does not pass unseen); add empty-body to templates:"},
+		{"json-errors said already", nil, true, "note: laravel validates request bodies; add empty-body to templates:"},
 		{"both present", []string{"empty-body", "json-errors"}, false, ""},
 	} {
 		t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))

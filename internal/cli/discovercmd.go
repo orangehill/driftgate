@@ -487,11 +487,11 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 			none = append(none, k)
 		}
 	}
-	// A gap is a list to act on; known failures are acknowledged already.
+	// Every list but the known failures, which are acknowledged already,
+	// asks for a fix.
 	gaps := false
 	gap := func(title string, items []string) {
-		section(out, title, items)
-		gaps = gaps || len(items) > 0
+		gaps = section(out, title, items) || gaps
 	}
 	gap("Uncovered routes (add a catalog entry, or an exclusion with a reason)", none)
 	gap("Routes reached only by error cases (not-found, invalid-param…): give their parameters under params: so the ok request is generated", c.Negative)
@@ -507,7 +507,7 @@ func checkCoverage(sel selection, cat *catalog.Catalog, inv *routes.Inventory, e
 	gap(noInvalidBodyTitle, c.NoInvalidBody)
 	if code == ExitClean {
 		if gaps {
-			fmt.Fprintln(out, "\nevery route is covered or excluded; close the gaps listed above")
+			fmt.Fprintln(out, "\nevery route is covered or excluded; fix the lists above")
 		} else {
 			fmt.Fprintln(out, "\nevery route is covered or excluded ✓")
 		}

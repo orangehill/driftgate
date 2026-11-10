@@ -148,8 +148,10 @@ func TestBaselinesRebase(t *testing.T) {
 		r.Retry = &snapshot.Retry{Sends: 2, Status: 503, MS: 5, Recovered: true}
 	})
 	code, out, errOut = rebase("local", "--from", "broken", "--reason", "checked", "--allow-freeze")
-	// Mode freeze accepts nothing: the title says to rebase instead.
-	if code != ExitClean || !strings.Contains(out, failedRequestsTitle(config.Freeze)) || !strings.Contains(out, "--allow-freeze)") ||
+	// Mode freeze accepts nothing: the title says to rebase instead, with
+	// every argument rebase needs.
+	if code != ExitClean || !strings.Contains(out, failedRequestsTitle(config.Freeze)) ||
+		!strings.Contains(out, `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze), baseline local:`) ||
 		strings.Contains(out, "accept the new answer") || !strings.Contains(out, "news") ||
 		!strings.Contains(out, "warning: baseline local holds 1 response that came only after a retry: me-anonymous") {
 		t.Fatalf("rebase of a broken capture: %d\n%s\n%s", code, out, errOut)
