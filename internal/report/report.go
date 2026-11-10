@@ -502,7 +502,7 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		b, c := ShortPair(d.Baseline, d.Current, shortMax)
+		b, c := DriftPair(d, shortMax)
 		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
@@ -556,6 +556,101 @@ func extends(c rune) bool {
 		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
 }
 
+// setCookie is where a drift of the Set-Cookie header is.
+const setCookie = "header:set-cookie"
+
+// DriftPair shortens the two values of a drift for display, like
+// ShortPair. The cookies of a Set-Cookie drift are compacted first: their
+// masked values say little more than their length, and a long one would
+// leave the cookie that changed or its attributes out of the window.
+func DriftPair(d compare.Drift, max int) (string, string) {
+	a, b := d.Baseline, d.Current
+	lead := max / 3
+	if d.Where == setCookie {
+		a, b = compactCookies(a, b)
+		// The window starts at the name of the cookie that changed when
+		// the difference still fits, with both marks and a \uXXXX after it.
+		ra := []rune(a)
+		first := firstDiff(ra, []rune(b))
+		name := first
+		for name > 0 && ra[name-1] != '"' {
+			name--
+		}
+		if n := first - name; n+8 < max {
+			lead = n
+		}
+	}
+	return shortPair(a, b, max, lead)
+}
+
+// compactCookies shortens two lists of Set-Cookie values. When both have
+// as many cookies, a cookie the same on both sides becomes …, and one that
+// differs only in its masked value is kept as it is, to show what changed
+// in it. Any other cookie becomes name=…(N), N the length of its value,
+// with its attributes in full. A value that is not such a list, such as
+// (private), is returned as it is.
+func compactCookies(a, b string) (string, string) {
+	as, aok := cookieList(a)
+	bs, bok := cookieList(b)
+	if aok && bok && len(as) == len(bs) {
+		for i := range as {
+			switch {
+			case as[i] == bs[i]:
+				as[i], bs[i] = "…", "…"
+			case !onlyValueDiffers(as[i], bs[i]):
+				as[i], bs[i] = compactCookie(as[i]), compactCookie(bs[i])
+			}
+		}
+	} else {
+		for i := range as {
+			as[i] = compactCookie(as[i])
+		}
+		for i := range bs {
+			bs[i] = compactCookie(bs[i])
+		}
+	}
+	return listOr(as, aok, a), listOr(bs, bok, b)
+}
+
+// cookieList reads a header's values, written as a JSON list.
+func cookieList(s string) ([]string, bool) {
+	var vs []string
+	return vs, json.Unmarshal([]byte(s), &vs) == nil
+}
+
+// listOr writes vs as a JSON list, the way drifts hold a header's values,
+// or returns s when s was not a list.
+func listOr(vs []string, ok bool, s string) string {
+	if !ok {
+		return s
+	}
+	b, _ := json.Marshal(vs)
+	return string(b)
+}
+
+func compactCookie(v string) string {
+	name, value, attrs, ok := splitCookie(v)
+	if !ok {
+		return v
+	}
+	return fmt.Sprintf("%s=…(%d)%s", name, utf8.RuneCountInString(value), attrs)
+}
+
+func onlyValueDiffers(x, y string) bool {
+	xn, _, xa, xok := splitCookie(x)
+	yn, _, ya, yok := splitCookie(y)
+	return xok && yok && xn == yn && xa == ya
+}
+
+// splitCookie splits a Set-Cookie value into the cookie's name, its value
+// and its attributes, from the first ";" on. ok is false when no "="
+// comes before that ";".
+func splitCookie(v string) (name, value, attrs string, ok bool) {
+	first, _, _ := strings.Cut(v, ";")
+	name, value, ok = strings.Cut(first, "=")
+	return strings.TrimSpace(name), value, v[len(first):], ok
+}
+
 // shortMax is how many characters of a drift's values a line shows.
 const shortMax = 80
 
@@ -563,19 +658,22 @@ const shortMax = 80
 // longer than max characters, both are cut to the same window around the
 // first character where they differ, with … where text is left out: two
 // long texts that differ in the middle show that difference, not two equal
-// beginnings.
+// beginnings. A quoted value keeps its quotes outside the marks: "…x…".
+// Escapes stay whole for a max of 15 or more; below it, a difference
+// inside \uXXXX can leave the window's start in that escape.
 func ShortPair(a, b string, max int) (string, string) {
+	return shortPair(a, b, max, max/3) // a third before the difference
+}
+
+// shortPair is ShortPair with lead characters before the first difference.
+func shortPair(a, b string, max, lead int) (string, string) {
 	ra, rb := []rune(a), []rune(b)
 	if len(ra) <= max && len(rb) <= max {
 		return a, b
 	}
-	first := 0
-	for first < len(ra) && first < len(rb) && ra[first] == rb[first] {
-		first++
-	}
-	// A third of the window before the difference, the rest after it.
+	first := firstDiff(ra, rb)
 	from := 0
-	if lead := max / 3; first > lead {
+	if first > lead {
 		from = first - lead
 	}
 	cut := func(r []rune) string {
@@ -583,29 +681,80 @@ func ShortPair(a, b string, max int) (string, string) {
 			return string(r) // short enough as it is
 		}
 		start := min(from, len(r))
-		end := min(len(r), start+max-1)
+		marks := 1 // room for …
 		if start > 0 {
-			end = min(len(r), start+max-2) // room for both marks
+			marks = 2 // for both
 		}
+		quoted := len(r) >= 2 && r[0] == '"' && r[len(r)-1] == '"'
+		if quoted {
+			marks *= 2 // and the quotes kept outside them
+		}
+		end := min(len(r), start+max-marks)
 		// Not inside a character the eye sees as one: an accent, a
 		// variation selector, a skin tone or a joined emoji stays with
-		// the character it belongs to.
-		for start > 0 && (extends(r[start]) || r[start-1] == zwj) {
-			start--
+		// the character it belongs to. Nor inside an escape: \" cut in
+		// two would show a quote of its own. The window narrows to the
+		// next whole one, so it stays within max, and keeps the first
+		// different character.
+		inside := func(i int) bool { return extends(r[i]) || r[i-1] == zwj || inEscape(r, i) }
+		for start > 0 && start < first && inside(start) {
+			start++
 		}
-		for end < len(r) && end > start && (extends(r[end]) || r[end-1] == zwj) {
-			end++
+		for end < len(r) && end > first+1 && inside(end) {
+			end--
 		}
 		s := string(r[start:end])
 		if start > 0 {
 			s = "…" + s
+			if quoted {
+				s = `"` + s
+			}
 		}
 		if end < len(r) {
 			s += "…"
+			if quoted {
+				s += `"`
+			}
 		}
 		return s
 	}
 	return cut(ra), cut(rb)
+}
+
+// firstDiff is the index of the first character where a and b differ, or
+// the length of the shorter.
+func firstDiff(a, b []rune) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+// inEscape reports that r[i] is inside a backslash escape, after its
+// backslash: the next character, or the rest of \uXXXX. An escape starts
+// at a backslash after an even number of backslashes. It applies to every
+// value, JSON or not: in another value it only moves a window's edge by a
+// few characters.
+func inEscape(r []rune, i int) bool {
+	for j := i - 1; j >= 0 && j >= i-5; j-- {
+		if r[j] != '\\' {
+			continue
+		}
+		k := j
+		for k > 0 && r[k-1] == '\\' {
+			k--
+		}
+		if (j-k)%2 != 0 {
+			continue // the second backslash of \\
+		}
+		n := 2
+		if j+1 < len(r) && r[j+1] == 'u' {
+			n = 6
+		}
+		return i < j+n
+	}
+	return false
 }
 
 // Text writes a readable report: every drifted request with up to maxDrifts

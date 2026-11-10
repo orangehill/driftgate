@@ -357,14 +357,15 @@ func TestResentCounted(t *testing.T) {
 
 // TestShortPairAroundTheDifference: two long values are cut alike around
 // the first character where they differ, so a change in the middle of a
-// long text shows in the drift line and in the group's explanation; short
-// values and a difference at the start are shown as before.
+// long text shows in the drift line and in the group's explanation, a
+// quoted one inside its quotes; short values and a difference at the start
+// are shown as before.
 func TestShortPairAroundTheDifference(t *testing.T) {
 	head, tail := strings.Repeat("a", 150), strings.Repeat("z", 150)
 	b, c := `"`+head+"OLD-WORD"+tail+`"`, `"`+head+"NEW-WORD"+tail+`"`
 	sb, sc := ShortPair(b, c, 80)
 	for _, s := range []string{sb, sc} {
-		if !strings.HasPrefix(s, "…") || !strings.HasSuffix(s, "…") || len([]rune(s)) > 80 {
+		if !strings.HasPrefix(s, `"…`) || !strings.HasSuffix(s, `…"`) || len([]rune(s)) > 80 {
 			t.Errorf("window %q (%d characters)", s, len([]rune(s)))
 		}
 	}
@@ -381,6 +382,10 @@ func TestShortPairAroundTheDifference(t *testing.T) {
 	// One value a prefix of the other: the window ends where the shorter does.
 	if x, y := ShortPair(head+head, head+head+"MORE", 80); !strings.HasSuffix(x, "a") || !strings.HasPrefix(x, "…") || !strings.Contains(y, "MORE") {
 		t.Errorf("prefix: %q → %q", x, y)
+	}
+	// A value that only starts with a quote is not a quoted string.
+	if x, _ := ShortPair(`"`+head+"OLD"+tail, `"`+head+"NEW"+tail, 80); !strings.HasPrefix(x, "…a") || !strings.HasSuffix(x, "z…") {
+		t.Errorf("unclosed quote: %q", x)
 	}
 	// Multibyte text is cut on characters.
 	if x, _ := ShortPair(strings.Repeat("é", 200)+"1", strings.Repeat("é", 200)+"2", 40); !utf8.ValidString(x) || !strings.HasSuffix(x, "1") {
@@ -484,13 +489,124 @@ func TestShortPairKeepsCharactersWhole(t *testing.T) {
 			x, y := ShortPair(b, c, 80)
 			for _, w := range []string{x, y} {
 				inner := strings.TrimSuffix(strings.TrimPrefix(w, "…"), "…")
-				if !strings.HasPrefix(inner, unit) && !strings.HasPrefix(inner, "a") || !strings.HasSuffix(inner, unit) {
-					t.Errorf("%q, pad %d: window cuts a character: %q", unit, pad, w)
+				if !strings.HasPrefix(inner, unit) && !strings.HasPrefix(inner, "a") || !strings.HasSuffix(inner, unit) || len([]rune(w)) > 80 {
+					t.Errorf("%q, pad %d: window cuts a character or is too long: %q", unit, pad, w)
 				}
 			}
 			if !strings.Contains(x, "OLD") || !strings.Contains(y, "NEW") {
 				t.Errorf("%q: difference not shown: %q → %q", unit, x, y)
 			}
 		}
+	}
+}
+
+// TestShortPairKeepsEscapesWhole: a window over a quoted JSON value does
+// not start or end inside a backslash escape (\", \\, \uXXXX), keeps the
+// outer quotes and shows the difference, wherever the escapes fall.
+func TestShortPairKeepsEscapesWhole(t *testing.T) {
+	cycle := strings.Repeat(`\"\\é\u00e9`, 20)
+	var original string
+	if err := json.Unmarshal([]byte(`"`+cycle+`"`), &original); err != nil {
+		t.Fatal(err)
+	}
+	// pad moves where the window starts among the escapes, tail where it ends.
+	for pad := range 12 {
+		for tail := range 12 {
+			b := `"` + cycle + strings.Repeat("a", pad) + "OLD" + strings.Repeat("a", tail) + cycle + `"`
+			c := `"` + cycle + strings.Repeat("a", pad) + "NEW" + strings.Repeat("a", tail) + cycle + `"`
+			x, y := ShortPair(b, c, 80)
+			for _, w := range []string{x, y} {
+				if !strings.HasPrefix(w, `"…`) || !strings.HasSuffix(w, `…"`) || len([]rune(w)) > 80 {
+					t.Errorf("pad %d, tail %d: outer quotes not kept or window too long: %s", pad, tail, w)
+				}
+				inner := strings.TrimPrefix(strings.TrimPrefix(w, `"`), "…")
+				inner = strings.TrimSuffix(strings.TrimSuffix(inner, `"`), "…")
+				var text string
+				if err := json.Unmarshal([]byte(`"`+inner+`"`), &text); err != nil {
+					t.Errorf("pad %d, tail %d: window splits an escape: %s", pad, tail, w)
+					continue
+				}
+				// \u00e9 cut to u00e9 is still valid JSON, but not the text.
+				head, _, _ := strings.Cut(text, "a")
+				head, _, _ = strings.Cut(head, "OLD")
+				head, _, _ = strings.Cut(head, "NEW")
+				if !strings.Contains(original, head) {
+					t.Errorf("pad %d, tail %d: window starts inside an escape: %s", pad, tail, w)
+				}
+			}
+			if !strings.Contains(x, "OLD") || !strings.Contains(y, "NEW") {
+				t.Errorf("pad %d, tail %d: difference not shown: %s → %s", pad, tail, x, y)
+			}
+		}
+	}
+}
+
+// TestShortPairCutsAfterAnEscapedBackslash: \\ is a whole escape, so a
+// window may end right after it; the backslash before it does not start
+// another escape with the next character.
+func TestShortPairCutsAfterAnEscapedBackslash(t *testing.T) {
+	// The window is the first 78 characters: " X, 74 a, then \\.
+	rest := strings.Repeat("a", 74) + `\\` + strings.Repeat("a", 100) + `"`
+	if x, _ := ShortPair(`"X`+rest, `"Y`+rest, 80); !strings.HasSuffix(x, `a\\…"`) || len([]rune(x)) != 80 {
+		t.Errorf("cut after \\\\: %s", x)
+	}
+}
+
+// TestDriftPairCompactsCookies: a Set-Cookie drift shows each masked
+// cookie as its name and length with the attributes in full, so an
+// attribute added at the end shows; a value that is not a list of cookies,
+// such as (private), is shown as it is.
+func TestDriftPairCompactsCookies(t *testing.T) {
+	token := strings.Repeat("xx0x", 80)
+	d := drift("r", compare.KindHeaderValue, "header:set-cookie", `["XSRF-TOKEN=`+token+`"]`, `["XSRF-TOKEN=`+token+`; samesite=lax"]`)
+	r := Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{d}}})
+	var out bytes.Buffer
+	r.Text(&out, DefaultDrifts)
+	line := strings.Split(out.String(), "\n")[1]
+	for _, s := range []string{line, r.Groups[0].Explanation} {
+		if !strings.Contains(s, "XSRF-TOKEN=…(320)") || !strings.Contains(s, "samesite=lax") || strings.Contains(s, "xxxx") {
+			t.Errorf("set-cookie drift shown as %q", s)
+		}
+	}
+	// Cookies of the same length: compacted alike, so shown as they are.
+	if b, c := DriftPair(drift("r", compare.KindHeaderValue, "header:set-cookie", `["a=xx0"]`, `["a=xxx"]`), 80); b != `["a=xx0"]` || c != `["a=xxx"]` {
+		t.Errorf("same length: %s → %s", b, c)
+	}
+
+	// Two cookies of the same number: the one that did not change is …,
+	// one whose masked value changed shape shows it, even at the same
+	// length.
+	if b, c := DriftPair(drift("r", compare.KindHeaderValue, "header:set-cookie", `["a=xxx","b=xx0","c=xx"]`, `["a=xxxx","b=x0x","c=xx"]`), 80); b != `["a=xxx","b=xx0","…"]` || c != `["a=xxxx","b=x0x","…"]` {
+		t.Errorf("two changed cookies: %s → %s", b, c)
+	}
+	// Laravel: the session cookie gains an attribute; the line names it.
+	xsrf, session := "XSRF-TOKEN="+token+"; path=/; samesite=lax", "laravel_session="+token+"; path=/; httponly"
+	laravel := drift("r", compare.KindHeaderValue, "header:set-cookie", `["`+xsrf+`","`+session+`"]`, `["`+xsrf+`","`+session+`; samesite=lax"]`)
+	if b, c := DriftPair(laravel, shortMax); !strings.Contains(b, "laravel_session=…(320); path=/; httponly") || !strings.Contains(c, "laravel_session=…(320); path=/; httponly; samesite=lax") {
+		t.Errorf("laravel: %s → %s", b, c)
+	}
+	// With expires, the window starts at the name of the cookie that
+	// changed: the line shows it and the attribute it gained, and the
+	// explanation a session cookie whose masked value changed shape.
+	expires := "; expires=Tue, 10 Nov 2026 16:00:00 GMT; path=/"
+	xsrf, session = "XSRF-TOKEN="+token+expires, "laravel_session="+token+expires+"; httponly"
+	laravel = drift("r", compare.KindHeaderValue, "header:set-cookie", `["`+xsrf+`","`+session+`"]`, `["`+xsrf+`; samesite=lax","`+session+`"]`)
+	if b, c := DriftPair(laravel, shortMax); !strings.Contains(b, "XSRF-TOKEN=…(320)") || !strings.HasPrefix(c, "…XSRF-TOKEN=…(320)") || !strings.Contains(c, "samesite=lax") {
+		t.Errorf("laravel with expires: %s → %s", b, c)
+	}
+	laravel = drift("r", compare.KindHeaderValue, "header:set-cookie", `["`+xsrf+`","`+session+`"]`, `["`+xsrf+`","laravel_session=0`+token[1:]+expires+`; httponly"]`)
+	if b, c := DriftPair(laravel, 40); !strings.HasPrefix(b, "…laravel_session=x") || !strings.HasPrefix(c, "…laravel_session=0") {
+		t.Errorf("laravel, shape only: %s → %s", b, c)
+	}
+
+	private := drift("r", compare.KindHeaderValue, "header:set-cookie", "(private)", "(private)")
+	r = Build("capture:c", "baseline:local", []Result{{ID: "r", Outcome: Drift, Drifts: []compare.Drift{private}}})
+	out.Reset()
+	r.Text(&out, DefaultDrifts)
+	if line := strings.Split(out.String(), "\n")[1]; !strings.Contains(line, "(private) → (private)") {
+		t.Errorf("private line %q", line)
+	}
+	if e := r.Groups[0].Explanation; !strings.Contains(e, "(private) → (private)") {
+		t.Errorf("private explanation %q", e)
 	}
 }
