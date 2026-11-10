@@ -250,7 +250,7 @@ func TestMySQLDropOthersFirst(t *testing.T) {
 					"Dropped before the refusal and made again from the pristine copy: view a_view", "view a_view dgt_order@%, view b_view root@%"},
 				{"a view that cannot be made again", []string{"DROP VIEW a_view", "CREATE DEFINER = 'dgt_order_other'@'%' VIEW a_view AS SELECT id FROM items",
 					"DROP VIEW b_view", "CREATE VIEW b_view AS SELECT id FROM items", "DROP TABLE items"},
-					"Now missing from dgt_droporder until the next successful restore: view a_view (", "view b_view root@%"},
+					"Now missing from dgt_droporder until they are made again from the pristine copy: view a_view (", "view b_view root@%"},
 			} {
 				t.Run(c.name, func(t *testing.T) { dropOthersFirst(t, dsn, c.prep, c.says, c.after) })
 			}
@@ -308,7 +308,7 @@ func dropOthersFirst(t *testing.T, dsn string, prep []string, says, want string)
 	if err == nil || !strings.Contains(err.Error(), says) || !strings.Contains(err.Error(), "view b_view cannot be dropped") {
 		t.Fatalf("restore: %v", err)
 	}
-	if strings.Contains(says, "missing") && !strings.Contains(err.Error(), "until the next successful restore") {
+	if strings.Contains(says, "missing") && !strings.Contains(err.Error(), "until they are made again from the pristine copy") {
 		t.Fatalf("restore: %v", err)
 	}
 	if after != want {

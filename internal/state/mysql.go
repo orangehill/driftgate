@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -611,24 +612,35 @@ func (m *MySQL) fingerprint(ctx context.Context, c *sql.Conn, db string, items [
 // stops for a lock is read again in full (retryLocked).
 func (m *MySQL) fingerprintAs(ctx context.Context, c *sql.Conn, db string, items []string, format int) (f Fingerprint, err error) {
 	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
-		f, err = m.fingerprintOnce(ctx, c, db, items, format)
+		f, err = m.fingerprintOnce(ctx, c, db, items, format, fpRows)
 		return err
 	})
 	return f, err
 }
 
-func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int) (Fingerprint, error) {
+// fingerprintOnce hashes items (nil: all) of db; with fpRestoreOnly only
+// the restore_only tables, which it otherwise leaves out; with fpSchema
+// those too, without checksums, AUTO_INCREMENT or where a sequence goes on.
+func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	objs, err := m.objects(ctx, c, db)
 	if err != nil {
 		return nil, err
 	}
 	want := func(item string) bool { return items == nil || contains(items, item) }
+	names := objs.tables
+	switch mode {
+	case fpRestoreOnly:
+		names = objs.restoreOnly
+		want = func(item string) bool { return strings.HasPrefix(item, "table:") }
+	case fpSchema:
+		names = slices.Concat(objs.tables, objs.restoreOnly)
+	}
 	f := Fingerprint{}
 	// One read of SHOW CREATE for every table, view and trigger (showAll).
 	var tables, views []string
 	var trigs []dbx.MySQLTrigger
 	var reqs []showReq
-	for _, t := range objs.tables {
+	for _, t := range names {
 		if want("table:" + t) {
 			tables = append(tables, t)
 			reqs = append(reqs, showReq{"TABLE", db, t})
@@ -650,7 +662,7 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 	if err != nil {
 		return nil, err
 	}
-	if err := m.hashCreated(ctx, c, db, tables, shown[:len(tables)], f); err != nil {
+	if err := m.hashCreated(ctx, c, db, tables, shown[:len(tables)], f, mode); err != nil {
 		return nil, err
 	}
 	shown = shown[len(tables):]
@@ -671,9 +683,11 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 		if err != nil {
 			return nil, err
 		}
-		next, err := sequenceNext(ctx, c, db, s)
-		if err != nil {
-			return nil, err
+		var next string
+		if mode.rows() {
+			if next, err = sequenceNext(ctx, c, db, s); err != nil {
+				return nil, err
+			}
 		}
 		f["sequence:"+s] = hash([]byte(def + "\x00" + next))
 	}
@@ -690,27 +704,10 @@ func (m *MySQL) fingerprintOnce(ctx context.Context, c *sql.Conn, db string, ite
 	return f, nil
 }
 
-// hashTables adds to f the item of every table of db that want accepts:
-// its CREATE statement and its checksum.
-func (m *MySQL) hashTables(ctx context.Context, c *sql.Conn, db string, names []string, want func(string) bool, f Fingerprint) error {
-	var tables []string
-	var reqs []showReq
-	for _, t := range names {
-		if want("table:" + t) {
-			tables = append(tables, t)
-			reqs = append(reqs, showReq{"TABLE", db, t})
-		}
-	}
-	shown, err := m.showAll(ctx, c, reqs)
-	if err != nil {
-		return err
-	}
-	return m.hashCreated(ctx, c, db, tables, shown, f)
-}
-
 // hashCreated adds to f the item of every table: its CREATE statement, from
-// its row of SHOW CREATE TABLE in shown, and its checksum.
-func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint) error {
+// its row of SHOW CREATE TABLE in shown, and its checksum; with fpSchema
+// the statement without AUTO_INCREMENT only.
+func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables []string, shown []map[string]string, f Fingerprint, mode fpMode) error {
 	creates := map[string]string{}
 	for i, t := range tables {
 		def, err := dbx.ShowCreateStatement("TABLE", t, shown[i])
@@ -718,6 +715,12 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 			return err
 		}
 		creates[t] = def
+		if !mode.rows() {
+			f["table:"+t] = hash([]byte(autoIncrement().ReplaceAllString(def, "")))
+		}
+	}
+	if !mode.rows() {
+		return nil
 	}
 	sums, err := m.checksums(ctx, c, db, tables, creates)
 	if err != nil {
@@ -736,15 +739,27 @@ func (m *MySQL) hashCreated(ctx context.Context, c *sql.Conn, db string, tables 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
 // database, or of the pristine one (RestoreOnly). It leaves the last
 // fingerprint and its counters as they were.
-func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (f Fingerprint, err error) {
+func (m *MySQL) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return m.read(ctx, pristine, fpRestoreOnly)
+}
+
+// SchemaFingerprint hashes the definitions of the working database, or of
+// the pristine one (Schemer).
+func (m *MySQL) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return m.read(ctx, pristine, fpSchema)
+}
+
+// read fingerprints the working database, or the pristine one, as mode
+// reads it, again when the server stops it for a lock (retryLocked).
+func (m *MySQL) read(ctx context.Context, pristine bool, mode fpMode) (f Fingerprint, err error) {
 	err = m.retryLocked(ctx, "fingerprint", func(ctx context.Context) error {
-		f, err = m.restoreOnlyFingerprint(ctx, pristine)
+		f, err = m.readOnce(ctx, pristine, mode)
 		return err
 	})
 	return f, err
 }
 
-func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+func (m *MySQL) readOnce(ctx context.Context, pristine bool, mode fpMode) (Fingerprint, error) {
 	c, err := m.session(ctx)
 	if err != nil {
 		return nil, err
@@ -754,15 +769,7 @@ func (m *MySQL) restoreOnlyFingerprint(ctx context.Context, pristine bool) (Fing
 	if pristine {
 		db = m.o.Pristine
 	}
-	objs, err := m.objects(ctx, c, db)
-	if err != nil {
-		return nil, err
-	}
-	f := Fingerprint{}
-	if err := m.hashTables(ctx, c, db, objs.restoreOnly, func(string) bool { return true }, f); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return m.fingerprintOnce(ctx, c, db, nil, FingerprintFormat, mode)
 }
 
 // checksums checksums the tables (see checksumGroup; defs are their CREATE
@@ -1208,10 +1215,82 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err := m.dropFirstOthers(ctx, c, dst, drops); err != nil {
 		return nil, err
 	}
+	// ids are the connections of the copy (CONNECTION_ID()): the server
+	// may still run their statements after a cancel.
+	ids := []int64{0}
+	if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&ids[0]); err != nil {
+		return nil, err
+	}
+	// onBackground goes on after a failure or a cancel on a session of its
+	// own that no cancel stops: it ends what the copy's connections still
+	// run (KILL QUERY), so their locks go, and waits 30 s at most for a
+	// lock. It rebinds ctx and c, which create, makeSeq and makeObjects
+	// read when they run, so they run there; done gives the session up.
+	onBackground := func() (done func()) {
+		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		s, err := m.session(bg)
+		if err != nil {
+			return cancel
+		}
+		for _, id := range ids {
+			if id != 0 { // a connection whose id was not read
+				s.ExecContext(bg, fmt.Sprintf("KILL QUERY %d", id))
+			}
+		}
+		s.ExecContext(bg, "SET SESSION lock_wait_timeout = 30")
+		if _, err := s.ExecContext(bg, "USE "+qi(dst)); err != nil {
+			discardConn(s)
+			return cancel
+		}
+		ctx, c = bg, s
+		return func() { discardConn(s); cancel() }
+	}
 	makeSeq := func(q string) error { return copySequence(ctx, c, src, dst, q) }
+	// makeObjects makes the sequences of seqs, the triggers of trigDefs (in
+	// firing order per table) and the views of pending, and takes each
+	// made off its list: what a failure leaves on them is missing from
+	// dst. A closure: it shares create's collation and lost, and reads ctx
+	// and c when it runs, which onBackground rebinds.
+	makeObjects := func() error {
+		for len(seqs) > 0 {
+			if err := makeSeq(seqs[0]); err != nil {
+				return err
+			}
+			seqs = seqs[1:]
+		}
+		for len(trigDefs) > 0 {
+			r := trigDefs[0]
+			if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
+				if lost == nil {
+					err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
+				}
+				return err
+			}
+			trigDefs = trigDefs[1:]
+		}
+		// A view may use another view: create them until no more succeed.
+		for len(pending) > 0 {
+			before := len(pending)
+			var lastErr error
+			for name, v := range pending {
+				if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
+					if lost != nil {
+						return lost
+					}
+					lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
+					continue
+				}
+				delete(pending, name)
+			}
+			if len(pending) == before { // no view could be created in this pass
+				return lastErr
+			}
+		}
+		return nil
+	}
 	// What makes again what a failure leaves missing: a restore of the
 	// working database, or a seed of the pristine copy.
-	recovery := "the next successful restore"
+	recovery := "they are made again from the pristine copy"
 	if dst == m.o.Pristine {
 		recovery = "driftgate seed runs again"
 	}
@@ -1227,6 +1306,10 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			if lost != nil {
 				return nil, lost
 			}
+			// On a pristine copy too: a seed cancelled after its drops
+			// makes the objects again all the same.
+			done := onBackground()
+			defer done()
 			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
 		}
 		dropped = append(dropped, d)
@@ -1238,44 +1321,22 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if m.hooks != nil && m.hooks.copyFails != nil {
 		err = m.hooks.copyFails()
 	} else {
-		extra, err = m.copyTables(ctx, c, src, dst, jobs)
+		var more []int64
+		extra, more, err = m.copyTables(ctx, c, src, dst, jobs)
+		ids = append(ids, more...)
+	}
+	if err == nil {
+		err = makeObjects()
+	}
+	if err != nil && lost == nil && dst == m.o.Working {
+		// A failed or stopped restore makes them again: the working schema
+		// stays the pristine copy's.
+		done := onBackground()
+		defer done()
+		makeObjects()
 	}
 	if err != nil {
 		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
-	}
-	for i, q := range seqs {
-		if err := makeSeq(q); err != nil {
-			return nil, notMade(dst, recovery, err, lost, seqs[i:], trigDefs, pending)
-		}
-	}
-
-	// trigDefs are in firing order per table.
-	for i, r := range trigDefs {
-		if err := create(r["SQL Original Statement"], r["sql_mode"], r["collation_connection"]); err != nil {
-			if lost == nil {
-				err = createRefused(ctx, c, "trigger", r["name"], dst, r["SQL Original Statement"], err)
-			}
-			return nil, notMade(dst, recovery, err, lost, nil, trigDefs[i:], pending)
-		}
-	}
-
-	// A view may use another view: create them until no more succeed.
-	for len(pending) > 0 {
-		before := len(pending)
-		var lastErr error
-		for name, v := range pending {
-			if err := create(v.def, mysqlSession.SQLMode, v.collation); err != nil {
-				if lost != nil {
-					return nil, notMade(dst, recovery, lost, lost, nil, nil, pending)
-				}
-				lastErr = createRefused(ctx, c, "view", name, dst, v.def, err)
-				continue
-			}
-			delete(pending, name)
-		}
-		if len(pending) == before { // no view could be created in this pass
-			return nil, notMade(dst, recovery, lastErr, nil, nil, nil, pending)
-		}
 	}
 	return extra, nil
 }
@@ -1407,7 +1468,7 @@ func copySequence(ctx context.Context, c *sql.Conn, src, dst, q string) error {
 // are dst's before the drops); when the working copy's triggers of that
 // table were reordered, or others stand between, the order may still
 // differ from the pristine one, which the message says. It names what was
-// made again; what is missing and the next successful restore makes again
+// made again; what is missing until it is made again from the pristine copy
 // (its creation failed, or it is of another kind in the pristine copy);
 // and what is gone, which no restore makes again (the pristine copy has
 // nothing of that name).
@@ -1530,7 +1591,7 @@ func undoDrops(dst, recovery string, dropped []dropItem, srcKind map[string]stri
 
 // notMade adds to err, a failure after the drops, the sequences (seqs),
 // triggers and views that are not made yet: missing from dst until
-// recovery (the next successful restore, or a new seed). A lost session (lost) is returned in err's
+// recovery (made again from the pristine copy, or a new seed). A lost session (lost) is returned in err's
 // place, with them.
 func notMade(dst, recovery string, err, lost error, seqs []string, trigDefs []map[string]string, views map[string]viewDef) error {
 	if lost != nil {
