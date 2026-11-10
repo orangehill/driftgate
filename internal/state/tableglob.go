@@ -19,7 +19,8 @@ type tableGlobs struct {
 }
 
 // newTableGlobs folds copies of o's globs (fold nil: as written); o's
-// own slices stay as they are.
+// own slices stay as they are, so the copy is kept also without a fold
+// (it runs once per driver).
 func newTableGlobs(o Options, fold func(string) string) *tableGlobs {
 	folded := func(lists ...[]string) []string {
 		var out []string
