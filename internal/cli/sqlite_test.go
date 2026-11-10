@@ -60,8 +60,8 @@ func TestSetupSQLite(t *testing.T) {
 
 // TestInitSQLite: init writes the SQLite state: commented out, with the
 // framework's own tables proposed for exclude:, restore_empty: and
-// restore_only:, the block commented in line and an SQLite example of
-// seed:.
+// restore_only: under the framework's reason, the block commented in
+// line and an SQLite example of seed:.
 func TestInitSQLite(t *testing.T) {
 	root := setupDir(t, map[string]string{"artisan": "", "composer.json": sanctum, ".env": laravelSQLiteEnv("http://shop.test")})
 	code, out, errOut := runCLI(t, "init")
@@ -69,7 +69,8 @@ func TestInitSQLite(t *testing.T) {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
-	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]",
+	for _, want := range []string{"#     working: database/database.sqlite\n", "#     # the framework keeps its own state in this database: SESSION_DRIVER=database", "tokens made or deleted, as at login and logout, are not compared",
+		"#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]",
 		"#     restore_only: [personal_access_tokens]   # kept as seeded at every restore; rows a request writes there are never compared\n", "\n#     # pristine: a file of DriftGate's store",
 		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {
 		if !strings.Contains(raw, want) {

@@ -351,6 +351,9 @@ func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
+	if !t.Empty() {
+		lines = append(lines, "    # the framework keeps its own state in this database: "+t.Why)
+	}
 	if len(t.Exclude) > 0 {
 		lines = append(lines, "    exclude: "+flow(t.Exclude)+"   # the framework's own tables: never compared or restored")
 	}
