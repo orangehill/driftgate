@@ -918,7 +918,7 @@ func TestWholeRestoreDrift(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tr.close()
-				if err := tr.restore(ctx, false); err != nil {
+				if err := tr.restore(ctx); err != nil {
 					t.Fatal(err)
 				}
 				exec(work, "INSERT INTO a VALUES (1)")
@@ -983,10 +983,10 @@ func (f *fullReads) Fingerprint(ctx context.Context, items []string) (state.Fing
 	return f.Component.Fingerprint(ctx, items)
 }
 
-// TestWholeCopyReads: a restore that copies PostgreSQL whole reads it in
-// full only with readWhole (the reset before prepare or the tokens
-// command), once in a run: the final restore of a capture, whose requests
-// all ran on checked data, reads only the items it restored.
+// TestWholeCopyReads: a whole copy of PostgreSQL is read in full only by
+// the reset before prepare or the tokens command (wholeFingerprint), once
+// in a run: the final restore of a capture, whose requests all ran on
+// checked data, reads only the items it restored.
 func TestWholeCopyReads(t *testing.T) {
 	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
 	if dsn == "" {
@@ -999,7 +999,7 @@ func TestWholeCopyReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tr.close()
-	if err := tr.restore(ctx, false); err != nil { // the first: nothing to copy
+	if err := tr.restore(ctx); err != nil { // the first: nothing to copy
 		t.Fatal(err)
 	}
 	f := &fullReads{Component: tr.comps[0]}
@@ -1017,8 +1017,17 @@ func TestWholeCopyReads(t *testing.T) {
 		want      int
 	}{{"final restore", false, 0}, {"reset before prepare", true, 1}, {"compared already", true, 1}} {
 		write()
-		if err := tr.restore(ctx, c.readWhole); err != nil {
+		if err := tr.restore(ctx); err != nil {
 			t.Fatal(err)
+		}
+		if c.readWhole { // reset, before prepare
+			whole, err := tr.wholeFingerprint(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tr.checkWhole(ctx, whole); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if f.n != c.want {
 			t.Errorf("%s: %d full reads in all, want %d", c.name, f.n, c.want)

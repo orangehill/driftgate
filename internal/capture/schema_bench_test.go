@@ -189,29 +189,44 @@ func BenchmarkCaptureSchema(b *testing.B) {
 	}
 }
 
-// BenchmarkCaptureWrite is a capture of a read-only request and one that
-// writes a row, on benchSchema unchanged since the last capture, as in
-// local work: the first restore copies nothing, and the final restore
-// copies what the request wrote (PostgreSQL: the whole database). On
-// benchServers.
+// BenchmarkCaptureWrite is a capture of requests that write a row, on
+// benchSchema unchanged since the last capture, as in local work: the
+// first restore copies nothing. plain: a read-only request and one that
+// writes, whose final restore copies what it wrote (PostgreSQL: the whole
+// database). prepare: two that write, with --restore each and prepare:,
+// whose reset before the second copies it. On benchServers.
 func BenchmarkCaptureWrite(b *testing.B) {
 	servers := benchServers()
-	cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public},
-		{ID: "post", Method: "POST", Path: "/", Storage: snapshot.Public}}}
+	get := catalog.Request{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}
+	post := func(id string) catalog.Request {
+		return catalog.Request{ID: id, Method: "POST", Path: "/", Storage: snapshot.Public}
+	}
 	for _, driver := range []string{config.SQLite, config.MySQL, config.Postgres} {
 		dsn, ok := servers[driver]
 		if !ok {
 			continue
 		}
-		b.Run(driver, func(b *testing.B) {
-			p, _ := benchProject(b, driver, dsn)
-			ctx := context.Background()
-			for range b.N {
-				if _, err := Run(ctx, p, cat, Options{Tag: "bench", Force: true}); err != nil {
-					b.Fatal(err)
+		for _, c := range []struct {
+			name    string
+			reqs    []catalog.Request
+			prepare bool
+		}{{"plain", []catalog.Request{get, post("post")}, false}, {"prepare", []catalog.Request{post("post1"), post("post2")}, true}} {
+			b.Run(driver+"/"+c.name, func(b *testing.B) {
+				p, _ := benchProject(b, driver, dsn)
+				opt := Options{Tag: "bench", Force: true}
+				if c.prepare {
+					p.Prepare = []config.Command{{Run: []string{"true"}}}
+					opt.Restore = "each"
 				}
-			}
-		})
+				cat := &catalog.Catalog{Version: 1, Requests: c.reqs}
+				ctx := context.Background()
+				for range b.N {
+					if _, err := Run(ctx, p, cat, opt); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }
 

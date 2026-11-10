@@ -73,7 +73,7 @@ func Probe(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Pro
 	}
 	defer tr.close()
 	r := &runner{p: p, services: services, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr}
-	if err := tr.restore(ctx, false); err != nil {
+	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.prepare(ctx); err != nil {
