@@ -26,6 +26,36 @@ func TestRetryNote(t *testing.T) {
 	}
 }
 
+// TestRetryRead: the fault of a try runs after its read, only when the
+// read succeeded, and a fault the server's lock error fails is read again.
+func TestRetryRead(t *testing.T) {
+	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
+	lockRetryWait = time.Millisecond
+	defer func() { readFault = nil }()
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	var calls []string
+	readFault = func(what string) error {
+		calls = append(calls, "fault "+what)
+		if len(calls) < 6 {
+			return deadlock
+		}
+		return nil
+	}
+	err := retryRead(context.Background(), nil, "source", func() error { calls = append(calls, "read"); return nil })
+	want := []string{"read", "fault source", "read", "fault source", "read", "fault source"}
+	if err != nil || !reflect.DeepEqual(calls, want) {
+		t.Errorf("%v after %q, want %q", err, calls, want)
+	}
+	calls = nil
+	other := &mysql.MySQLError{Number: 1146}
+	err = retryRead(context.Background(), nil, "source", func() error { calls = append(calls, "read"); return other })
+	if err != other || !reflect.DeepEqual(calls, []string{"read"}) {
+		t.Errorf("a failed read: %v after %q", err, calls)
+	}
+}
+
 // TestMySQLRetrySourceRead: the source phase of anonymize (with a subset
 // and an index of originals), of verify (source and target) and of
 // classify, stopped for a lock (1213, injected once each try has built its
@@ -134,21 +164,24 @@ func testRetrySourceRead(t *testing.T, s *server) {
 		t.Fatalf("anonymize, target stopped: %v after %d tries", err, tries)
 	}
 
-	// Verify: its own read of the source, and its scan of the target.
-	verify := func() *VerifyReport {
+	// Verify: its own read of the source, and its scan of the target, with
+	// the same log (each kind of read was noted above).
+	verify := func() (*VerifyReport, string) {
 		t.Helper()
-		rep, err := Verify(ctx, VerifyOptions{Source: s.db(src), Target: &target, Rules: rules, Key: testKey})
+		var log bytes.Buffer
+		rep, err := Verify(ctx, VerifyOptions{Source: s.db(src), Target: &target, Rules: rules, Key: testKey, Log: &log})
 		if err != nil {
 			t.Fatal(err)
 		}
 		rep.Seconds = 0
-		return rep
+		return rep, log.String()
 	}
-	want := verify()
+	readFault = nil
+	want, wantLog := verify()
 	for _, what := range []string{"source", "target"} {
 		stop(what, 2)
-		if got := verify(); tries != 3 || !reflect.DeepEqual(got, want) {
-			t.Errorf("verify, %s stopped: %d tries, %+v, want %+v", what, tries, got, want)
+		if got, log := verify(); tries != 3 || !reflect.DeepEqual(got, want) || log != wantLog {
+			t.Errorf("verify, %s stopped: %d tries, %+v, want %+v; log:\n%s\nwant:\n%s", what, tries, got, want, log, wantLog)
 		}
 	}
 

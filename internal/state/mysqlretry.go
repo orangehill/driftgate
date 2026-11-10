@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // lockRetryWait is the wait before the first retry of a step the server
 // stopped for a lock (dbx.RetryMySQLLock).
-var lockRetryWait = 50 * time.Millisecond
+var lockRetryWait = dbx.MySQLLockWait
 
 // retryNoted holds the kinds of step (what) whose retry was noted: one
 // note per kind and process, whichever component it was in.
