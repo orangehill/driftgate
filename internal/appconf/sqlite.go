@@ -1000,7 +1000,7 @@ func laravelTables(root string, d Database, env Lookup) Tables {
 		}
 		if strings.Contains(string(composer), `"laravel/sanctum"`) {
 			only = append(only, "personal_access_tokens")
-			why = append(why, "Sanctum (last_used_at on every authenticated request)")
+			why = append(why, "Sanctum writes last_used_at on every authenticated request")
 		}
 	}
 	return Tables{Exclude: tables, RestoreEmpty: cache, RestoreOnly: only, Why: strings.Join(why, ", ")}

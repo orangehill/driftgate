@@ -50,7 +50,7 @@ func TestSetupSQLite(t *testing.T) {
 	root = setupDir(t, map[string]string{"artisan": "", "composer.json": sanctum, ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
 	input(t, "n\n")
 	if code, out, errOut = runCLI(t, "setup"); code != ExitConfig || !strings.Contains(errOut, "The framework keeps its own state in this database (") || !strings.Contains(errOut, "empty cache, cache_locks at every restore (a cache; never compared)") ||
-		!strings.Contains(errOut, "; restore personal_access_tokens at every restore (Sanctum writes last_used_at; writes to it are not compared)?") {
+		!strings.Contains(errOut, "; keep personal_access_tokens as seeded at every restore (rows a request writes there are never compared)?") {
 		t.Fatalf("setup at a terminal: %d\n%s\n%s", code, out, errOut)
 	}
 	if _, c := loadState(t, root); len(c.Exclude)+len(c.RestoreEmpty)+len(c.RestoreOnly) != 0 || c.Working != "database/database.sqlite" {
@@ -70,7 +70,7 @@ func TestInitSQLite(t *testing.T) {
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
 	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]",
-		"#     restore_only: [personal_access_tokens]   # restored at every restore: Sanctum writes last_used_at; writes to it are not compared\n", "\n#     # pristine: a file of DriftGate's store",
+		"#     restore_only: [personal_access_tokens]   # kept as seeded at every restore; rows a request writes there are never compared\n", "\n#     # pristine: a file of DriftGate's store",
 		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("configuration without %q:\n%s", want, raw)

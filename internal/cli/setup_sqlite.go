@@ -80,7 +80,8 @@ func (s *setup) sqliteDatabase(db *appconf.Database, database string) error {
 // (appconf.FrameworkTables): excluded, as restoring them would log the
 // developer out or disturb a running worker, restore_empty (a cache,
 // whose entries would carry over between captures), or restore_only
-// (Sanctum's tokens, written on reads). The default is yes
+// (kept as seeded at every restore; rows a request writes there are never
+// compared). The default is yes
 // (--yes says yes); the answer is written to state:.
 func (s *setup) askTables(dr *draft, db appconf.Database) error {
 	t := appconf.FrameworkTables(dr.p.Root, db, os.LookupEnv)
@@ -98,7 +99,7 @@ func (s *setup) askTables(dr *draft, db appconf.Database) error {
 		chosen = append(chosen, "restore_empty: "+strings.Join(t.RestoreEmpty, ", "))
 	}
 	if len(t.RestoreOnly) > 0 {
-		parts = append(parts, "restore "+strings.Join(t.RestoreOnly, ", ")+" at every restore (Sanctum writes last_used_at; writes to it are not compared)")
+		parts = append(parts, "keep "+strings.Join(t.RestoreOnly, ", ")+" as seeded at every restore (rows a request writes there are never compared)")
 		chosen = append(chosen, "restore_only: "+strings.Join(t.RestoreOnly, ", "))
 	}
 	q := fmt.Sprintf("The framework keeps its own state in this database (%s): %s?", t.Why, strings.Join(parts, "; "))

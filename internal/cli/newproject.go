@@ -358,7 +358,7 @@ func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 		lines = append(lines, "    restore_empty: "+flow(t.RestoreEmpty)+"   # a cache: emptied at every restore, never compared")
 	}
 	if len(t.RestoreOnly) > 0 {
-		lines = append(lines, "    restore_only: "+flow(t.RestoreOnly)+"   # restored at every restore: Sanctum writes last_used_at; writes to it are not compared")
+		lines = append(lines, "    restore_only: "+flow(t.RestoreOnly)+"   # kept as seeded at every restore; rows a request writes there are never compared")
 	}
 	if t.Empty() {
 		lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")

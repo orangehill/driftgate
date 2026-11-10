@@ -402,8 +402,9 @@ func TestSQLiteFind(t *testing.T) {
 // Laravel's for a store whose driver is database on the default
 // connection, by .env, config/*.php or the framework's default (the cache
 // restore_empty); job_batches and failed_jobs always (unless failed jobs
-// go elsewhere); Telescope's; Sanctum's tokens restore_only; Django's sessions; Rails' Solid tables in the primary
-// schema; Hangfire's and the Data Protection keys of ASP.NET.
+// go elsewhere); Telescope's; Sanctum's tokens restore_only; Django's
+// sessions; Rails' Solid tables in the primary schema; Hangfire's and the
+// Data Protection keys of ASP.NET.
 func TestFrameworkTables(t *testing.T) {
 	all := []string{"sessions", "jobs", "job_batches", "failed_jobs"}
 	cache := []string{"cache", "cache_locks"}
@@ -413,26 +414,25 @@ func TestFrameworkTables(t *testing.T) {
 		"config/queue.php":   "<?php return ['default' => env('QUEUE_CONNECTION', 'database')];",
 	}
 	for _, c := range []struct {
-		env            string
-		config         map[string]string
-		exclude, empty []string
-		why            string
-		only           []string // restore_only
+		env                  string
+		config               map[string]string
+		exclude, empty, only []string // only: restore_only
+		why                  string
 	}{
-		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n", nil, all, cache, "SESSION_DRIVER=database in .env", nil},
-		{"DB_CONNECTION=sqlite\n", nil, all, cache, "SESSION_DRIVER unset: Laravel's default database", nil}, // Laravel 11: no config/*.php
-		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, "SESSION_DRIVER unset", nil},
-		{"DB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, "SESSION_DRIVER unset", nil},
-		{"DB_CONNECTION=sqlite\n", l10, []string{"jobs", "job_batches", "failed_jobs"}, nil, "QUEUE_CONNECTION unset: database by config/queue.php", nil},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n", nil, all, cache, nil, "SESSION_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\n", nil, all, cache, nil, "SESSION_DRIVER unset: Laravel's default database"}, // Laravel 11: no config/*.php
+		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, nil, "SESSION_DRIVER unset"},
+		{"DB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, nil, "SESSION_DRIVER unset"},
+		{"DB_CONNECTION=sqlite\n", l10, []string{"jobs", "job_batches", "failed_jobs"}, nil, nil, "QUEUE_CONNECTION unset: database by config/queue.php"},
 		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\nSESSION_DRIVER=file\nCACHE_DRIVER=file\nQUEUE_DRIVER=database\n", nil,
-			[]string{"jobs", "job_batches", "failed_jobs"}, nil, "QUEUE_DRIVER=database in .env", nil}, // Laravel 5.5 and 5.6
+			[]string{"jobs", "job_batches", "failed_jobs"}, nil, nil, "QUEUE_DRIVER=database in .env"}, // Laravel 5.5 and 5.6
 		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_DRIVER=database\nDB_CACHE_TABLE=app_cache\nQUEUE_CONNECTION=redis\nQUEUE_FAILED_DRIVER=null\n", nil,
-			[]string{"job_batches"}, []string{"app_cache", "cache_locks"}, "CACHE_DRIVER=database in .env", nil},
-		{"DB_CONNECTION=sqlite\nSESSION_CONNECTION=other\nDB_CACHE_CONNECTION=other\nDB_QUEUE_CONNECTION=other\n", nil, []string{"job_batches", "failed_jobs"}, nil, "on the default connection", nil},
+			[]string{"job_batches"}, []string{"app_cache", "cache_locks"}, nil, "CACHE_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\nSESSION_CONNECTION=other\nDB_CACHE_CONNECTION=other\nDB_QUEUE_CONNECTION=other\n", nil, []string{"job_batches", "failed_jobs"}, nil, nil, "on the default connection"},
 		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n", map[string]string{"composer.json": `{"require": {"laravel/telescope": "^5.0"}}`},
-			[]string{"job_batches", "failed_jobs", "telescope_entries", "telescope_entries_tags", "telescope_monitoring"}, nil, "Telescope", nil},
+			[]string{"job_batches", "failed_jobs", "telescope_entries", "telescope_entries_tags", "telescope_monitoring"}, nil, nil, "Telescope"},
 		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n", map[string]string{"composer.json": `{"require": {"laravel/sanctum": "^4.0"}}`},
-			[]string{"job_batches", "failed_jobs"}, nil, "Sanctum", []string{"personal_access_tokens"}},
+			[]string{"job_batches", "failed_jobs"}, nil, []string{"personal_access_tokens"}, "Sanctum"},
 	} {
 		files := map[string]string{"artisan": "", ".env": c.env}
 		for k, v := range c.config {
