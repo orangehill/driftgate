@@ -374,8 +374,7 @@ func TestPostgresSafeCopy(t *testing.T) {
 // database it copies or renames away. A role that is not a superuser may
 // not end a superuser's: when the session stays, it gets that error (42501)
 // after one wait of the server (5 s), not after five; when the session ends
-// within that wait (as an autovacuum worker it may not end, before
-// PostgreSQL 18), the copy succeeds. A cancel while a session is in the
+// within that wait, the copy succeeds. A cancel while a session is in the
 // way returns at once.
 func TestPostgresOtherSessions(t *testing.T) {
 	dsn := postgresServer(t)
@@ -440,6 +439,12 @@ func TestPostgresOtherSessions(t *testing.T) {
 		t.Run(db, func(t *testing.T) {
 			// A session that stays: the error that says why it stays.
 			_, release := hold(db, "SELECT pg_sleep(60)")
+			// pgTerminate's filter (no autovacuum workers) keeps it, also
+			// for a role that may not see the superuser's session.
+			var n int
+			if err := p.admin.QueryRow(strings.Replace(pgTerminate, "pg_catalog.pg_terminate_backend(pid)", "count(*)", 1), db).Scan(&n); err != nil || n != 1 {
+				t.Fatalf("sessions pgTerminate ends: %d, %v", n, err)
+			}
 			start := time.Now()
 			err := p.copyDatabase(ctx, pristine, work, nil, nil)
 			took := time.Since(start)
@@ -473,6 +478,8 @@ func TestPostgresOtherSessions(t *testing.T) {
 	defer func(q string) { pgTerminate = q }(pgTerminate)
 	pgTerminate = "SELECT $1::text"
 	for db, stmt := range map[string]string{pristine: "CREATE DATABASE " + qp(newName(work)), work: "ALTER DATABASE " + qp(work) + " RENAME"} {
+		// The rename case guards against a regression: swap had no wait
+		// before, and already returned on a cancel.
 		t.Run("cancel "+db, func(t *testing.T) {
 			_, release := hold(db, "SELECT pg_sleep(60)")
 			defer release()
