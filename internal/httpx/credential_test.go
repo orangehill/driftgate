@@ -82,8 +82,8 @@ func TestMasksWholeMatchesMaskHeader(t *testing.T) {
 }
 
 // TestSplitSetCookie: the name is up to the first = before the first ;,
-// attrs keep that ; and everything after it as sent, and the three parts
-// joined with = are the value again; without = before the first ; it is
+// attrs keep that ; and everything after it as sent, and name + "=" +
+// value + attrs is the value again; without = before the first ; it is
 // not a cookie.
 func TestSplitSetCookie(t *testing.T) {
 	for _, c := range []struct {
