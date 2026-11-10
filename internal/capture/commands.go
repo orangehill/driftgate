@@ -42,8 +42,9 @@ func openStdin(path string) (io.Reader, func(), error) {
 }
 
 // checkAllCommands checks the commands a capture runs (checkCommands):
-// prepare, the guards when requests change data, and the command steps.
-func checkAllCommands(p *config.Project, readonly []catalog.Request, units []unit) error {
+// prepare, the guards when there are units (requests that change data),
+// and the command steps among all, the selected requests.
+func checkAllCommands(p *config.Project, all []catalog.Request, units []unit) error {
 	if err := checkCommands(p, "prepare", p.Prepare); err != nil {
 		return err
 	}
@@ -54,7 +55,7 @@ func checkAllCommands(p *config.Project, readonly []catalog.Request, units []uni
 			}
 		}
 	}
-	for _, req := range append(append([]catalog.Request{}, readonly...), unitRequests(units)...) {
+	for _, req := range all {
 		if req.IsCommand() {
 			if err := checkCommands(p, req.ID, []config.Command{stepCommand(req)}); err != nil {
 				return err
