@@ -190,10 +190,8 @@ func galeraSequences(ctx context.Context, src *sql.Conn, srcName string, s *Sche
 // or an event.
 func (e *engine) inspect(ctx context.Context, admin *sql.DB, dst Database) (st dbState, err error) {
 	err = retryRead(ctx, nil, "target", func() error {
-		if st, err = e.dl.inspect(ctx, admin, dst); err != nil {
-			return err
-		}
-		return fault("inspect")
+		st, err = e.dl.inspect(ctx, admin, dst)
+		return err
 	})
 	return st, err
 }

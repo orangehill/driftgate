@@ -10,21 +10,9 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-)
 
-func TestLockStopped(t *testing.T) {
-	for err, want := range map[error]bool{
-		&mysql.MySQLError{Number: 1213}:                                    true,
-		&mysql.MySQLError{Number: 1205}:                                    true,
-		errors.Join(errors.New("source"), &mysql.MySQLError{Number: 1213}): true,
-		&mysql.MySQLError{Number: 1146}:                                    false,
-		context.Canceled:                                                   false,
-	} {
-		if lockStopped(err) != want {
-			t.Errorf("%v: %v", err, !want)
-		}
-	}
-}
+	"github.com/orangehill/driftgate/internal/dbx"
+)
 
 // TestRetryNote: the note reads as a sentence for every read retryRead
 // runs.
@@ -124,12 +112,12 @@ func testRetrySourceRead(t *testing.T, s *server) {
 		t.Errorf("index of originals: %d values, %d after a retry", clean.index.x.count(), retried.index.x.count())
 	}
 
-	// Stopped every time: the server's error, after lockRetries more
-	// tries, and no target, staging database or dump.
+	// Stopped every time: the server's error, after dbx.MySQLLockRetries
+	// more tries, and no target, staging database or dump.
 	stop("source", 1000)
 	target := s.db(dst)
 	failed, err := anonymize(&target)
-	if !errors.Is(err, deadlock) || tries != lockRetries+1 {
+	if !errors.Is(err, deadlock) || tries != dbx.MySQLLockRetries+1 {
 		t.Fatalf("anonymize: %v after %d tries", err, tries)
 	}
 	if len(failed.dump) != 0 {
@@ -141,9 +129,9 @@ func testRetrySourceRead(t *testing.T, s *server) {
 
 	// The reads of the target before the staging database is made and
 	// before it replaces the target (stage, publish).
-	stop("inspect", 2)
+	stop("target", 2)
 	if _, err := anonymize(&target); err != nil || tries != 4 {
-		t.Fatalf("anonymize, inspect stopped: %v after %d tries", err, tries)
+		t.Fatalf("anonymize, target stopped: %v after %d tries", err, tries)
 	}
 
 	// Verify: its own read of the source, and its scan of the target.
