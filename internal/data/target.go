@@ -181,7 +181,7 @@ func galeraSequences(ctx context.Context, src *sql.Conn, srcName string, s *Sche
 	if len(refused) == 0 {
 		return nil
 	}
-	return fmt.Errorf("target %s is on a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of the source cannot be copied: %s; %s in the source, or write to a server without Galera", dst.Name, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
+	return fmt.Errorf("target %s is on a Galera cluster node, %s, so these sequences of the source cannot be copied: %s; %s in the source, or write to a server without Galera", dst.Name, dbx.GaleraSequencesWhy, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
 }
 
 // inspect reads what the target holds, again when the server stops the
