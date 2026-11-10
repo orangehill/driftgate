@@ -19,7 +19,6 @@ import (
 
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
-	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
 
@@ -48,58 +47,6 @@ type Options struct {
 	Replacing func() error
 }
 
-// excluded, restoreOnly and restoreEmpty are MySQL's and PostgreSQL's:
-// they match table names as written (no fold), as both compare names
-// case-sensitively (MySQL and MariaDB with lower_case_table_names=0, as on
-// Linux, where users and Users are two tables; PostgreSQL once unquoted).
-// PostgreSQL passes a name with and without its schema.
-func (o Options) excluded(names ...string) bool { return matchAny(o.Exclude, nil, names...) }
-
-// restoreOnly reports whether a table is restore_only (Options.RestoreOnly
-// or RestoreEmpty).
-func (o Options) restoreOnly(names ...string) bool {
-	return matchAny(o.RestoreOnly, nil, names...) || matchAny(o.RestoreEmpty, nil, names...)
-}
-
-// restoreEmpty reports whether a table is restored to no rows
-// (Options.RestoreEmpty).
-func (o Options) restoreEmpty(names ...string) bool { return matchAny(o.RestoreEmpty, nil, names...) }
-
-// restoreOnlyGlobs are the globs of RestoreOnly and RestoreEmpty.
-func (o Options) restoreOnlyGlobs() []string {
-	return append(append([]string{}, o.RestoreOnly...), o.RestoreEmpty...)
-}
-
-// matchAny reports whether a glob matches one of names, the table names of
-// one table (each driver's own forms of it). fold, when not nil, folds the
-// globs and the names first (copies: the Options' globs stay as written):
-// it is the driver's letter-case rule. config's Component.matches applies
-// the same rules.
-func matchAny(globs []string, fold func(string) string, names ...string) bool {
-	if len(globs) == 0 {
-		return false
-	}
-	if fold != nil {
-		var buf [2]string // a name with and without its schema, on the stack
-		folded := buf[:0]
-		for _, n := range names {
-			folded = append(folded, fold(n))
-		}
-		names = folded
-	}
-	for _, g := range globs {
-		if fold != nil {
-			g = fold(g)
-		}
-		for _, n := range names {
-			if glob.Match(g, n) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // bothErr is the error of a table that both exclude and restore_only name.
 func (o Options) bothErr(table string) error {
 	return fmt.Errorf("state %s: table %s is both excluded and restore_only; name it in one of them", o.Name, table)
@@ -112,7 +59,11 @@ func (o Options) tracked(table string) bool { return contains(o.RowTracking, tab
 // views, sequences and triggers that differ. Routines and events are not
 // tracked; system-versioned tables must be excluded.
 type MySQL struct {
-	o  Options
+	o Options
+	// g matches table names as written: MySQL and MariaDB compare them
+	// case-sensitively (lower_case_table_names=0, as on Linux, where users
+	// and Users are two tables).
+	g  *tableGlobs
 	db *sql.DB
 	// multi takes queries of several statements: SHOW CREATE for many
 	// objects in one round trip (see showAll). multiRefused is set once
@@ -175,7 +126,7 @@ func NewMySQL(o Options) (*MySQL, error) {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
-	m := &MySQL{o: o, early: map[driver.Conn]bool{}}
+	m := &MySQL{o: o, g: newTableGlobs(o, nil), early: map[driver.Conn]bool{}}
 	db, err := dbx.OpenMySQLWith(o.DSN, "", o.Dial, dbx.MySQLOpen{Init: m.initConn})
 	if err != nil {
 		return nil, err
@@ -368,13 +319,13 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 				o.probes[name] = "view"
 			}
 		case typ == "VIEW":
-			if !m.o.excluded(name) {
+			if !m.g.excluded(name) {
 				o.views = append(o.views, name)
 				o.kind[name] = "view"
 			}
-		case m.o.excluded(name):
+		case m.g.excluded(name):
 			if typ == "BASE TABLE" {
-				if m.o.restoreOnly(name) {
+				if m.g.restoreOnly(name) {
 					return nil, m.o.bothErr(name)
 				}
 				o.excludedTables = append(o.excludedTables, name)
@@ -384,7 +335,7 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			o.kind[name] = "sequence"
 		case typ == "SYSTEM VERSIONED":
 			return nil, fmt.Errorf("state %s: %s is a system-versioned table, whose history cannot be restored; add it to exclude", m.o.Name, name)
-		case m.o.restoreOnly(name):
+		case m.g.restoreOnly(name):
 			o.restoreOnly = append(o.restoreOnly, name)
 			o.kind[name] = "table"
 		default:
@@ -406,7 +357,7 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			o.probes[t.Name] = "trigger"
 			continue
 		}
-		if !m.o.excluded(t.Table) && !probeName(t.Table) {
+		if !m.g.excluded(t.Table) && !probeName(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
 	}
@@ -1871,7 +1822,7 @@ func (m *MySQL) seed(ctx context.Context) error {
 	copied := append([]string{}, objs.tables...)
 	empty := append([]string{}, objs.excludedTables...)
 	for _, t := range objs.restoreOnly {
-		if m.o.restoreEmpty(t) {
+		if m.g.restoreEmpty(t) {
 			empty = append(empty, t)
 		} else {
 			copied = append(copied, t)

@@ -31,7 +31,12 @@ var _ interface {
 // VIEW SERVER PERFORMANCE STATE (2019 and older: VIEW SERVER STATE);
 // without it every fingerprint hashes every table.
 type SQLServer struct {
-	o   Options
+	o Options
+	// g matches table names in any letter case (strings.ToLower), with and
+	// without the schema: SQL Server compares names without case in the
+	// usual collations. It folds under every collation, so under a
+	// case-sensitive one a glob names Users and users both.
+	g   *tableGlobs
 	cfg msdsn.Config
 
 	mu    sync.Mutex
@@ -96,7 +101,7 @@ func NewSQLServer(o Options) (*SQLServer, error) {
 	if strings.EqualFold(o.Working, o.Pristine) {
 		return nil, fmt.Errorf("state %s: the pristine database must be another one than %s", o.Name, o.Working)
 	}
-	return &SQLServer{o: o, cfg: cfg, pools: map[string]*sql.DB{}}, nil
+	return &SQLServer{o: o, g: newTableGlobs(o, strings.ToLower), cfg: cfg, pools: map[string]*sql.DB{}}, nil
 }
 
 func (s *SQLServer) Name() string  { return s.o.Name }
@@ -131,22 +136,23 @@ func (s *SQLServer) setMode(mode string) {
 }
 
 // excluded reports whether a table (schema.name) is excluded: a glob
-// matches it with or without its schema. SQL Server compares names
-// without case (in the usual collations), so the globs do too, in any
-// Unicode letter (strings.ToLower) and under every collation: under a
-// case-sensitive one, a glob names Users and users both.
+// matches it with or without its schema, in any letter case (g). The
+// parts are lowered apart, name once: that is schema.name lowered whole,
+// the dot being ASCII (FuzzLowerParts). The concatenation stays here, not
+// in a helper, so it stays on the stack.
 func (s *SQLServer) excluded(schema, name string) bool {
-	return matchAny(s.o.Exclude, strings.ToLower, schema+"."+name, name)
+	bare := strings.ToLower(name)
+	return s.g.excluded(strings.ToLower(schema)+"."+bare) || s.g.excluded(bare)
 }
 
-// restoreOnly is excluded for restore_only (Options.RestoreOnly).
-func (s *SQLServer) restoreOnly(schema, name string) bool {
-	return matchAny(s.o.restoreOnlyGlobs(), strings.ToLower, schema+"."+name, name)
-}
-
-// restoreEmpty is restoreOnly for Options.RestoreEmpty.
-func (s *SQLServer) restoreEmpty(schema, name string) bool {
-	return matchAny(s.o.RestoreEmpty, strings.ToLower, schema+"."+name, name)
+// globFlags sets t's Excluded, RestoreOnly and RestoreEmpty, its names
+// lowered once as excluded lowers them.
+func (s *SQLServer) globFlags(t *ssTable) {
+	bare := strings.ToLower(t.Name)
+	full := strings.ToLower(t.Schema) + "." + bare
+	t.Excluded = s.g.excluded(full) || s.g.excluded(bare)
+	t.RestoreOnly = s.g.restoreOnly(full) || s.g.restoreOnly(bare)
+	t.RestoreEmpty = s.g.restoreEmpty(full) || s.g.restoreEmpty(bare)
 }
 
 // tracked reports whether a table (schema.name) tracks its rows: listed

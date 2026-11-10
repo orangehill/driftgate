@@ -1,59 +1,128 @@
 package state
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
 
-// TestMatchAny: a glob matches one of the names, after the fold when there
-// is one; no glob matches nothing, an empty name only a glob that takes it.
-func TestMatchAny(t *testing.T) {
+// TestMatchGlobs: a glob matches the name; no glob matches nothing, an
+// empty name only a glob that takes it. Brackets match themselves.
+func TestMatchGlobs(t *testing.T) {
 	for _, c := range []struct {
 		globs []string
-		fold  func(string) string
-		names []string
+		name  string
 		want  bool
 	}{
-		{nil, nil, []string{"users"}, false},
-		{nil, strings.ToLower, []string{""}, false},
-		{[]string{"*"}, nil, []string{""}, true},
-		{[]string{"?"}, nil, []string{""}, false},
-		{[]string{"users"}, nil, nil, false},
-		{[]string{"users"}, nil, []string{"users"}, true},
-		{[]string{"users"}, nil, []string{"Users"}, false},
-		{[]string{"Users"}, strings.ToLower, []string{"USERS"}, true},
-		{[]string{"Été"}, strings.ToLower, []string{"ÉTÉ"}, true},
-		{[]string{"Été"}, asciiLower, []string{"ÉTÉ"}, false},
-		{[]string{"Été"}, asciiLower, []string{"ÉtÉ"}, false},
-		{[]string{"Été"}, asciiLower, []string{"ÉTé"}, true},
-		{[]string{"sess*", "job?"}, nil, []string{"public.jobs", "jobs"}, true},
-		{[]string{"sess*", "job?"}, nil, []string{"public.job", "job"}, false},
-		{[]string{"app.*"}, strings.ToLower, []string{"APP.users", "users"}, true},
-		{[]string{"[a]"}, nil, []string{"a"}, false},
-		{[]string{"[a]"}, asciiLower, []string{"[A]"}, true},
-		{[]string{"a[b"}, nil, []string{"a[b"}, true},
+		{nil, "users", false},
+		{[]string{"*"}, "", true},
+		{[]string{"?"}, "", false},
+		{[]string{"users"}, "users", true},
+		{[]string{"users"}, "Users", false},
+		{[]string{"sess*", "job?"}, "jobs", true},
+		{[]string{"sess*", "job?"}, "public.jobs", false},
+		{[]string{"app.*"}, "app.users", true},
+		{[]string{"[a]"}, "a", false},
+		{[]string{"[a]"}, "[a]", true},
+		{[]string{"a[b"}, "a[b", true},
 	} {
-		if got := matchAny(c.globs, c.fold, c.names...); got != c.want {
-			t.Errorf("matchAny(%q, %q) = %v, want %v", c.globs, c.names, got, c.want)
+		if got := matchGlobs(c.globs, c.name); got != c.want {
+			t.Errorf("matchGlobs(%q, %q) = %v, want %v", c.globs, c.name, got, c.want)
 		}
-	}
-	// The fold leaves the globs and the names as they were.
-	globs, names := []string{"USERS"}, []string{"Users", "dbo.Users", "Users"}
-	matchAny(globs, strings.ToLower, names...)
-	if globs[0] != "USERS" || names[0] != "Users" || names[1] != "dbo.Users" {
-		t.Errorf("after matchAny: globs %q, names %q", globs, names)
 	}
 }
 
-// TestTableGlobs: each driver matches exclude, restore_only and
-// restore_empty as its database compares names. MySQL and PostgreSQL take
-// them as written (PostgreSQL with or without the schema), SQLite without
-// ASCII case (and a shadow table as its virtual table), SQL Server without
-// any case and with or without the schema. Brackets match themselves.
+// TestNewTableGlobs: the globs are folded copies, restore_empty's among
+// restore_only's; the Options keep theirs as written. A driver whose
+// constructor did not make its globs stops at its first match.
+func TestNewTableGlobs(t *testing.T) {
+	o := Options{Exclude: []string{"USERS", "Été"}, RestoreOnly: []string{"Jobs"}, RestoreEmpty: []string{"Cache"}}
+	for _, c := range []struct {
+		fold                 func(string) string
+		exclude, only, empty []string
+	}{
+		{nil, []string{"USERS", "Été"}, []string{"Jobs", "Cache"}, []string{"Cache"}},
+		{asciiLower, []string{"users", "Été"}, []string{"jobs", "cache"}, []string{"cache"}},
+		{strings.ToLower, []string{"users", "été"}, []string{"jobs", "cache"}, []string{"cache"}},
+	} {
+		g := newTableGlobs(o, c.fold)
+		if !slices.Equal(g.exclude, c.exclude) || !slices.Equal(g.only, c.only) || !slices.Equal(g.empty, c.empty) {
+			t.Errorf("newTableGlobs = %+v, want %q, %q, %q", g, c.exclude, c.only, c.empty)
+		}
+	}
+	if o.Exclude[0] != "USERS" || o.RestoreOnly[0] != "Jobs" || o.RestoreEmpty[0] != "Cache" {
+		t.Errorf("Options changed: %+v", o)
+	}
+	if g := newTableGlobs(Options{}, strings.ToLower); g.excluded("x") || g.restoreOnly("x") || g.restoreEmpty("x") {
+		t.Error("no globs match a name")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("a driver without its globs matched")
+		}
+	}()
+	(&MySQL{}).g.excluded("x")
+}
+
+// FuzzLowerParts: lowering schema and name apart and joining them with a
+// dot, as SQL Server's matchers do, is lowering schema.name whole, in any
+// bytes.
+func FuzzLowerParts(f *testing.F) {
+	for _, s := range [][2]string{{"dbo", "Users"}, {"\xc3", "\xa9"}, {"\xff", "x"}, {"\u212a", "\u212a"}, {"ΣΑΣ", "ΣΑΣ"}, {"İ", "ẞ"}, {"", ""}} {
+		f.Add(s[0], s[1])
+	}
+	f.Fuzz(func(t *testing.T, schema, name string) {
+		if parts, whole := strings.ToLower(schema)+"."+strings.ToLower(name), strings.ToLower(schema+"."+name); parts != whole {
+			t.Errorf("%q.%q: %q apart, %q whole", schema, name, parts, whole)
+		}
+	})
+}
+
+// TestTableGlobs: each driver, as its constructor makes it, matches
+// exclude, restore_only and restore_empty as its database compares names.
+// MySQL and PostgreSQL take them as written (PostgreSQL with or without
+// the schema), SQLite without ASCII case (and a shadow table as its
+// virtual table), SQL Server without any case and with or without the
+// schema. Brackets match themselves.
 func TestTableGlobs(t *testing.T) {
-	o := Options{Exclude: []string{"sess*", "Cache", "[a]"}, RestoreOnly: []string{"job?"}, RestoreEmpty: []string{"Été*"}}
-	pg, ss := &Postgres{o: o}, &SQLServer{o: o}
 	type want struct{ excluded, restoreOnly, restoreEmpty bool }
+	match := func(t *testing.T, o Options) func(driver, table string) want {
+		my, err := NewMySQL(withDSN(o, "mysql://u:p@127.0.0.1:1/"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { my.Close() })
+		pg, err := NewPostgres(withDSN(o, "postgres://u:p@127.0.0.1:1/postgres"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { pg.Close() })
+		ss, err := NewSQLServer(withDSN(o, "sqlserver://u:p@127.0.0.1:1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ss.Close() })
+		sl := newSQLite(o) // NewSQLite's, without a working file to open
+		return func(driver, table string) want {
+			switch driver {
+			case "mysql":
+				return want{my.g.excluded(table), my.g.restoreOnly(table), my.g.restoreEmpty(table)}
+			case "postgres":
+				return want{pg.excludedQualified(table), pg.restoreOnlyQualified(table), pg.restoreEmptyQualified(table)}
+			case "sqlite":
+				return want{sl.excludedTable(table, ""), sl.restoreOnlyTable(table, ""), sl.restoreEmptyTable(table)}
+			}
+			schema, name, _ := strings.Cut(table, ".")
+			tb := &ssTable{Schema: schema, Name: name}
+			ss.globFlags(tb)
+			if ss.excluded(schema, name) != tb.Excluded {
+				t.Errorf("sqlserver %s: excluded and globFlags differ", table)
+			}
+			return want{tb.Excluded, tb.RestoreOnly, tb.RestoreEmpty}
+		}
+	}
+	o := Options{Exclude: []string{"sess*", "Cache", "[a]", "Ünit"}, RestoreOnly: []string{"job?"}, RestoreEmpty: []string{"Été*"}}
+	got := match(t, o)
 	for _, c := range []struct {
 		driver, table string
 		want
@@ -82,6 +151,9 @@ func TestTableGlobs(t *testing.T) {
 		{"sqlite", "Sessions", want{true, false, false}},
 		{"sqlite", "CACHE", want{true, false, false}},
 		{"sqlite", "[A]", want{true, false, false}},
+		{"sqlite", "Ünit", want{true, false, false}},
+		{"sqlite", "ÜNIT", want{true, false, false}},
+		{"sqlite", "ünit", want{}},
 		{"sqlite", "JOBS", want{false, true, false}},
 		{"sqlite", "Étés", want{false, true, true}},
 		{"sqlite", "ÉTÉS", want{}},
@@ -91,29 +163,44 @@ func TestTableGlobs(t *testing.T) {
 		{"sqlserver", "dbo.CACHE", want{true, false, false}},
 		{"sqlserver", "Sess.Users", want{true, false, false}},
 		{"sqlserver", "dbo.[A]", want{true, false, false}},
+		{"sqlserver", "dbo.ünit", want{true, false, false}},
 		{"sqlserver", "app.JOBS", want{false, true, false}},
 		{"sqlserver", "dbo.étés", want{false, true, true}},
 		{"sqlserver", "dbo.ÉTÉS", want{false, true, true}},
 		{"sqlserver", "dbo.users", want{}},
 	} {
-		var got want
-		switch c.driver {
-		case "mysql":
-			got = want{o.excluded(c.table), o.restoreOnly(c.table), o.restoreEmpty(c.table)}
-		case "postgres":
-			got = want{pg.excludedQualified(c.table), pg.restoreOnlyQualified(c.table), pg.restoreEmptyQualified(c.table)}
-		case "sqlite":
-			got = want{o.excludedTable(c.table, ""), o.restoreOnlyTable(c.table, ""), o.restoreEmptyTable(c.table)}
-		case "sqlserver":
-			schema, name, _ := strings.Cut(c.table, ".")
-			got = want{ss.excluded(schema, name), ss.restoreOnly(schema, name), ss.restoreEmpty(schema, name)}
-		}
-		if got != c.want {
-			t.Errorf("%s %s: excluded, restore_only, restore_empty %v, want %v", c.driver, c.table, got, c.want)
+		if g := got(c.driver, c.table); g != c.want {
+			t.Errorf("%s %s: excluded, restore_only, restore_empty %v, want %v", c.driver, c.table, g, c.want)
 		}
 	}
 	// A shadow table of SQLite is as its virtual table is, whatever its name.
-	if !o.excludedTable("x_data", "Sessions") || !o.restoreOnlyTable("x_data", "Jobs") || o.restoreOnlyTable("jobs", "x") {
+	sl := newSQLite(o)
+	if !sl.excludedTable("x_data", "Sessions") || !sl.restoreOnlyTable("x_data", "Jobs") || sl.restoreOnlyTable("jobs", "x") {
 		t.Error("sqlite: a shadow table is not matched by its virtual table's name")
 	}
+
+	// A glob with a schema matches the table in that schema only; one
+	// without, SQL Server's in any schema.
+	for _, c := range []struct {
+		o             Options
+		driver, table string
+		want
+	}{
+		{Options{RestoreOnly: []string{"app.*"}}, "postgres", "app.x", want{false, true, false}},
+		{Options{RestoreOnly: []string{"app.*"}}, "postgres", "public.x", want{}},
+		{Options{RestoreEmpty: []string{"app.*"}}, "postgres", "app.x", want{false, true, true}},
+		{Options{RestoreEmpty: []string{"app.*"}}, "postgres", "public.x", want{}},
+		{Options{Exclude: []string{"App.*"}}, "sqlserver", "app.x", want{true, false, false}},
+		{Options{Exclude: []string{"App.*"}}, "sqlserver", "dbo.x", want{}},
+		{Options{Exclude: []string{"X"}}, "sqlserver", "app.x", want{true, false, false}},
+	} {
+		if g := match(t, c.o)(c.driver, c.table); g != c.want {
+			t.Errorf("%+v %s %s: excluded, restore_only, restore_empty %v, want %v", c.o, c.driver, c.table, g, c.want)
+		}
+	}
+}
+
+func withDSN(o Options, dsn string) Options {
+	o.DSN, o.Working, o.Pristine = dsn, "shop", "shop_pristine"
+	return o
 }

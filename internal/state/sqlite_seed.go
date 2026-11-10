@@ -147,7 +147,7 @@ func (s *SQLite) prepare(ctx context.Context, path string) error {
 	emptied := append([]string{}, objs.excluded...)
 	recreate := maps.Clone(objs.exvirtual)
 	for _, name := range objs.order {
-		if t := objs.tables[name]; t.restoreOnly && !t.shadow && s.o.restoreEmptyTable(owned(t)) {
+		if t := objs.tables[name]; t.restoreOnly && !t.shadow && s.restoreEmptyTable(owned(t)) {
 			emptied = append(emptied, name)
 			if t.virtual {
 				recreate[name] = t.sql

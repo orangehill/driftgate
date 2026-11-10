@@ -502,7 +502,7 @@ func (s *SQLServer) inventory(ctx context.Context, c *sql.Conn) (*ssInventory, e
 			if err := claim(t.Item, "table "+t.qname()); err != nil {
 				return err
 			}
-			t.Excluded, t.RestoreOnly, t.RestoreEmpty = s.excluded(t.Schema, t.Name), s.restoreOnly(t.Schema, t.Name), s.restoreEmpty(t.Schema, t.Name)
+			s.globFlags(t)
 			if t.Excluded && t.RestoreOnly {
 				return s.o.bothErr(t.Schema + "." + t.Name)
 			}
