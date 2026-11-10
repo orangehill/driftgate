@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/routes"
 	"github.com/orangehill/driftgate/internal/secret"
 )
@@ -69,7 +71,7 @@ storage:
 	if code != ExitDrift || !strings.Contains(out, "baseline local made") {
 		t.Fatalf("first run: %d\n%s\n%s", code, out, errOut)
 	}
-	for _, want := range []string{"failed in the baseline (an error the baseline keeps green: fix it and accept the new answer), baseline local", "get-api-tree: 500", "get-api-items-id-2: 404",
+	for _, want := range []string{"failed in the baseline (errors the baseline keeps green: fix them and accept the new answers), baseline local", "get-api-tree: 500", "get-api-items-id-2: 404",
 		"GET /api/tree ← get-api-tree: 500", "requests meant to succeed failed in the baseline"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("first run lacks %q:\n%s", want, out)
@@ -160,11 +162,65 @@ func TestKnownFailuresOfOtherServices(t *testing.T) {
 		{Request: "get-gone", Reason: "renamed"},
 	}}
 	var b strings.Builder
-	c, _, err := checkCoverage(selection{"api": true}, cat, inv, excl, nil, "text", &b)
+	c, _, err := checkCoverage(selection{"api": true}, cat, inv, excl, nil, config.Evolve, "text", &b)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(c.Health.Stale, []string{"get-gone (no request)"}) {
 		t.Errorf("stale %v\n%s", c.Health.Stale, b.String())
+	}
+}
+
+// TestFailedTitlesByMode: the lists of requests that failed in the
+// baseline say how it takes their fixed answers: accept in mode evolve, a
+// rebase with --allow-freeze in mode freeze, which accepts nothing.
+func TestFailedTitlesByMode(t *testing.T) {
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/a"}}}
+	cat := &catalog.Catalog{Requests: []catalog.Request{{ID: "get-a", Method: "GET", Path: "/a"}}}
+	answers := map[string]routes.Answer{"get-a": {Status: 500}}
+	for mode, want := range map[string]string{config.Freeze: "--allow-freeze", config.Evolve: "accept the new answers"} {
+		var b strings.Builder
+		if _, code, err := checkCoverage(nil, cat, inv, &routes.Exclusions{}, answers, mode, "text", &b); err != nil || code != ExitDrift {
+			t.Fatalf("%s: %d %v\n%s", mode, code, err, b.String())
+		}
+		out := b.String()
+		if strings.Count(out, want) != 2 || mode == config.Freeze && strings.Contains(out, "accept the new answer") {
+			t.Errorf("%s: both titles must say %q:\n%s", mode, want, out)
+		}
+	}
+}
+
+// TestCoverageGaps: coverage ticks its last line only when it lists
+// nothing to fix; a clean exit after such a list says to fix it.
+func TestCoverageGaps(t *testing.T) {
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/a"}}}
+	cat := &catalog.Catalog{Requests: []catalog.Request{{ID: "get-a", Method: "GET", Path: "/a"}}}
+	var b strings.Builder
+	if _, code, _ := checkCoverage(nil, cat, inv, &routes.Exclusions{}, nil, config.Freeze, "text", &b); code != ExitClean || !strings.Contains(b.String(), "every route is covered or excluded ✓") {
+		t.Errorf("clean: %d\n%s", code, b.String())
+	}
+	body := json.RawMessage(`{"title":"a"}`)
+	for _, c := range []struct {
+		name  string
+		route *routes.Route
+		excl  routes.Exclusions
+		title string
+	}{
+		// A validated body no request checks: covered, but listed.
+		{"no invalid body", &routes.Route{Methods: []string{"POST"}, Path: "/posts", Body: body}, routes.Exclusions{}, noInvalidBodyTitle},
+		{"stale known failure", nil, routes.Exclusions{KnownFailures: []routes.KnownFailure{{Request: "get-gone", Reason: "renamed"}}}, staleKnownTitle},
+		{"stale exclusion", nil, routes.Exclusions{Routes: []routes.Exclusion{{Route: "/gone", Reason: "removed"}}}, "Exclusions that match no route"},
+	} {
+		inv, cat := inv, cat
+		if c.route != nil {
+			inv = &routes.Inventory{Routes: append(slices.Clone(inv.Routes), *c.route)}
+			cat = &catalog.Catalog{Requests: append(slices.Clone(cat.Requests), catalog.Request{ID: "post-posts", Method: "POST", Path: "/posts", Body: body})}
+		}
+		b.Reset()
+		_, code, _ := checkCoverage(nil, cat, inv, &c.excl, nil, config.Freeze, "text", &b)
+		if out := b.String(); code != ExitClean || !strings.Contains(out, c.title) || strings.Contains(out, "✓") ||
+			!strings.Contains(out, "every route is covered or excluded; fix the lists above") {
+			t.Errorf("%s: %d\n%s", c.name, code, out)
+		}
 	}
 }
