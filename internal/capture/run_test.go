@@ -138,7 +138,7 @@ func TestRunBaselineRefusals(t *testing.T) {
 		older       bool   // the baseline's state has the format before state.FingerprintFormat
 		skip        bool   // --skip-fingerprint-check
 		corrupt     bool   // the baseline's meta.json cannot be read
-		want        string // <dir> is the baseline's folder; "" is a capture that runs
+		want        string // <dir> is the baseline's folder, <meta> its meta.json; "" is a capture that runs
 		prefix      bool   // want is the start of the message
 	}{
 		{name: "older format", baseline: "main", older: true,
@@ -152,7 +152,7 @@ func TestRunBaselineRefusals(t *testing.T) {
 		{name: "other data, capture",
 			want: "environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase base --from <tag> --reason \"…\""},
 		{name: "skip fingerprint check", baseline: "main", skip: true},
-		{name: "meta unreadable", baseline: "main", corrupt: true, want: "<dir>/meta.json: invalid character ", prefix: true},
+		{name: "meta unreadable", baseline: "main", corrupt: true, want: "<meta>: invalid character ", prefix: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
@@ -234,7 +234,7 @@ func TestRunBaselineRefusals(t *testing.T) {
 			} else if !errors.Is(err, ErrEnv) {
 				t.Errorf("kind of %v: want %v", err, ErrEnv)
 			}
-			want := strings.ReplaceAll(tc.want, "<dir>", base.Dir)
+			want := strings.NewReplacer("<dir>", base.Dir, "<meta>", filepath.Join(base.Dir, "meta.json")).Replace(tc.want)
 			if tc.prefix && !strings.HasPrefix(err.Error(), want) || !tc.prefix && err.Error() != want {
 				t.Errorf("message:\n%s\nwant:\n%s", err, want)
 			}
