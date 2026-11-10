@@ -14,16 +14,6 @@ import (
 	"github.com/orangehill/driftgate/internal/pii"
 )
 
-// DumpFormat is the version of the dump format; it changes when the same
-// input would give different bytes. 2: a statement whose last line may end
-// in a comment gets its delimiter on a line of its own.
-const DumpFormat = 2
-
-// dumpHeader is the first line of a dump; data verify reads no other dump.
-func dumpHeader(format int, driver string) string {
-	return fmt.Sprintf("-- DriftGate anonymized data, dump format %d (%s)\n", format, driver)
-}
-
 // FileValue is one value of a file column: the path the application stored.
 type FileValue struct {
 	Table, Column string
