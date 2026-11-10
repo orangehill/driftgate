@@ -789,9 +789,7 @@ func cookieAttrFormat(key string, vals []string, expires string, deleted bool) s
 	case key == "max-age":
 		short, lo, hi := vals[0], len(vals[0]), 0
 		for _, v := range vals {
-			// Not a plain count (a leading 0, or too long for a
-			// repeat count): inferred as any other value.
-			if !allDigits(v) || v[0] == '0' || len(v) > 18 {
+			if !allDigits(v) {
 				return grouped(valuesFormat(vals))
 			}
 			if len(v) < len(short) || len(v) == len(short) && v < short {
