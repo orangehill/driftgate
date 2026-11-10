@@ -1191,6 +1191,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&ids[0]); err != nil {
 		return nil, err
 	}
+	caller := ctx // the run's own: onBackground rebinds ctx
 	// onBackground goes on after a failure or a cancel on a session of its
 	// own that no cancel stops: it ends what the copy's connections still
 	// run (KILL QUERY), so their locks go, and waits 30 s at most for a
@@ -1280,7 +1281,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			// makes the objects again all the same.
 			done := onBackground()
 			defer done()
-			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, err)
+			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, dbx.MySQLLockCancelled(caller, err))
 		}
 		dropped = append(dropped, d)
 	}
@@ -1306,7 +1307,9 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 		makeObjects()
 	}
 	if err != nil {
-		return nil, notMade(dst, recovery, err, lost, seqs, trigDefs, pending)
+		// After a cancel the cause is the cancel, not the lock it stopped
+		// (dbx.MySQLLockCancelled), and the list is kept.
+		return nil, notMade(dst, recovery, dbx.MySQLLockCancelled(caller, err), dbx.MySQLLockCancelled(caller, lost), seqs, trigDefs, pending)
 	}
 	return extra, nil
 }

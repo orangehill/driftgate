@@ -210,7 +210,7 @@ func probeOnce(ctx context.Context, c *sql.Conn, db, target string, tables []str
 	defer func() {
 		for i := len(drops) - 1; i >= 0; i-- {
 			if _, e := c.ExecContext(context.WithoutCancel(ctx), drops[i]); e != nil {
-				err = errors.Join(err, fmt.Errorf("the probe %s is left in %s, as it could not be dropped (%v): drop it by hand, or the next seed or restore by a login that may drops it", name, db, e))
+				err = errors.Join(dbx.MySQLLockCancelled(ctx, err), fmt.Errorf("the probe %s is left in %s, as it could not be dropped (%v): drop it by hand, or the next seed or restore by a login that may drops it", name, db, e))
 				return
 			}
 		}
