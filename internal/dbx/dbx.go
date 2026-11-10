@@ -1,9 +1,11 @@
 // Package dbx holds what the state components (internal/state) and the data
 // module (internal/data) both do with MySQL/MariaDB and PostgreSQL servers:
 // connecting, quoting names, setting up a session, telling MariaDB from
-// MySQL, reading SHOW CREATE, filtering PostgreSQL's system schemas, and
-// checking that a database is on a host DriftGate may rewrite. Reading a
-// DSN stays in internal/dbdsn, which keeps every error free of the DSN.
+// MySQL, reading SHOW CREATE, filtering PostgreSQL's system schemas,
+// checking that a database is on a host DriftGate may rewrite, trying a
+// MySQL step again when the server stopped it for a lock, and finding the
+// sequences a Galera node refuses to create. Reading a DSN stays in
+// internal/dbdsn, which keeps every error free of the DSN.
 //
 // Where the two callers differ on purpose, the difference is a parameter
 // here, with the reason at the parameter.

@@ -56,6 +56,10 @@ func GaleraRefusedSequences(ctx context.Context, q Querier, db string, seqs []st
 	return refused, rows.Err()
 }
 
+// GaleraSequencesWhy says why a Galera node refuses the sequences
+// GaleraRefusedSequences names, as a clause after "Galera cluster node, ".
+const GaleraSequencesWhy = "which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235)"
+
 // GaleraSequencesHint is what to do about a sequence GaleraRefusedSequences
 // names.
 const GaleraSequencesHint = "make them NOCACHE or INCREMENT BY 0 (ALTER SEQUENCE) and InnoDB (ALTER TABLE … ENGINE=InnoDB)"
