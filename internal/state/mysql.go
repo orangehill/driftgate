@@ -1420,7 +1420,7 @@ func (m *MySQL) galeraSequences(ctx context.Context, c *sql.Conn, src string, se
 	if err != nil || len(refused) == 0 {
 		return err
 	}
-	return fmt.Errorf("state %s: the server is a Galera cluster node, which creates no sequence with a cache and an increment other than 0, nor one of another engine than InnoDB (1235), so these sequences of %s cannot be copied: %s; %s, or add them to exclude", m.o.Name, src, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
+	return fmt.Errorf("state %s: the server is a Galera cluster node, %s, so these sequences of %s cannot be copied: %s; %s, or add them to exclude", m.o.Name, dbx.GaleraSequencesWhy, src, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
 }
 
 // copySequence makes sequence q of dst as src has it, where it goes on.

@@ -99,15 +99,17 @@ func readAnswersOnce(dir string, ids []string) (map[string]routes.Answer, error)
 	return answers, nil
 }
 
-// section prints a titled list; nothing when it is empty.
-func section(out io.Writer, title string, items []string) {
+// section prints a titled list, and says whether it did: nothing when it
+// is empty.
+func section(out io.Writer, title string, items []string) bool {
 	if len(items) == 0 {
-		return
+		return false
 	}
 	fmt.Fprintf(out, "\n%s:\n", title)
 	for _, it := range items {
 		fmt.Fprintf(out, "  %s\n", it)
 	}
+	return true
 }
 
 func failureLines(fs []routes.Failure) []string {
@@ -127,11 +129,27 @@ func failedRouteLines(rs []routes.FailedRoute) []string {
 }
 
 const (
-	failedRoutesTitle   = "Routes whose requests meant to succeed all failed in the baseline (not covered: fix them and accept the new answers, or acknowledge them under known_failures: in exclusions.yaml with a reason)"
-	failedRequestsTitle = "Requests meant to succeed that failed in the baseline (an error the baseline keeps green: fix it and accept the new answer)"
-	knownTitle          = "Known failures (known_failures: in exclusions.yaml; still compared)"
-	staleKnownTitle     = "Known failures that are stale (remove them from exclusions.yaml)"
+	knownTitle      = "Known failures (known_failures: in exclusions.yaml; still compared)"
+	staleKnownTitle = "Known failures that are stale (remove them from exclusions.yaml)"
 )
+
+// fixAdvice is how the baseline takes the answers of requests fixed in
+// mode: evolve accepts them; freeze accepts nothing, so a rebase does. A
+// rebase takes the whole capture, drifts included (as JoinAdvice says).
+func fixAdvice(mode string) string {
+	if mode == config.Freeze {
+		return `rebase the baseline on a capture with no other drift: driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`
+	}
+	return "accept the new answers"
+}
+
+func failedRoutesTitle(mode string) string {
+	return "Routes whose requests meant to succeed all failed in the baseline (not covered: acknowledge them under known_failures: in exclusions.yaml with a reason, or fix them and " + fixAdvice(mode) + ")"
+}
+
+func failedRequestsTitle(mode string) string {
+	return "Requests meant to succeed that failed in the baseline (errors the baseline keeps green: fix them and " + fixAdvice(mode) + ")"
+}
 
 // baselineHealth checks a baseline just made (ids nil) or the requests just
 // accepted into it (ids): requests meant to succeed whose answer is an
@@ -167,12 +185,12 @@ func baselineHealth(p *config.Project, inv *routes.Inventory, excl *routes.Exclu
 	} else {
 		h = routes.CheckHealth(cat, answers, excl.KnownFailures)
 	}
-	section(out, fmt.Sprintf("%s, baseline %s", failedRequestsTitle, name), failureLines(h.Failed))
+	section(out, fmt.Sprintf("%s, baseline %s", failedRequestsTitle(p.Mode), name), failureLines(h.Failed))
 	section(out, knownTitle, failureLines(h.Known))
 	if len(failed) == 0 {
 		return ExitClean, nil
 	}
-	section(out, failedRoutesTitle, failedRouteLines(failed))
+	section(out, failedRoutesTitle(p.Mode), failedRouteLines(failed))
 	return ExitDrift, []string{"requests meant to succeed failed in the baseline (see above)"}
 }
 

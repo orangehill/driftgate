@@ -179,7 +179,7 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 			if err != nil {
 				return fmt.Errorf("source: %w", err)
 			}
-			return fault("source")
+			return nil
 		})
 		if err != nil {
 			return nil, err
@@ -222,9 +222,6 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 				sc := x.scanner(output)
 				defer sc.close()
 				if err := sc.database(ctx, *opt.Target, &buf); err != nil {
-					return err
-				}
-				if err := fault("target"); err != nil {
 					return err
 				}
 				db.values, db.findings = sc.values, sc.findings()

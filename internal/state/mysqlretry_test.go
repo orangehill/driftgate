@@ -4,29 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-)
 
-func TestLockStopped(t *testing.T) {
-	for err, want := range map[error]bool{
-		&mysql.MySQLError{Number: 1213}:                      true,
-		&mysql.MySQLError{Number: 1205}:                      true,
-		fmt.Errorf("t: %w", &mysql.MySQLError{Number: 1213}): true,
-		&mysql.MySQLError{Number: 1146}:                      false,
-		errors.New("Deadlock found when trying to get lock"): false,
-		context.Canceled:                                     false,
-	} {
-		if lockStopped(err) != want {
-			t.Errorf("%v: %v", err, !want)
-		}
-	}
-}
+	"github.com/orangehill/driftgate/internal/dbx"
+)
 
 // TestRetryNote: the note reads as a sentence for every kind of step
 // retryLocked runs.
@@ -40,11 +27,35 @@ func TestRetryNote(t *testing.T) {
 	}
 }
 
+// TestRetryLockedNested: a step within a step is not tried again on its
+// own, the outer one is: an inner step stopped every time runs once per
+// try of the outer one, dbx.MySQLLockRetries+1 times in all, not that
+// squared.
+func TestRetryLockedNested(t *testing.T) {
+	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
+	lockRetryWait = time.Millisecond
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	m := &MySQL{o: Options{Name: "db", Log: io.Discard}}
+	outer, inner := 0, 0
+	err := m.retryLocked(context.Background(), "restore", func(ctx context.Context) error {
+		outer++
+		return m.retryLocked(ctx, "query", func(context.Context) error {
+			inner++
+			return deadlock
+		})
+	})
+	if !errors.Is(err, deadlock) || outer != dbx.MySQLLockRetries+1 || inner != dbx.MySQLLockRetries+1 {
+		t.Errorf("%v after %d outer and %d inner tries", err, outer, inner)
+	}
+}
+
 // TestMySQLRetryLocked: a fingerprint, restore or seed the server stops for
 // a lock (1213, injected) runs again and then gives what a run without the
 // stop gives; a retried read sees a write made between the tries; one that
-// keeps being stopped returns the server's error after lockRetries tries
-// more.
+// keeps being stopped returns the server's error after
+// dbx.MySQLLockRetries tries more.
 func TestMySQLRetryLocked(t *testing.T) {
 	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
 	lockRetryWait = time.Millisecond
@@ -120,7 +131,7 @@ func TestMySQLRetryLocked(t *testing.T) {
 			}
 			noted := log.Len()
 
-			// Stopped every time: the server's error, after lockRetries more.
+			// Stopped every time: the server's error, after dbx.MySQLLockRetries more.
 			for _, what := range []string{"fingerprint", "restore", "seed"} {
 				stop(what, 1000, nil)
 				var err error
@@ -133,7 +144,7 @@ func TestMySQLRetryLocked(t *testing.T) {
 				case "seed":
 					err = m.Seed(ctx)
 				}
-				if !errors.Is(err, deadlock) || calls != lockRetries+1 {
+				if !errors.Is(err, deadlock) || calls != dbx.MySQLLockRetries+1 {
 					t.Errorf("%s: %v after %d tries", what, err, calls)
 				}
 			}
