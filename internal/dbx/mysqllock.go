@@ -29,18 +29,28 @@ func mysqlLockStopped(err error) bool {
 // deadlock, 1213, or a lock wait timeout, 1205), up to MySQLLockRetries
 // times, after wait, four times as long each time. retrying is given the
 // error before each wait. f must start anew on each try: a try's result is
-// never kept from one that failed. When every try fails, or ctx ends, the
-// last error is returned.
+// never kept from one that failed. Any other error is returned at once, and
+// the last lock error when every try fails. When ctx ends while a lock is in
+// the way, ctx's error is returned at once, without a wait, not the lock
+// error, which would blame the server.
 func RetryMySQLLock(ctx context.Context, wait time.Duration, f func() error, retrying func(error)) error {
 	for try := 0; ; try++ {
 		err := f()
-		if !mysqlLockStopped(err) || try == MySQLLockRetries || ctx.Err() != nil {
+		if !mysqlLockStopped(err) {
+			return err
+		}
+		// Cancelled while f ran: the driver then mostly returns ctx's error
+		// itself, but a lock error may come back together with the cancel.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if try == MySQLLockRetries {
 			return err
 		}
 		retrying(err)
 		select {
 		case <-ctx.Done():
-			return err
+			return ctx.Err()
 		case <-time.After(wait):
 		}
 		wait *= 4

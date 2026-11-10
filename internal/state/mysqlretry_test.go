@@ -51,6 +51,29 @@ func TestRetryLockedNested(t *testing.T) {
 	}
 }
 
+// TestRetryLockedCancelled: a step within a step stopped for a lock as the
+// run is cancelled ends the outer step with the cancel, after one try, and
+// is not noted: the lock error would blame the server for the interrupt.
+func TestRetryLockedCancelled(t *testing.T) {
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	var log bytes.Buffer
+	m := &MySQL{o: Options{Name: "db", Log: &log}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tries := 0
+	err := m.retryLocked(ctx, "restore", func(ctx context.Context) error {
+		tries++
+		return m.retryLocked(ctx, "query", func(context.Context) error {
+			cancel()
+			return &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+		})
+	})
+	if !errors.Is(err, context.Canceled) || tries != 1 || log.Len() != 0 {
+		t.Errorf("%v after %d tries; log %q", err, tries, log.String())
+	}
+}
+
 // TestMySQLRetryLocked: a fingerprint, restore or seed the server stops for
 // a lock (1213, injected) runs again and then gives what a run without the
 // stop gives; a retried read sees a write made between the tries; one that

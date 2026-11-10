@@ -29,20 +29,24 @@ func TestMySQLLockStopped(t *testing.T) {
 
 // TestRetryMySQLLock: a step stopped every time is tried
 // MySQLLockRetries+1 times, noted before each wait, and waits four times
-// as long each time; a context that ends stops the retries at once, also
-// during a wait, and one ended before the first try is never noted.
+// as long each time. A context that ends while a lock is in the way stops
+// the retries at once with its own error, not the lock error: when it ends
+// before the first try, during a try, before a wait or during one; a try
+// stopped after it ended is not noted.
 func TestRetryMySQLLock(t *testing.T) {
 	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
-	// run calls RetryMySQLLock and records the calls of f and retrying; a
-	// call that does not end in time fails the test instead of hanging it.
-	run := func(ctx context.Context, wait time.Duration, retrying func()) ([]string, error) {
+	// run calls RetryMySQLLock with an f that is stopped every time, records
+	// the calls of f and retrying, and runs try within f and note within
+	// retrying; a call that does not end in time fails the test instead of
+	// hanging it.
+	run := func(ctx context.Context, wait time.Duration, try, note func()) ([]string, error) {
 		t.Helper()
 		var calls []string
 		done := make(chan error, 1)
 		go func() {
 			done <- RetryMySQLLock(ctx, wait,
-				func() error { calls = append(calls, "f"); return deadlock },
-				func(error) { calls = append(calls, "note"); retrying() })
+				func() error { calls = append(calls, "f"); try(); return deadlock },
+				func(error) { calls = append(calls, "note"); note() })
 		}()
 		select {
 		case err := <-done:
@@ -52,9 +56,10 @@ func TestRetryMySQLLock(t *testing.T) {
 			return nil, nil
 		}
 	}
+	nothing := func() {}
 
 	start := time.Now()
-	calls, err := run(context.Background(), 2*time.Millisecond, func() {})
+	calls, err := run(context.Background(), 2*time.Millisecond, nothing, nothing)
 	elapsed := time.Since(start)
 	want := []string{"f", "note", "f", "note", "f", "note", "f"}
 	if !errors.Is(err, deadlock) || !reflect.DeepEqual(calls, want) {
@@ -65,15 +70,37 @@ func TestRetryMySQLLock(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	calls, err = run(ctx, time.Hour, cancel)
-	if !errors.Is(err, deadlock) || !reflect.DeepEqual(calls, []string{"f", "note"}) {
-		t.Errorf("cancelled during the wait: %v after %v", err, calls)
+	cancel()
+	calls, err = run(ctx, time.Hour, nothing, nothing)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"f"}) {
+		t.Errorf("cancelled before: %v after %v", err, calls)
+	}
+
+	// The lock error comes back together with the cancel.
+	ctx, cancel = context.WithCancel(context.Background())
+	calls, err = run(ctx, time.Hour, cancel, nothing)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"f"}) {
+		t.Errorf("cancelled during a try: %v after %v", err, calls)
 	}
 
 	ctx, cancel = context.WithCancel(context.Background())
-	cancel()
-	calls, err = run(ctx, time.Hour, func() {})
-	if !errors.Is(err, deadlock) || !reflect.DeepEqual(calls, []string{"f"}) {
-		t.Errorf("cancelled before: %v after %v", err, calls)
+	calls, err = run(ctx, time.Hour, nothing, cancel)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"f", "note"}) {
+		t.Errorf("cancelled before the wait: %v after %v", err, calls)
+	}
+
+	// Cancelled 20ms into an hour's wait: it returns within a few ms of the
+	// cancel, and f is not tried again.
+	ctx, cancel = context.WithCancel(context.Background())
+	var cancelled time.Time
+	calls, err = run(ctx, time.Hour, nothing, func() {
+		time.AfterFunc(20*time.Millisecond, func() { cancelled = time.Now(); cancel() })
+	})
+	late := time.Since(cancelled)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"f", "note"}) {
+		t.Errorf("cancelled during the wait: %v after %v", err, calls)
+	}
+	if late > 50*time.Millisecond {
+		t.Errorf("returned %v after the cancel", late)
 	}
 }

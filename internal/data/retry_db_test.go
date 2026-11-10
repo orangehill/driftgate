@@ -28,7 +28,7 @@ func TestRetryNote(t *testing.T) {
 
 // TestRetryRead: the fault of a try runs after its read, only when the
 // read succeeded, and a read whose fault returns the server's lock error
-// is read again.
+// is read again; a read stopped as the run is cancelled is not.
 func TestRetryRead(t *testing.T) {
 	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
 	lockRetryWait = time.Millisecond
@@ -54,6 +54,17 @@ func TestRetryRead(t *testing.T) {
 	err = retryRead(context.Background(), nil, "source", func() error { calls = append(calls, "read"); return other })
 	if err != other || !reflect.DeepEqual(calls, []string{"read"}) {
 		t.Errorf("a failed read: %v after %q", err, calls)
+	}
+	// Stopped as the run is cancelled: the cancel, after one try, and no
+	// note, which would blame the server for the interrupt.
+	calls = nil
+	readFault = nil
+	var log bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err = retryRead(ctx, &log, "source", func() error { calls = append(calls, "read"); cancel(); return deadlock })
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(calls, []string{"read"}) || log.Len() != 0 {
+		t.Errorf("a cancelled read: %v after %q; log %q", err, calls, log.String())
 	}
 }
 

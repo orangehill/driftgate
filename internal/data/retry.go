@@ -31,7 +31,8 @@ var readFault func(what string) error
 // (dbx.RetryMySQLLock), up to dbx.MySQLLockRetries times, with one note in
 // log. f is a read in a snapshot of its own that writes nothing and builds
 // all its state anew on each try. When every try fails, the last error is
-// returned.
+// returned; when ctx ends while a lock is in the way, ctx's error, and a try
+// stopped after ctx ended is not noted.
 func retryRead(ctx context.Context, log io.Writer, what string, f func() error) error {
 	return dbx.RetryMySQLLock(ctx, lockRetryWait, func() error {
 		if err := f(); err != nil || readFault == nil {

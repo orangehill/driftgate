@@ -62,6 +62,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - The two baseline captures are one second apart, so timestamps differ as in later runs. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - The route count of `discover` and `run` reads `13 routes (13 from laravel)`; `laravel 13` read as a framework version.
 - "Not covered by this result" names every request the comparison skipped, in every format, by what it is (request that changes data, read, command step) and why (no baseline, not sent by `capture --read-only`, private body not on this machine …). In JSON this is `not_covered.skipped`, a list with `what`, `reason`, `count` and `names`.
+- MySQL/MariaDB: an interrupted step that the server had stopped for a lock (a fingerprint, seed, restore, or a read of `anonymize`, `subset`, `verify` or `classify`) reports the interrupt at once, not the lock error it was waiting on.
 
 ### Fixed
 
