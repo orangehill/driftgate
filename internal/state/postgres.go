@@ -785,14 +785,8 @@ func (p *Postgres) copyDatabase(ctx context.Context, src, dst string, prepare fu
 	if p.fileCopy(ctx, src) {
 		create += " STRATEGY FILE_COPY"
 	}
-	for attempt := 0; attempt < 5; attempt++ {
-		// Sessions on the source block the copy; end them and try again.
-		p.admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", src)
-		if _, err = p.admin.ExecContext(ctx, create); err == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	// Sessions on the source block the copy.
+	err = p.alone(ctx, src, create)
 	if err == nil && keep != nil {
 		err = p.keep(ctx, tmp, keep)
 	}
@@ -829,17 +823,7 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 		if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS false"); err != nil {
 			return err
 		}
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			p.admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", dst)
-			if _, err = p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err == nil {
-				break
-			}
-			if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
-				break
-			}
-		}
-		if err != nil {
+		if err := p.alone(ctx, dst, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err != nil {
 			p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS "+strconv.FormatBool(keep.AllowConn))
 			return err
 		}
@@ -853,6 +837,39 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 		}
 	}
 	return err
+}
+
+// pgTerminate ends the other sessions on a database; a variable for the
+// tests.
+var pgTerminate = "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = $1 AND pid <> pg_catalog.pg_backend_pid()"
+
+// alone runs stmt, which needs db to have no other sessions (CREATE
+// DATABASE … TEMPLATE db, ALTER DATABASE db RENAME): it ends them first,
+// and tries again, at most 5 times, while stmt fails because a session is
+// still there (55006 object_in_use). A failure to end them is returned
+// only with that 55006, so that it is not hidden behind "being accessed by
+// other users": before PostgreSQL 18, a role that is not a superuser may
+// not end an autovacuum worker, which the server then ends itself, and
+// stmt succeeds.
+func (p *Postgres) alone(ctx context.Context, db, stmt string) error {
+	for attempt := 1; ; attempt++ {
+		_, terr := p.admin.ExecContext(ctx, pgTerminate, db)
+		_, err := p.admin.ExecContext(ctx, stmt)
+		if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
+			return err
+		}
+		if terr != nil {
+			return fmt.Errorf("%w; ending the other sessions on %s: %w", err, db, terr)
+		}
+		if attempt == 5 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // wait waits for the drop of the database the last copy replaced.

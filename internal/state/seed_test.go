@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/orangehill/driftgate/internal/dbx"
 )
 
@@ -365,6 +367,140 @@ func TestPostgresSafeCopy(t *testing.T) {
 	db.Close()
 	if err := p.Seed(ctx); err == nil || !strings.Contains(err.Error(), "was not made by driftgate seed") {
 		t.Fatalf("seed over someone's database: %v", err)
+	}
+}
+
+// TestPostgresOtherSessions: a copy ends the other sessions on the
+// database it copies or renames away. A role that is not a superuser may
+// not end a superuser's: when the session stays, it gets that error (42501)
+// after one wait of the server (5 s), not after five; when the session ends
+// within that wait (as an autovacuum worker it may not end, before
+// PostgreSQL 18), the copy succeeds. A cancel while a session is in the
+// way returns at once.
+func TestPostgresOtherSessions(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_term", "dgt_term_pristine"
+	su, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine, newName(work), oldName(work)} {
+			su.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+		su.admin.Exec("DROP ROLE IF EXISTS dgt_term_app")
+	}
+	drop()
+	t.Cleanup(func() {
+		drop()
+		su.Close()
+	})
+	mustExec(t, su.admin, "CREATE ROLE dgt_term_app LOGIN PASSWORD 'app' CREATEDB",
+		"CREATE DATABASE "+work+" OWNER dgt_term_app", "CREATE DATABASE "+pristine+" OWNER dgt_term_app")
+	u, _ := url.Parse(dsn)
+	u.User = url.UserPassword("dgt_term_app", "app")
+	p, err := NewPostgres(Options{Name: "db", DSN: u.String(), Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// hold opens a superuser session on db that runs q; done gets its error.
+	hold := func(db, q string) (done chan error, release func()) {
+		t.Helper()
+		d, err := su.open(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done = make(chan error, 1)
+		go func() {
+			_, err := d.Exec(q)
+			d.Close()
+			done <- err
+		}()
+		for i := 0; ; i++ {
+			var n int
+			su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND query = $2", db, q).Scan(&n)
+			if n > 0 {
+				break
+			}
+			if i == 200 {
+				t.Fatalf("no session on %s", db)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return done, func() {
+			su.admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", db)
+			<-done
+		}
+	}
+	// The copy (CREATE DATABASE … TEMPLATE pristine) and the rename of work.
+	for _, db := range []string{pristine, work} {
+		t.Run(db, func(t *testing.T) {
+			// A session that stays: the error that says why it stays.
+			_, release := hold(db, "SELECT pg_sleep(60)")
+			start := time.Now()
+			err := p.copyDatabase(ctx, pristine, work, nil, nil)
+			took := time.Since(start)
+			release()
+			pe := (*pgconn.PgError)(nil)
+			if !errors.As(err, &pe) || pe.Code != "55006" || !strings.Contains(err.Error(), "SQLSTATE 42501") {
+				t.Fatalf("copy over a superuser's session: %v", err)
+			}
+			if took > 8*time.Second {
+				t.Fatalf("the error took %v", took)
+			}
+			var allow bool
+			if err := su.admin.QueryRow("SELECT datallowconn FROM pg_database WHERE datname = $1", work).Scan(&allow); err != nil || !allow {
+				t.Fatalf("working database after the failed copy: %v, %v", allow, err)
+			}
+
+			// A session that ends within the server's wait: the copy succeeds.
+			done, _ := hold(db, "SELECT pg_sleep(1.5)")
+			if err := p.copyDatabase(ctx, pristine, work, nil, nil); err != nil {
+				t.Fatalf("copy over a session that ends: %v", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("the session was ended: %v", err)
+			}
+			p.wait()
+		})
+	}
+
+	// A cancel while a session is in the way (one that is not ended here)
+	// returns at once.
+	defer func(q string) { pgTerminate = q }(pgTerminate)
+	pgTerminate = "SELECT $1::text"
+	for db, stmt := range map[string]string{pristine: "CREATE DATABASE " + qp(newName(work)), work: "ALTER DATABASE " + qp(work) + " RENAME"} {
+		t.Run("cancel "+db, func(t *testing.T) {
+			_, release := hold(db, "SELECT pg_sleep(60)")
+			defer release()
+			cctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			at := make(chan time.Time, 1)
+			go func() {
+				// Cancel once the first attempt failed: in the wait before
+				// the next one.
+				for seen := false; cctx.Err() == nil; time.Sleep(5 * time.Millisecond) {
+					var n int
+					su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND starts_with(query, $1)", stmt).Scan(&n)
+					if n > 0 {
+						seen = true
+					} else if seen {
+						at <- time.Now()
+						cancel()
+					}
+				}
+			}()
+			err := p.copyDatabase(cctx, pristine, work, nil, nil)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("copy cancelled: %v", err)
+			}
+			if took := time.Since(<-at); took > 150*time.Millisecond {
+				t.Fatalf("returned %v after the cancel", took)
+			}
+		})
 	}
 }
 
