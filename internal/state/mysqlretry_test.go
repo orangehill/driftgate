@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
@@ -37,6 +38,29 @@ func TestRetryNote(t *testing.T) {
 		if got := retryNote("db", what, err); got != want {
 			t.Errorf("%s:\n%q\nwant\n%q", what, got, want)
 		}
+	}
+}
+
+// TestRetryLockedNested: a step within a step is not tried again on its
+// own, the outer one is: an inner step stopped every time runs once per
+// try of the outer one, lockRetries+1 times in all, not that squared.
+func TestRetryLockedNested(t *testing.T) {
+	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
+	lockRetryWait = time.Millisecond
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	m := &MySQL{o: Options{Name: "db", Log: io.Discard}}
+	outer, inner := 0, 0
+	err := m.retryLocked(context.Background(), "restore", func(ctx context.Context) error {
+		outer++
+		return m.retryLocked(ctx, "query", func(context.Context) error {
+			inner++
+			return deadlock
+		})
+	})
+	if !errors.Is(err, deadlock) || outer != lockRetries+1 || inner != lockRetries+1 {
+		t.Errorf("%v after %d outer and %d inner tries", err, outer, inner)
 	}
 }
 
