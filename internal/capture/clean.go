@@ -144,7 +144,7 @@ func Clean(ctx context.Context, p *config.Project, items []CleanItem, out, log i
 		if err != nil {
 			return envErr("%v", err)
 		}
-		if err := os.Remove(it.Record); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeRecords(it.Record); err != nil {
 			return envErr("state %s: record %s: %v", it.Name, it.Record, err)
 		}
 		if was {

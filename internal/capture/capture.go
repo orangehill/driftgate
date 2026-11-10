@@ -325,6 +325,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	if err != nil {
 		return nil, err
 	}
+	if err := tr.checkWhole(ctx, start); err != nil {
+		return nil, err
+	}
 	r.sum.Tracked = len(start) > 0
 	r.start = start
 	if opt.Baseline != nil && !opt.SkipFingerprintCheck {
@@ -448,6 +451,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	// Leave the data as the capture found it after its first restore, so the
 	// working copy is ready for the application and the next capture.
+	// Every request ran on data checked before it; a pristine copy changed
+	// since is found by the next run's first restore, so this restore
+	// reads nothing more (no whole-copy read).
 	if (len(units) > 0 || len(r.sum.Writers) > 0) && len(p.State) > 0 {
 		if err := tr.restore(ctx); err != nil {
 			return nil, err
@@ -706,11 +712,11 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 }
 
 // CheckReadOnly refuses a configuration a read-only capture cannot keep
-// from writing: --read-only selects requests, and prepare: runs after
-// every restore as configured.
+// from writing: --read-only selects requests, and prepare: runs as
+// configured. With state: it should write only to data the restore brings back.
 func CheckReadOnly(p *config.Project) error {
-	if len(p.Prepare) > 0 {
-		return configErr("--read-only covers the requests only, not the project's commands: prepare: runs after every restore and may write; leave it out of the configuration for a read-only check")
+	if len(p.Prepare) > 0 && len(p.State) == 0 {
+		return configErr("--read-only covers the requests only, not the project's commands: prepare: may write, and without state: nothing restores what it writes; leave it out of the configuration for a read-only check")
 	}
 	return nil
 }
@@ -837,7 +843,7 @@ func (r *runner) runPrepare(ctx context.Context) error {
 			return envErr("prepare: %v", err)
 		}
 	}
-	return nil
+	return r.tr.checkPrepared(ctx)
 }
 
 // reloadTokens reads the tokens again, which a restore or a prepare may
@@ -858,6 +864,18 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	if err := r.tr.restore(ctx); err != nil {
 		return nil, err
 	}
+	// A whole copy is compared with its record before prepare and the
+	// tokens command, which may write; without them, on the fingerprint
+	// read below.
+	if len(r.p.Prepare)+len(r.p.Tokens.Command) > 0 {
+		whole, err := r.tr.wholeFingerprint(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.tr.checkWhole(ctx, whole); err != nil {
+			return nil, err
+		}
+	}
 	r.tainted = false
 	if err := r.prepare(ctx); err != nil {
 		return nil, err
@@ -867,6 +885,9 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	}
 	now, err := r.tr.fingerprint(ctx, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.tr.checkWhole(ctx, now); err != nil {
 		return nil, err
 	}
 	changed := diffStates(r.start, now)

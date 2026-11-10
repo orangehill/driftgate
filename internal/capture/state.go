@@ -92,6 +92,11 @@ type pristineFile struct {
 	RestoreOnly            []string          `json:"restore_only,omitempty"`
 	RestoreEmpty           []string          `json:"restore_empty,omitempty"` // as RestoreOnly, for restore_empty (their fingerprint is in RestoreOnlyFingerprint)
 	RestoreOnlyFingerprint state.Fingerprint `json:"restore_only_fingerprint,omitempty"`
+	// Schema is the pristine copy's schema at the seed (state.Schemer) in
+	// SchemaFormat, which spares checkSchema its read when the working
+	// schema equals it.
+	Schema       state.Fingerprint `json:"schema,omitempty"`
+	SchemaFormat int               `json:"schema_format,omitempty"`
 }
 
 // pristinePath is the pristine file of a database component on a server.
@@ -127,21 +132,33 @@ func pristinePath(p *config.Project, name, server string) (string, error) {
 }
 
 // readPristine reads the record of a component's pristine copy on a server
-// (see pristinePath, which also takes over a record of an earlier release).
-func readPristine(p *config.Project, name, server string) (pristineFile, error) {
+// (see pristinePath, which also takes over a record of an earlier release),
+// and returns its path.
+func readPristine(p *config.Project, name, server string) (pristineFile, string, error) {
 	var pf pristineFile
 	path, err := pristinePath(p, name, server)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	if err := json.Unmarshal(raw, &pf); err != nil {
-		return pf, fmt.Errorf("%s: %w", path, err)
+		return pf, path, fmt.Errorf("%s: %w", path, err)
 	}
-	return pf, nil
+	return pf, path, nil
+}
+
+// removeRecords removes the record of a pristine copy (path) and the
+// schemaRecord beside it.
+func removeRecords(path string) error {
+	for _, f := range []string{path, schemaPath(path)} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // recorded reports whether DriftGate's record of a pristine copy names the
@@ -149,7 +166,7 @@ func readPristine(p *config.Project, name, server string) (pristineFile, error) 
 // even without the mark seeds now leave in it (state.Options.AdoptPristine).
 // A record of an earlier release is found too: pristinePath takes it over first.
 func recorded(p *config.Project, name, server string, sc config.Component) bool {
-	pf, err := readPristine(p, name, server)
+	pf, _, err := readPristine(p, name, server)
 	return err == nil && pf.Driver == sc.Driver && pf.Working == sc.Working && pf.Pristine == sc.Pristine
 }
 
@@ -174,6 +191,11 @@ type tracker struct {
 	// are those whose last restore ended sessions.
 	databases map[string]endedDatabase
 	endedBy   []endedDatabase
+	// The whole-restore check against the record of the pristine copy
+	// (checkWhole, compareWhole), part of the restore's own checks.
+	copiedWhole map[string]bool // the components the last restore copied whole (not Partial)
+	compared    map[string]bool // the components whose whole copy was compared with the record in this run
+	schemaCheck
 }
 
 // openComponents connects to every state component, in name order.
@@ -232,12 +254,9 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			}
 		}
 		if seed {
-			o.Replacing = func() error {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				return nil
-			}
+			// A new pristine copy takes the working schema in: an earlier
+			// run's schemaRecord no longer applies.
+			o.Replacing = func() error { return removeRecords(path) }
 		}
 		// A restore rewrites the tables: the database must be on an allowed
 		// host, and every host the driver may connect to is checked, first
@@ -279,7 +298,9 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{}}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
+		compared:    map[string]bool{},
+		schemaCheck: schemaCheck{prepare: len(p.Prepare) > 0, config: configPath(p), records: map[string]string{}, schemas: states{}}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -288,7 +309,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
 		}
-		pf, err := readPristine(p, c.Name(), servers[c.Name()])
+		pf, path, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
 			t.close()
 			return nil, envErr("state %s has no pristine copy yet; run driftgate seed", c.Name())
@@ -331,6 +352,10 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 				t.close()
 				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
 			}
+		}
+		t.records[c.Name()] = schemaPath(path)
+		if pf.SchemaFormat == state.SchemaFormat {
+			t.schemas[c.Name()] = pf.Schema
 		}
 		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
@@ -401,7 +426,14 @@ func (t *tracker) restore(ctx context.Context) error {
 	t.resends.Store(0)
 	t.resentAfter = ""
 	t.endedBy = nil
+	t.copiedWhole = map[string]bool{}
 	ended := 0
+	first := t.dirty == nil
+	if first {
+		if err := t.checkSchema(ctx); err != nil {
+			return err
+		}
+	}
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -451,6 +483,9 @@ func (t *tracker) restore(ctx context.Context) error {
 		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
+		if !c.Partial() {
+			t.copiedWhole[c.Name()] = true
+		}
 		// The restore_only tables are not checked: the application may
 		// write them at any time, and they decide no pass.
 		var got state.Fingerprint
@@ -463,11 +498,69 @@ func (t *tracker) restore(ctx context.Context) error {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; when the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
+			return restoreLeft(ctx, c, pf, d)
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
 	t.dirty = map[string][]string{}
+	return nil
+}
+
+// restoreLeft is the stop of a restore of c that left items d different
+// from the record of its pristine copy (pf).
+func restoreLeft(ctx context.Context, c state.Component, pf state.Fingerprint, d []string) error {
+	return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; the working database now holds what the pristine copy has now. When the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
+}
+
+// checkWhole compares, for each component the last restore copied whole
+// and not compared in this run yet, the fingerprint read right after it
+// (now) with the record of its pristine copy (compareWhole).
+func (t *tracker) checkWhole(ctx context.Context, now states) error {
+	for _, c := range t.comps {
+		if t.copiedWhole[c.Name()] && !t.compared[c.Name()] {
+			if err := t.compareWhole(ctx, c, now[c.Name()]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// wholeFingerprint reads in full each component the last restore copied
+// whole and not compared in this run yet, for checkWhole, when commands
+// that may write (prepare, tokens) run before the run reads its own.
+func (t *tracker) wholeFingerprint(ctx context.Context) (states, error) {
+	defer func(start time.Time) {
+		t.time.Fingerprint += time.Since(start)
+		t.time.Fingerprints++
+	}(time.Now())
+	out := states{}
+	for _, c := range t.comps {
+		if t.copiedWhole[c.Name()] && !t.compared[c.Name()] {
+			f, err := c.Fingerprint(ctx, nil)
+			if err != nil {
+				return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
+			}
+			out[c.Name()] = f
+		}
+	}
+	return out, nil
+}
+
+// compareWhole compares f, the fingerprint of c right after a restore
+// copied its whole database, with the record of its pristine copy, once in
+// a run: the restore checks only the items it found different, and copies
+// every other item too, as the pristine copy has it now, which another
+// seed or a hand may have changed since the record. A record of an older
+// format is not compared.
+func (t *tracker) compareWhole(ctx context.Context, c state.Component, f state.Fingerprint) error {
+	t.compared[c.Name()] = true
+	if t.formats[c.Name()] != state.FingerprintFormat {
+		return nil
+	}
+	if d := state.Diff(f, t.pristine[c.Name()]); len(d) > 0 {
+		return restoreLeft(ctx, c, t.pristine[c.Name()], d)
+	}
 	return nil
 }
 
@@ -515,6 +608,7 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 		return nil, err
 	}
 	defer tr.close()
+	tr.run = runMigrateState
 	for _, c := range tr.comps {
 		if f, ok := tr.formats[c.Name()]; ok && f != state.FingerprintFormat {
 			return nil, envErr("state %s: the record of the pristine copy has the older fingerprint format too; run driftgate seed first", c.Name())
@@ -525,6 +619,9 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 	}
 	now, err := tr.fingerprint(ctx, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := tr.checkWhole(ctx, now); err != nil {
 		return nil, err
 	}
 	then := fromMeta(meta.State)
@@ -736,6 +833,12 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
 			}
 			pf.RestoreOnly, pf.RestoreEmpty = sortedCopy(sc.RestoreOnly), sortedCopy(sc.RestoreEmpty)
+		}
+		if s, ok := c.(state.Schemer); ok {
+			if pf.Schema, err = s.SchemaFingerprint(ctx, true); err != nil {
+				return envErr("state %s: schema of the pristine copy: %v", c.Name(), err)
+			}
+			pf.SchemaFormat = state.SchemaFormat
 		}
 		if pi, ok := c.(pristineIdentifier); ok {
 			if pf.PristineID, err = pi.PristineID(ctx); err != nil {
