@@ -13,7 +13,8 @@ import (
 // renders errors by Accept, not for others, and empty-body for a framework
 // whose discovery reads the rules it validates bodies against (a changed
 // validation error must not pass unseen); a project of such a framework
-// without json-errors gets a note, once per store.
+// without them gets a note that names the missing ones, once per store and
+// template.
 func TestJSONErrorsTemplate(t *testing.T) {
 	for files, want := range map[[2]string]string{
 		{"composer.json", `{"require":{"symfony/framework-bundle":"7.1"}}`}: "templates: [ok, not-found, json, json-errors]\n",
@@ -42,23 +43,53 @@ func TestJSONErrorsTemplate(t *testing.T) {
 	}
 	var b strings.Builder
 	// A check without a store says nothing and makes no store.
-	jsonErrorsNote(p, &b, true)
+	templatesNote(p, &b, true)
 	if _, err := os.Stat(p.Layout.Store); b.Len() != 0 || err == nil {
 		t.Errorf("check without a store: %q, store made: %v", b.String(), err == nil)
 	}
 	// Otherwise once, also across commands.
-	jsonErrorsNote(p, &b, false)
-	jsonErrorsNote(p, &b, false)
-	jsonErrorsNote(p, &b, true)
+	templatesNote(p, &b, false)
+	templatesNote(p, &b, false)
+	templatesNote(p, &b, true)
 	if strings.Count(b.String(), "note:") != 1 || !strings.Contains(b.String(), "note: rails renders errors as JSON for API clients; add json-errors to templates: in driftgate.yaml") {
 		t.Errorf("once: %q", b.String())
 	}
 	b.Reset()
 	os.Remove(filepath.Join(p.Layout.Store, ".note-json-errors"))
 	p.Templates = append(p.Templates, "json-errors")
-	jsonErrorsNote(p, &b, false)
+	templatesNote(p, &b, false)
 	if b.Len() != 0 {
 		t.Errorf("note with json-errors: %q", b.String())
+	}
+
+	// Laravel needs both: the note names the missing ones, each once.
+	write(t, cfg, "version: 1\nproject: shop\ntarget:\n  base_url: http://localhost:8000\ndiscover:\n  - adapter: laravel\n    command: [php, artisan, route:list, --json]\ntemplates: [ok, not-found]\n")
+	for _, c := range []struct {
+		name      string
+		templates []string
+		marked    bool // .note-json-errors is there already
+		want      string
+	}{
+		{"neither", nil, false, "note: laravel validates request bodies and renders errors as JSON for API clients; add empty-body and json-errors to templates:"},
+		{"empty-body present", []string{"empty-body"}, false, "note: laravel renders errors as JSON for API clients; add json-errors to templates:"},
+		{"json-errors said already", nil, true, "note: laravel validates request bodies; add empty-body to templates:"},
+		{"both present", []string{"empty-body", "json-errors"}, false, ""},
+	} {
+		t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+		p, err := config.Load(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Templates = append(p.Templates, c.templates...)
+		if c.marked {
+			write(t, filepath.Join(p.Layout.Store, ".note-json-errors"), "")
+		}
+		b.Reset()
+		templatesNote(p, &b, false)
+		templatesNote(p, &b, false)
+		if got := b.String(); c.want == "" && got != "" || c.want != "" && (strings.Count(got, "note:") != 1 || !strings.Contains(got, c.want)) {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

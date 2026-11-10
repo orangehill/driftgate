@@ -252,7 +252,7 @@ func runRoutes(ctx context.Context, p *config.Project, sel selection, first bool
 		fmt.Fprintf(out, "warning: baseline %s was not checked for errors kept in it: %v\n", baseName, err)
 		answers = nil
 	}
-	cov, c, err := checkCoverage(sel, cat, inv, excl, answers, "text", out)
+	cov, c, err := checkCoverage(sel, cat, inv, excl, answers, p.Mode, "text", out)
 	if err != nil {
 		return 0, nil, none, err
 	}
