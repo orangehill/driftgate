@@ -74,10 +74,8 @@ func (c *Classification) Changed() bool {
 // server stops for a lock runs again from a new snapshot (retryRead).
 func Classify(ctx context.Context, src Database, rules *Rules, det *pii.Detector, sample int) (out *Classification, err error) {
 	err = retryRead(ctx, nil, "source", func() error {
-		if out, err = classify(ctx, src, rules, det, sample); err != nil {
-			return err
-		}
-		return fault("source")
+		out, err = classify(ctx, src, rules, det, sample)
+		return err
 	})
 	return out, err
 }
