@@ -662,7 +662,7 @@ func (c Component) validate() error {
 // component matches it: SQLite in ASCII without case, SQL Server without
 // case and with or without the schema (dbo for a table named without
 // one), with bare also PostgreSQL with or without the schema, the others
-// as written.
+// as written. The drivers apply the same rules (state's tableGlobs).
 func (c Component) matches(globs []string, t string, bare bool) bool {
 	names, fold := []string{t}, func(s string) string { return s }
 	switch c.Driver {

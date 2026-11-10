@@ -190,6 +190,7 @@ func TestTableGlobs(t *testing.T) {
 		{Options{RestoreOnly: []string{"app.*"}}, "postgres", "public.x", want{}},
 		{Options{RestoreEmpty: []string{"app.*"}}, "postgres", "app.x", want{false, true, true}},
 		{Options{RestoreEmpty: []string{"app.*"}}, "postgres", "public.x", want{}},
+		{Options{Exclude: []string{"*"}}, "postgres", "x", want{true, false, false}},
 		{Options{Exclude: []string{"App.*"}}, "sqlserver", "app.x", want{true, false, false}},
 		{Options{Exclude: []string{"App.*"}}, "sqlserver", "dbo.x", want{}},
 		{Options{Exclude: []string{"X"}}, "sqlserver", "app.x", want{true, false, false}},
