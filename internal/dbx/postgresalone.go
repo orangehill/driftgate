@@ -31,9 +31,9 @@ const (
 	pgAloneWait  = 200 * time.Millisecond
 )
 
-// PostgresAlone runs stmt on admin, a statement that needs db to have no
-// other sessions (CREATE DATABASE … TEMPLATE db, ALTER DATABASE db RENAME):
-// it ends them first, and tries again, at most pgAloneTries times, while
+// PostgresAlone runs stmt, a statement that needs db to have no other
+// sessions (CREATE DATABASE … TEMPLATE db, ALTER DATABASE db RENAME), on
+// admin: it ends them first, and tries again, at most pgAloneTries times, while
 // stmt fails because a session is still there (55006 object_in_use). Any
 // other error is returned at once. A failure to end them is returned with
 // that 55006, so that it is not hidden behind "being accessed by other
@@ -48,7 +48,10 @@ func PostgresAlone(ctx context.Context, admin *sql.DB, db, stmt string) error {
 		if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
 			return err
 		}
-		if ctx.Err() != nil { // cancelled meanwhile: no try, no wait
+		// Cancelled while stmt ran: pgx then mostly returns ctx's error
+		// itself, but a 55006 may come back together with the cancel.
+		// Too narrow a window for a test.
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if terr != nil {

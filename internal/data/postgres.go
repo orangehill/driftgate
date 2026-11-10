@@ -518,7 +518,8 @@ func (d postgresDialect) create(ctx context.Context, admin *sql.DB, src Database
 
 // publish gives the staging database the target's name. RENAME needs it
 // to have no other sessions: the run's own are closed, and the server
-// waits for their processes to end; any others are ended.
+// waits for their processes to end; others are ended where the role may
+// (dbx.PostgresAlone).
 func (d postgresDialect) publish(ctx context.Context, admin *sql.DB, staging, target Database) error {
 	return dbx.PostgresAlone(ctx, admin, staging.Name, "ALTER DATABASE "+d.quote(staging.Name)+" RENAME TO "+d.quote(target.Name))
 }
