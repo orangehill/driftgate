@@ -843,12 +843,11 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 // tests. It leaves out autovacuum workers: a role that is not a superuser
 // may not end them (before PostgreSQL 18, or on 18 without
 // pg_signal_autovacuum_worker), and pg_terminate_backend's error aborts the
-// whole statement, so the
-// sessions listed after one would stay. CREATE DATABASE … TEMPLATE and
-// RENAME end autovacuum workers themselves. They are the sessions on a
-// database without a role (usesysid); backend_type cannot tell them, as
-// it is NULL to a role for the sessions of roles it may not see, which
-// must stay in the list so that their error is returned.
+// whole statement, so the sessions listed after one would stay. CREATE
+// DATABASE … TEMPLATE and RENAME end autovacuum workers themselves. They
+// are the sessions on a database without a role (usesysid); backend_type
+// cannot tell them, as it is NULL to a role for the sessions of roles it
+// may not see, which must stay in the list so that their error is returned.
 var pgTerminate = "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = $1 AND pid <> pg_catalog.pg_backend_pid() AND usesysid IS NOT NULL"
 
 // How often alone tries, and how long it waits between the tries.
