@@ -120,6 +120,124 @@ func TestRunRefusals(t *testing.T) {
 	}
 }
 
+// TestRunBaselineRefusals: a capture whose start state differs from the one
+// its baseline was captured from is refused with an environment error,
+// once the previous capture is moved aside, which it puts back, and before
+// any request: a baseline fingerprinted in an older format points to
+// verify --migrate-state, items that are restore_only now to the changed
+// configuration, and any other difference to the data; the command that
+// makes the baseline again names a baseline of the repository's other than
+// local.
+func TestRunBaselineRefusals(t *testing.T) {
+	format := state.FingerprintFormat
+	for _, tc := range []struct {
+		name        string
+		baseline    string // its name in the repository's baselines; "" is the capture base
+		restoreOnly bool   // sessions is restore_only, not excluded, and only the baseline's state has it
+		format      int    // of the baseline's state
+		want        string // <dir> is the baseline's folder
+	}{
+		{"older format", "main", false, format - 1,
+			"environment: the state differs from the one the baseline was captured from (1 items: [db/table:users]), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline main --migrate-state checks that the data is the baseline's and records the fingerprint in the new format"},
+		{"restore_only now", "main", true, format,
+			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:sessions]; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move <dir> away; the next driftgate run --baseline main makes it)"},
+		{"other data", "main", false, format,
+			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run --baseline main makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase main --from <tag> --reason \"…\""},
+		{"other data, local", "local", false, format,
+			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase local --from <tag> --reason \"…\""},
+		{"other data, capture", "", false, format,
+			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase base --from <tag> --reason \"…\""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			app := newSQLiteApp(t, filepath.Join(root, "app.sqlite"), "wal")
+			srv := httptest.NewServer(app)
+			t.Cleanup(srv.Close)
+			c := config.Component{Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}}
+			if tc.restoreOnly {
+				c.Exclude, c.RestoreOnly = nil, []string{"sessions"}
+			}
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+				Target: config.Target{BaseURL: srv.URL}, State: map[string]config.Component{"db": c}}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(ctx, p, sqliteCatalog(), Options{Tag: "run", Only: "list"}); err != nil {
+				t.Fatal(err)
+			}
+			before := readMeta(t, p, "run")
+			// The baseline's state: the one this capture starts from, but
+			// for one item.
+			meta := snapshot.Meta{Tag: "base", Source: "capture", Created: before.Created, StateFormat: tc.format,
+				State: map[string]map[string]string{"db": {}}}
+			for k, v := range before.State["db"] {
+				meta.State["db"][k] = v
+			}
+			if tc.restoreOnly {
+				meta.State["db"]["table:sessions"] = "baseline"
+			} else {
+				meta.State["db"]["table:users"] = "baseline"
+			}
+			base, err := p.Capture("base")
+			if tc.baseline != "" {
+				base, err = p.Baseline(tc.baseline)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := base.WriteMeta(meta); err != nil {
+				t.Fatal(err)
+			}
+			app.mu.Lock()
+			clear(app.served)
+			app.mu.Unlock()
+			var points []string
+			chaos.At = func(point string) { points = append(points, point) }
+			t.Cleanup(func() { chaos.At = nil })
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "run", Only: "list", Force: true, Baseline: base})
+			chaos.At = nil
+			if err == nil {
+				t.Fatal("the capture ran")
+			}
+			if !errors.Is(err, ErrEnv) {
+				t.Errorf("kind of %v: want %v", err, ErrEnv)
+			}
+			if want := strings.ReplaceAll(tc.want, "<dir>", base.Dir); err.Error() != want {
+				t.Errorf("message:\n%s\nwant:\n%s", err, want)
+			}
+			if !slices.Contains(points, "capture.started") {
+				t.Errorf("capture.started not reached (points %v)", points)
+			}
+			app.mu.Lock()
+			served := len(app.served)
+			app.mu.Unlock()
+			if served > 0 {
+				t.Errorf("the refused capture sent %d requests", served)
+			}
+			Wait()
+			set, err := p.Capture("run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := set.Meta()
+			if err != nil || after == nil || after.Incomplete || after.Created != before.Created {
+				t.Fatalf("the previous capture after a refusal: %+v %v", after, err)
+			}
+			entries, _ := os.ReadDir(p.Layout.Captures)
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), asidePrefix("run")) {
+					t.Fatalf("left aside: %s", e.Name())
+				}
+			}
+		})
+	}
+}
+
 // TestRunMeta: the meta.json a capture writes last, with the services named
 // as the configuration names them (the empty name of a request is the only
 // service's), their origins and connect_to, and what a read-only capture
