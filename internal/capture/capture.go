@@ -184,57 +184,12 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	default:
 		return nil, configErr("--restore must be once or each")
 	}
-	var skip map[string]bool
-	if opt.ReadOnly {
-		// --read-only selects requests; the project's own commands run as
-		// configured, and connect_to does not apply to them.
-		if err := CheckReadOnly(p); err != nil {
-			return nil, err
-		}
-		skip = cat.ReadOnlySkips()
+	readonly, units, skip, err := selectRequests(p, cat, opt)
+	if err != nil {
+		return nil, err
 	}
-	readonly, units := plan(cat, opt.Only, skip)
-	if len(readonly)+len(units) == 0 {
-		if opt.ReadOnly {
-			return nil, configErr("no catalog request that leaves data unchanged is selected (--read-only)")
-		}
-		if opt.Only != "" {
-			return nil, configErr("no catalog request matches --only %s", opt.Only)
-		}
-		return nil, configErr("the catalog has no requests")
-	}
-	var mutating, repeats []catalog.Request
-	for _, u := range units {
-		for _, r := range u.reqs {
-			// A command step changes data unless it says mutates: false,
-			// which only a read-only capture takes at its word (it sends
-			// no other step).
-			if r.Mutating() || r.IsCommand() && !opt.ReadOnly {
-				mutating = append(mutating, r)
-			} else if r.Repeat > 1 {
-				repeats = append(repeats, r)
-			}
-		}
-	}
-	// An uploaded real file stays in the application's data until a restore
-	// takes it out; without one it would stay there after the capture.
-	for _, r := range append(append([]catalog.Request{}, readonly...), unitRequests(units)...) {
-		if r.UsesFiles() && (len(p.State) == 0 || opt.AllowMutatingWithoutRestore) {
-			return nil, configErr("%s uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)", r.ID)
-		}
-	}
-	if len(mutating) > 0 && len(p.State) == 0 && !opt.AllowMutatingWithoutRestore {
-		return nil, configErr("the catalog has requests that change data (%s), but no state with a restore command is configured: configure state: in %s (see driftgate init)%s",
-			listRequests(mutating), configPath(p), byMethodHint(mutating))
-	}
-	// A request sent many times in a row (repeat:) is a burst, like a
-	// change of data, to a server outside allow_hosts.
-	if len(mutating)+len(repeats) > 0 && opt.AllowRemote && !opt.AllowRemoteMutations {
-		return nil, configErr("refusing to send requests that change data or are repeated (%s) to a service outside allow_hosts without --allow-remote-mutations%s",
-			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
-	}
-
-	if err := checkAllCommands(p, readonly, units); err != nil {
+	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
+	if err := preflight(p, opt, readonly, units, all); err != nil {
 		return nil, err
 	}
 	set, err := p.Capture(opt.Tag)
@@ -266,29 +221,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	chaos.Point("capture.started")
-	// A client, rate limits, allowed hosts and concurrency per service. The
-	// empty name means the only service.
-	for i := range readonly {
-		readonly[i].Target = p.Canonical(readonly[i].Target)
-	}
-	for _, u := range units {
-		for i := range u.reqs {
-			u.reqs[i].Target = p.Canonical(u.reqs[i].Target)
-		}
-	}
-	services := map[string]*service{}
-	for _, req := range append(append([]catalog.Request{}, readonly...), unitRequests(units)...) {
-		if _, ok := services[req.Target]; ok || req.IsCommand() {
-			continue
-		}
-		s, err := newService(ctx, p, req, opt.AllowRemote)
-		if err != nil {
-			return nil, err
-		}
-		if n, ok := opt.Concurrency[req.Target]; ok && n > 0 {
-			s.slots = make(chan struct{}, n)
-		}
-		services[req.Target] = s
+	services, err := newServices(ctx, p, all, opt.AllowRemote, opt.Concurrency)
+	if err != nil {
+		return nil, err
 	}
 	detector, err := pii.New(p.PII.Allow)
 	if err != nil {
@@ -304,7 +239,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		timings: map[string]int64{},
 		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
 			Retried: map[string]*snapshot.Retry{}}}
-	if r.uploads, err = prepareUploads(p, append(append([]catalog.Request{}, readonly...), unitRequests(units)...)); err != nil {
+	if r.uploads, err = prepareUploads(p, all); err != nil {
 		return nil, err
 	}
 
@@ -396,7 +331,6 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	case len(p.Tokens.Command) == 0:
 		r.prepared(diffStates(start, before))
 	}
-	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
 	}
@@ -461,6 +395,119 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		saveEnded(p, tr)
 	}
 
+	if err := r.markComplete(opt, created, skip); err != nil {
+		return nil, err
+	}
+	chaos.Point("capture.complete")
+	sort.Strings(r.sum.Failed)
+	tr.time.Total = time.Since(began)
+	r.sum.Time = *tr.time
+	return r.sum, nil
+}
+
+// selectRequests selects the requests of a capture: those of the catalog
+// that --only and --read-only leave, split into read-only requests and
+// units (plan), each with its target named as the configuration names it
+// (the empty name means the only service). skip are the requests a
+// read-only capture leaves out. A selection that is empty, or a
+// configuration a read-only capture cannot keep from writing, is refused.
+func selectRequests(p *config.Project, cat *catalog.Catalog, opt Options) (readonly []catalog.Request, units []unit, skip map[string]bool, err error) {
+	if opt.ReadOnly {
+		// --read-only selects requests; the project's own commands run as
+		// configured, and connect_to does not apply to them.
+		if err := CheckReadOnly(p); err != nil {
+			return nil, nil, nil, err
+		}
+		skip = cat.ReadOnlySkips()
+	}
+	readonly, units = plan(cat, opt.Only, skip)
+	if len(readonly)+len(units) == 0 {
+		if opt.ReadOnly {
+			return nil, nil, nil, configErr("no catalog request that leaves data unchanged is selected (--read-only)")
+		}
+		if opt.Only != "" {
+			return nil, nil, nil, configErr("no catalog request matches --only %s", opt.Only)
+		}
+		return nil, nil, nil, configErr("the catalog has no requests")
+	}
+	for i := range readonly {
+		readonly[i].Target = p.Canonical(readonly[i].Target)
+	}
+	for _, u := range units {
+		for i := range u.reqs {
+			u.reqs[i].Target = p.Canonical(u.reqs[i].Target)
+		}
+	}
+	return readonly, units, skip, nil
+}
+
+// preflight refuses a capture whose requests may not run, before anything
+// is changed: a real file uploaded without a restore to take it out,
+// requests that change data without a state to restore, requests that
+// change data or are repeated sent outside allow_hosts, and a command
+// that would stop halfway (checkAllCommands). all are readonly and the
+// requests of units, in that order.
+func preflight(p *config.Project, opt Options, readonly []catalog.Request, units []unit, all []catalog.Request) error {
+	var mutating, repeats []catalog.Request
+	for _, u := range units {
+		for _, r := range u.reqs {
+			// A command step changes data unless it says mutates: false,
+			// which only a read-only capture takes at its word (it sends
+			// no other step).
+			if r.Mutating() || r.IsCommand() && !opt.ReadOnly {
+				mutating = append(mutating, r)
+			} else if r.Repeat > 1 {
+				repeats = append(repeats, r)
+			}
+		}
+	}
+	// An uploaded real file stays in the application's data until a restore
+	// takes it out; without one it would stay there after the capture.
+	for _, r := range all {
+		if r.UsesFiles() && (len(p.State) == 0 || opt.AllowMutatingWithoutRestore) {
+			return configErr("%s uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)", r.ID)
+		}
+	}
+	if len(mutating) > 0 && len(p.State) == 0 && !opt.AllowMutatingWithoutRestore {
+		return configErr("the catalog has requests that change data (%s), but no state with a restore command is configured: configure state: in %s (see driftgate init)%s",
+			listRequests(mutating), configPath(p), byMethodHint(mutating))
+	}
+	// A request sent many times in a row (repeat:) is a burst, like a
+	// change of data, to a server outside allow_hosts.
+	if len(mutating)+len(repeats) > 0 && opt.AllowRemote && !opt.AllowRemoteMutations {
+		return configErr("refusing to send requests that change data or are repeated (%s) to a service outside allow_hosts without --allow-remote-mutations%s",
+			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
+	}
+	return checkAllCommands(p, readonly, units)
+}
+
+// newServices makes the service of every target reqs are sent to (a
+// command step is sent to none): a client, rate limits, allowed hosts and
+// concurrency, which concurrency replaces for the targets it names.
+func newServices(ctx context.Context, p *config.Project, reqs []catalog.Request, allowRemote bool, concurrency map[string]int) (map[string]*service, error) {
+	services := map[string]*service{}
+	for _, req := range reqs {
+		if _, ok := services[req.Target]; ok || req.IsCommand() {
+			continue
+		}
+		s, err := newService(ctx, p, req, allowRemote)
+		if err != nil {
+			return nil, err
+		}
+		if n, ok := concurrency[req.Target]; ok && n > 0 {
+			s.slots = make(chan struct{}, n)
+		}
+		services[req.Target] = s
+	}
+	return services, nil
+}
+
+// markComplete writes the capture's timings, then its meta without
+// Incomplete, which marks the capture whole: it is written last. created
+// is when the capture began, and skip the requests a read-only capture
+// left out (selectRequests).
+func (r *runner) markComplete(opt Options, created string, skip map[string]bool) error {
+	p := r.p
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
 		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
 	if opt.ReadOnly {
@@ -475,9 +522,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		sort.Strings(meta.ReadOnlySkipped)
 	}
 	if r.sum.Tracked {
-		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
+		meta.State, meta.StateFormat = toMeta(r.start), state.FingerprintFormat
 	}
-	for name := range services {
+	for name := range r.services {
 		t, _ := p.TargetFor(name)
 		if o, err := compare.Origin(t.BaseURL); err == nil {
 			if meta.Origins == nil {
@@ -492,18 +539,10 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 			meta.ConnectTo[name] = t.ConnectTo
 		}
 	}
-	// The meta without Incomplete marks the capture whole: it is written last.
-	if err := snapshot.WriteJSON(filepath.Join(set.Dir, "timings.json"), r.timings); err != nil {
-		return nil, err
+	if err := snapshot.WriteJSON(filepath.Join(r.set.Dir, "timings.json"), r.timings); err != nil {
+		return err
 	}
-	if err := set.WriteMeta(meta); err != nil {
-		return nil, err
-	}
-	chaos.Point("capture.complete")
-	sort.Strings(r.sum.Failed)
-	tr.time.Total = time.Since(began)
-	r.sum.Time = *tr.time
-	return r.sum, nil
+	return r.set.WriteMeta(meta)
 }
 
 // projectRoots are the folder of the project and, when it differs, its
