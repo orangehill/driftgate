@@ -22,7 +22,7 @@ func TestMySQLLockStopped(t *testing.T) {
 		errors.New("Deadlock found when trying to get lock"):               false,
 		context.Canceled: false,
 	} {
-		if mysqlLockStopped(err) != want {
+		if MySQLLockStopped(err) != want {
 			t.Errorf("%v: %v", err, !want)
 		}
 	}

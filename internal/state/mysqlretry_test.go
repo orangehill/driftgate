@@ -99,6 +99,32 @@ func TestUndoDropsCancelled(t *testing.T) {
 	}
 }
 
+// TestStaleDropFailed: a probe left behind whose drop the cancel stopped,
+// by its own error or a lock, is not to be dropped by hand: the next seed
+// or restore drops it; any other failure, cancelled or not, is.
+func TestStaleDropFailed(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	denied := &mysql.MySQLError{Number: 1142, Message: "DROP command denied"}
+	for _, c := range []struct {
+		ctx    context.Context
+		err    error
+		byHand bool
+	}{
+		{ended, context.Canceled, false},
+		{ended, deadlock, false},
+		{ended, denied, true},
+		{context.Background(), deadlock, true},
+		{context.Background(), denied, true},
+	} {
+		got := staleDropFailed(c.ctx, "view", "dgprobe_x", "work", c.err)
+		if !errors.Is(got, c.err) || strings.Contains(got.Error(), "drop it by hand") != c.byHand {
+			t.Errorf("%v (ctx %v): %v", c.err, c.ctx.Err(), got)
+		}
+	}
+}
+
 // TestMySQLRetryLocked: a fingerprint, restore or seed the server stops for
 // a lock (1213, injected) runs again and then gives what a run without the
 // stop gives; a retried read sees a write made between the tries; one that

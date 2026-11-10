@@ -16,12 +16,12 @@ const (
 	MySQLLockWait    = 50 * time.Millisecond
 )
 
-// mysqlLockStopped reports a statement the server stopped for a lock: a
+// MySQLLockStopped reports a statement the server stopped for a lock: a
 // deadlock (1213) or a lock wait timeout (1205). A Galera node returns 1213
 // to any statement that holds a table another session alters (a
 // brute-force abort), also to a read in a snapshot, where a server without
 // Galera lets the ALTER wait.
-func mysqlLockStopped(err error) bool {
+func MySQLLockStopped(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
 }
@@ -32,10 +32,10 @@ func mysqlLockStopped(err error) bool {
 // the server. One wrapped with what the step has to say, such as what it
 // left undone, keeps that text, which the user must act on, and gets ctx's
 // error added, so that errors.Is(err, ctx.Err()) holds. Any other err, and
-// any err while ctx runs, is returned as it is. A step that wants its cause
-// itself named so calls it on the cause, once its work is done.
+// any err while ctx runs, is returned as it is. A step that wraps a lock
+// error calls it on that error once its own work is done.
 func MySQLLockCause(ctx context.Context, err error) error {
-	if ctx.Err() == nil || !mysqlLockStopped(err) || errors.Is(err, ctx.Err()) {
+	if ctx.Err() == nil || !MySQLLockStopped(err) || errors.Is(err, ctx.Err()) {
 		return err
 	}
 	if _, bare := err.(*mysql.MySQLError); bare {
@@ -55,7 +55,7 @@ func MySQLLockCause(ctx context.Context, err error) error {
 func RetryMySQLLock(ctx context.Context, wait time.Duration, f func() error, retrying func(error)) error {
 	for try := 0; ; try++ {
 		err := f()
-		if !mysqlLockStopped(err) {
+		if !MySQLLockStopped(err) {
 			return err
 		}
 		// Cancelled while f ran: the driver then mostly returns ctx's error

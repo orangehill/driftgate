@@ -106,10 +106,7 @@ func (m *MySQL) definerProbe(ctx context.Context, c *sql.Conn, db, target string
 	}()
 	for name, kind := range stale {
 		if err := dropObject(ctx, c, db, name, kind); err != nil {
-			if ctx.Err() != nil {
-				return err // the cancel's doing: the next seed or restore drops it
-			}
-			return fmt.Errorf("a probe left behind, %s %s in %s, cannot be dropped: %w; drop it by hand", kind, name, db, err)
+			return staleDropFailed(ctx, kind, name, db, err)
 		}
 	}
 	for _, w := range work {
@@ -199,6 +196,17 @@ func lockUnsupported(err error) bool {
 func probeDenied(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && (me.Number == 1142 || me.Number == 1044)
+}
+
+// staleDropFailed is the error of a probe left behind (kind name in db)
+// that could not be dropped. One the cancel stopped, by its own error or a
+// lock, is returned as it is: the next seed or restore drops it. Any other
+// failure, such as a missing privilege, asks for it to be dropped by hand.
+func staleDropFailed(ctx context.Context, kind, name, db string, err error) error {
+	if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || dbx.MySQLLockStopped(err)) {
+		return err
+	}
+	return fmt.Errorf("a probe left behind, %s %s in %s, cannot be dropped: %w; drop it by hand", kind, name, db, err)
 }
 
 // probeOnce makes and drops one probe of it in db, and reports whether it
