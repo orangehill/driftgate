@@ -764,7 +764,13 @@ func cookieFormats(vals []string) []string {
 		}
 		out = append(out, f)
 	}
-	for _, v := range other { // not a cookie: each as recorded
+	return append(out, literals(other)...) // not a cookie: each as recorded
+}
+
+// literals are the values as recorded, each once, in the order seen.
+func literals(vals []string) []string {
+	var out []string
+	for _, v := range vals {
 		if q := regexp.QuoteMeta(v); !slices.Contains(out, q) {
 			out = append(out, q)
 		}
@@ -790,13 +796,7 @@ func cookieAttrFormat(key string, vals []string, expires string, deleted bool) s
 	case key == "expires" && expires == "dashed":
 		return dashedDate
 	case key == "max-age" && (deleted || !dated):
-		var seen []string
-		for _, v := range vals {
-			if q := regexp.QuoteMeta(v); !slices.Contains(seen, q) {
-				seen = append(seen, q)
-			}
-		}
-		return grouped(strings.Join(seen, "|"))
+		return grouped(strings.Join(literals(vals), "|"))
 	case key == "max-age":
 		short, lo, hi := vals[0], len(vals[0]), 0
 		for _, v := range vals {
