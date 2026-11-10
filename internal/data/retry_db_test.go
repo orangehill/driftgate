@@ -27,7 +27,8 @@ func TestRetryNote(t *testing.T) {
 }
 
 // TestRetryRead: the fault of a try runs after its read, only when the
-// read succeeded, and a fault the server's lock error fails is read again.
+// read succeeded, and a read whose fault returns the server's lock error
+// is read again.
 func TestRetryRead(t *testing.T) {
 	defer func(d time.Duration) { lockRetryWait = d }(lockRetryWait)
 	lockRetryWait = time.Millisecond
