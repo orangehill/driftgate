@@ -52,6 +52,8 @@ func TestMaskHeaderCredentials(t *testing.T) {
 // the headers whose every value MaskHeader masks whole (maskChars of the
 // value); a header masked in part or not at all keeps some value as sent.
 func TestMasksWholeMatchesMaskHeader(t *testing.T) {
+	// Every name MaskHeader or MasksWhole names; a new case there goes
+	// here too.
 	names := []string{
 		"authorization", "cookie", "proxy-authorization",
 		"set-cookie", "location", "content-location", "refresh", "link",

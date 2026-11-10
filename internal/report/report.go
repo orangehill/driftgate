@@ -644,7 +644,9 @@ func onlyValueDiffers(x, y string) bool {
 
 // splitCookie splits a Set-Cookie value into the cookie's name, its value
 // and its attributes, from the first ";" on. ok is false when no "="
-// comes before that ";".
+// comes before that ";". It is httpx.SplitSetCookie's cut, with the name
+// trimmed and kept also when it is not a cookie (cookieNames counts it);
+// report does not import httpx.
 func splitCookie(v string) (name, value, attrs string, ok bool) {
 	first, _, _ := strings.Cut(v, ";")
 	name, value, ok = strings.Cut(first, "=")
