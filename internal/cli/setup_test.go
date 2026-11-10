@@ -481,9 +481,9 @@ func TestSetupSettingsDisagree(t *testing.T) {
 }
 
 // TestSetupInitThenRun: init leaves state: commented out, its comments in
-// line, so a run after it creates no database unasked. setup asks to turn it on (no terminal:
-// it stops), and --yes turns it on in place, its comments kept, before
-// the pristine copy.
+// line, so a run after it creates no database unasked. setup asks to turn
+// it on (no terminal: it stops), and --yes turns it on in place, its
+// comments kept, before the pristine copy.
 func TestSetupInitThenRun(t *testing.T) {
 	root := setupDir(t, map[string]string{
 		".env": "APP_URL=http://127.0.0.1:" + closedPort(t) +
