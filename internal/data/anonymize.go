@@ -439,11 +439,9 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 			}
 		}
 		if galeraTarget {
-			if err := galeraSequences(ctx, src, opt.Source.Name, schema, *opt.Target); err != nil {
-				return err
-			}
+			return galeraSequences(ctx, src, opt.Source.Name, schema, *opt.Target)
 		}
-		return fault("source")
+		return nil
 	})
 	opt.Log.Write(sampleLog.Bytes())
 	if err != nil {
