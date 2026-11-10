@@ -149,7 +149,7 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 	switch {
 	case err != nil:
 		return false, err
-	case saved || w.State == "RESTORING" && len(s.o.Exclude) == 0:
+	case saved || w.State == "RESTORING" && len(s.g.exclude) == 0:
 		fmt.Fprintf(s.o.Log, "state %s: working database %s is %s: a restore of the whole database stopped halfway, and the database is unusable until this restore completes it\n", s.o.Name, s.o.Working, w.State)
 		return true, nil
 	case w.State == "OFFLINE":
@@ -161,7 +161,7 @@ func (s *SQLServer) notOnline(ctx context.Context, w *sqlServerDatabase) (bool, 
 		defer c.Close()
 		_, err = c.ExecContext(ctx, "ALTER DATABASE "+qms(s.o.Working)+" SET ONLINE")
 		return false, err
-	case len(s.o.Exclude) == 0:
+	case len(s.g.exclude) == 0:
 		fmt.Fprintf(s.o.Log, "state %s: working database %s is %s; restoring the whole database from the pristine copy's backup\n", s.o.Name, s.o.Working, w.State)
 		return true, nil
 	}

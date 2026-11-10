@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"modernc.org/sqlite" // registers the "sqlite" driver
-
-	"github.com/orangehill/driftgate/internal/glob"
 )
 
 // SQLite is an SQLite database file. The pristine copy is a second file,
@@ -35,6 +33,7 @@ import (
 // SQLite itself tells whether one is a database.
 type SQLite struct {
 	o  Options
+	g  *tableGlobs // made by newSQLite
 	id os.FileInfo // the working file the connections were opened on
 	db *sql.DB     // the working file, read-write
 	// main stays open for the life of the component: PRAGMA data_version
@@ -89,12 +88,19 @@ func NewSQLite(o Options) (*SQLite, error) {
 	if err := sqliteSeparate(o.Working, o.Pristine); err != nil {
 		return nil, fmt.Errorf("state %s: %v", o.Name, err)
 	}
-	s := &SQLite{o: o}
+	s := newSQLite(o)
 	if err := s.open(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
+
+// newSQLite is an SQLite component on o, not opened. Its globs match
+// table names without ASCII letter case (asciiLower), as SQLite compares
+// names: exclude: sessions also names a table made as Sessions. Not
+// strings.ToLower: SQLite folds A-Z only, so Été and été are two tables
+// and one glob must not name both.
+func newSQLite(o Options) *SQLite { return &SQLite{o: o, g: newTableGlobs(o, asciiLower)} }
 
 // sqliteSidecars are the files SQLite keeps next to a database file, and the
 // one a seed makes next to the pristine file before it replaces it.
@@ -418,46 +424,25 @@ type sqliteObjects struct {
 
 // excludedTable reports whether a table is excluded: by name, or as a
 // shadow table of an excluded virtual table.
-func (o Options) excludedTable(name string, owner string) bool {
-	return o.sqliteExcluded(name) || owner != "" && o.sqliteExcluded(owner)
+func (s *SQLite) excludedTable(name string, owner string) bool {
+	return s.g.excluded(asciiLower(name)) || owner != "" && s.g.excluded(asciiLower(owner))
 }
 
 // restoreOnlyTable reports whether a table is restore_only: by name, or a
 // shadow table as its virtual table is. A shadow table of a virtual table
 // that is fingerprinted is too, whatever its own name: its rows are the
 // virtual table's.
-func (o Options) restoreOnlyTable(name, owner string) bool {
+func (s *SQLite) restoreOnlyTable(name, owner string) bool {
 	if owner != "" {
 		name = owner
 	}
-	for _, g := range o.restoreOnlyGlobs() {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
+	return s.g.restoreOnly(asciiLower(name))
 }
 
 // restoreEmptyTable reports whether a table is restored to no rows
 // (Options.RestoreEmpty), without letter case.
-func (o Options) restoreEmptyTable(name string) bool {
-	for _, g := range o.RestoreEmpty {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
-}
-
-// sqliteExcluded is excluded for SQLite, whose names are ASCII-case-
-// insensitive: exclude: sessions also names a table made as Sessions.
-func (o Options) sqliteExcluded(name string) bool {
-	for _, g := range o.Exclude {
-		if glob.Match(asciiLower(g), asciiLower(name)) {
-			return true
-		}
-	}
-	return false
+func (s *SQLite) restoreEmptyTable(name string) bool {
+	return s.g.restoreEmpty(asciiLower(name))
 }
 
 // objects reads the schema of a database file (schema: main or the
@@ -556,8 +541,8 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 		if shadow {
 			own = owner(e.name)
 		}
-		ro := s.o.restoreOnlyTable(e.name, own)
-		if s.o.excludedTable(e.name, own) {
+		ro := s.restoreOnlyTable(e.name, own)
+		if s.excludedTable(e.name, own) {
 			if ro {
 				return nil, s.o.bothErr(e.name)
 			}
@@ -582,7 +567,7 @@ func (s *SQLite) objects(ctx context.Context, q queryer, schema string) (*sqlite
 				t.indexes = append(t.indexes, e.sql)
 			}
 		case "view":
-			if !s.o.sqliteExcluded(e.name) {
+			if !s.excludedTable(e.name, "") {
 				o.views[e.name] = e.sql
 				o.vorder = append(o.vorder, e.name)
 			}

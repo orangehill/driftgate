@@ -182,7 +182,7 @@ func DropSQLitePristine(ctx context.Context, o Options) (bool, error) {
 	if err := sqliteSeparate(filepath.Clean(o.Working), filepath.Clean(o.Pristine)); err != nil {
 		return false, fmt.Errorf("state %s: %v", o.Name, err)
 	}
-	s := &SQLite{o: o}
+	s := newSQLite(o)
 	fi, err := os.Stat(s.o.Pristine)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

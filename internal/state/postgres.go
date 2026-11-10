@@ -27,7 +27,10 @@ import (
 // large database. PostgreSQL cannot read across databases, so a restore always
 // covers the whole database (Partial is false).
 type Postgres struct {
-	o     Options
+	o Options
+	// g matches table names as written, with and without the schema:
+	// PostgreSQL compares names case-sensitively once unquoted.
+	g     *tableGlobs
 	admin *sql.DB // the database named in the DSN, for CREATE and DROP DATABASE
 	// dropping ends with the drop of the database the last copy replaced
 	// (copyDatabase); nil when there is none to wait for.
@@ -51,7 +54,7 @@ func NewPostgres(o Options) (*Postgres, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Postgres{o: o, admin: admin}, nil
+	return &Postgres{o: o, g: newTableGlobs(o, nil), admin: admin}, nil
 }
 
 func (p *Postgres) Name() string  { return p.o.Name }
@@ -76,20 +79,20 @@ func (p *Postgres) open(db string) (*sql.DB, error) {
 
 func (p *Postgres) excludedQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.excluded(name) || p.o.excluded(table)
+	return p.g.excluded(name) || p.g.excluded(table)
 }
 
 // restoreEmptyQualified is excludedQualified for restore_empty.
 func (p *Postgres) restoreEmptyQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.restoreEmpty(name) || p.o.restoreEmpty(table)
+	return p.g.restoreEmpty(name) || p.g.restoreEmpty(table)
 }
 
 // emptyTables are the restore_empty tables of the database d is
 // connected to, with the sequences they own (theirs: sequence → table).
 func (p *Postgres) emptyTables(ctx context.Context, d *sql.DB) (tables []string, theirs map[string]string, err error) {
 	theirs = map[string]string{}
-	if len(p.o.RestoreEmpty) == 0 {
+	if len(p.g.empty) == 0 {
 		return nil, theirs, nil
 	}
 	all, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname")+` ORDER BY 1`)
@@ -249,7 +252,7 @@ func (p *Postgres) restoreEmpty(ctx context.Context, items []string) (ok bool, e
 // restoreOnlyQualified is excludedQualified for restore_only.
 func (p *Postgres) restoreOnlyQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.restoreOnly(name) || p.o.restoreOnly(table)
+	return p.g.restoreOnly(name) || p.g.restoreOnly(table)
 }
 
 // ownedSequences maps the sequences of serial and identity columns of
@@ -257,7 +260,7 @@ func (p *Postgres) restoreOnlyQualified(name string) bool {
 // application adds, so they are restore_only too.
 func (p *Postgres) ownedSequences(ctx context.Context, d *sql.DB) (map[string]bool, error) {
 	out := map[string]bool{}
-	if len(p.o.restoreOnlyGlobs()) == 0 {
+	if len(p.g.only) == 0 {
 		return out, nil
 	}
 	rows, err := d.QueryContext(ctx, `SELECT sn.nspname || '.' || s.relname, tn.nspname || '.' || t.relname
@@ -1037,7 +1040,7 @@ func (p *Postgres) Restore(ctx context.Context, items []string) error {
 	if !ok {
 		return fmt.Errorf("state %s: pristine database %s does not exist; run driftgate seed", p.o.Name, p.o.Pristine)
 	}
-	if items != nil && len(p.o.RestoreEmpty) > 0 {
+	if items != nil && len(p.g.empty) > 0 {
 		// Whatever stops the emptying in place (a working database that is
 		// missing, as a copy stopped between its renames leaves it), the
 		// copy of the whole database restores it.
@@ -1097,7 +1100,7 @@ func (p *Postgres) Seed(ctx context.Context) error {
 // leaveOutEmpty empties the restore_empty tables of db, a new pristine
 // copy, their sequences starting again.
 func (p *Postgres) leaveOutEmpty(ctx context.Context, db string) error {
-	if len(p.o.RestoreEmpty) == 0 {
+	if len(p.g.empty) == 0 {
 		return nil
 	}
 	d, err := p.open(db)

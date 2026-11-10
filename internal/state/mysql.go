@@ -19,7 +19,6 @@ import (
 
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
-	"github.com/orangehill/driftgate/internal/glob"
 	"github.com/orangehill/driftgate/internal/lazy"
 )
 
@@ -48,39 +47,6 @@ type Options struct {
 	Replacing func() error
 }
 
-func (o Options) excluded(table string) bool {
-	for _, g := range o.Exclude {
-		if glob.Match(g, table) {
-			return true
-		}
-	}
-	return false
-}
-
-// restoreOnly reports whether a table is restore_only (Options.RestoreOnly
-// or RestoreEmpty).
-func (o Options) restoreOnly(table string) bool {
-	return matchAny(o.RestoreOnly, table) || matchAny(o.RestoreEmpty, table)
-}
-
-// restoreEmpty reports whether a table is restored to no rows
-// (Options.RestoreEmpty).
-func (o Options) restoreEmpty(table string) bool { return matchAny(o.RestoreEmpty, table) }
-
-// restoreOnlyGlobs are the globs of RestoreOnly and RestoreEmpty.
-func (o Options) restoreOnlyGlobs() []string {
-	return append(append([]string{}, o.RestoreOnly...), o.RestoreEmpty...)
-}
-
-func matchAny(globs []string, table string) bool {
-	for _, g := range globs {
-		if glob.Match(g, table) {
-			return true
-		}
-	}
-	return false
-}
-
 // bothErr is the error of a table that both exclude and restore_only name.
 func (o Options) bothErr(table string) error {
 	return fmt.Errorf("state %s: table %s is both excluded and restore_only; name it in one of them", o.Name, table)
@@ -93,7 +59,11 @@ func (o Options) tracked(table string) bool { return contains(o.RowTracking, tab
 // views, sequences and triggers that differ. Routines and events are not
 // tracked; system-versioned tables must be excluded.
 type MySQL struct {
-	o  Options
+	o Options
+	// g matches table names as written: MySQL and MariaDB compare them
+	// case-sensitively (lower_case_table_names=0, as on Linux, where users
+	// and Users are two tables).
+	g  *tableGlobs
 	db *sql.DB
 	// multi takes queries of several statements: SHOW CREATE for many
 	// objects in one round trip (see showAll). multiRefused is set once
@@ -156,7 +126,7 @@ func NewMySQL(o Options) (*MySQL, error) {
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
-	m := &MySQL{o: o, early: map[driver.Conn]bool{}}
+	m := &MySQL{o: o, g: newTableGlobs(o, nil), early: map[driver.Conn]bool{}}
 	db, err := dbx.OpenMySQLWith(o.DSN, "", o.Dial, dbx.MySQLOpen{Init: m.initConn})
 	if err != nil {
 		return nil, err
@@ -349,13 +319,13 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 				o.probes[name] = "view"
 			}
 		case typ == "VIEW":
-			if !m.o.excluded(name) {
+			if !m.g.excluded(name) {
 				o.views = append(o.views, name)
 				o.kind[name] = "view"
 			}
-		case m.o.excluded(name):
+		case m.g.excluded(name):
 			if typ == "BASE TABLE" {
-				if m.o.restoreOnly(name) {
+				if m.g.restoreOnly(name) {
 					return nil, m.o.bothErr(name)
 				}
 				o.excludedTables = append(o.excludedTables, name)
@@ -365,7 +335,7 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			o.kind[name] = "sequence"
 		case typ == "SYSTEM VERSIONED":
 			return nil, fmt.Errorf("state %s: %s is a system-versioned table, whose history cannot be restored; add it to exclude", m.o.Name, name)
-		case m.o.restoreOnly(name):
+		case m.g.restoreOnly(name):
 			o.restoreOnly = append(o.restoreOnly, name)
 			o.kind[name] = "table"
 		default:
@@ -387,7 +357,7 @@ func (m *MySQL) objects(ctx context.Context, c *sql.Conn, db string) (*mysqlObje
 			o.probes[t.Name] = "trigger"
 			continue
 		}
-		if !m.o.excluded(t.Table) && !probeName(t.Table) {
+		if !m.g.excluded(t.Table) && !probeName(t.Table) {
 			o.triggers = append(o.triggers, t)
 		}
 	}
@@ -1852,7 +1822,7 @@ func (m *MySQL) seed(ctx context.Context) error {
 	copied := append([]string{}, objs.tables...)
 	empty := append([]string{}, objs.excludedTables...)
 	for _, t := range objs.restoreOnly {
-		if m.o.restoreEmpty(t) {
+		if m.g.restoreEmpty(t) {
 			empty = append(empty, t)
 		} else {
 			copied = append(copied, t)

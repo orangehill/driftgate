@@ -533,7 +533,7 @@ func (s *SQLServer) saveExcluded(ctx context.Context, w *sqlServerDatabase) (sav
 	// With tables excluded the save is made even when there is nothing to
 	// save: a restore that stops halfway then knows that nothing is lost
 	// (notOnline).
-	if len(tables) == 0 && len(seqs) == 0 && len(s.o.Exclude) == 0 {
+	if len(tables) == 0 && len(seqs) == 0 && len(s.g.exclude) == 0 {
 		return false, nil
 	}
 	// The rows go back into the tables as the pristine copy has them.
