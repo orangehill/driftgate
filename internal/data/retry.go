@@ -13,8 +13,8 @@ import (
 // stopped for a lock (dbx.RetryMySQLLock).
 var lockRetryWait = dbx.MySQLLockWait
 
-// retryNoted holds the reads (what) whose retry was noted: one note per
-// read and process.
+// retryNoted holds the reads (what) whose retry was noted in a log: one
+// note per read and process.
 var retryNoted sync.Map
 
 // retryNote is the one note of a read (what) that runs again.
@@ -39,7 +39,10 @@ func retryRead(ctx context.Context, log io.Writer, what string, f func() error) 
 		}
 		return readFault(what)
 	}, func(err error) {
-		if _, told := retryNoted.LoadOrStore(what, true); !told && log != nil {
+		if log == nil {
+			return // not noted: a later retry with a log notes it
+		}
+		if _, told := retryNoted.LoadOrStore(what, true); !told {
 			fmt.Fprint(log, retryNote(what, err))
 		}
 	})

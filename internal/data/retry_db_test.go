@@ -166,7 +166,9 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	}
 
 	// Verify: its own read of the source, and its scan of the target, with
-	// the same log (each kind of read was noted above).
+	// the log of a clean run. The read of the source was noted above; the
+	// reads of the target were too, but without a log, so the first
+	// retried scan of the target notes it, once.
 	verify := func() (*VerifyReport, string) {
 		t.Helper()
 		var log bytes.Buffer
@@ -179,10 +181,19 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	}
 	readFault = nil
 	want, wantLog := verify()
-	for _, what := range []string{"source", "target"} {
+	targetNote := retryNote("target", deadlock)
+	for i, what := range []string{"source", "target", "target"} {
 		stop(what, 2)
-		if got, log := verify(); tries != 3 || !reflect.DeepEqual(got, want) || log != wantLog {
-			t.Errorf("verify, %s stopped: %d tries, %+v, want %+v; log:\n%s\nwant:\n%s", what, tries, got, want, log, wantLog)
+		got, log := verify()
+		if tries != 3 || !reflect.DeepEqual(got, want) {
+			t.Errorf("verify, %s stopped: %d tries, %+v, want %+v", what, tries, got, want)
+		}
+		notes := 0
+		if i == 1 {
+			notes = 1
+		}
+		if strings.Count(log, targetNote) != notes || strings.Replace(log, targetNote, "", 1) != wantLog {
+			t.Errorf("verify, %s stopped (%d): want %d notes of the target; log:\n%s\nwant:\n%s", what, i, notes, log, wantLog)
 		}
 	}
 
