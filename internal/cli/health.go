@@ -144,7 +144,7 @@ func fixAdvice(mode string) string {
 }
 
 func failedRoutesTitle(mode string) string {
-	return "Routes whose requests meant to succeed all failed in the baseline (not covered: fix them and " + fixAdvice(mode) + ", or acknowledge them under known_failures: in exclusions.yaml with a reason)"
+	return "Routes whose requests meant to succeed all failed in the baseline (not covered: acknowledge them under known_failures: in exclusions.yaml with a reason, or fix them and " + fixAdvice(mode) + ")"
 }
 
 func failedRequestsTitle(mode string) string {
