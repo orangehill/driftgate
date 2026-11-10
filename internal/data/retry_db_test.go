@@ -63,7 +63,8 @@ func TestRetryRead(t *testing.T) {
 // state), runs again and then gives exactly what a run without the stop
 // gives: the same dump byte for byte, the same reports; so do the reads
 // of the target before it is written. Stopped every
-// time, anonymize returns the server's error and writes no target.
+// time, anonymize returns the server's error, writes no target and still
+// logs the sample of its last try.
 func TestMySQLRetrySourceRead(t *testing.T) {
 	eachMySQL(t, testRetrySourceRead)
 }
@@ -153,6 +154,10 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	}
 	if len(failed.dump) != 0 {
 		t.Errorf("a dump was written: %d bytes", len(failed.dump))
+	}
+	// The sample of the last try is logged all the same, once.
+	if strings.Count(failed.log, "subset:") != 1 {
+		t.Errorf("log of the failed read:\n%s", failed.log)
 	}
 	if n := s.query(t, "", "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE '"+dst+"%'"); n != "0" {
 		t.Errorf("%s databases named like the target", n)

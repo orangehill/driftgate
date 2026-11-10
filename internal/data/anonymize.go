@@ -379,76 +379,32 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 			return nil, fmt.Errorf("target: %w", err)
 		}
 	}
-	// The source phase: a snapshot, the schema, the checks, the stand-ins
-	// reserved for the originals, the index of originals and the sample.
-	// Nothing is written before it ends. A try the server stops for a lock
-	// (retryRead) starts again from a new snapshot and a new engine, index
-	// and sample, so nothing of it reaches the next try.
-	var src *sql.Conn
-	defer func() {
-		if src != nil {
-			src.ExecContext(context.Background(), "ROLLBACK")
-			src.Close()
-		}
-	}()
-	var schema *Schema
-	var x *leakIndex
+	// A try the server stops for a lock (retryRead) starts again from a new
+	// snapshot and a new engine, index and sample, so nothing of it reaches
+	// the next try. A failed try keeps its connection until the next try or
+	// the return, after its sample is logged; the deferred closure closes
+	// the last try's sr.
+	var sr *sourceRead
+	defer func() { sr.close() }()
 	var sampleLog bytes.Buffer
 	det := e.text.pii
 	err = retryRead(ctx, opt.Log, "source", func() error {
-		if src != nil {
-			src.ExecContext(context.Background(), "ROLLBACK")
-			src.Close()
-			src = nil
-		}
+		sr.close()
 		sampleLog.Reset()
-		var err error
-		if e, err = newEngine(opt.Source.Driver, opt.Key, det, opt.Files); err != nil {
-			return err
-		}
-		if src, err = srcDB.Conn(ctx); err != nil {
-			return fmt.Errorf("source: %w", err)
-		}
-		if err := e.dl.session(ctx, src); err != nil {
-			return fmt.Errorf("source: %w", err)
-		}
-		if err := e.dl.snapshot(ctx, src); err != nil {
-			return fmt.Errorf("source: %w", err)
-		}
-		if schema, err = e.dl.schema(ctx, src, opt.Source.Name); err != nil {
-			return fmt.Errorf("source: %w", err)
-		}
-		if err := opt.Rules.Check(schema, opt.Files != nil); err != nil {
-			return err
-		}
-		if err := opt.Rules.CheckSchema(schema, e.text.pii); err != nil {
-			return err
-		}
-		x = nil
-		if opt.Index != nil {
-			if x, err = newLeakIndex(opt.Key, e.text.pii); err != nil {
-				return err
-			}
-		}
-		if err := e.r.prepare(ctx, src, e.dl, e.text.pii, schema, opt.Rules, x); err != nil {
-			return fmt.Errorf("source: %w", err)
-		}
-		if p, ok := opt.Filter.(preparer); ok {
-			if err := p.prepare(ctx, src, e.dl, schema, opt.Rules, &sampleLog); err != nil {
-				return err
-			}
-		}
-		if galeraTarget {
-			return galeraSequences(ctx, src, opt.Source.Name, schema, *opt.Target)
-		}
-		return nil
+		sr = &sourceRead{}
+		return sr.read(ctx, srcDB, opt, det, galeraTarget, &sampleLog)
 	})
+	// The last try's sample is logged, also when the read failed.
 	opt.Log.Write(sampleLog.Bytes())
 	if err != nil {
 		return nil, err
 	}
-	if x != nil {
-		*opt.Index = VerifyIndex{key: opt.Key, x: x, schema: schema}
+	// The try's engine, whose stand-ins were reserved, replaces the
+	// pre-flight one.
+	e = sr.e
+	src, schema := sr.src, sr.schema
+	if sr.x != nil {
+		*opt.Index = VerifyIndex{key: opt.Key, x: sr.x, schema: schema}
 	}
 
 	var staging *Database
@@ -545,6 +501,70 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 	}
 	rep.Seconds = time.Since(start).Seconds()
 	return rep, nil
+}
+
+// sourceRead is one try of the source phase of Anonymize: a snapshot of
+// the source, its schema, the rules checked against it, the stand-ins
+// reserved for the originals (in e), the index of originals and the sample.
+type sourceRead struct {
+	e      *engine
+	src    *sql.Conn // open, also after a failed read, until close
+	schema *Schema
+	x      *leakIndex // nil without opt.Index
+}
+
+// read fills s, a new sourceRead, from a connection of srcDB; det: the
+// detector every try shares. The filter's sample is logged to sampleLog.
+// With galeraTarget, the sequences a Galera target refuses are named.
+// Nothing is written.
+func (s *sourceRead) read(ctx context.Context, srcDB *sql.DB, opt Options, det *pii.Detector, galeraTarget bool, sampleLog io.Writer) error {
+	var err error
+	if s.e, err = newEngine(opt.Source.Driver, opt.Key, det, opt.Files); err != nil {
+		return err
+	}
+	if s.src, err = srcDB.Conn(ctx); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := s.e.dl.session(ctx, s.src); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := s.e.dl.snapshot(ctx, s.src); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if s.schema, err = s.e.dl.schema(ctx, s.src, opt.Source.Name); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := opt.Rules.Check(s.schema, opt.Files != nil); err != nil {
+		return err
+	}
+	if err := opt.Rules.CheckSchema(s.schema, s.e.text.pii); err != nil {
+		return err
+	}
+	if opt.Index != nil {
+		if s.x, err = newLeakIndex(opt.Key, s.e.text.pii); err != nil {
+			return err
+		}
+	}
+	if err := s.e.r.prepare(ctx, s.src, s.e.dl, s.e.text.pii, s.schema, opt.Rules, s.x); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if p, ok := opt.Filter.(preparer); ok {
+		if err := p.prepare(ctx, s.src, s.e.dl, s.schema, opt.Rules, sampleLog); err != nil {
+			return err
+		}
+	}
+	if galeraTarget {
+		return galeraSequences(ctx, s.src, opt.Source.Name, s.schema, *opt.Target)
+	}
+	return nil
+}
+
+// close ends the snapshot and closes the connection, if any; s may be nil.
+func (s *sourceRead) close() {
+	if s != nil && s.src != nil {
+		s.src.ExecContext(context.Background(), "ROLLBACK")
+		s.src.Close()
+	}
 }
 
 // copy writes the schema and the rows to the sinks.
