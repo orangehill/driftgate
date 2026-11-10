@@ -78,13 +78,15 @@ func (s *setup) sqliteDatabase(db *appconf.Database, database string) error {
 // askTables proposes, for the database of db, to leave the tables the
 // framework keeps its own state in out of the comparison
 // (appconf.FrameworkTables): excluded, as restoring them would log the
-// developer out or disturb a running worker, or restore_empty (a cache,
-// whose entries would carry over between captures). The default is yes
+// developer out or disturb a running worker, restore_empty (a cache,
+// whose entries would carry over between captures), or restore_only
+// (kept as seeded at every restore; rows a request writes there are never
+// compared). The default is yes
 // (--yes says yes); the answer is written to state:.
 func (s *setup) askTables(dr *draft, db appconf.Database) error {
 	t := appconf.FrameworkTables(dr.p.Root, db, os.LookupEnv)
 	dr.tablesAsked = true
-	if len(t.Exclude)+len(t.RestoreEmpty) == 0 {
+	if t.Empty() {
 		return nil
 	}
 	var parts, chosen []string
@@ -95,6 +97,10 @@ func (s *setup) askTables(dr *draft, db appconf.Database) error {
 	if len(t.RestoreEmpty) > 0 {
 		parts = append(parts, "empty "+strings.Join(t.RestoreEmpty, ", ")+" at every restore (a cache; never compared)")
 		chosen = append(chosen, "restore_empty: "+strings.Join(t.RestoreEmpty, ", "))
+	}
+	if len(t.RestoreOnly) > 0 {
+		parts = append(parts, "keep "+strings.Join(t.RestoreOnly, ", ")+" as seeded at every restore (rows a request writes there are never compared)")
+		chosen = append(chosen, "restore_only: "+strings.Join(t.RestoreOnly, ", "))
 	}
 	q := fmt.Sprintf("The framework keeps its own state in this database (%s): %s?", t.Why, strings.Join(parts, "; "))
 	yes := s.a.yes

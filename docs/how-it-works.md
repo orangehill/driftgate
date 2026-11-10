@@ -85,7 +85,7 @@ the gaps the report counts after the verdict, and `driftgate coverage`.
 - Background jobs, queue workers and scheduled commands, unless a [command step](catalog.md#command-steps) runs them.
 - Requests a frontend sends by itself, unless you [record](catalog.md#record) them.
 - Behaviour with a warm cache, when a restore empties the cache.
-- Excluded tables: they are never compared.
+- Excluded, `restore_only` and `restore_empty` tables: what a request writes there is never compared.
 - A request that passed only after a retry is reported as such, never as a plain pass.
 
 ## Incomplete results

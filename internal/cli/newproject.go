@@ -351,13 +351,19 @@ func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 	case d.Name != "":
 		lines = append(lines, "    pristine: "+scalar(d.Name+"_pristine")+"   # its pristine copy, made by driftgate seed")
 	}
+	if !t.Empty() {
+		lines = append(lines, "    # the framework keeps its own state in this database: "+t.Why)
+	}
 	if len(t.Exclude) > 0 {
 		lines = append(lines, "    exclude: "+flow(t.Exclude)+"   # the framework's own tables: never compared or restored")
 	}
 	if len(t.RestoreEmpty) > 0 {
 		lines = append(lines, "    restore_empty: "+flow(t.RestoreEmpty)+"   # a cache: emptied at every restore, never compared")
 	}
-	if len(t.Exclude)+len(t.RestoreEmpty) == 0 {
+	if len(t.RestoreOnly) > 0 {
+		lines = append(lines, "    restore_only: "+flow(t.RestoreOnly)+"   # kept as seeded at every restore; rows a request writes there are never compared")
+	}
+	if t.Empty() {
 		lines = append(lines, "    # exclude: [sessions, cache, jobs]    # tables never restored")
 	}
 	var missing []string
@@ -382,9 +388,9 @@ func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 		b.WriteString("# found in the project's settings: driftgate setup turns it on (it asks before it creates the pristine copy), or uncomment it\n")
 	}
 	for _, l := range lines {
-		// SQLite's comments inside the block are commented with it, so they
-		// stay in line.
-		if off && (!strings.HasPrefix(strings.TrimSpace(l), "#") || d.Driver == appconf.SQLite) {
+		// Comments inside the block are commented with it, so they stay in
+		// line.
+		if off {
 			l = "# " + l
 		}
 		b.WriteString(l + "\n")

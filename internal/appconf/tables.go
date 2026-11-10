@@ -16,18 +16,26 @@ import (
 // no rows, never compared: a cache, whose entries (rate limit counters
 // too) would otherwise carry over from one capture to the next and change
 // its responses; empty, not the rows the seed found (the developer's own
-// cache, entries that never expire). Why says what the proposal comes
-// from.
+// cache, entries that never expire). RestoreOnly: restored with the rows
+// the seed found, never compared: rows the application writes on reads
+// (Sanctum's last_used_at), which the requests that follow use. Why says
+// what the proposal comes from.
 type Tables struct {
-	Exclude, RestoreEmpty []string
-	Why                   string
+	Exclude, RestoreEmpty, RestoreOnly []string
+	Why                                string
+}
+
+// Empty reports a proposal of no tables.
+func (t Tables) Empty() bool {
+	return len(t.Exclude)+len(t.RestoreEmpty)+len(t.RestoreOnly) == 0
 }
 
 // FrameworkTables proposes the tables of the database of setting d, for
 // any driver: Laravel's sessions, cache, jobs, job batches, failed jobs,
-// Telescope and Pulse (laravelTables); Django's sessions; Rails' Solid
-// Cache, Solid Queue and Solid Cable in the primary database; Hangfire's
-// and the ASP.NET Data Protection keys of an ASP.NET project.
+// Telescope, Pulse and Sanctum's tokens (laravelTables); Django's
+// sessions; Rails' Solid Cache, Solid Queue and Solid Cable in the primary
+// database; Hangfire's and the ASP.NET Data Protection keys of an ASP.NET
+// project.
 func FrameworkTables(root string, d Database, env Lookup) Tables {
 	switch d.Ref.Source {
 	case Dotenv:
@@ -99,7 +107,7 @@ func railsTables(root string, d Database) Tables {
 	if strings.Contains(schema, "solid_cable_messages") {
 		t.Exclude = append(t.Exclude, "solid_cable_messages")
 	}
-	if len(t.Exclude)+len(t.RestoreEmpty) > 0 {
+	if !t.Empty() {
 		t.Why = "Solid Cache, Queue or Cable in the primary database (" + file + ")"
 	}
 	// activerecord-session_store keeps the sessions in a table.

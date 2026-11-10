@@ -480,10 +480,10 @@ func TestSetupSettingsDisagree(t *testing.T) {
 	}
 }
 
-// TestSetupInitThenRun: init leaves state: commented out, so a run after
-// it creates no database unasked. setup asks to turn it on (no terminal:
-// it stops), and --yes turns it on in place, its comments kept, before
-// the pristine copy.
+// TestSetupInitThenRun: init leaves state: commented out, its comments in
+// line, so a run after it creates no database unasked. setup asks to turn
+// it on (no terminal: it stops), and --yes turns it on in place, its
+// comments kept, before the pristine copy.
 func TestSetupInitThenRun(t *testing.T) {
 	root := setupDir(t, map[string]string{
 		".env": "APP_URL=http://127.0.0.1:" + closedPort(t) +
@@ -492,6 +492,9 @@ func TestSetupInitThenRun(t *testing.T) {
 	})
 	if code, out, errOut := runCLI(t, "init"); code != ExitClean {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
+	}
+	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); !strings.Contains(raw, "\n#     # exclude: [sessions, cache, jobs]") {
+		t.Errorf("a comment inside the commented-out block is not in line:\n%s", raw)
 	}
 	if code, out, errOut := runCLI(t, "run"); strings.Contains(out, "== seed ==") {
 		t.Errorf("run after init seeds unasked: %d\n%s\n%s", code, out, errOut)

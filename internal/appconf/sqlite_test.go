@@ -398,12 +398,13 @@ func TestSQLiteFind(t *testing.T) {
 }
 
 // TestFrameworkTables: the tables the framework keeps its own state in,
-// proposed for exclude and restore_only, for every driver: Laravel's for
-// a store whose driver is database on the default connection, by .env,
-// config/*.php or the framework's default (the cache restore_only);
-// job_batches and failed_jobs always (unless failed jobs go elsewhere);
-// Telescope's; Django's sessions; Rails' Solid tables in the primary
-// schema; Hangfire's and the Data Protection keys of ASP.NET.
+// proposed for exclude, restore_empty and restore_only, for every driver:
+// Laravel's for a store whose driver is database on the default
+// connection, by .env, config/*.php or the framework's default (the cache
+// restore_empty); job_batches and failed_jobs always (unless failed jobs
+// go elsewhere); Telescope's; Sanctum's tokens restore_only; Django's
+// sessions; Rails' Solid tables in the primary schema; Hangfire's and the
+// Data Protection keys of ASP.NET.
 func TestFrameworkTables(t *testing.T) {
 	all := []string{"sessions", "jobs", "job_batches", "failed_jobs"}
 	cache := []string{"cache", "cache_locks"}
@@ -413,23 +414,25 @@ func TestFrameworkTables(t *testing.T) {
 		"config/queue.php":   "<?php return ['default' => env('QUEUE_CONNECTION', 'database')];",
 	}
 	for _, c := range []struct {
-		env           string
-		config        map[string]string
-		exclude, only []string
-		why           string
+		env                  string
+		config               map[string]string
+		exclude, empty, only []string // only: restore_only
+		why                  string
 	}{
-		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n", nil, all, cache, "SESSION_DRIVER=database in .env"},
-		{"DB_CONNECTION=sqlite\n", nil, all, cache, "SESSION_DRIVER unset: Laravel's default database"}, // Laravel 11: no config/*.php
-		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, "SESSION_DRIVER unset"},
-		{"DB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, "SESSION_DRIVER unset"},
-		{"DB_CONNECTION=sqlite\n", l10, []string{"jobs", "job_batches", "failed_jobs"}, nil, "QUEUE_CONNECTION unset: database by config/queue.php"},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n", nil, all, cache, nil, "SESSION_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\n", nil, all, cache, nil, "SESSION_DRIVER unset: Laravel's default database"}, // Laravel 11: no config/*.php
+		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, nil, "SESSION_DRIVER unset"},
+		{"DB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n", nil, all, cache, nil, "SESSION_DRIVER unset"},
+		{"DB_CONNECTION=sqlite\n", l10, []string{"jobs", "job_batches", "failed_jobs"}, nil, nil, "QUEUE_CONNECTION unset: database by config/queue.php"},
 		{"DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\nSESSION_DRIVER=file\nCACHE_DRIVER=file\nQUEUE_DRIVER=database\n", nil,
-			[]string{"jobs", "job_batches", "failed_jobs"}, nil, "QUEUE_DRIVER=database in .env"}, // Laravel 5.5 and 5.6
+			[]string{"jobs", "job_batches", "failed_jobs"}, nil, nil, "QUEUE_DRIVER=database in .env"}, // Laravel 5.5 and 5.6
 		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_DRIVER=database\nDB_CACHE_TABLE=app_cache\nQUEUE_CONNECTION=redis\nQUEUE_FAILED_DRIVER=null\n", nil,
-			[]string{"job_batches"}, []string{"app_cache", "cache_locks"}, "CACHE_DRIVER=database in .env"},
-		{"DB_CONNECTION=sqlite\nSESSION_CONNECTION=other\nDB_CACHE_CONNECTION=other\nDB_QUEUE_CONNECTION=other\n", nil, []string{"job_batches", "failed_jobs"}, nil, "on the default connection"},
+			[]string{"job_batches"}, []string{"app_cache", "cache_locks"}, nil, "CACHE_DRIVER=database in .env"},
+		{"DB_CONNECTION=sqlite\nSESSION_CONNECTION=other\nDB_CACHE_CONNECTION=other\nDB_QUEUE_CONNECTION=other\n", nil, []string{"job_batches", "failed_jobs"}, nil, nil, "on the default connection"},
 		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n", map[string]string{"composer.json": `{"require": {"laravel/telescope": "^5.0"}}`},
-			[]string{"job_batches", "failed_jobs", "telescope_entries", "telescope_entries_tags", "telescope_monitoring"}, nil, "Telescope"},
+			[]string{"job_batches", "failed_jobs", "telescope_entries", "telescope_entries_tags", "telescope_monitoring"}, nil, nil, "Telescope"},
+		{"DB_CONNECTION=sqlite\nSESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n", map[string]string{"composer.json": `{"require": {"laravel/sanctum": "^4.0"}}`},
+			[]string{"job_batches", "failed_jobs"}, nil, []string{"personal_access_tokens"}, "Sanctum"},
 	} {
 		files := map[string]string{"artisan": "", ".env": c.env}
 		for k, v := range c.config {
@@ -438,8 +441,8 @@ func TestFrameworkTables(t *testing.T) {
 		root := sqliteProject(t, files)
 		d := Find(root, nil).Databases[0]
 		got := FrameworkTables(root, d, nil)
-		if !reflect.DeepEqual(got.Exclude, c.exclude) || !reflect.DeepEqual(got.RestoreEmpty, c.only) || !strings.Contains(got.Why, c.why) {
-			t.Errorf("%q: %+v, want %q %q (%s)", c.env, got, c.exclude, c.only, c.why)
+		if !reflect.DeepEqual(got.Exclude, c.exclude) || !reflect.DeepEqual(got.RestoreEmpty, c.empty) || !reflect.DeepEqual(got.RestoreOnly, c.only) || !strings.Contains(got.Why, c.why) {
+			t.Errorf("%q: %+v, want %q %q %q (%s)", c.env, got, c.exclude, c.empty, c.only, c.why)
 		}
 	}
 	settings := "INSTALLED_APPS = ['django.contrib.sessions']\nDATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': 'db.sqlite3'}}\n"

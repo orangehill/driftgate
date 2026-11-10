@@ -916,7 +916,9 @@ func (f *finder) composeMount(file string) string {
 // job_batches and failed_jobs are on the default connection whatever the
 // queue (failed_jobs unless QUEUE_FAILED_DRIVER is null, file or
 // dynamodb); Telescope's and Pulse's tables when composer.json requires
-// them. The cache and its locks are restore_only, the others excluded.
+// them. The cache and its locks are restore_empty, the others excluded;
+// with Sanctum, personal_access_tokens is restore_only (its seeded tokens
+// kept, last_used_at written on every authenticated request).
 func laravelTables(root string, d Database, env Lookup) Tables {
 	if _, err := localPath(root, "artisan"); err != nil {
 		return Tables{}
@@ -938,7 +940,7 @@ func laravelTables(root string, d Database, env Lookup) Tables {
 		}
 		return def
 	}
-	var tables, cache, why []string
+	var tables, cache, only, why []string
 	// uses reports a store whose driver is database on the default
 	// connection, and says where that comes from.
 	uses := func(config, connKey string, keys ...string) bool {
@@ -996,8 +998,12 @@ func laravelTables(root string, d Database, env Lookup) Tables {
 			tables = append(tables, "pulse_values", "pulse_entries", "pulse_aggregates")
 			why = append(why, "Pulse")
 		}
+		if strings.Contains(string(composer), `"laravel/sanctum"`) {
+			only = append(only, "personal_access_tokens")
+			why = append(why, "Sanctum writes last_used_at on every authenticated request, and tokens at login and logout")
+		}
 	}
-	return Tables{Exclude: tables, RestoreEmpty: cache, Why: strings.Join(why, ", ")}
+	return Tables{Exclude: tables, RestoreEmpty: cache, RestoreOnly: only, Why: strings.Join(why, ", ")}
 }
 
 // phpEnvDefault reads the default of env('KEY', 'default') in a PHP

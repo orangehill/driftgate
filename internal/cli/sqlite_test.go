@@ -18,12 +18,16 @@ func laravelSQLiteEnv(appURL string) string {
 	return "APP_URL=" + appURL + "\nDB_CONNECTION=sqlite\nSESSION_DRIVER=database\nCACHE_STORE=database\nQUEUE_CONNECTION=database\n"
 }
 
+// sanctum is the composer.json of a Laravel application with Sanctum.
+const sanctum = `{"require": {"laravel/sanctum": "^4.0"}}`
+
 // TestSetupSQLite: setup --yes on a Laravel application on SQLite writes
 // state: with the database file as working, no pristine database and no
-// grant, and excludes the framework's own tables; before the application
-// has made the file, it stops with how to make it.
+// grant, and excludes the framework's own tables (Sanctum's tokens
+// restore_only); before the application has made the file, it stops with
+// how to make it.
 func TestSetupSQLite(t *testing.T) {
-	root := setupDir(t, map[string]string{"artisan": "", ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
+	root := setupDir(t, map[string]string{"artisan": "", "composer.json": sanctum, ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
 	code, out, errOut := runCLI(t, "setup", "--yes")
 	if code != ExitConfig || !strings.Contains(out, "state: db sqlite database/database.sqlite (.env)") ||
 		!strings.Contains(errOut, "the database file database/database.sqlite does not exist yet") || !strings.Contains(errOut, "php artisan migrate") {
@@ -32,38 +36,42 @@ func TestSetupSQLite(t *testing.T) {
 	_, c := loadState(t, root)
 	want := []string{"sessions", "jobs", "job_batches", "failed_jobs"}
 	if c.Driver != config.SQLite || c.Working != "database/database.sqlite" || c.Pristine != "" || c.DSN != (config.Secret{Dotenv: ".env"}) || !reflect.DeepEqual(c.Exclude, want) ||
-		!reflect.DeepEqual(c.RestoreEmpty, []string{"cache", "cache_locks"}) {
+		!reflect.DeepEqual(c.RestoreEmpty, []string{"cache", "cache_locks"}) || !reflect.DeepEqual(c.RestoreOnly, []string{"personal_access_tokens"}) {
 		t.Errorf("state db: %+v", c)
 	}
 	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); !strings.Contains(raw, "dsn: {dotenv: .env}   # from .env, read when a command runs; it must name the working file\n") {
 		t.Errorf("configuration:\n%s", raw)
 	}
-	if !strings.Contains(out, "chosen: exclude: sessions, jobs, job_batches, failed_jobs; restore_empty: cache, cache_locks") || strings.Contains(out+errOut, "GRANT") || strings.Contains(out, "password") {
+	if !strings.Contains(out, "chosen: exclude: sessions, jobs, job_batches, failed_jobs; restore_empty: cache, cache_locks; restore_only: personal_access_tokens (") || strings.Contains(out+errOut, "GRANT") || strings.Contains(out, "password") {
 		t.Errorf("output:\n%s\n%s", out, errOut)
 	}
 
 	// At a terminal, the exclusion is a question whose default is yes.
-	root = setupDir(t, map[string]string{"artisan": "", ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
+	root = setupDir(t, map[string]string{"artisan": "", "composer.json": sanctum, ".env": laravelSQLiteEnv("http://127.0.0.1:" + closedPort(t))})
 	input(t, "n\n")
-	if code, out, errOut = runCLI(t, "setup"); code != ExitConfig || !strings.Contains(errOut, "The framework keeps its own state in this database (") || !strings.Contains(errOut, "empty cache, cache_locks at every restore (a cache; never compared)") {
+	if code, out, errOut = runCLI(t, "setup"); code != ExitConfig || !strings.Contains(errOut, "The framework keeps its own state in this database (") || !strings.Contains(errOut, "empty cache, cache_locks at every restore (a cache; never compared)") ||
+		!strings.Contains(errOut, "; keep personal_access_tokens as seeded at every restore (rows a request writes there are never compared)?") {
 		t.Fatalf("setup at a terminal: %d\n%s\n%s", code, out, errOut)
 	}
-	if _, c := loadState(t, root); len(c.Exclude)+len(c.RestoreEmpty) != 0 || c.Working != "database/database.sqlite" {
+	if _, c := loadState(t, root); len(c.Exclude)+len(c.RestoreEmpty)+len(c.RestoreOnly) != 0 || c.Working != "database/database.sqlite" {
 		t.Errorf("state db after no: %+v", c)
 	}
 }
 
 // TestInitSQLite: init writes the SQLite state: commented out, with the
-// framework's own tables proposed for exclude:, the block commented in line
-// and an SQLite example of seed:.
+// framework's own tables proposed for exclude:, restore_empty: and
+// restore_only: under the framework's reason, the block commented in
+// line and an SQLite example of seed:.
 func TestInitSQLite(t *testing.T) {
-	root := setupDir(t, map[string]string{"artisan": "", ".env": laravelSQLiteEnv("http://shop.test")})
+	root := setupDir(t, map[string]string{"artisan": "", "composer.json": sanctum, ".env": laravelSQLiteEnv("http://shop.test")})
 	code, out, errOut := runCLI(t, "init")
 	if code != ExitClean || !strings.Contains(out, "state: db sqlite database/database.sqlite (.env), commented out") {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
-	for _, want := range []string{"#     working: database/database.sqlite\n", "#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]", "\n#     # pristine: a file of DriftGate's store",
+	for _, want := range []string{"#     working: database/database.sqlite\n", "#     # the framework keeps its own state in this database: SESSION_DRIVER=database", "and tokens at login and logout",
+		"#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]",
+		"#     restore_only: [personal_access_tokens]   # kept as seeded at every restore; rows a request writes there are never compared\n", "\n#     # pristine: a file of DriftGate's store",
 		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("configuration without %q:\n%s", want, raw)
