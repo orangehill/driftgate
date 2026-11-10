@@ -474,40 +474,37 @@ func TestPostgresOtherSessions(t *testing.T) {
 	}
 
 	// A cancel while a session is in the way (one that is not ended here)
-	// returns at once.
+	// returns at once. alone is tested itself, as the copy and the rename
+	// share it, and what copyDatabase does after it (the drop of its copy,
+	// which may checkpoint) is not part of the wait.
 	defer func(q string) { pgTerminate = q }(pgTerminate)
 	pgTerminate = "SELECT $1::text"
-	for db, stmt := range map[string]string{pristine: "CREATE DATABASE " + qp(newName(work)), work: "ALTER DATABASE " + qp(work) + " RENAME"} {
-		// The rename case guards against a regression: swap had no wait
-		// before, and already returned on a cancel.
-		t.Run("cancel "+db, func(t *testing.T) {
-			_, release := hold(db, "SELECT pg_sleep(60)")
-			defer release()
-			cctx, cancel := context.WithCancel(ctx)
-			defer cancel()
-			at := make(chan time.Time, 1)
-			go func() {
-				// Cancel once the first attempt failed: in the wait before
-				// the next one.
-				for seen := false; cctx.Err() == nil; time.Sleep(5 * time.Millisecond) {
-					var n int
-					su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND starts_with(query, $1)", stmt).Scan(&n)
-					if n > 0 {
-						seen = true
-					} else if seen {
-						at <- time.Now()
-						cancel()
-					}
-				}
-			}()
-			err := p.copyDatabase(cctx, pristine, work, nil, nil)
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("copy cancelled: %v", err)
+	_, release := hold(pristine, "SELECT pg_sleep(60)")
+	defer release()
+	create := "CREATE DATABASE " + qp(newName(work)) + " TEMPLATE " + qp(pristine)
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	at := make(chan time.Time, 1)
+	go func() {
+		// Cancel once the first attempt failed: in the wait before the
+		// next one.
+		for seen := false; cctx.Err() == nil; time.Sleep(5 * time.Millisecond) {
+			var n int
+			su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query = $1", create).Scan(&n)
+			if n > 0 {
+				seen = true
+			} else if seen {
+				at <- time.Now()
+				cancel()
 			}
-			if took := time.Since(<-at); took > 150*time.Millisecond {
-				t.Fatalf("returned %v after the cancel", took)
-			}
-		})
+		}
+	}()
+	err = p.alone(cctx, pristine, create)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copy cancelled: %v", err)
+	}
+	if took := time.Since(<-at); took > 150*time.Millisecond {
+		t.Fatalf("returned %v after the cancel", took)
 	}
 }
 
