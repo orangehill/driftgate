@@ -841,8 +841,9 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 
 // pgTerminate ends the other sessions on a database; a variable for the
 // tests. It leaves out autovacuum workers: a role that is not a superuser
-// may not end them (on PostgreSQL 18 without pg_signal_autovacuum_worker),
-// and pg_terminate_backend's error aborts the whole statement, so the
+// may not end them (before PostgreSQL 18, or on 18 without
+// pg_signal_autovacuum_worker), and pg_terminate_backend's error aborts the
+// whole statement, so the
 // sessions listed after one would stay. CREATE DATABASE … TEMPLATE and
 // RENAME end autovacuum workers themselves. They are the sessions on a
 // database without a role (usesysid); backend_type cannot tell them, as
