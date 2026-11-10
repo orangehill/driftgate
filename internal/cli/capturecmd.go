@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -629,29 +631,26 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 }
 
 // headerFormat is one format for every value of a header: a pattern per
-// position, joined with | when they differ (one cookie name per position).
+// position, joined with | when they differ. A Set-Cookie header has one
+// pattern per cookie name, whatever its position.
 // A header is recorded masked where it may carry a credential (letters
 // become x and X, digits 0: httpx.MaskHeader), and no format is derived
 // from what the mask left: a cookie's value is any text up to the first
 // ;, and a header masked whole is any text.
 func headerFormat(name string, positions [][]string) string {
+	if name == "set-cookie" {
+		return strings.Join(cookieFormats(slices.Concat(positions...)), "|")
+	}
 	var parts []string
 	seen := map[string]bool{}
 	for _, vals := range positions {
-		var ps []string
-		switch {
-		case name == "set-cookie":
-			ps = cookieFormats(vals)
-		case httpx.MasksWhole(name):
-			ps = []string{".+"}
-		default:
-			ps = []string{valuesFormat(vals)}
+		p := ".+"
+		if !httpx.MasksWhole(name) {
+			p = valuesFormat(vals)
 		}
-		for _, p := range ps {
-			if !seen[p] {
-				seen[p] = true
-				parts = append(parts, p)
-			}
+		if !seen[p] {
+			seen[p] = true
+			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, "|")
@@ -666,46 +665,203 @@ func valuesFormat(vals []string) string {
 	return regexp.QuoteMeta(vals[0])
 }
 
-// cookieFormats are the formats of Set-Cookie values, one per cookie name:
-// the name as it is, its value (masked when recorded, which keeps its
-// length) as text without a ; of the lengths seen, and the attributes
-// after it (expiry, path, flags), which are recorded as sent, inferred as
-// any other value. A cookie that is emptied or set to "deleted" does not
-// match.
+// cookieFormats are the formats of Set-Cookie values, one per cookie
+// group: the values of one cookie name with the same attributes in the
+// same order (their keys and flags as sent), of one kind (a cookie set, or
+// one deleted: emptied or with a Max-Age of 0 or less) and one form of
+// expiry. The name is as it is, the value (masked when recorded, which
+// keeps its length) is text without a ; of the lengths seen, and each
+// attribute takes cookieAttrFormat. A deleted cookie does not match a
+// group of set ones, nor a set one a group of deleted ones. A delete that
+// keeps a value, has no Max-Age and has an expiry in the past shares the
+// group of the set cookie, as before. Values that are not a cookie (no =)
+// are kept each as recorded.
 func cookieFormats(vals []string) []string {
-	var names []string
-	attrs := map[string][]string{}
-	lengths := map[string][2]int{} // shortest and longest value, in characters
+	type groupKey struct {
+		name, skeleton, expires string
+		deleted                 bool
+	}
+	type group struct {
+		groupKey
+		lo, hi int        // shortest and longest value, in characters
+		vals   []string   // as recorded
+		rests  []string   // the attributes as one text, from the first ;
+		attrs  [][]string // the attributes, split at ;
+	}
+	var groups []*group
+	var other []string // values that are not a cookie
+	index := map[groupKey]*group{}
 	for _, v := range vals {
 		first, rest, _ := strings.Cut(v, ";")
 		cookie, value, ok := strings.Cut(first, "=")
 		if !ok {
-			return []string{valuesFormat(vals)} // not a cookie: as recorded
+			other = append(other, v)
+			continue
 		}
-		n := utf8.RuneCountInString(value)
-		if l, ok := lengths[cookie]; !ok {
-			names = append(names, cookie)
-			lengths[cookie] = [2]int{n, n}
-		} else {
-			lengths[cookie] = [2]int{min(l[0], n), max(l[1], n)}
-		}
+		var attrs, skeleton []string
 		if strings.Contains(v, ";") {
+			attrs = strings.Split(rest, ";")
 			rest = ";" + rest
 		}
-		attrs[cookie] = append(attrs[cookie], rest)
-	}
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		l, length := lengths[n], fmt.Sprintf("{%d}", lengths[n][0])
-		switch {
-		case l[1] == 0:
-			length = "{0}" // only ever empty
-		case l[0] != l[1]:
-			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
+		k := groupKey{name: cookie, deleted: value == ""}
+		for _, a := range attrs {
+			key, val, isValue := strings.Cut(a, "=")
+			if isValue {
+				key += "="
+			}
+			skeleton = append(skeleton, key)
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "max-age=":
+				n, err := strconv.Atoi(val)
+				k.deleted = k.deleted || err == nil && n <= 0
+			case "expires=":
+				k.expires = expiresForm(val)
+			}
 		}
-		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+valuesFormat(attrs[n]))
+		k.skeleton = strings.Join(skeleton, ";")
+		n := utf8.RuneCountInString(value)
+		g := index[k]
+		if g == nil {
+			g = &group{groupKey: k, lo: n, hi: n}
+			index[k] = g
+			groups = append(groups, g)
+		}
+		g.lo, g.hi = min(g.lo, n), max(g.hi, n)
+		g.vals, g.rests, g.attrs = append(g.vals, v), append(g.rests, rest), append(g.attrs, attrs)
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		length := fmt.Sprintf("{%d}", g.lo)
+		switch {
+		case g.hi == 0:
+			length = "{0}" // only ever empty
+		case g.lo != g.hi:
+			length = fmt.Sprintf("{%d,%d}", max(g.lo, 1), g.hi)
+		}
+		head := regexp.QuoteMeta(g.name) + "=[^;]" + length
+		var b strings.Builder
+		for i, a := range g.attrs[0] {
+			key, _, isValue := strings.Cut(a, "=")
+			b.WriteString(";" + regexp.QuoteMeta(key))
+			if !isValue {
+				continue // a flag (secure, httponly), as sent
+			}
+			col := make([]string, len(g.attrs))
+			for j, attrs := range g.attrs {
+				_, col[j], _ = strings.Cut(attrs[i], "=")
+			}
+			b.WriteString("=" + cookieAttrFormat(strings.ToLower(strings.TrimSpace(key)), col, g.expires, g.deleted))
+		}
+		f := head + b.String()
+		// Each part matches its values; should the whole still not match
+		// one, the attributes are inferred as one text.
+		re, err := regexp.Compile(`^(?:` + f + `)$`)
+		for _, v := range g.vals {
+			if err != nil || !re.MatchString(v) {
+				f = head + grouped(valuesFormat(g.rests))
+				break
+			}
+		}
+		out = append(out, f)
+	}
+	return append(out, literals(other)...) // not a cookie: each as recorded
+}
+
+// literals are the values as recorded, each once, in the order seen.
+func literals(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		if q := regexp.QuoteMeta(v); !slices.Contains(out, q) {
+			out = append(out, q)
+		}
 	}
 	return out
+}
+
+// cookieAttrFormat is the format of the values of one cookie attribute in
+// a group. A cookie that is set gets an expiry of its form (any HTTP date,
+// any dashed date: runs within the same second agree on it only by chance);
+// next to such a date, Max-Age is counted down from it, so it gets the
+// widths seen (one width less from a power of ten: 1000 is 999 a second
+// later), never 0 or less. Without such a date, and in a deleted cookie,
+// Max-Age is one of the values seen: a lifetime that changes is a drift,
+// and a deleted cookie never matches a set one. A deleted cookie's expiry,
+// which frameworks put a year or more before the time of the response,
+// takes its form as well. Other attributes are inferred.
+func cookieAttrFormat(key string, vals []string, expires string, deleted bool) string {
+	dated := expires == "http" || expires == "dashed"
+	switch {
+	case key == "expires" && expires == "http":
+		return httpDate
+	case key == "expires" && expires == "dashed":
+		return dashedDate
+	case key == "max-age" && (deleted || !dated):
+		return grouped(strings.Join(literals(vals), "|"))
+	case key == "max-age":
+		short, lo, hi := vals[0], len(vals[0]), 0
+		for _, v := range vals {
+			if !allDigits(v) {
+				return grouped(valuesFormat(vals))
+			}
+			if len(v) < len(short) || len(v) == len(short) && v < short {
+				short = v
+			}
+			lo, hi = min(lo, len(v)), max(hi, len(v))
+		}
+		if len(short) > 1 && strings.TrimRight(short, "0") == "1" {
+			lo-- // a power of ten
+		}
+		// The first digit is never 0, so the format never takes 0.
+		switch {
+		case hi == 1:
+			return `[1-9]`
+		case lo == hi:
+			return fmt.Sprintf(`[1-9]\d{%d}`, hi-1)
+		}
+		return fmt.Sprintf(`[1-9]\d{%d,%d}`, lo-1, hi-1)
+	}
+	return grouped(valuesFormat(vals))
+}
+
+// grouped is a format that may hold a | of its own (an alternation),
+// inside (?:…) so that the text around it stays outside it; one without
+// a | stays bare.
+func grouped(p string) string {
+	if !strings.Contains(p, "|") {
+		return p
+	}
+	return "(?:" + p + ")"
+}
+
+// expiresForm is the form of a cookie's expiry: an HTTP date, a dashed
+// date, or other.
+func expiresForm(v string) string {
+	switch {
+	case httpDateValue().MatchString(v):
+		return "http"
+	case dashedDateValue().MatchString(v):
+		return "dashed"
+	}
+	return "other"
+}
+
+// dashedDate is the format of a cookie's expiry as PHP's setcookie and
+// other Netscape-style writers send it (Thu, 01-Jan-1970 00:00:01 GMT).
+const dashedDate = `[A-Z][a-z]{2}, \d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2} GMT`
+
+var (
+	httpDateValue   = lazy.Regexp(`^(?:` + httpDate + `)$`)
+	dashedDateValue = lazy.Regexp(`^(?:` + dashedDate + `)$`)
+)
+
+// allDigits reports a run of digits only (as infer's allDigits).
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 var yamlQuote = compare.YAMLQuote
@@ -874,12 +1030,15 @@ func rel(root, path string) string {
 	return path
 }
 
+// httpDate is the format of an HTTP date (Sun, 09 Nov 2026 01:23:45 GMT).
+const httpDate = `[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`
+
 // initAllowlist allows the Date header, which every response carries and
 // which changes every second.
 const initAllowlist = `version: 1
 headers:
   - name: date
-    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    format: '` + httpDate + `'
     reason: Time of the response; changes with every request.
 body: []
 `
