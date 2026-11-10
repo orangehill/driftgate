@@ -127,7 +127,9 @@ func TestRunRefusals(t *testing.T) {
 // verify --migrate-state, items that are restore_only now to the changed
 // configuration, and any other difference to the data; the command that
 // makes the baseline again names a baseline of the repository's other than
-// local.
+// local. A baseline whose meta.json cannot be read is refused with the
+// error of the read, as it is; with --skip-fingerprint-check the capture
+// runs.
 func TestRunBaselineRefusals(t *testing.T) {
 	format := state.FingerprintFormat
 	for _, tc := range []struct {
@@ -135,18 +137,22 @@ func TestRunBaselineRefusals(t *testing.T) {
 		baseline    string // its name in the repository's baselines; "" is the capture base
 		restoreOnly bool   // sessions is restore_only, not excluded, and only the baseline's state has it
 		format      int    // of the baseline's state
-		want        string // <dir> is the baseline's folder
+		skip        bool   // --skip-fingerprint-check
+		corrupt     bool   // the baseline's meta.json cannot be read
+		want        string // <dir> is the baseline's folder; with a trailing "…", its start; "" is a capture that runs
 	}{
-		{"older format", "main", false, format - 1,
+		{"older format", "main", false, format - 1, false, false,
 			"environment: the state differs from the one the baseline was captured from (1 items: [db/table:users]), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline main --migrate-state checks that the data is the baseline's and records the fingerprint in the new format"},
-		{"restore_only now", "main", true, format,
+		{"restore_only now", "main", true, format, false, false,
 			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:sessions]; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move <dir> away; the next driftgate run --baseline main makes it)"},
-		{"other data", "main", false, format,
+		{"other data", "main", false, format, false, false,
 			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run --baseline main makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase main --from <tag> --reason \"…\""},
-		{"other data, local", "local", false, format,
+		{"other data, local", "local", false, format, false, false,
 			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase local --from <tag> --reason \"…\""},
-		{"other data, capture", "", false, format,
+		{"other data, capture", "", false, format, false, false,
 			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase base --from <tag> --reason \"…\""},
+		{"skip fingerprint check", "main", false, format, true, false, ""},
+		{"meta unreadable", "main", false, format, false, true, "<dir>/meta.json: invalid character…"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
@@ -193,21 +199,40 @@ func TestRunBaselineRefusals(t *testing.T) {
 			if err := base.WriteMeta(meta); err != nil {
 				t.Fatal(err)
 			}
+			if tc.corrupt {
+				if err := os.WriteFile(filepath.Join(base.Dir, "meta.json"), []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			app.mu.Lock()
 			clear(app.served)
 			app.mu.Unlock()
 			var points []string
 			chaos.At = func(point string) { points = append(points, point) }
 			t.Cleanup(func() { chaos.At = nil })
-			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "run", Only: "list", Force: true, Baseline: base})
+			_, err = Run(ctx, p, sqliteCatalog(), Options{Tag: "run", Only: "list", Force: true, Baseline: base, SkipFingerprintCheck: tc.skip})
 			chaos.At = nil
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("capture with --skip-fingerprint-check: %v", err)
+				}
+				if meta := readMeta(t, p, "run"); meta.Incomplete || !meta.Unreliable {
+					t.Fatalf("meta: %+v", meta)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("the capture ran")
 			}
-			if !errors.Is(err, ErrEnv) {
+			if tc.corrupt {
+				if errors.Is(err, ErrEnv) || errors.Is(err, ErrConfig) {
+					t.Errorf("kind of %v: want the read's error as it is", err)
+				}
+			} else if !errors.Is(err, ErrEnv) {
 				t.Errorf("kind of %v: want %v", err, ErrEnv)
 			}
-			if want := strings.ReplaceAll(tc.want, "<dir>", base.Dir); err.Error() != want {
+			want := strings.ReplaceAll(tc.want, "<dir>", base.Dir)
+			if start, cut := strings.CutSuffix(want, "…"); cut && !strings.HasPrefix(err.Error(), start) || !cut && err.Error() != want {
 				t.Errorf("message:\n%s\nwant:\n%s", err, want)
 			}
 			if !slices.Contains(points, "capture.started") {

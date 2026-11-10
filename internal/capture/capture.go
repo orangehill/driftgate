@@ -486,8 +486,8 @@ func newServices(ctx context.Context, p *config.Project, reqs []catalog.Request,
 // checkBaseline refuses a capture whose start state (the fingerprint after
 // the first restore) differs from the one opt.Baseline was captured from,
 // unless --skip-fingerprint-check: a baseline fingerprinted in an older
-// format, items that are restore_only now (tr's configuration), or other
-// data; each message says how to go on.
+// format, items that are restore_only now (the configuration as tr holds
+// it now), or other data; each message says how to go on.
 func checkBaseline(p *config.Project, tr *tracker, opt Options, start states) error {
 	if opt.Baseline == nil || opt.SkipFingerprintCheck {
 		return nil
