@@ -69,7 +69,17 @@ func benchProject(b testing.TB, driver, dsn string) (*config.Project, func(strin
 	b.Helper()
 	b.Setenv(config.EnvStore, filepath.Join(b.TempDir(), "store"))
 	root := b.TempDir()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"ok":true}`)) }))
+	// A POST writes a row, as a request that changes data does.
+	var exec func(string) error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			if err := exec("INSERT INTO t0 (name, n, at) VALUES ('post', 1, '2024-01-03 00:00:00')"); err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
 	b.Cleanup(srv.Close)
 	sc := config.Component{Driver: driver, Working: "app.sqlite"}
 	var db *sql.DB
@@ -120,7 +130,7 @@ func benchProject(b testing.TB, driver, dsn string) (*config.Project, func(strin
 	if err := Seed(context.Background(), p, SeedOptions{}); err != nil {
 		b.Fatal(err)
 	}
-	exec := func(stmt string) error {
+	exec = func(stmt string) error {
 		c, err := open(dsn, sc.Working, nil)
 		if err != nil {
 			return err
@@ -171,6 +181,32 @@ func BenchmarkCaptureSchema(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.StartTimer()
+				if _, err := Run(ctx, p, cat, Options{Tag: "bench", Force: true}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkCaptureWrite is a capture of a read-only request and one that
+// writes a row, on benchSchema unchanged since the last capture, as in
+// local work: the first restore copies nothing, and the final restore
+// copies what the request wrote (PostgreSQL: the whole database). On
+// benchServers.
+func BenchmarkCaptureWrite(b *testing.B) {
+	servers := benchServers()
+	cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public},
+		{ID: "post", Method: "POST", Path: "/", Storage: snapshot.Public}}}
+	for _, driver := range []string{config.SQLite, config.MySQL, config.Postgres} {
+		dsn, ok := servers[driver]
+		if !ok {
+			continue
+		}
+		b.Run(driver, func(b *testing.B) {
+			p, _ := benchProject(b, driver, dsn)
+			ctx := context.Background()
+			for range b.N {
 				if _, err := Run(ctx, p, cat, Options{Tag: "bench", Force: true}); err != nil {
 					b.Fatal(err)
 				}

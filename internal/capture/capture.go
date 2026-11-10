@@ -316,7 +316,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 	// Every capture starts from the pristine state, so two captures of the
 	// same code see the same data.
-	if err := tr.restore(ctx); err != nil {
+	if err := tr.restore(ctx, false); err != nil {
 		return nil, err
 	}
 	// Sessions the last restore of the previous capture ended fail now.
@@ -451,8 +451,11 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	// Leave the data as the capture found it after its first restore, so the
 	// working copy is ready for the application and the next capture.
+	// Every request ran on data checked before it; a pristine copy changed
+	// since is found by the next run's first restore, so this restore
+	// reads nothing more (no readWhole).
 	if (len(units) > 0 || len(r.sum.Writers) > 0) && len(p.State) > 0 {
-		if err := tr.restore(ctx); err != nil {
+		if err := tr.restore(ctx, false); err != nil {
 			return nil, err
 		}
 		saveEnded(p, tr)
@@ -858,7 +861,11 @@ func (r *runner) reloadTokens(ctx context.Context) error {
 // Everything that differs from the restored state, prepare's changes
 // included, is what the next restore brings back.
 func (r *runner) reset(ctx context.Context) (states, error) {
-	if err := r.tr.restore(ctx); err != nil {
+	// A whole copy is compared with its record before prepare and the
+	// tokens command, which may write; without them, on the fingerprint
+	// read below.
+	commands := len(r.p.Prepare)+len(r.p.Tokens.Command) > 0
+	if err := r.tr.restore(ctx, commands); err != nil {
 		return nil, err
 	}
 	r.tainted = false
@@ -871,6 +878,11 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	now, err := r.tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
+	}
+	if !commands {
+		if err := r.tr.checkWhole(ctx, now); err != nil {
+			return nil, err
+		}
 	}
 	changed := diffStates(r.start, now)
 	r.tr.markDirty(changed)

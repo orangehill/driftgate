@@ -201,7 +201,7 @@ func TestStalePristineHint(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tr.close()
-				return tr.restore(ctx)
+				return tr.restore(ctx, false)
 			}
 			exec("UPDATE dgt_stale.news SET title = 'b'")
 			if err := restore(); err != nil {
@@ -358,7 +358,7 @@ func testSeedWhileWriting(t *testing.T, driver, dsn string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = tr.restore(ctx)
+		err = tr.restore(ctx, false)
 		tr.close()
 		if err != nil {
 			t.Fatalf("restore %d after a seed the application wrote during: %v", i, err)

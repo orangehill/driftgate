@@ -825,13 +825,13 @@ func TestChangedOutsideSchemaCache(t *testing.T) {
 // record of an older fingerprint format it is not compared, nor is a
 // component the restore did not copy (the application wrote since). A
 // whole copy later in the run (the reset before a request that changes
-// data) is compared too, before prepare.
+// data) is compared too; the final restore's is not.
 func TestWholeRestoreDrift(t *testing.T) {
 	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
 	if dsn == "" {
 		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
 	}
-	for _, kind := range []string{"drift", "drift mid-run", "older format", "not restored"} {
+	for _, kind := range []string{"drift", "drift mid-run", "drift mid-run, prepare", "older format", "not restored"} {
 		t.Run(kind, func(t *testing.T) {
 			older := kind == "older format"
 			ctx := context.Background()
@@ -918,7 +918,7 @@ func TestWholeRestoreDrift(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tr.close()
-				if err := tr.restore(ctx); err != nil {
+				if err := tr.restore(ctx, false); err != nil {
 					t.Fatal(err)
 				}
 				exec(work, "INSERT INTO a VALUES (1)")
@@ -939,15 +939,24 @@ func TestWholeRestoreDrift(t *testing.T) {
 			exec(pristine, "INSERT INTO b VALUES (2)")
 			admin.Exec("ALTER DATABASE " + pristine + " ALLOW_CONNECTIONS false")
 			cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}}}
-			if kind == "drift mid-run" {
+			if strings.HasPrefix(kind, "drift mid-run") {
 				// The first restore copies nothing; the reset before the
-				// second POST copies the whole database, with the drift.
+				// second POST (--restore each) copies the whole database,
+				// with the drift, and is compared on the fingerprint it
+				// reads after it, or with prepare: before prepare.
+				if kind == "drift mid-run, prepare" {
+					p.Prepare = []config.Command{{Run: []string{"true"}}}
+				}
 				cat.Requests = append(cat.Requests, catalog.Request{ID: "post1", Method: "POST", Path: "/", Storage: snapshot.Public},
 					catalog.Request{ID: "post2", Method: "POST", Path: "/", Storage: snapshot.Public})
 			} else {
 				exec(work, "INSERT INTO a VALUES (1)")
 			}
-			_, err = Run(ctx, p, cat, Options{Tag: "now"})
+			opt := Options{Tag: "now"}
+			if strings.HasPrefix(kind, "drift mid-run") {
+				opt.Restore = "each" // a reset before each request that changes data
+			}
+			_, err = Run(ctx, p, cat, opt)
 			if older {
 				if err != nil {
 					t.Fatalf("capture with a record of an older format: %v", err)
@@ -958,5 +967,61 @@ func TestWholeRestoreDrift(t *testing.T) {
 				t.Fatalf("capture: %v", err)
 			}
 		})
+	}
+}
+
+// fullReads counts the fingerprints of all items a component takes.
+type fullReads struct {
+	state.Component
+	n int
+}
+
+func (f *fullReads) Fingerprint(ctx context.Context, items []string) (state.Fingerprint, error) {
+	if items == nil {
+		f.n++
+	}
+	return f.Component.Fingerprint(ctx, items)
+}
+
+// TestWholeCopyReads: a restore that copies PostgreSQL whole reads it in
+// full only with readWhole (the reset before prepare or the tokens
+// command), once in a run: the final restore of a capture, whose requests
+// all ran on checked data, reads only the items it restored.
+func TestWholeCopyReads(t *testing.T) {
+	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
+	}
+	p, exec := benchProject(t, config.Postgres, dsn)
+	ctx := context.Background()
+	tr, err := newTracker(ctx, p, nil, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.close()
+	if err := tr.restore(ctx, false); err != nil { // the first: nothing to copy
+		t.Fatal(err)
+	}
+	f := &fullReads{Component: tr.comps[0]}
+	tr.comps[0] = f
+	write := func() {
+		t.Helper()
+		if err := exec("INSERT INTO t0 (name, n, at) VALUES ('w', 1, '2024-01-03 00:00:00')"); err != nil {
+			t.Fatal(err)
+		}
+		tr.markDirty(map[string][]string{"db": {"table:public.t0"}})
+	}
+	for _, c := range []struct {
+		name      string
+		readWhole bool
+		want      int
+	}{{"final restore", false, 0}, {"reset before prepare", true, 1}, {"compared already", true, 1}} {
+		write()
+		if err := tr.restore(ctx, c.readWhole); err != nil {
+			t.Fatal(err)
+		}
+		if f.n != c.want {
+			t.Errorf("%s: %d full reads in all, want %d", c.name, f.n, c.want)
+		}
 	}
 }
