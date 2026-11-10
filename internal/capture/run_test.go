@@ -131,28 +131,28 @@ func TestRunRefusals(t *testing.T) {
 // error of the read, as it is; with --skip-fingerprint-check the capture
 // runs.
 func TestRunBaselineRefusals(t *testing.T) {
-	format := state.FingerprintFormat
 	for _, tc := range []struct {
 		name        string
 		baseline    string // its name in the repository's baselines; "" is the capture base
 		restoreOnly bool   // sessions is restore_only, not excluded, and only the baseline's state has it
-		format      int    // of the baseline's state
+		older       bool   // the baseline's state has the format before state.FingerprintFormat
 		skip        bool   // --skip-fingerprint-check
 		corrupt     bool   // the baseline's meta.json cannot be read
-		want        string // <dir> is the baseline's folder; with a trailing "…", its start; "" is a capture that runs
+		want        string // <dir> is the baseline's folder; "" is a capture that runs
+		prefix      bool   // want is the start of the message
 	}{
-		{"older format", "main", false, format - 1, false, false,
-			"environment: the state differs from the one the baseline was captured from (1 items: [db/table:users]), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline main --migrate-state checks that the data is the baseline's and records the fingerprint in the new format"},
-		{"restore_only now", "main", true, format, false, false,
-			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:sessions]; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move <dir> away; the next driftgate run --baseline main makes it)"},
-		{"other data", "main", false, format, false, false,
-			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run --baseline main makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase main --from <tag> --reason \"…\""},
-		{"other data, local", "local", false, format, false, false,
-			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase local --from <tag> --reason \"…\""},
-		{"other data, capture", "", false, format, false, false,
-			"environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase base --from <tag> --reason \"…\""},
-		{"skip fingerprint check", "main", false, format, true, false, ""},
-		{"meta unreadable", "main", false, format, false, true, "<dir>/meta.json: invalid character…"},
+		{name: "older format", baseline: "main", older: true,
+			want: "environment: the state differs from the one the baseline was captured from (1 items: [db/table:users]), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline main --migrate-state checks that the data is the baseline's and records the fingerprint in the new format"},
+		{name: "restore_only now", baseline: "main", restoreOnly: true,
+			want: "environment: the state differs from the one the baseline was captured from (1 items): [db/table:sessions]; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move <dir> away; the next driftgate run --baseline main makes it)"},
+		{name: "other data", baseline: "main",
+			want: "environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run --baseline main makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase main --from <tag> --reason \"…\""},
+		{name: "other data, local", baseline: "local",
+			want: "environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase local --from <tag> --reason \"…\""},
+		{name: "other data, capture",
+			want: "environment: the state differs from the one the baseline was captured from (1 items): [db/table:users]; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move <dir> away; the next driftgate run makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase base --from <tag> --reason \"…\""},
+		{name: "skip fingerprint check", baseline: "main", skip: true},
+		{name: "meta unreadable", baseline: "main", corrupt: true, want: "<dir>/meta.json: invalid character ", prefix: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
@@ -179,8 +179,11 @@ func TestRunBaselineRefusals(t *testing.T) {
 			before := readMeta(t, p, "run")
 			// The baseline's state: the one this capture starts from, but
 			// for one item.
-			meta := snapshot.Meta{Tag: "base", Source: "capture", Created: before.Created, StateFormat: tc.format,
+			meta := snapshot.Meta{Tag: "base", Source: "capture", Created: before.Created, StateFormat: state.FingerprintFormat,
 				State: map[string]map[string]string{"db": {}}}
+			if tc.older {
+				meta.StateFormat--
+			}
 			for k, v := range before.State["db"] {
 				meta.State["db"][k] = v
 			}
@@ -232,7 +235,7 @@ func TestRunBaselineRefusals(t *testing.T) {
 				t.Errorf("kind of %v: want %v", err, ErrEnv)
 			}
 			want := strings.ReplaceAll(tc.want, "<dir>", base.Dir)
-			if start, cut := strings.CutSuffix(want, "…"); cut && !strings.HasPrefix(err.Error(), start) || !cut && err.Error() != want {
+			if tc.prefix && !strings.HasPrefix(err.Error(), want) || !tc.prefix && err.Error() != want {
 				t.Errorf("message:\n%s\nwant:\n%s", err, want)
 			}
 			if !slices.Contains(points, "capture.started") {
