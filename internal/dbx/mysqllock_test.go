@@ -27,9 +27,9 @@ func TestMySQLLockStopped(t *testing.T) {
 	}
 }
 
-// TestMySQLLockCancelled: only a lock stop is replaced, and only once ctx
+// TestMySQLLockCause: only a lock stop is replaced, and only once ctx
 // has ended.
-func TestMySQLLockCancelled(t *testing.T) {
+func TestMySQLLockCause(t *testing.T) {
 	deadlock := fmt.Errorf("t: %w", &mysql.MySQLError{Number: 1213})
 	other := &mysql.MySQLError{Number: 1146}
 	ended, cancel := context.WithCancel(context.Background())
@@ -43,7 +43,7 @@ func TestMySQLLockCancelled(t *testing.T) {
 		{ended, nil, nil},
 		{context.Background(), deadlock, deadlock},
 	} {
-		if got := MySQLLockCancelled(c.ctx, c.err); got != c.want {
+		if got := MySQLLockCause(c.ctx, c.err); got != c.want {
 			t.Errorf("%v (ctx %v): %v, want %v", c.err, c.ctx.Err(), got, c.want)
 		}
 	}

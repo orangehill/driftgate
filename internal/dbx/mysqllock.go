@@ -25,11 +25,11 @@ func mysqlLockStopped(err error) bool {
 	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
 }
 
-// MySQLLockCancelled is err, or ctx's error in its place when err is a lock
+// MySQLLockCause is err, or ctx's error in its place when err is a lock
 // stop and ctx has ended (RetryMySQLLock's rule). A step that wraps such a
 // cause with more to say, such as what it left undone, replaces the cause
 // with it first: RetryMySQLLock would otherwise return ctx's error alone.
-func MySQLLockCancelled(ctx context.Context, err error) error {
+func MySQLLockCause(ctx context.Context, err error) error {
 	if ctx.Err() != nil && mysqlLockStopped(err) {
 		return ctx.Err()
 	}
@@ -48,7 +48,7 @@ func RetryMySQLLock(ctx context.Context, wait time.Duration, f func() error, ret
 	for try := 0; ; try++ {
 		// Cancelled while f ran: the driver then mostly returns ctx's error
 		// itself, but a lock error may come back together with the cancel.
-		err := MySQLLockCancelled(ctx, f())
+		err := MySQLLockCause(ctx, f())
 		if !mysqlLockStopped(err) {
 			return err
 		}

@@ -1281,7 +1281,7 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 			// makes the objects again all the same.
 			done := onBackground()
 			defer done()
-			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, dbx.MySQLLockCancelled(caller, err))
+			return nil, undoDrops(dst, recovery, dropped, srcObjs.kind, srcObjs.triggers, dstObjs.triggers, trigDefs, pending, create, makeSeq, dbx.MySQLLockCause(caller, err))
 		}
 		dropped = append(dropped, d)
 	}
@@ -1308,8 +1308,8 @@ func (m *MySQL) copyObjects(ctx context.Context, c *sql.Conn, src, dst string, t
 	}
 	if err != nil {
 		// After a cancel the cause is the cancel, not the lock it stopped
-		// (dbx.MySQLLockCancelled), and the list is kept.
-		return nil, notMade(dst, recovery, dbx.MySQLLockCancelled(caller, err), dbx.MySQLLockCancelled(caller, lost), seqs, trigDefs, pending)
+		// (dbx.MySQLLockCause), and the list is kept.
+		return nil, notMade(dst, recovery, dbx.MySQLLockCause(caller, err), dbx.MySQLLockCause(caller, lost), seqs, trigDefs, pending)
 	}
 	return extra, nil
 }
