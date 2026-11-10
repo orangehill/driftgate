@@ -766,19 +766,21 @@ func cookieFormats(vals []string) []string {
 
 // cookieAttrFormat is the format of the values of one cookie attribute in
 // a group. A cookie that is set gets an expiry of its form (any HTTP date,
-// any dashed date: runs within the same second agree on it only by chance)
-// and a Max-Age of the widths seen (one width less from a power of ten:
-// 1000 is 999 a second later), never 0 or less. In a deleted cookie
-// Max-Age is one of the values seen, so that it never matches a set one;
-// its expiry, which frameworks put a year or more before the time of the
-// response, takes its form as well. Other attributes are inferred.
+// any dashed date: runs within the same second agree on it only by chance);
+// next to such a date, Max-Age is counted down from it, so it gets the
+// widths seen (one width less from a power of ten: 1000 is 999 a second
+// later), never 0 or less. Without a date, and in a deleted cookie,
+// Max-Age is one of the values seen: a lifetime that changes is a drift,
+// and a deleted cookie never matches a set one. A deleted cookie's expiry,
+// which frameworks put a year or more before the time of the response,
+// takes its form as well. Other attributes are inferred.
 func cookieAttrFormat(key string, vals []string, expires string, deleted bool) string {
 	switch {
 	case key == "expires" && expires == "http":
 		return httpDate
 	case key == "expires" && expires == "dashed":
 		return dashedDate
-	case key == "max-age" && deleted:
+	case key == "max-age" && (deleted || expires != "http" && expires != "dashed"):
 		var seen []string
 		for _, v := range vals {
 			if q := regexp.QuoteMeta(v); !slices.Contains(seen, q) {
