@@ -27,9 +27,10 @@ func mysqlLockStopped(err error) bool {
 
 // RetryMySQLLock runs f, again when the server stopped it for a lock (a
 // deadlock, 1213, or a lock wait timeout, 1205), up to MySQLLockRetries
-// times, after wait, four times as long each time. retrying is given the error before each wait. f must
-// start anew on each try: a try's result is never kept from one that
-// failed. When every try fails, or ctx ends, the last error is returned.
+// times, after wait, four times as long each time. retrying is given the
+// error before each wait. f must start anew on each try: a try's result is
+// never kept from one that failed. When every try fails, or ctx ends, the
+// last error is returned.
 func RetryMySQLLock(ctx context.Context, wait time.Duration, f func() error, retrying func(error)) error {
 	for try := 0; ; try++ {
 		err := f()
