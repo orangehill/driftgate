@@ -675,7 +675,7 @@ func valuesFormat(vals []string) string {
 // group of set ones, nor a set one a group of deleted ones. A delete that
 // keeps a value, has no Max-Age and has an expiry in the past shares the
 // group of the set cookie, as before. Values that are not a cookie (no =)
-// get one format of their own.
+// are kept each as recorded.
 func cookieFormats(vals []string) []string {
 	type groupKey struct {
 		name, skeleton, expires string
@@ -764,8 +764,10 @@ func cookieFormats(vals []string) []string {
 		}
 		out = append(out, f)
 	}
-	if other != nil {
-		out = append(out, valuesFormat(other)) // not a cookie: as recorded
+	for _, v := range other { // not a cookie: each as recorded
+		if q := regexp.QuoteMeta(v); !slices.Contains(out, q) {
+			out = append(out, q)
+		}
 	}
 	return out
 }
