@@ -69,7 +69,7 @@ func TestInitSQLite(t *testing.T) {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
 	}
 	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
-	for _, want := range []string{"#     working: database/database.sqlite\n", "#     # the framework keeps its own state in this database: SESSION_DRIVER=database", "tokens made or deleted, as at login and logout, are not compared",
+	for _, want := range []string{"#     working: database/database.sqlite\n", "#     # the framework keeps its own state in this database: SESSION_DRIVER=database", "and tokens at login and logout",
 		"#     exclude: [sessions, jobs, job_batches, failed_jobs]", "#     restore_empty: [cache, cache_locks]",
 		"#     restore_only: [personal_access_tokens]   # kept as seeded at every restore; rows a request writes there are never compared\n", "\n#     # pristine: a file of DriftGate's store",
 		`#   - ["sqlite3", "database/database.sqlite", ".read dump.sql"]`} {

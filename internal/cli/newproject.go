@@ -388,9 +388,9 @@ func stateBlock(d appconf.Database, on bool, t appconf.Tables) string {
 		b.WriteString("# found in the project's settings: driftgate setup turns it on (it asks before it creates the pristine copy), or uncomment it\n")
 	}
 	for _, l := range lines {
-		// SQLite's comments inside the block are commented with it, so they
-		// stay in line.
-		if off && (!strings.HasPrefix(strings.TrimSpace(l), "#") || d.Driver == appconf.SQLite) {
+		// Comments inside the block are commented with it, so they stay in
+		// line.
+		if off {
 			l = "# " + l
 		}
 		b.WriteString(l + "\n")
