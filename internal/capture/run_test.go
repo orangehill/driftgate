@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/snapshot"
@@ -20,10 +21,9 @@ import (
 )
 
 // TestRunRefusals: a capture that may not run is refused with its message
-// and error kind, the first refusal winning, before anything is touched (a
-// refusal before the capture folder is taken leaves the previous capture
-// where it was); one refused later, once the previous capture is moved
-// aside, puts it back.
+// and error kind, the first refusal winning. One refused before the store
+// is touched never reaches capture.started and sends nothing; one refused
+// later, once the previous capture is moved aside, puts it back.
 func TestRunRefusals(t *testing.T) {
 	get := catalog.Request{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}
 	post := catalog.Request{ID: "post", Method: "POST", Path: "/", Storage: snapshot.Public}
@@ -39,33 +39,34 @@ func TestRunRefusals(t *testing.T) {
 		prepare bool
 		kind    error
 		want    string // the whole message; with a trailing "…", its start
+		late    bool   // refused once the store is taken (after capture.started)
 	}{
 		{"restore", []catalog.Request{get}, Options{Restore: "never"}, false, ErrConfig,
-			"configuration: --restore must be once or each"},
+			"configuration: --restore must be once or each", false},
 		{"read-only prepare", []catalog.Request{get}, Options{ReadOnly: true}, true, ErrConfig,
-			"configuration: --read-only covers the requests only, not the project's commands…"},
+			"configuration: --read-only covers the requests only, not the project's commands…", false},
 		{"read-only none", []catalog.Request{post}, Options{ReadOnly: true}, false, ErrConfig,
-			"configuration: no catalog request that leaves data unchanged is selected (--read-only)"},
+			"configuration: no catalog request that leaves data unchanged is selected (--read-only)", false},
 		{"only none", []catalog.Request{get}, Options{Only: "nope"}, false, ErrConfig,
-			"configuration: no catalog request matches --only nope"},
+			"configuration: no catalog request matches --only nope", false},
 		{"empty", nil, Options{}, false, ErrConfig,
-			"configuration: the catalog has no requests"},
+			"configuration: the catalog has no requests", false},
 		{"upload before state", []catalog.Request{get, post, upload}, Options{}, false, ErrConfig,
-			"configuration: upload uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)"},
+			"configuration: upload uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)", false},
 		{"no state", []catalog.Request{get, post}, Options{AllowRemote: true}, false, ErrConfig,
-			"configuration: the catalog has requests that change data (post), but no state with a restore command is configured: configure state: in driftgate.yaml (see driftgate init)" + hint},
+			"configuration: the catalog has requests that change data (post), but no state with a restore command is configured: configure state: in driftgate.yaml (see driftgate init)" + hint, false},
 		{"remote", []catalog.Request{get, post, burst}, Options{AllowRemote: true, AllowMutatingWithoutRestore: true}, false, ErrConfig,
-			"configuration: refusing to send requests that change data or are repeated (post, burst) to a service outside allow_hosts without --allow-remote-mutations" + hint},
+			"configuration: refusing to send requests that change data or are repeated (post, burst) to a service outside allow_hosts without --allow-remote-mutations" + hint, false},
 		{"command folder", []catalog.Request{get, step}, Options{AllowMutatingWithoutRestore: true}, false, ErrEnv,
-			"environment: step: …"},
+			"environment: step: …", false},
 		// Refused after the previous capture was moved aside.
 		{"service", []catalog.Request{get, {ID: "elsewhere", Method: "GET", Path: "/", Target: "other", Storage: snapshot.Public}}, Options{}, false, ErrConfig,
-			`configuration: elsewhere: target "other": the configuration has one target and no targets: section`},
+			`configuration: elsewhere: target "other": the configuration has one target and no targets: section`, true},
 		{"identity", []catalog.Request{get, {ID: "mine", Method: "GET", Path: "/", Identity: "admin", Storage: snapshot.Public}}, Options{}, false, ErrEnv,
-			"environment: no token for identity admin"},
+			"environment: no token for identity admin", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, _ := queueProject(t, 1)
+			p, sent := queueProject(t, 1)
 			ctx := context.Background()
 			if _, err := Run(ctx, p, &catalog.Catalog{Version: 1, Requests: []catalog.Request{get}}, Options{Tag: "run"}); err != nil {
 				t.Fatal(err)
@@ -83,9 +84,20 @@ func TestRunRefusals(t *testing.T) {
 			}
 			opt := tc.opt
 			opt.Tag, opt.Force = "run", true
+			var points []string
+			chaos.At = func(point string) { points = append(points, point) }
+			t.Cleanup(func() { chaos.At = nil })
+			requests := len(sent())
 			_, err = Run(ctx, p, &catalog.Catalog{Version: 1, Requests: tc.reqs}, opt)
+			chaos.At = nil
 			if err == nil {
 				t.Fatal("the capture ran")
+			}
+			if started := slices.Contains(points, "capture.started"); started != tc.late {
+				t.Errorf("capture.started reached: %v, want %v (points %v)", started, tc.late, points)
+			}
+			if n := len(sent()) - requests; n > 0 {
+				t.Errorf("the refused capture sent %d requests", n)
 			}
 			if !errors.Is(err, tc.kind) {
 				t.Errorf("kind of %v: want %v", err, tc.kind)
@@ -127,7 +139,11 @@ func TestRunMeta(t *testing.T) {
 		cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{
 			{ID: "list", Method: "GET", Path: "/", Storage: snapshot.Public},
 			{ID: "post", Method: "POST", Path: "/", Storage: snapshot.Public},
+			{ID: "save", Method: "PUT", Path: "/", Storage: snapshot.Public},
 			{ID: "drop", Method: "DELETE", Path: "/", Storage: snapshot.Public},
+			{ID: "kill", Method: "DELETE", Path: "/", Storage: snapshot.Public},
+			{ID: "move", Method: "PATCH", Path: "/", Storage: snapshot.Public},
+			{ID: "edit", Method: "PATCH", Path: "/", Storage: snapshot.Public},
 			{ID: "add", Method: "POST", Path: "/", Storage: snapshot.Public},
 		}}
 		began := time.Now().UTC().Truncate(time.Second)
@@ -147,7 +163,7 @@ func TestRunMeta(t *testing.T) {
 			t.Errorf("created %q: %v", meta.Created, err)
 		}
 		if meta.Tag != "ro" || meta.Source != "capture" || meta.Incomplete || !meta.Unreliable || !meta.ReadOnly ||
-			!slices.Equal(meta.ReadOnlySkipped, []string{"drop", "post"}) ||
+			!slices.Equal(meta.ReadOnlySkipped, []string{"drop", "edit", "kill", "move", "post", "save"}) ||
 			len(meta.Origins) != 1 || meta.Origins["api"] != origin ||
 			len(meta.ConnectTo) != 1 || meta.ConnectTo["api"] != "127.0.0.1" ||
 			!slices.Equal(meta.Roots, projectRoots(p.Root)) || len(meta.RowTracking) != 0 ||

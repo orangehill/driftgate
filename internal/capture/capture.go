@@ -189,7 +189,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
-	if err := preflight(p, opt, readonly, units, all); err != nil {
+	if err := preflight(p, opt, units, all); err != nil {
 		return nil, err
 	}
 	set, err := p.Capture(opt.Tag)
@@ -445,9 +445,9 @@ func selectRequests(p *config.Project, cat *catalog.Catalog, opt Options) (reado
 // is changed: a real file uploaded without a restore to take it out,
 // requests that change data without a state to restore, requests that
 // change data or are repeated sent outside allow_hosts, and a command
-// that would stop halfway (checkAllCommands). all are readonly and the
-// requests of units, in that order.
-func preflight(p *config.Project, opt Options, readonly []catalog.Request, units []unit, all []catalog.Request) error {
+// that would stop halfway (checkAllCommands). all are the read-only
+// requests and then the requests of units.
+func preflight(p *config.Project, opt Options, units []unit, all []catalog.Request) error {
 	var mutating, repeats []catalog.Request
 	for _, u := range units {
 		for _, r := range u.reqs {
@@ -478,12 +478,12 @@ func preflight(p *config.Project, opt Options, readonly []catalog.Request, units
 		return configErr("refusing to send requests that change data or are repeated (%s) to a service outside allow_hosts without --allow-remote-mutations%s",
 			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
 	}
-	return checkAllCommands(p, readonly, units)
+	return checkAllCommands(p, all, units)
 }
 
 // newServices makes the service of every target reqs are sent to (a
 // command step is sent to none): a client, rate limits, allowed hosts and
-// concurrency, which concurrency replaces for the targets it names.
+// slots; concurrency sets the slots of the targets it names.
 func newServices(ctx context.Context, p *config.Project, reqs []catalog.Request, allowRemote bool, concurrency map[string]int) (map[string]*service, error) {
 	services := map[string]*service{}
 	for _, req := range reqs {
