@@ -834,18 +834,25 @@ func TestWholeRestoreDrift(t *testing.T) {
 	for _, kind := range []string{"drift", "drift mid-run", "drift mid-run, prepare", "older format", "not restored"} {
 		t.Run(kind, func(t *testing.T) {
 			older := kind == "older format"
+			curl, _ := exec.LookPath("curl")
 			ctx := context.Background()
 			t.Setenv(config.EnvStore, t.TempDir())
 			t.Setenv("DG_DRIFT_DSN", dsn)
 			work, pristine := "dgt_drift", "dgt_drift_pristine"
-			// A POST writes a row to a (the restore ends the sessions:
-			// a connection of its own each time).
+			// A POST writes a row to a; POST /prepare (the prepare: of
+			// "drift mid-run, prepare") sets b back to the rows the record
+			// has (the restore ends the sessions: a connection of its own
+			// each time).
 			var posts atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == "POST" {
 					c, err := dbx.OpenPostgres(dsn, work, nil)
 					if err == nil {
-						_, err = c.Exec("INSERT INTO a VALUES ($1)", 100+posts.Add(1))
+						if r.URL.Path == "/prepare" {
+							_, err = c.Exec("DELETE FROM b WHERE id <> 1")
+						} else {
+							_, err = c.Exec("INSERT INTO a VALUES ($1)", 100+posts.Add(1))
+						}
 						c.Close()
 					}
 					if err != nil {
@@ -943,9 +950,14 @@ func TestWholeRestoreDrift(t *testing.T) {
 				// The first restore copies nothing; the reset before the
 				// second POST (--restore each) copies the whole database,
 				// with the drift, and is compared on the fingerprint it
-				// reads after it, or with prepare: before prepare.
+				// reads after it, or with prepare: before prepare, which
+				// here sets b back as the record has it: a check after
+				// prepare would find nothing.
 				if kind == "drift mid-run, prepare" {
-					p.Prepare = []config.Command{{Run: []string{"true"}}}
+					if curl == "" {
+						t.Skip("curl not found")
+					}
+					p.Prepare = []config.Command{{Run: []string{curl, "-sf", "-X", "POST", srv.URL + "/prepare"}}}
 				}
 				cat.Requests = append(cat.Requests, catalog.Request{ID: "post1", Method: "POST", Path: "/", Storage: snapshot.Public},
 					catalog.Request{ID: "post2", Method: "POST", Path: "/", Storage: snapshot.Public})
