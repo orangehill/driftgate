@@ -530,6 +530,10 @@ func (t *tracker) checkWhole(ctx context.Context, now states) error {
 // whole and not compared in this run yet, for checkWhole, when commands
 // that may write (prepare, tokens) run before the run reads its own.
 func (t *tracker) wholeFingerprint(ctx context.Context) (states, error) {
+	defer func(start time.Time) {
+		t.time.Fingerprint += time.Since(start)
+		t.time.Fingerprints++
+	}(time.Now())
 	out := states{}
 	for _, c := range t.comps {
 		if t.copiedWhole[c.Name()] && !t.compared[c.Name()] {

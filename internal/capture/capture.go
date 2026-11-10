@@ -453,7 +453,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	// working copy is ready for the application and the next capture.
 	// Every request ran on data checked before it; a pristine copy changed
 	// since is found by the next run's first restore, so this restore
-	// reads nothing more (no readWhole).
+	// reads nothing more (no whole-copy read).
 	if (len(units) > 0 || len(r.sum.Writers) > 0) && len(p.State) > 0 {
 		if err := tr.restore(ctx); err != nil {
 			return nil, err
