@@ -509,16 +509,11 @@ func Headers(h http.Header) [][2]string {
 func MaskHeader(name, value string) string {
 	switch name {
 	case "set-cookie":
-		first, rest, _ := strings.Cut(value, ";")
-		cookie, val, ok := strings.Cut(first, "=")
+		cookie, val, attrs, ok := SplitSetCookie(value)
 		if !ok {
 			return value
 		}
-		masked := cookie + "=" + maskChars(val)
-		if rest != "" || strings.Contains(value, ";") {
-			masked += ";" + rest
-		}
-		return masked
+		return cookie + "=" + maskChars(val) + attrs
 	case "location", "content-location", "refresh":
 		masked, _ := credential.MaskURL(value, true, maskChars)
 		return masked
@@ -543,6 +538,24 @@ func MaskHeader(name, value string) string {
 		return maskChars(value)
 	}
 	return value
+}
+
+// SplitSetCookie cuts a Set-Cookie value into the cookie's name, its value
+// and its attributes, all as sent: the name is up to the first = before
+// the first ;, the value runs from there to that ;, and attrs is the rest
+// from that ; on ("" when there is none), so name + "=" + value + attrs is
+// the value again. ok is false when the part before the first ; has no =:
+// the value is not a cookie.
+func SplitSetCookie(v string) (name, value, attrs string, ok bool) {
+	i := strings.IndexByte(v, ';')
+	if i < 0 {
+		i = len(v)
+	}
+	name, value, ok = strings.Cut(v[:i], "=")
+	if !ok {
+		return "", "", "", false
+	}
+	return name, value, v[i:], true
 }
 
 // MasksWhole reports a header whose whole value MaskHeader masks: one that

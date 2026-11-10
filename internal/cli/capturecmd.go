@@ -692,16 +692,14 @@ func cookieFormats(vals []string) []string {
 	var other []string // values that are not a cookie
 	index := map[groupKey]*group{}
 	for _, v := range vals {
-		first, rest, _ := strings.Cut(v, ";")
-		cookie, value, ok := strings.Cut(first, "=")
+		cookie, value, rest, ok := httpx.SplitSetCookie(v)
 		if !ok {
 			other = append(other, v)
 			continue
 		}
 		var attrs, skeleton []string
-		if strings.Contains(v, ";") {
-			attrs = strings.Split(rest, ";")
-			rest = ";" + rest
+		if rest != "" {
+			attrs = strings.Split(rest[1:], ";")
 		}
 		k := groupKey{name: cookie, deleted: value == ""}
 		for _, a := range attrs {
