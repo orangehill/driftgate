@@ -107,9 +107,6 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	// Each method of a route is generated unless it is excluded or (without
 	// --all) a hand-written entry already reaches it.
-	g.skipUnit = func(route routes.Route, unit string) bool {
-		return o.Exclusions.ExcludedUnit(route, unit) != nil
-	}
 	if !o.All {
 		g.byHand = reached(o.Inventory, manual)
 	}
@@ -151,15 +148,14 @@ func reachKey(route routes.Route, unit string) string {
 }
 
 type generator struct {
-	o        Options
-	res      *Result
-	ids      map[string]bool
-	values   map[string][]string // query results, by state and SQL
-	bases    map[string]string   // ID base of each route and method
-	skipUnit func(routes.Route, string) bool
-	byHand   map[string][]string // route method → entries written by hand that reach it (nil with --all)
-	from     []catalog.Request   // generated requests that take a value from a response
-	hits     []settingHits       // what each entry of requests: named
+	o      Options
+	res    *Result
+	ids    map[string]bool
+	values map[string][]string // query results, by state and SQL
+	bases  map[string]string   // ID base of each route and method
+	byHand map[string][]string // route method → entries written by hand that reach it (nil with --all)
+	from   []catalog.Request   // generated requests that take a value from a response
+	hits   []settingHits       // what each entry of requests: named
 }
 
 // settingHits are the routes and methods an entry of requests: named.
@@ -524,7 +520,7 @@ func takesBody(m string) bool { return m == "POST" || m == "PUT" || m == "PATCH"
 func (g *generator) route(ctx context.Context, route routes.Route, templates []string) ([]catalog.Request, error) {
 	var out []catalog.Request
 	for _, m := range methods(route) {
-		if g.skipUnit != nil && g.skipUnit(route, m) {
+		if g.o.Exclusions.ExcludedUnit(route, m) != nil {
 			continue
 		}
 		if hand := g.byHand[reachKey(route, m)]; len(hand) > 0 {
@@ -542,10 +538,12 @@ func (g *generator) route(ctx context.Context, route routes.Route, templates []s
 
 // replaced notes a route method that entries written by hand reach, with
 // the requests generate would make for it: their IDs come from a copy of
-// the generator, so nothing of this one (IDs taken, the entries of
-// requests: named, sequences, skips) changes. A query for a parameter
-// value that fails here only leaves the generated IDs out: the route is
-// not generated, so it never fails generate.
+// the generator, so the IDs taken, the entries of requests: named, the
+// sequences and the skips of this one do not change. The copy shares the
+// query results (values) and adds to them: a value queried here is not
+// queried again. A query for a parameter value that fails here only
+// leaves the generated IDs out: the route is not generated, so it never
+// fails generate.
 func (g *generator) replaced(ctx context.Context, route routes.Route, m string, templates []string, hand []string) {
 	scratch := &generator{o: g.o, res: &Result{}, ids: maps.Clone(g.ids), values: g.values, bases: g.bases}
 	reqs, err := scratch.routeMethod(ctx, route, m, templates)
