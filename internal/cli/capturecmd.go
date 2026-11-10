@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"regexp/syntax"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -665,108 +665,165 @@ func valuesFormat(vals []string) string {
 	return regexp.QuoteMeta(vals[0])
 }
 
-// cookieFormats are the formats of Set-Cookie values, one per cookie name:
-// the name as it is, its value (masked when recorded, which keeps its
-// length) as text without a ; of the lengths seen, and the attributes
-// after it (expiry, path, flags), which are recorded as sent (attrsFormat).
-// A cookie that is emptied or set to "deleted" does not match.
+// cookieFormats are the formats of Set-Cookie values, one per cookie
+// group: the values of one cookie name with the same attributes in the
+// same order (their keys and flags as sent), of one kind (a cookie set, or
+// one deleted: emptied or with a Max-Age of 0 or less) and one form of
+// expiry. The name is as it is, the value (masked when recorded, which
+// keeps its length) is text without a ; of the lengths seen, and each
+// attribute takes cookieAttrFormat. A deleted cookie does not match a
+// group of set ones, nor a set one a group of deleted ones.
 func cookieFormats(vals []string) []string {
-	var names []string
-	attrs := map[string][]string{}
-	lengths := map[string][2]int{} // shortest and longest value, in characters
+	type groupKey struct {
+		name, skeleton, expires string
+		deleted                 bool
+	}
+	type group struct {
+		groupKey
+		lo, hi int        // shortest and longest value, in characters
+		vals   []string   // as recorded
+		rests  []string   // the attributes as one text, from the first ;
+		attrs  [][]string // the attributes, split at ;
+	}
+	var groups []*group
+	index := map[groupKey]*group{}
 	for _, v := range vals {
 		first, rest, _ := strings.Cut(v, ";")
 		cookie, value, ok := strings.Cut(first, "=")
 		if !ok {
 			return []string{valuesFormat(vals)} // not a cookie: as recorded
 		}
-		n := utf8.RuneCountInString(value)
-		if l, ok := lengths[cookie]; !ok {
-			names = append(names, cookie)
-			lengths[cookie] = [2]int{n, n}
-		} else {
-			lengths[cookie] = [2]int{min(l[0], n), max(l[1], n)}
-		}
+		var attrs, skeleton []string
 		if strings.Contains(v, ";") {
+			attrs = strings.Split(rest, ";")
 			rest = ";" + rest
 		}
-		attrs[cookie] = append(attrs[cookie], rest)
-	}
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		l, length := lengths[n], fmt.Sprintf("{%d}", lengths[n][0])
-		switch {
-		case l[1] == 0:
-			length = "{0}" // only ever empty
-		case l[0] != l[1]:
-			length = fmt.Sprintf("{%d,%d}", max(l[0], 1), l[1])
+		k := groupKey{name: cookie, deleted: value == ""}
+		for _, a := range attrs {
+			key, val, isValue := strings.Cut(a, "=")
+			if isValue {
+				key += "="
+			}
+			skeleton = append(skeleton, key)
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "max-age=":
+				n, err := strconv.Atoi(val)
+				k.deleted = k.deleted || err == nil && n <= 0
+			case "expires=":
+				k.expires = expiresForm(val)
+			}
 		}
-		out = append(out, regexp.QuoteMeta(n)+"=[^;]"+length+attrsFormat(attrs[n]))
+		k.skeleton = strings.Join(skeleton, ";")
+		n := utf8.RuneCountInString(value)
+		g := index[k]
+		if g == nil {
+			g = &group{groupKey: k, lo: n, hi: n}
+			index[k] = g
+			groups = append(groups, g)
+		}
+		g.lo, g.hi = min(g.lo, n), max(g.hi, n)
+		g.vals, g.rests, g.attrs = append(g.vals, v), append(g.rests, rest), append(g.attrs, attrs)
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		length := fmt.Sprintf("{%d}", g.lo)
+		switch {
+		case g.hi == 0:
+			length = "{0}" // only ever empty
+		case g.lo != g.hi:
+			length = fmt.Sprintf("{%d,%d}", max(g.lo, 1), g.hi)
+		}
+		head := regexp.QuoteMeta(g.name) + "=[^;]" + length
+		var b strings.Builder
+		for i, a := range g.attrs[0] {
+			key, _, isValue := strings.Cut(a, "=")
+			b.WriteString(";" + regexp.QuoteMeta(key))
+			if !isValue {
+				continue // a flag (secure, httponly), as sent
+			}
+			col := make([]string, len(g.attrs))
+			for j, attrs := range g.attrs {
+				_, col[j], _ = strings.Cut(attrs[i], "=")
+			}
+			b.WriteString("=(?:" + cookieAttrFormat(strings.ToLower(strings.TrimSpace(key)), col, g.expires, g.deleted) + ")")
+		}
+		f := head + b.String()
+		// Each part matches its values; should the whole not match one, the
+		// attributes are inferred as one text.
+		re, err := regexp.Compile(`^(?:` + f + `)$`)
+		for _, v := range g.vals {
+			if err != nil || !re.MatchString(v) {
+				f = head + valuesFormat(g.rests)
+				break
+			}
+		}
+		out = append(out, f)
 	}
 	return out
 }
 
-// attrsFormat is the format of a cookie's attributes, with an expiry
-// written as an HTTP date taking any HTTP date: runs within the same
-// second agree on it only by chance. The date is set aside (dateMark)
-// while the rest is inferred, and the format takes httpDate in its place
-// only where the mark stayed a character of its own; otherwise, as for an
-// expiry in any other form, the attributes are inferred as they are.
-func attrsFormat(attrs []string) string {
-	marked := make([]string, len(attrs))
-	for i, a := range attrs {
-		if strings.Contains(a, dateMark) {
-			return valuesFormat(attrs)
+// cookieAttrFormat is the format of the values of one cookie attribute in
+// a group. A cookie that is set gets an expiry of its form (any HTTP date,
+// any dashed date: runs within the same second agree on it only by chance)
+// and a Max-Age of the widths seen (one width less from a power of ten:
+// 1000 is 999 a second later), never 0 or less. In a deleted cookie
+// Max-Age stays as it is, so that it never matches a set one; its expiry,
+// which frameworks put a year or more before the time of the response,
+// takes its form as well. Other attributes are inferred.
+func cookieAttrFormat(key string, vals []string, expires string, deleted bool) string {
+	switch {
+	case key == "expires" && expires == "http":
+		return httpDate
+	case key == "expires" && expires == "dashed":
+		return dashedDate
+	case key == "max-age" && deleted:
+		return regexp.QuoteMeta(vals[0])
+	case key == "max-age":
+		short, lo, hi := vals[0], len(vals[0]), 0
+		for _, v := range vals {
+			if !allDigits(v) {
+				return valuesFormat(vals)
+			}
+			if len(v) < len(short) || len(v) == len(short) && v < short {
+				short = v
+			}
+			lo, hi = min(lo, len(v)), max(hi, len(v))
 		}
-		marked[i] = expiresDate().ReplaceAllString(a, "${1}"+dateMark)
-	}
-	p := valuesFormat(marked)
-	if !markLiteral(p) {
-		return valuesFormat(attrs)
-	}
-	f := strings.ReplaceAll(p, dateMark, httpDate)
-	re, err := regexp.Compile(`^(?:` + f + `)$`)
-	if err != nil {
-		return valuesFormat(attrs)
-	}
-	for _, a := range attrs {
-		if !re.MatchString(a) {
-			return valuesFormat(attrs)
+		if len(short) > 1 && strings.TrimRight(short, "0") == "1" {
+			lo-- // a power of ten
 		}
+		if lo == hi {
+			return fmt.Sprintf(`\d{%d}`, lo)
+		}
+		return fmt.Sprintf(`\d{%d,%d}`, lo, hi)
 	}
-	return f
+	return valuesFormat(vals)
 }
 
-// dateMark stands for an expiry's HTTP date in attrsFormat. A header value
-// cannot hold it, and regexp.QuoteMeta and infer keep it as it is.
-const dateMark = "\x00"
-
-var expiresDate = lazy.Regexp(`(;\s*(?i:expires)=)` + httpDate)
-
-// markLiteral reports whether dateMark is only ever a literal character in
-// the pattern, never one of a class ([…]) that infer made of mixed values.
-func markLiteral(p string) bool {
-	re, err := syntax.Parse(p, syntax.Perl)
-	if err != nil {
-		return false
+// expiresForm is the form of a cookie's expiry: an HTTP date, a dashed
+// date, or other.
+func expiresForm(v string) string {
+	switch {
+	case httpDateValue().MatchString(v):
+		return "http"
+	case dashedDateValue().MatchString(v):
+		return "dashed"
 	}
-	var literal func(*syntax.Regexp) bool
-	literal = func(n *syntax.Regexp) bool {
-		if n.Op == syntax.OpCharClass {
-			for i := 0; i < len(n.Rune); i += 2 {
-				if n.Rune[i] == 0 {
-					return false
-				}
-			}
-		}
-		for _, s := range n.Sub {
-			if !literal(s) {
-				return false
-			}
-		}
-		return true
-	}
-	return literal(re)
+	return "other"
+}
+
+// dashedDate is the format of a cookie's expiry as PHP's setcookie and
+// other Netscape-style writers send it (Thu, 01-Jan-1970 00:00:01 GMT).
+const dashedDate = `[A-Z][a-z]{2}, \d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2} GMT`
+
+var (
+	httpDateValue   = lazy.Regexp(`^(?:` + httpDate + `)$`)
+	dashedDateValue = lazy.Regexp(`^(?:` + dashedDate + `)$`)
+)
+
+// allDigits reports a run of digits only.
+func allDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
 var yamlQuote = compare.YAMLQuote
