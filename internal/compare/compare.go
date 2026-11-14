@@ -138,6 +138,11 @@ type Drift struct {
 	// neutral origin, so that the drift reads the same captured from
 	// another address (a worktree on another port); empty otherwise.
 	Material string `json:"-"`
+	// RowValues are, of a side effect where a row changed alike on both
+	// sides but with other values, those columns
+	// (<component>/table:<name>.<column>): the drifts two captures of one
+	// state have learn them as volatile.
+	RowValues []string `json:"-"`
 	// parted: rules with parts judge the values; what is digested of them
 	// is the witness (their pieces), not the values as they are.
 	parted bool
@@ -291,6 +296,10 @@ type Side struct {
 	// release). Rows of an item the other side did not track are not
 	// compared: a note says so.
 	RowTables []string
+	// NoRowValues: the values of tracked rows are not compared (the set
+	// compared against was captured once, so the columns that change by
+	// themselves are not known).
+	NoRowValues bool
 	// Folders are the forms of the two sides' Roots, made once for many
 	// requests (NewFolders, the same on both sides); nil: made from Roots.
 	Folders *Folders
@@ -409,7 +418,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, !base.NoRowValues && !cur.NoRowValues)
 		}
 	}
 }
@@ -435,7 +444,7 @@ func (c *comparer) rawAllowed(base, cur Side) bool {
 // sideEffects compares the items a request changed and, of the tables
 // both sides tracked rows of (bTables, vTables; nil: every table), its
 // rows.
-func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string) {
+func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string, values bool) {
 	b, v := map[string]bool{}, map[string]bool{}
 	for _, it := range base.Items {
 		b[it] = true
@@ -472,8 +481,8 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 		}
 		return true
 	}
-	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string) {
-		m := map[string]string{}
+	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string, map[string]snapshot.RowChange) {
+		m, changes := map[string]string{}, map[string]snapshot.RowChange{}
 		var keys []string
 		for _, r := range list {
 			if untracked(r.Item, other, why) {
@@ -483,16 +492,50 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 			if _, ok := m[k]; !ok {
 				keys = append(keys, k)
 			}
-			m[k] = describe(r)
+			m[k], changes[k] = describe(r), r
 		}
-		return m, keys
+		return m, keys, changes
 	}
-	bRows, bKeys := rows(base.Rows, vTables, "row_tracking no longer covers the table")
-	vRows, vKeys := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	bRows, bKeys, bChanges := rows(base.Rows, vTables, "row_tracking no longer covers the table")
+	vRows, vKeys, vChanges := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	volatile := map[string]bool{}
+	for _, v := range [][]string{base.Volatile, cur.Volatile} {
+		for _, col := range v {
+			volatile[col] = true
+		}
+	}
 	for _, k := range bKeys {
 		if vRows[k] != bRows[k] {
 			c.add(KindSideEffect, "side-effects:"+k, bRows[k], orNone(vRows[k]))
+			continue
 		}
+		if c.level < LevelValues || !values {
+			continue
+		}
+		// The row changed alike: the values it got are compared, of the
+		// columns both sides named a value of (none of a set that
+		// recorded none, nor of a column row_tracking ignores on either
+		// side), apart from those two captures of one state disagree on.
+		b, v := bChanges[k], vChanges[k]
+		var cols, named []string
+		for col, bv := range b.Values {
+			if vv, ok := v.Values[col]; ok && vv != bv && !volatile[b.Item+"."+col] {
+				cols = append(cols, col)
+			}
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		sort.Strings(cols)
+		for _, col := range cols {
+			named = append(named, b.Item+"."+col)
+		}
+		what := "other value: "
+		if len(cols) > 1 {
+			what = "other values: "
+		}
+		c.add(KindSideEffect, "side-effects:"+k, bRows[k], vRows[k]+"; "+what+strings.Join(cols, ","))
+		c.drifts[len(c.drifts)-1].RowValues = named
 	}
 	for _, k := range vKeys {
 		if _, ok := bRows[k]; !ok {

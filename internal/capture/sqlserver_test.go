@@ -21,6 +21,7 @@ import (
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -100,11 +101,12 @@ func (s *sqlServerCapture) open(t *testing.T, db string) *sql.DB {
 // as its state db, its sessions table excluded.
 func (s *sqlServerCapture) project(t *testing.T, url string) *config.Project {
 	t.Helper()
+	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=") // row_tracking names row values with the key; never the Keychain
 	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
 	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
 		Target: config.Target{BaseURL: url},
 		State: map[string]config.Component{"db": {Driver: config.SQLServer, DSN: config.Secret{Env: "DG_TEST_SQLSERVER"},
-			Working: s.work, Pristine: s.work + "_pristine", Exclude: []string{"sessions"}, RowTracking: []string{"users"}}}}, t.TempDir())
+			Working: s.work, Pristine: s.work + "_pristine", Exclude: []string{"sessions"}, RowTracking: config.Tables("users")}}}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

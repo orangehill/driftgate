@@ -22,7 +22,8 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 		NoRequest: NewGap([]string{"GET /api/extra"}), NoInvalidBody: NewGap([]string{"POST /api/posts"}), FailedInBaseline: NewGap([]string{"get-tree"}), Observed: NewGap(ids),
 		Skipped: []SkippedGap{{What: SkippedMutating, Reason: "no baseline", Gap: *NewGap([]string{"post-import"})},
 			{What: SkippedRead, Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}, {What: SkippedCommand, Reason: "no baseline", Gap: *NewGap([]string{"schema"})}},
-		KnownFailures: NewGap([]string{"get-old"})}
+		KnownFailures: NewGap([]string{"get-old"}),
+		RowValues:     &SkippedGap{What: SkippedMutating, Reason: "the baseline recorded no row values", Gap: *NewGap([]string{"post-follow"})}}
 	g, drifted, elsewhere, ok := r.FindDominant()
 	if !ok || g.Requests != 5 || drifted != 5 || elsewhere != 0 {
 		t.Fatalf("dominant %v %d %d %v", g, drifted, elsewhere, ok)
@@ -35,12 +36,12 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 	gaps := []string{"1 route method without a request meant to succeed: GET /api/extra",
 		"1 route method whose validation error no request checks (templates empty-body and json-errors): POST /api/posts", "1 request meant to succeed that failed in baseline:local: get-tree",
 		"12 requests observed (measured, not compared): get-r-0, get-r-1, get-r-2, get-r-3, get-r-4 and 7 more", "1 request that changes data skipped (no baseline): post-import", "1 read skipped (" + NoteNotSent + "): get-in-seq", "1 command step skipped (no baseline): schema",
-		"1 known failure (exclusions.yaml): get-old"}
+		"1 known failure (exclusions.yaml): get-old", "1 request that changes data whose row values were not compared (the baseline recorded no row values): post-follow"}
 	dominant := "one change in 5 of 5 drifted requests: header x-a is new; set aside, 0 of 5 drift in something else; fix it, or take it with driftgate accept group:1"
 	mdGaps := []string{"> - 1 route method without a request meant to succeed: GET /api/extra", "> - 12 requests observed (measured, not compared)"}
 	want := map[string][]string{
 		"text":     append([]string{catalogLine, notCoveredTitle, dominant}, gaps...),
-		"json":     {`"not_covered": {`, `"multipart": 0`, `"routes_checked": true`, `"count": 12`, `"get-r-9"`, `"no_invalid_body": {`, `"what": "read"`, `"reason": "not sent: capture --read-only"`, `"dominant": {`, `"elsewhere": 0`, `"get-tree"`},
+		"json":     {`"not_covered": {`, `"multipart": 0`, `"routes_checked": true`, `"count": 12`, `"get-r-9"`, `"no_invalid_body": {`, `"what": "read"`, `"reason": "not sent: capture --read-only"`, `"dominant": {`, `"elsewhere": 0`, `"get-tree"`, `"row_values": {`},
 		"markdown": append([]string{"catalog: 19 requests", "driftgate coverage lists the routes", "one change in 5 of 5 drifted requests"}, mdGaps...),
 		"junit":    append([]string{catalogLine, "driftgate coverage lists the routes", dominant}, gaps...),
 	}

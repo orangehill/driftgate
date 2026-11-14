@@ -55,7 +55,7 @@ func (r *runner) findWritersHalving(ctx context.Context, reqs []catalog.Request,
 			if err != nil {
 				return nil, nil, err
 			}
-			rows = rowChanges(rowsBefore, rowsAfter)
+			rows = r.tr.rowChanges(rowsBefore, rowsAfter)
 		}
 		return d, rows, nil
 	}

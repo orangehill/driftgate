@@ -19,6 +19,8 @@ import (
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
+	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -180,7 +182,12 @@ type tracker struct {
 	formats  map[string]int      // the format the pristine fingerprints were recorded in
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
-	out      io.Writer
+	// values names the values requests write into tracked rows; nil: not
+	// recorded (no project key). ignore are row_tracking's ignored
+	// columns, per component.
+	values *secret.RowValues
+	ignore map[string]config.RowTables
+	out    io.Writer
 	// resends is how many requests may still be sent again after the last
 	// restore (resendAfterRestore): the application's sessions with a
 	// database it ended (state.SessionEnder), each a pooled connection
@@ -236,7 +243,7 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			closeAll()
 			return nil, nil, configErr("state %s: %v", n, err)
 		}
-		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RestoreOnly: sc.RestoreOnly, RestoreEmpty: sc.RestoreEmpty, RowTracking: sc.RowTracking, Log: log,
+		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RestoreOnly: sc.RestoreOnly, RestoreEmpty: sc.RestoreEmpty, RowTracking: sc.RowTracking.Names(), Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
 		// The record's path names the pristine file of SQLite and is
 		// removed by a seed; MySQL and PostgreSQL need it for neither.
@@ -308,6 +315,10 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		}
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
+			if t.ignore == nil {
+				t.ignore = map[string]config.RowTables{}
+			}
+			t.ignore[c.Name()] = sc.RowTracking
 		}
 		pf, path, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
@@ -683,6 +694,25 @@ func limit(items []string, n int) []string {
 	return append(items[:n:n], fmt.Sprintf("and %d more", len(items)-n))
 }
 
+// loadRowValues takes the project key that names the values requests
+// write into tracked rows, when rows are tracked. Without a key the values
+// are not recorded (none): never by a plain hash, which would let a short
+// value be guessed from the capture.
+func (t *tracker) loadRowValues(p *config.Project) (none bool, err error) {
+	if !t.rows {
+		return false, nil
+	}
+	key, err := p.LoadKey()
+	if errors.Is(err, secret.ErrNoKey) {
+		return true, nil
+	}
+	if err != nil {
+		return false, envErr("row_tracking names the values requests write with the project key: %v", err)
+	}
+	t.values = key.RowValues()
+	return false, nil
+}
+
 // readRows reads the tracked tables of every component.
 func (t *tracker) readRows(ctx context.Context) (map[string]state.Rows, error) {
 	if !t.rows {
@@ -699,7 +729,7 @@ func (t *tracker) readRows(ctx context.Context) (map[string]state.Rows, error) {
 	return out, nil
 }
 
-func rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
+func (t *tracker) rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
 	var out []snapshot.RowChange
 	names := make([]string, 0, len(after))
 	for n := range after {
@@ -708,7 +738,56 @@ func rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
 	sort.Strings(names)
 	for _, n := range names {
 		for _, ch := range state.RowDiff(before[n], after[n]) {
-			out = append(out, snapshot.RowChange{Item: n + "/table:" + ch.Table, Key: ch.Key, Change: ch.Change, Columns: ch.Columns})
+			item := n + "/table:" + ch.Table
+			rc := snapshot.RowChange{Item: item, Key: ch.Key, Change: ch.Change, Columns: ch.Columns}
+			if t.values != nil && ch.Change != "deleted" {
+				rc.Values = t.rowValues(n, item, ch, after[n][ch.Table][ch.Key])
+			}
+			out = append(out, rc)
+		}
+	}
+	return out
+}
+
+// rowValues names the values a request wrote into a row (row, the column
+// → value hash the state read after it): every column of an inserted
+// row, the changed ones of an updated row, apart from ignored columns.
+// nil when no column is left.
+func (t *tracker) rowValues(comp, item string, ch state.RowChange, row map[string]string) map[string]string {
+	cols := ch.Columns
+	if ch.Change == "inserted" {
+		cols = make([]string, 0, len(row))
+		for c := range row {
+			cols = append(cols, c)
+		}
+	}
+	ignored := ignoredColumns(t.ignore[comp], ch.Table)
+	var out map[string]string
+	for _, c := range cols {
+		v, ok := row[c]
+		if !ok || slices.ContainsFunc(ignored, func(g string) bool { return glob.Match(strings.ToLower(g), strings.ToLower(c)) }) {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[c] = t.values.Name(item, c, v)
+	}
+	return out
+}
+
+// ignoredColumns are the ignore globs of row_tracking for table as the
+// driver names it: by its name without letter case, or, for a table
+// configured without a schema, by its name without the schema.
+func ignoredColumns(tables config.RowTables, table string) []string {
+	bare := table
+	if i := strings.LastIndexByte(table, '.'); i >= 0 {
+		bare = table[i+1:]
+	}
+	var out []string
+	for _, rt := range tables {
+		if strings.EqualFold(rt.Name, table) || !strings.Contains(rt.Name, ".") && strings.EqualFold(rt.Name, bare) {
+			out = append(out, rt.Ignore...)
 		}
 	}
 	return out

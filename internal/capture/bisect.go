@@ -72,7 +72,7 @@ func (r *runner) findWriters(ctx context.Context, reqs []catalog.Request, before
 			if err != nil {
 				return nil, nil, err
 			}
-			rows = rowChanges(rowsBefore, rowsAfter)
+			rows = r.tr.rowChanges(rowsBefore, rowsAfter)
 		}
 		return d, rows, nil
 	}

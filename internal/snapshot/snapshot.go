@@ -112,6 +112,10 @@ func (r *Retry) First() string {
 type SideEffects struct {
 	Items []string    `json:"items"`          // <component>/<item>, e.g. db/table:faq
 	Rows  []RowChange `json:"rows,omitempty"` // rows of tables under row_tracking
+	// Volatile are the columns whose values differed between two captures
+	// of the same state (<component>/table:<name>.<column>): their values
+	// are not compared for this request.
+	Volatile []string `json:"volatile,omitempty"`
 }
 
 // RowChange is one changed row of a tracked table.
@@ -120,6 +124,11 @@ type RowChange struct {
 	Key     string   `json:"key"`  // primary key as column=value pairs
 	Change  string   `json:"change"`
 	Columns []string `json:"columns,omitempty"` // for an update: the columns that changed
+	// Values names the values the request wrote (secret.RowValues): of
+	// every column of an inserted row, of the changed columns of an
+	// updated one, apart from the columns row_tracking ignores. nil when
+	// the capture recorded no values (no project key, an earlier release).
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // Meta describes a snapshot set.
@@ -167,6 +176,9 @@ type Meta struct {
 	// (row_tracking: <component>/table:<name>), [] for none; nil in a
 	// capture of an earlier release, which does not say.
 	RowTracking []string `json:"row_tracking"`
+	// RowValues names the key the values of tracked rows were named under
+	// (secret.RowValues.ID); empty when the capture recorded no values.
+	RowValues string `json:"row_values,omitempty"`
 }
 
 // Concurrency is the decision of concurrency: auto for one service, with

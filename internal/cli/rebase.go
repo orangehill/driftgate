@@ -278,6 +278,9 @@ func rebaseChecks(p *config.Project, oldMeta *snapshot.Meta, cur *snapshot.Set, 
 	case meta.State != nil && meta.StateFormat != state.FingerprintFormat:
 		return nil, configErr("capture %s has a state fingerprint of an earlier format; capture it again", tag)
 	}
+	if err := rebaseRowValues(p, oldMeta, meta, tag); err != nil {
+		return nil, err
+	}
 	recs, err := cur.Records()
 	if err != nil {
 		return nil, envErr(err)

@@ -307,6 +307,9 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	if err != nil {
 		return stop(envErr(err))
 	}
+	if err := rowValuesKey(namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return stop(err)
+	}
 
 	// Every record is read here and again when its request is compared.
 	base.CacheRecords()
@@ -385,6 +388,7 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	}
 	// What the result does not cover, from the records read already.
 	gaps := notCovered(p, o.sel, cat, reqs, o.only != "", baseName, base, results, o.coverage)
+	gaps.RowValues = rowValuesGap(base, cur, ids)
 	known := catalogIDs(cat)
 	if o.someTargets {
 		known = func(string) bool { return true } // the catalog holds some services only
@@ -662,6 +666,7 @@ func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sid
 		b.Roots, c.Roots = origins.roots[0], origins.roots[1]
 		b.Folders, c.Folders = origins.folders, origins.folders
 		b.RowTables, c.RowTables = origins.rowTables[0], origins.rowTables[1]
+		b.NoRowValues = origins.noRowValues
 	}
 	// Two bodies with one name are the same bytes, which is all the
 	// comparison needs to know of them: neither is read.

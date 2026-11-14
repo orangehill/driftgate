@@ -38,6 +38,9 @@ type NotCovered struct {
 	Skipped []SkippedGap `json:"skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
+	// Requests that changed tracked rows whose values were not compared,
+	// and why (a side recorded none).
+	RowValues *SkippedGap `json:"row_values,omitempty"`
 }
 
 // CatalogCounts are requests by what they do; Multipart are among the
@@ -85,7 +88,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil && n.RowValues == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -156,6 +159,9 @@ func (n *NotCovered) NotCoveredLines() []string {
 		add(&g, one+" skipped ("+s.Reason+")", many+" skipped ("+s.Reason+")")
 	}
 	add(n.KnownFailures, "known failure (exclusions.yaml)", "known failures (exclusions.yaml)")
+	if g := n.RowValues; g != nil {
+		add(&g.Gap, "request that changes data whose row values were not compared ("+g.Reason+")", "requests that change data whose row values were not compared ("+g.Reason+")")
+	}
 	return out
 }
 

@@ -107,6 +107,9 @@ type Summary struct {
 	// fingerprints taken anyway (with a tokens command, one more after
 	// the first restore, and the later restores are not checked).
 	Prepared []string
+	// NoRowValues: row_tracking is on, but no project key was at hand, so
+	// the values requests wrote into tracked rows were not recorded.
+	NoRowValues bool
 }
 
 // Time is where a capture spent its time.
@@ -234,11 +237,15 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	defer tr.close()
+	noValues, err := tr.loadRowValues(p)
+	if err != nil {
+		return nil, err
+	}
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
 		timings: map[string]int64{},
 		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
-			Retried: map[string]*snapshot.Retry{}}}
+			Retried: map[string]*snapshot.Retry{}, NoRowValues: noValues}}
 	if r.uploads, err = prepareUploads(p, all); err != nil {
 		return nil, err
 	}
@@ -525,6 +532,9 @@ func (r *runner) markComplete(opt Options, created string, skip map[string]bool)
 	p := r.p
 	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
 		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
+	if r.tr.values != nil {
+		meta.RowValues = r.tr.values.ID()
+	}
 	if opt.ReadOnly {
 		// What it left out, as the catalog was: a comparison reads the
 		// list, not the catalog of its own time.
@@ -1078,7 +1088,7 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 			if err != nil {
 				return nil, err
 			}
-			se.Rows = rowChanges(rowsBefore, rowsAfter)
+			se.Rows = r.tr.rowChanges(rowsBefore, rowsAfter)
 		}
 		res.Record.SideEffects = se
 	}
@@ -1097,7 +1107,7 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 func rowTrackingItems(p *config.Project) []string {
 	out := []string{}
 	for name, sc := range p.State {
-		for _, t := range sc.RowTracking {
+		for _, t := range sc.RowTracking.Names() {
 			switch {
 			case strings.Contains(t, "."):
 			case sc.Driver == config.Postgres:

@@ -29,6 +29,7 @@ func setOrigins(p *config.Project, base, cur *snapshot.Set) (s *sides, notes []s
 	sets := [2]*snapshot.Set{base, cur}
 	var recorded [2]map[string]string
 	var roots, rowTables [2][]string
+	noRowValues := false
 	for i, s := range sets {
 		meta, err := s.Meta()
 		if err != nil {
@@ -36,6 +37,7 @@ func setOrigins(p *config.Project, base, cur *snapshot.Set) (s *sides, notes []s
 		}
 		if meta != nil {
 			recorded[i], roots[i], rowTables[i] = meta.Origins, meta.Roots, meta.RowTracking
+			noRowValues = noRowValues || i == 0 && onceWithValues(meta)
 		}
 	}
 	var origins map[string][2][]string
@@ -69,10 +71,10 @@ func setOrigins(p *config.Project, base, cur *snapshot.Set) (s *sides, notes []s
 	// Two records of one folder in a home folder (~/…) may be of two
 	// homes: compared through them too.
 	home := slices.ContainsFunc(append(append([]string{}, roots[0]...), roots[1]...), func(r string) bool { return strings.HasPrefix(r, "~") })
-	if origins == nil && slices.Equal(roots[0], roots[1]) && !home && (rowTables[0] == nil || rowTables[1] == nil || slices.Equal(rowTables[0], rowTables[1])) {
+	if origins == nil && slices.Equal(roots[0], roots[1]) && !home && (rowTables[0] == nil || rowTables[1] == nil || slices.Equal(rowTables[0], rowTables[1])) && !noRowValues {
 		return nil, notes, nil
 	}
-	return &sides{origins: origins, roots: roots, rowTables: rowTables, folders: compare.NewFolders(roots[0], roots[1])}, notes, nil
+	return &sides{origins: origins, roots: roots, rowTables: rowTables, folders: compare.NewFolders(roots[0], roots[1]), noRowValues: noRowValues}, notes, nil
 }
 
 // sides are what the two sets of a comparison were captured from where
@@ -83,7 +85,15 @@ type sides struct {
 	roots     [2][]string
 	rowTables [2][]string      // the tables whose rows each tracked (meta.RowTracking)
 	folders   *compare.Folders // the forms of roots, made once for every request
+	// noRowValues: the set compared against recorded row values but was
+	// captured once, so the columns whose values change by themselves are
+	// not known: its row values are not compared (rowValuesGap).
+	noRowValues bool
 }
+
+// onceWithValues reports a set that recorded row values in a single
+// capture, not checked against a second capture of the same state.
+func onceWithValues(meta *snapshot.Meta) bool { return meta.RowValues != "" && meta.Agreed < 2 }
 
 // noOrigin says how to capture a set that records no origin again.
 func noOrigin(p *config.Project, s *snapshot.Set) error {

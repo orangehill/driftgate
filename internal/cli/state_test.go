@@ -15,6 +15,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/orangehill/driftgate/internal/demo"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
@@ -48,6 +49,7 @@ type dbProject struct {
 // DRIFTGATE_TEST_MYSQL, with that database as the project's state.
 func newDBProject(t *testing.T) *dbProject {
 	t.Helper()
+	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=") // row_tracking names row values with the key; never the Keychain
 	servers := os.Getenv("DRIFTGATE_TEST_MYSQL")
 	if servers == "" {
 		t.Skip("DRIFTGATE_TEST_MYSQL not set")

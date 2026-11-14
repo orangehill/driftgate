@@ -26,6 +26,7 @@ import (
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
@@ -406,6 +407,9 @@ func summarize(out, errOut io.Writer, tag string, sum *capture.Summary, cat *cat
 	}
 	retriedNote(out, sum)
 	preparedNote(out, sum)
+	if sum.NoRowValues {
+		fmt.Fprintf(out, "\nrow_tracking: the values requests write were not recorded, only which rows and columns they change: no project key (%s, key: in %s, or driftgate key create)\n", secret.EnvKey, config.FileName)
+	}
 	if len(sum.Personal) > 0 {
 		ids := make([]string, 0, len(sum.Personal))
 		for id := range sum.Personal {
@@ -471,6 +475,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 	headers := map[string][][]string{} // name → values at each position, over all runs
 	var headerNames []string
 	var other []compare.Drift
+	learned := map[string][]string{} // request → columns of tracked rows whose values differ by themselves
 	for _, tag := range tags[1:] {
 		set, err := p.Capture(tag)
 		if err != nil {
@@ -505,6 +510,8 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			}
 			for i, d := range res.Drifts {
 				switch {
+				case valuesOnly(d):
+					learned[req.ID] = mergeVolatile(learned[req.ID], d.RowValues)
 				case d.Kind == compare.KindHeaderValue && len(d.Values[0]) == len(d.Values[1]):
 					// Values are matched by position: the n-th Set-Cookie of
 					// one run with the n-th of the other.
@@ -532,6 +539,17 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 				}
 			}
 		}
+	}
+	if err := learnVolatile(p, tags[0], learned); err != nil {
+		return 0, err
+	}
+	if n := len(learned); n > 0 {
+		var cols []string
+		for _, c := range learned {
+			cols = mergeVolatile(cols, c)
+		}
+		fmt.Fprintf(out, "\n%d %s wrote other values into tracked rows on the same state; those columns are not compared for them: %s\n",
+			n, plural(n, "request", "requests"), listIDs(cols))
 	}
 	if len(keys) == 0 && len(headerNames) == 0 && len(other) == 0 {
 		fmt.Fprintf(out, "\n%d runs on the same state gave the same responses ✓\n", len(tags))
