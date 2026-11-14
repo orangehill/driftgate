@@ -238,12 +238,15 @@ func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery str
 // be freed: no file has a part of the log in use (sys.dm_db_log_info)
 // after its first two parts, as a shrink keeps at least two and a log that
 // is not held keeps its active part at the start. Where that view cannot
-// be read, it shrinks once, as without a check. It returns the log's size
-// in MB, why the server keeps it (log_reuse_wait_desc), and held: whether
-// a part in use still lies after the first two after the last try (MAX
-// only because of the SUM: a database has one reason). That
-// is the threshold of the note rather than a size: how small a clean
-// shrink gets depends on the log's layout, not on a number.
+// be read, it shrinks once, as without a check.
+//
+// Its one result set (DBCC … WITH NO_INFOMSGS returns none;
+// TestSQLServerSeedLog reads it on every version CI runs) is the log's
+// size in MB, why the server keeps it (log_reuse_wait_desc; MAX only for
+// the SUM, a database has one reason), and held: whether a part in use
+// still lies after the first two after the last try. That is the
+// threshold of the note rather than a size: how small a clean shrink gets
+// depends on the log's layout, not on a number.
 const sqlServerShrinkSQL = `SET NOCOUNT ON;
 DECLARE @pass int = 0, @done bit = 0, @held bit = 0, @f int;
 WHILE @pass < 5 AND @done = 0 BEGIN
