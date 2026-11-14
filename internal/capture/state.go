@@ -186,7 +186,7 @@ type tracker struct {
 	// recorded (no project key). ignore are row_tracking's ignored
 	// columns, per component.
 	values *secret.RowValues
-	ignore map[string]config.RowTables
+	ignore map[string][]rowIgnore
 	out    io.Writer
 	// resends is how many requests may still be sent again after the last
 	// restore (resendAfterRestore): the application's sessions with a
@@ -316,9 +316,17 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
 			if t.ignore == nil {
-				t.ignore = map[string]config.RowTables{}
+				t.ignore = map[string][]rowIgnore{}
 			}
-			t.ignore[c.Name()] = sc.RowTracking
+			for _, rt := range sc.RowTracking {
+				if len(rt.Ignore) > 0 {
+					globs := make([]string, len(rt.Ignore))
+					for i, g := range rt.Ignore {
+						globs[i] = strings.ToLower(g)
+					}
+					t.ignore[c.Name()] = append(t.ignore[c.Name()], rowIgnore{table: rt.Name, globs: globs})
+				}
+			}
 		}
 		pf, path, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
@@ -765,8 +773,14 @@ func (t *tracker) rowValues(comp, item string, ch state.RowChange, row map[strin
 	var out map[string]string
 	for _, c := range cols {
 		v, ok := row[c]
-		if !ok || slices.ContainsFunc(ignored, func(g string) bool { return glob.Match(strings.ToLower(g), strings.ToLower(c)) }) {
+		if !ok {
 			continue
+		}
+		if len(ignored) > 0 {
+			lower := strings.ToLower(c)
+			if slices.ContainsFunc(ignored, func(g string) bool { return glob.Match(g, lower) }) {
+				continue
+			}
 		}
 		if out == nil {
 			out = map[string]string{}
@@ -776,18 +790,28 @@ func (t *tracker) rowValues(comp, item string, ch state.RowChange, row map[strin
 	return out
 }
 
-// ignoredColumns are the ignore globs of row_tracking for table as the
-// driver names it: by its name without letter case, or, for a table
-// configured without a schema, by its name without the schema.
-func ignoredColumns(tables config.RowTables, table string) []string {
+// rowIgnore is the ignore list of one row_tracking table, its globs in
+// lower case.
+type rowIgnore struct {
+	table string
+	globs []string
+}
+
+// ignoredColumns are the ignore globs (lower case) of row_tracking for
+// table as the driver names it: by its name without letter case, or, for
+// a table configured without a schema, by its name without the schema.
+func ignoredColumns(tables []rowIgnore, table string) []string {
+	if len(tables) == 0 {
+		return nil
+	}
 	bare := table
 	if i := strings.LastIndexByte(table, '.'); i >= 0 {
 		bare = table[i+1:]
 	}
 	var out []string
 	for _, rt := range tables {
-		if strings.EqualFold(rt.Name, table) || !strings.Contains(rt.Name, ".") && strings.EqualFold(rt.Name, bare) {
-			out = append(out, rt.Ignore...)
+		if strings.EqualFold(rt.table, table) || !strings.Contains(rt.table, ".") && strings.EqualFold(rt.table, bare) {
+			out = append(out, rt.globs...)
 		}
 	}
 	return out

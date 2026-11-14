@@ -452,6 +452,9 @@ func testCommit(ctx context.Context, p *config.Project, wt *bisect.Worktree, rep
 	if err != nil {
 		return bisect.Probe{}, nil, envErr(err)
 	}
+	if err := rowValuesKey(namedSet{base, "the baseline"}, namedSet{set, "capture:" + tag}); err != nil {
+		return bisect.Probe{}, nil, err
+	}
 	probe := bisect.Probe{Present: map[string]bool{}}
 	var results []report.Result
 	for _, req := range ch.requests {

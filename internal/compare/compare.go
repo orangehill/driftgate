@@ -107,6 +107,10 @@ var kinds = []KindInfo{
 // Kinds returns a copy of the list of drift kinds.
 func Kinds() []KindInfo { return slices.Clone(kinds) }
 
+// OtherValue marks a side effect whose row changed alike on both sides
+// but got another value: "updated status; other value: status".
+const OtherValue = "other value"
+
 // Drift is one difference.
 type Drift struct {
 	Request  string `json:"request"`
@@ -296,10 +300,10 @@ type Side struct {
 	// release). Rows of an item the other side did not track are not
 	// compared: a note says so.
 	RowTables []string
-	// NoRowValues: the values of tracked rows are not compared (the set
-	// compared against was captured once, so the columns that change by
-	// themselves are not known).
-	NoRowValues bool
+	// LearnRowValues: the values of every tracked row are compared, not
+	// only of the items the side learned (SideEffects.Learned): two
+	// captures of one state, which learn them.
+	LearnRowValues bool
 	// Folders are the forms of the two sides' Roots, made once for many
 	// requests (NewFolders, the same on both sides); nil: made from Roots.
 	Folders *Folders
@@ -418,7 +422,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, !base.NoRowValues && !cur.NoRowValues)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, base.LearnRowValues)
 		}
 	}
 }
@@ -444,7 +448,7 @@ func (c *comparer) rawAllowed(base, cur Side) bool {
 // sideEffects compares the items a request changed and, of the tables
 // both sides tracked rows of (bTables, vTables; nil: every table), its
 // rows.
-func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string, values bool) {
+func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string, learning bool) {
 	b, v := map[string]bool{}, map[string]bool{}
 	for _, it := range base.Items {
 		b[it] = true
@@ -498,18 +502,22 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 	}
 	bRows, bKeys, bChanges := rows(base.Rows, vTables, "row_tracking no longer covers the table")
 	vRows, vKeys, vChanges := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	// Values are compared of the items whose values the baseline saw in
+	// two captures of one state (Learned; every item when learning),
+	// apart from the columns that differed between them (the baseline's
+	// Volatile only: a capture's own cannot hide a value the baseline
+	// fixed).
 	volatile := map[string]bool{}
-	for _, v := range [][]string{base.Volatile, cur.Volatile} {
-		for _, col := range v {
-			volatile[col] = true
-		}
+	for _, col := range base.Volatile {
+		volatile[col] = true
 	}
+	learned := func(item string) bool { return learning || slices.Contains(base.Learned, item) }
 	for _, k := range bKeys {
 		if vRows[k] != bRows[k] {
 			c.add(KindSideEffect, "side-effects:"+k, bRows[k], orNone(vRows[k]))
 			continue
 		}
-		if c.level < LevelValues || !values {
+		if c.level < LevelValues || !learned(bChanges[k].Item) {
 			continue
 		}
 		// The row changed alike: the values it got are compared, of the
@@ -530,9 +538,9 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 		for _, col := range cols {
 			named = append(named, b.Item+"."+col)
 		}
-		what := "other value: "
+		what := OtherValue + ": "
 		if len(cols) > 1 {
-			what = "other values: "
+			what = OtherValue + "s: "
 		}
 		c.add(KindSideEffect, "side-effects:"+k, bRows[k], vRows[k]+"; "+what+strings.Join(cols, ","))
 		c.drifts[len(c.drifts)-1].RowValues = named

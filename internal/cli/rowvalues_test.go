@@ -14,15 +14,17 @@ import (
 )
 
 // rowSet is a set with one record whose request inserted a tracked row,
-// captured with the row values named under id (empty: none recorded).
-func rowSet(t *testing.T, id string, agreed int, values map[string]string) *snapshot.Set {
+// captured with the row values named under id (empty: none recorded),
+// and the tables learned from two captures.
+func rowSet(t *testing.T, id string, values map[string]string, learned ...string) *snapshot.Set {
 	t.Helper()
 	s := &snapshot.Set{Dir: t.TempDir()}
-	if err := s.WriteMeta(snapshot.Meta{Tag: "x", RowTracking: []string{"db/table:follows"}, RowValues: id, Agreed: agreed}); err != nil {
+	if err := s.WriteMeta(snapshot.Meta{Tag: "x", RowTracking: []string{"db/table:follows"}, RowValues: id}); err != nil {
 		t.Fatal(err)
 	}
 	rec := &snapshot.Record{ID: "follow", Status: 204, Headers: [][2]string{}, Body: snapshot.Body{Storage: snapshot.Public},
-		SideEffects: &snapshot.SideEffects{Items: []string{"db/table:follows"}, Rows: []snapshot.RowChange{{Item: "db/table:follows", Key: "id=1", Change: "inserted", Values: values}}}}
+		SideEffects: &snapshot.SideEffects{Items: []string{"db/table:follows"}, Rows: []snapshot.RowChange{{Item: "db/table:follows", Key: "id=1", Change: "inserted", Values: values}},
+			Learned: learned}}
 	if err := s.Write(rec, []byte{}); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +35,8 @@ func rowSet(t *testing.T, id string, agreed int, values map[string]string) *snap
 // keys are not compared (an environment error that says what to do);
 // one that recorded none is, and the result names what it left out.
 func TestRowValuesKey(t *testing.T) {
-	a, b, none := rowSet(t, "k1", 2, map[string]string{"target": "x"}), rowSet(t, "k2", 2, map[string]string{"target": "y"}), rowSet(t, "", 2, nil)
+	v := map[string]string{"target": "x"}
+	a, b, none := rowSet(t, "k1", v, "db/table:follows"), rowSet(t, "k2", v, "db/table:follows"), rowSet(t, "", nil)
 	err := rowValuesKey(namedSet{a, "baseline:local"}, namedSet{b, "capture:run"})
 	if err == nil || classify(err) != ExitEnv || !strings.Contains(err.Error(), "different project keys") || !strings.Contains(err.Error(), secret.EnvKey) {
 		t.Errorf("another key: %v", err)
@@ -43,32 +46,62 @@ func TestRowValuesKey(t *testing.T) {
 			t.Errorf("one key or none: %v", err)
 		}
 	}
-	if g := rowValuesGap(a, a, []string{"follow"}); g != nil {
-		t.Errorf("both recorded values: %+v", g)
+	if g := rowValuesGap(a, a, "baseline:local", []string{"follow"}); g != nil {
+		t.Errorf("learned on both: %+v", g)
 	}
-	if g := rowValuesGap(none, a, []string{"follow"}); g == nil || g.Count != 1 || g.Names[0] != "follow" || !strings.Contains(g.Reason, "make the baseline again") {
+	if g := rowValuesGap(none, a, "baseline:local", []string{"follow"}); g == nil || g.Count != 1 || g.Names[0] != "follow" || !strings.Contains(g.Reason, "baseline:local recorded no row values: make it again") {
 		t.Errorf("a baseline without values: %+v", g)
 	}
-	if g := rowValuesGap(a, none, []string{"follow"}); g == nil || !strings.Contains(g.Reason, "no project key") {
+	if g := rowValuesGap(a, none, "baseline:local", []string{"follow"}); g == nil || !strings.Contains(g.Reason, "no project key") {
 		t.Errorf("a capture without values: %+v", g)
 	}
-	// A set captured once does not know which columns change by
-	// themselves: its values are not compared, and the result says so.
-	once := rowSet(t, "k1", 0, map[string]string{"target": "x"})
-	if g := rowValuesGap(once, a, []string{"follow"}); g == nil || !strings.Contains(g.Reason, "--repeat 2") {
-		t.Errorf("captured once: %+v", g)
+	// A record whose values two captures did not see (captured once, or
+	// accepted from one capture) has them not compared, and the result
+	// says how to learn them.
+	once := rowSet(t, "k1", v)
+	if g := rowValuesGap(once, a, "baseline:local", []string{"follow"}); g == nil || !strings.Contains(g.Reason, "--repeat 2, then driftgate baselines rebase") {
+		t.Errorf("not learned: %+v", g)
 	}
-	root := t.TempDir()
-	write(t, filepath.Join(root, "driftgate.yaml"), "version: 1\nproject: rowvalues\ntarget:\n  base_url: http://127.0.0.1:1\n")
-	p, err := config.Load(filepath.Join(root, "driftgate.yaml"))
-	if err != nil {
-		t.Fatal(err)
+	// A record accepted from a capture without the key, in a baseline
+	// that recorded values: not learned, so named too.
+	if g := rowValuesGap(rowSet(t, "k1", nil), a, "baseline:local", []string{"follow"}); g == nil || g.Count != 1 {
+		t.Errorf("accepted without the key: %+v", g)
 	}
-	if s, _, err := setOrigins(p, once, a); err != nil || s == nil || !s.noRowValues {
-		t.Errorf("captured once: sides %+v, %v", s, err)
+}
+
+// TestLearning: two captures learn the tables both recorded values of; a
+// record accepted from one capture keeps the learned tables it still
+// writes values into and the volatile columns, and learns no new table
+// nor one whose values it did not record (no key).
+func TestLearning(t *testing.T) {
+	v := map[string]string{"c": "x"}
+	row := func(item string, values map[string]string) snapshot.RowChange {
+		return snapshot.RowChange{Item: item, Key: "id=1", Change: "inserted", Values: values}
 	}
-	if s, _, err := setOrigins(p, a, once); err != nil || s != nil {
-		t.Errorf("the current side captured once: sides %+v, %v", s, err)
+	rows := map[string]*rowLearning{}
+	first := rowSet(t, "k", v)
+	if err := learnRows(rows, "follow", first, rowSet(t, "k", v)); err != nil || strings.Join(rows["follow"].Learned, ",") != "db/table:follows" {
+		t.Fatalf("learned %+v, %v", rows["follow"], err)
+	}
+	if err := learnRows(rows, "follow", first, rowSet(t, "k", nil)); err != nil || len(rows["follow"].Learned) != 0 {
+		t.Errorf("a third capture without values: %+v, %v", rows["follow"], err)
+	}
+
+	old := &snapshot.SideEffects{Learned: []string{"db/table:a", "db/table:b"}, Volatile: []string{"db/table:a.at"}}
+	rec := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:a", v), row("db/table:b", nil), row("db/table:c", v)}}
+	acceptLearning(old, rec)
+	if strings.Join(rec.Learned, ",") != "db/table:a" || strings.Join(rec.Volatile, ",") != "db/table:a.at" {
+		t.Errorf("accepted from one capture: %+v", rec)
+	}
+	fresh := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:c", v)}}
+	acceptLearning(nil, fresh)
+	if len(fresh.Learned) != 0 {
+		t.Errorf("a new request: %+v", fresh)
+	}
+	own := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:c", v)}, Learned: []string{"db/table:c"}}
+	acceptLearning(old, own)
+	if strings.Join(own.Learned, ",") != "db/table:c" || len(own.Volatile) != 0 {
+		t.Errorf("accepted from two captures: %+v", own)
 	}
 }
 

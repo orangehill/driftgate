@@ -471,11 +471,14 @@ func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) e
 				}
 				continue
 			}
-			// The columns two captures of the baseline's state learned as
-			// volatile stay so: the accepted capture was made once.
-			if old, err := work.Record(id); err == nil && old != nil && old.SideEffects != nil && rec.SideEffects != nil {
-				rec.SideEffects.Volatile = mergeVolatile(old.SideEffects.Volatile, rec.SideEffects.Volatile)
+			// What two captures of the baseline's state learned of row
+			// values stays, as far as it still applies: the accepted
+			// capture was made once.
+			var old *snapshot.SideEffects
+			if o, err := work.Record(id); err == nil && o != nil {
+				old = o.SideEffects
 			}
+			acceptLearning(old, rec.SideEffects)
 			var body []byte // nil for a failed request
 			if rec.Body.SHA256 != "" || rec.Body.Ref != "" {
 				if body, err = cur.Body(rec); err != nil {

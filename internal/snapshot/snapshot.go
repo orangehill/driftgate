@@ -116,6 +116,10 @@ type SideEffects struct {
 	// of the same state (<component>/table:<name>.<column>): their values
 	// are not compared for this request.
 	Volatile []string `json:"volatile,omitempty"`
+	// Learned are the items (<component>/table:<name>) whose row values
+	// two captures of the same state recorded: only their values are
+	// compared against this record.
+	Learned []string `json:"learned,omitempty"`
 }
 
 // RowChange is one changed row of a tracked table.

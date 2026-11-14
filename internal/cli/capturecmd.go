@@ -216,14 +216,18 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		if err := keepMedianTimings(p, tags); err != nil {
 			return 0, err
 		}
-		c, err := repeatReport(out, p, cat, allow, tags)
+		c, rows, err := repeatReport(out, p, cat, allow, tags)
 		if err != nil {
 			return 0, err
 		}
 		code = max(code, c)
 		if c == ExitClean {
-			// The capture says it was checked: a rebase takes it as run
+			// What the runs learned of the values of tracked rows, then
+			// that the capture was checked: a rebase takes it as run
 			// takes two equal captures.
+			if err := writeLearned(p, tags[0], rows); err != nil {
+				return 0, err
+			}
 			if err := markAgreed(p, tags[0], len(tags)); err != nil {
 				return 0, err
 			}
@@ -464,10 +468,10 @@ func notAnswering(p *config.Project, errOut io.Writer) {
 // repeatReport compares every repeated run with the first one. Values that
 // changed although the state was the same are not deterministic: for each,
 // it proposes an allowlist entry with a format that matches every value seen.
-func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tags []string) (int, error) {
+func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tags []string) (int, map[string]*rowLearning, error) {
 	first, err := p.Capture(tags[0])
 	if err != nil {
-		return 0, failed(err)
+		return 0, nil, failed(err)
 	}
 	first.CacheRecords()
 	values := map[key][]string{}
@@ -475,11 +479,11 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 	headers := map[string][][]string{} // name → values at each position, over all runs
 	var headerNames []string
 	var other []compare.Drift
-	learned := map[string][]string{} // request → columns of tracked rows whose values differ by themselves
+	rows := map[string]*rowLearning{} // per request: what the runs learned of the values of tracked rows
 	for _, tag := range tags[1:] {
 		set, err := p.Capture(tag)
 		if err != nil {
-			return 0, failed(err)
+			return 0, nil, failed(err)
 		}
 		set.CacheRecords()
 		// The requests are compared in parallel; their results are taken
@@ -496,13 +500,18 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		}
 		if err := parallel(len(cat.Requests), size, func(i int) error {
 			var err error
-			results[i], err = compareOne(cat.Requests[i], first, set, nil, allow, compare.LevelValues, true) // infer needs the values; it prints formats only
+			// infer needs the values; it prints formats only. Every tracked
+			// row's values are compared: the runs learn them.
+			results[i], err = compareOne(cat.Requests[i], first, set, &sides{learning: true}, allow, compare.LevelValues, true)
 			return err
 		}); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		for ri, req := range cat.Requests {
 			res := results[ri]
+			if err := learnRows(rows, req.ID, first, set); err != nil {
+				return 0, nil, err
+			}
 			hidden := res.Drifts
 			if rec, err := first.Record(req.ID); err == nil && isPrivate(rec) {
 				hidden = append([]compare.Drift{}, res.Drifts...)
@@ -511,7 +520,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			for i, d := range res.Drifts {
 				switch {
 				case valuesOnly(d):
-					learned[req.ID] = mergeVolatile(learned[req.ID], d.RowValues)
+					rows[req.ID].Volatile = mergeVolatile(rows[req.ID].Volatile, d.RowValues)
 				case d.Kind == compare.KindHeaderValue && len(d.Values[0]) == len(d.Values[1]):
 					// Values are matched by position: the n-th Set-Cookie of
 					// one run with the n-th of the other.
@@ -540,20 +549,21 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			}
 		}
 	}
-	if err := learnVolatile(p, tags[0], learned); err != nil {
-		return 0, err
-	}
-	if n := len(learned); n > 0 {
-		var cols []string
-		for _, c := range learned {
-			cols = mergeVolatile(cols, c)
+	var cols []string
+	n := 0
+	for _, l := range rows {
+		if len(l.Volatile) > 0 {
+			n++
+			cols = mergeVolatile(cols, l.Volatile)
 		}
+	}
+	if n > 0 {
 		fmt.Fprintf(out, "\n%d %s wrote other values into tracked rows on the same state; those columns are not compared for them: %s\n",
 			n, plural(n, "request", "requests"), listIDs(cols))
 	}
 	if len(keys) == 0 && len(headerNames) == 0 && len(other) == 0 {
 		fmt.Fprintf(out, "\n%d runs on the same state gave the same responses ✓\n", len(tags))
-		return ExitClean, nil
+		return ExitClean, rows, nil
 	}
 	fmt.Fprintf(out, "\n%d runs on the same state gave different responses.\n", len(tags))
 	mutating := false
@@ -597,7 +607,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		}
 		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
 	}
-	return ExitDrift, nil
+	return ExitDrift, rows, nil
 }
 
 // proposedFormat is a format as a proposal prints it: control and

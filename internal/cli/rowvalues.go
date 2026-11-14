@@ -34,34 +34,39 @@ func rowValuesKey(base, cur namedSet) error {
 }
 
 // rowValuesGap names, for the result's "not covered" section, the
-// compared requests whose rows changed but whose row values were not
-// compared: a side whose capture recorded none (made by an earlier
-// release, or without the project key). nil when there are none.
-func rowValuesGap(base, cur *snapshot.Set, ids []string) *report.SkippedGap {
-	var reason string
-	for i, s := range []*snapshot.Set{base, cur} {
+// compared requests that wrote into tracked rows whose values were not
+// compared, and why: a side whose capture recorded none (an earlier
+// release, no project key), or rows of a table whose values the record
+// compared against did not see in two captures of one state
+// (SideEffects.Learned: a request accepted from one capture, a set
+// captured once). nil when there are none.
+func rowValuesGap(base, cur *snapshot.Set, against string, ids []string) *report.ReasonGap {
+	recorded := func(s *snapshot.Set) bool {
 		meta, err := s.Meta()
-		if err != nil || meta == nil || meta.RowValues != "" || len(meta.RowTracking) == 0 && meta.RowTracking != nil {
-			continue
-		}
-		if i == 0 {
-			reason = "the baseline recorded no row values: make the baseline again, with the project key at hand, to compare them"
-		} else {
-			reason = "the capture recorded no row values: no project key when it was made"
-		}
-		break
+		tracksNothing := err == nil && meta != nil && meta.RowTracking != nil && len(meta.RowTracking) == 0
+		return err != nil || meta == nil || meta.RowValues != "" || tracksNothing
 	}
-	if meta, err := base.Meta(); reason == "" && err == nil && meta != nil && onceWithValues(meta) {
-		reason = "the set compared against was captured once, so the columns that change by themselves are not known: capture it with --repeat 2, as run makes a baseline"
+	var reason string
+	switch {
+	case !recorded(cur):
+		reason = "the capture recorded no row values: no project key when it was made"
+	case !recorded(base):
+		reason = against + " recorded no row values: make it again, with the project key at hand, to compare them"
+	default:
+		reason = against + " did not see them in two captures of one state: driftgate capture <tag> --repeat 2, then driftgate baselines rebase <name> --from <tag>"
 	}
-	if reason == "" {
-		return nil
-	}
+	all := !recorded(cur) || !recorded(base)
 	var names []string
 	for _, id := range ids {
+		var learned []string
+		if rec, err := base.Record(id); err == nil && rec != nil && rec.SideEffects != nil {
+			learned = rec.SideEffects.Learned
+		}
 		for _, s := range []*snapshot.Set{base, cur} {
 			if rec, err := s.Record(id); err == nil && rec != nil && rec.SideEffects != nil &&
-				slices.ContainsFunc(rec.SideEffects.Rows, func(r snapshot.RowChange) bool { return r.Change != "deleted" }) {
+				slices.ContainsFunc(rec.SideEffects.Rows, func(r snapshot.RowChange) bool {
+					return r.Change != "deleted" && (all || !slices.Contains(learned, r.Item))
+				}) {
 				names = append(names, id)
 				break
 			}
@@ -71,27 +76,82 @@ func rowValuesGap(base, cur *snapshot.Set, ids []string) *report.SkippedGap {
 	if g == nil {
 		return nil
 	}
-	return &report.SkippedGap{What: report.SkippedMutating, Reason: reason, Gap: *g}
+	return &report.ReasonGap{Reason: reason, Gap: *g}
 }
 
-// learnVolatile records, in the records of the capture tag, the columns
-// whose values differed between captures of the same state (drifts of
-// values only, compare.Drift.RowValues), per request: a later comparison
-// leaves their values out.
-func learnVolatile(p *config.Project, tag string, learned map[string][]string) error {
-	if len(learned) == 0 {
+// rowLearning is what captures of one state learned of the values a
+// request wrote into tracked rows: the tables whose values every capture
+// recorded (Learned), and the columns whose values differed (Volatile).
+type rowLearning struct {
+	Learned, Volatile []string
+	seen              bool // Learned holds the first comparison's tables
+}
+
+// learnRows narrows what the captures learned of request id by one more
+// capture (cur) compared with the first: the tables whose values both
+// recorded.
+func learnRows(rows map[string]*rowLearning, id string, first, cur *snapshot.Set) error {
+	l := rows[id]
+	if l == nil {
+		l = &rowLearning{}
+		rows[id] = l
+	}
+	var items [2][]string
+	for i, s := range []*snapshot.Set{first, cur} {
+		rec, err := s.Record(id)
+		if err != nil {
+			return envErr(err)
+		}
+		if rec != nil {
+			items[i] = valueItems(rec.SideEffects)
+		}
+	}
+	both := slices.DeleteFunc(items[0], func(it string) bool { return !slices.Contains(items[1], it) })
+	if l.seen {
+		both = slices.DeleteFunc(both, func(it string) bool { return !slices.Contains(l.Learned, it) })
+	}
+	l.Learned, l.seen = both, true
+	return nil
+}
+
+// valueItems are the tables of the rows a request inserted or updated
+// with their values recorded, sorted.
+func valueItems(se *snapshot.SideEffects) []string {
+	if se == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range se.Rows {
+		if r.Change != "deleted" && r.Values != nil {
+			out = append(out, r.Item)
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// writeLearned records in the records of the capture tag what its runs
+// learned of the values of tracked rows (rowLearning): a comparison
+// against it compares the values of the learned tables, apart from the
+// volatile columns.
+func writeLearned(p *config.Project, tag string, rows map[string]*rowLearning) error {
+	if len(rows) == 0 {
 		return nil
 	}
 	set, err := p.Capture(tag)
 	if err != nil {
 		return failed(err)
 	}
-	ids := make([]string, 0, len(learned))
-	for id := range learned {
+	ids := make([]string, 0, len(rows))
+	for id := range rows {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
+		l := rows[id]
+		if len(l.Learned) == 0 && len(l.Volatile) == 0 {
+			continue
+		}
 		rec, err := set.Record(id)
 		if err != nil {
 			return envErr(err)
@@ -99,12 +159,31 @@ func learnVolatile(p *config.Project, tag string, learned map[string][]string) e
 		if rec == nil || rec.SideEffects == nil {
 			continue
 		}
-		rec.SideEffects.Volatile = mergeVolatile(rec.SideEffects.Volatile, learned[id])
+		rec.SideEffects.Learned = l.Learned
+		rec.SideEffects.Volatile = mergeVolatile(rec.SideEffects.Volatile, l.Volatile)
 		if err := set.Write(rec, nil); err != nil {
 			return envErr(err)
 		}
 	}
 	return nil
+}
+
+// acceptLearning is what an accepted record keeps of the baseline
+// record's learning. A record of a capture made once learned nothing: it
+// keeps the learned tables it still wrote values into, and the volatile
+// columns; a table it newly writes is not learned. A record whose
+// captures learned (capture --repeat) keeps its own.
+func acceptLearning(old, rec *snapshot.SideEffects) {
+	if rec == nil || len(rec.Learned) > 0 || len(rec.Volatile) > 0 || old == nil {
+		return
+	}
+	now := valueItems(rec)
+	for _, it := range old.Learned {
+		if slices.Contains(now, it) {
+			rec.Learned = append(rec.Learned, it)
+		}
+	}
+	rec.Volatile = slices.Clone(old.Volatile)
 }
 
 // mergeVolatile is the sorted union of two lists of volatile columns.

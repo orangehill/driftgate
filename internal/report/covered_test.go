@@ -23,7 +23,7 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 		Skipped: []SkippedGap{{What: SkippedMutating, Reason: "no baseline", Gap: *NewGap([]string{"post-import"})},
 			{What: SkippedRead, Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}, {What: SkippedCommand, Reason: "no baseline", Gap: *NewGap([]string{"schema"})}},
 		KnownFailures: NewGap([]string{"get-old"}),
-		RowValues:     &SkippedGap{What: SkippedMutating, Reason: "the baseline recorded no row values", Gap: *NewGap([]string{"post-follow"})}}
+		RowValues:     &ReasonGap{Reason: "the baseline recorded no row values", Gap: *NewGap([]string{"post-follow"})}}
 	g, drifted, elsewhere, ok := r.FindDominant()
 	if !ok || g.Requests != 5 || drifted != 5 || elsewhere != 0 {
 		t.Fatalf("dominant %v %d %d %v", g, drifted, elsewhere, ok)
@@ -140,5 +140,26 @@ func TestKindsNote(t *testing.T) {
 	}
 	if n := Build("c", "baseline:local", []Result{{ID: "c", Outcome: Pass}}).KindsNote(); n != "" {
 		t.Errorf("without drift: %q", n)
+	}
+}
+
+// TestRowValuesNote: a stop on another value of a tracked row says how to
+// leave out a column that changes by itself between days; an expected
+// one, or another side effect, does not.
+func TestRowValuesNote(t *testing.T) {
+	d := compare.Drift{Request: "follow", Kind: compare.KindSideEffect, Where: "side-effects:db/table:follows[id=1]", Baseline: "inserted", Current: "inserted; other value: seen_on"}
+	r := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}})
+	var b bytes.Buffer
+	r.Text(&b, DefaultDrifts)
+	if !strings.Contains(b.String(), "goes under ignore: in row_tracking") {
+		t.Errorf("no hint:\n%s", b.String())
+	}
+	d.Expected = "ref"
+	if n := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}}).RowValuesNote(); n != "" {
+		t.Errorf("expected: %s", n)
+	}
+	d.Expected, d.Current = "", "updated seen_on"
+	if n := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}}).RowValuesNote(); n != "" {
+		t.Errorf("another side effect: %s", n)
 	}
 }

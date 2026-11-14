@@ -344,6 +344,9 @@ func showPrivateValues(p *config.Project, cfg string, r *report.Report) (why str
 	if err != nil {
 		return "", envErr(err)
 	}
+	if err := rowValuesKey(namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return "", err
+	}
 	for i, res := range r.Results {
 		req, ok := reqs[res.ID]
 		if res.Outcome != report.Drift || !ok {

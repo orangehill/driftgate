@@ -48,6 +48,8 @@ func (a *rowValueApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, err = a.db.Exec("UPDATE follows SET target = "+a.ph(1)+", touched = "+a.ph(2)+", seen = "+a.ph(3)+" WHERE id = 1", target, touched, seen)
 	case "/ins":
 		_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen) VALUES (2, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+")", target, touched, seen)
+	case "/ins3":
+		_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen) VALUES (3, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+")", target, touched, seen)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -158,11 +160,30 @@ func TestRowValue(t *testing.T) {
 			p.must(t, 0, "baselines", "rebase", "local", "--from", "r", "--reason", "Z is intended")
 			p.must(t, 0, "run")
 
+			// A new request accepted from run's single capture: its values
+			// were not seen twice, so they are not compared (touched would
+			// stop every run), and the result says how to learn them.
+			write(t, filepath.Join(p.root, "driftgate", "catalog.json"), strings.Replace(rowValueCatalog, "]}", `,
+ {"id":"ins3","method":"POST","path":"/ins3","mutates":true,"storage":"public"}]}`, 1))
+			p.must(t, 0, "run")
+			p.must(t, 0, "accept", "ins3", "--reason", "new request")
+			r = p.must(t, 0, "run")
+			if !strings.Contains(r.out, "1 request that changes data whose row values were not compared (baseline:local did not see them in two captures") {
+				t.Errorf("an accepted new request: %v", r)
+			}
+			// A rebase from two captures learns them: another value drifts.
+			p.must(t, 0, "capture", "r2", "--repeat", "2")
+			p.must(t, 0, "baselines", "rebase", "local", "--from", "r2", "--reason", "learn ins3")
+			app.set("W", "s2")
+			if r := p.must(t, 1, "run"); !strings.Contains(r.out, "follows[id=3]") || !strings.Contains(r.out, "other value: target") {
+				t.Errorf("after the rebase, another value: %v", r)
+			}
+
 			// Two captures made once: touched, which changes by itself, is
 			// not known, so no values are compared, and the result says so.
 			p.must(t, 0, "capture", "a")
 			p.must(t, 0, "capture", "b")
-			if r := p.must(t, 0, "compare", "b", "--against", "a"); !strings.Contains(r.out, "row values were not compared (the set compared against was captured once") {
+			if r := p.must(t, 0, "compare", "b", "--against", "a"); !strings.Contains(r.out, "row values were not compared (capture:a did not see them in two captures") {
 				t.Errorf("captures made once: %v", r)
 			}
 

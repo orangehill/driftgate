@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/orangehill/driftgate/internal/compare"
 )
 
 // NotCovered is what a comparison does not cover, next to its result: a
@@ -40,7 +42,7 @@ type NotCovered struct {
 	KnownFailures *Gap `json:"known_failures,omitempty"`
 	// Requests that changed tracked rows whose values were not compared,
 	// and why (a side recorded none).
-	RowValues *SkippedGap `json:"row_values,omitempty"`
+	RowValues *ReasonGap `json:"row_values,omitempty"`
 }
 
 // CatalogCounts are requests by what they do; Multipart are among the
@@ -71,6 +73,12 @@ const (
 // result's note: no baseline, not sent by a read-only capture …).
 type SkippedGap struct {
 	What   string `json:"what"` // read, mutating or command
+	Reason string `json:"reason"`
+	Gap
+}
+
+// ReasonGap is a gap with the reason for it.
+type ReasonGap struct {
 	Reason string `json:"reason"`
 	Gap
 }
@@ -197,6 +205,20 @@ type Dominant struct {
 	// --skip-fingerprint-check. accept and expect take neither.
 	Captures   bool `json:"captures,omitempty"`
 	Unreliable bool `json:"unreliable,omitempty"`
+}
+
+// RowValuesNote is the hint for a side effect whose tracked row got
+// another value (compare.OtherValue) among the drifts that fail: a column
+// that changes by itself between days goes under ignore. Empty otherwise.
+func (r *Report) RowValuesNote() string {
+	for _, res := range r.Results {
+		for _, d := range res.Drifts {
+			if d.Kind == compare.KindSideEffect && d.Expected == "" && strings.Contains(d.Current, "; "+compare.OtherValue) {
+				return "other value of a tracked row: a column whose value changes by itself between days (a date) goes under ignore: in row_tracking (name: { ignore: [column] })"
+			}
+		}
+	}
+	return ""
 }
 
 // KindsNote counts the drifts by kind, the most first ("kinds:

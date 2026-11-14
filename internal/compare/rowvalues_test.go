@@ -16,7 +16,7 @@ import (
 func TestRowValues(t *testing.T) {
 	rec := func(volatile []string, rows ...snapshot.RowChange) *snapshot.Record {
 		return &snapshot.Record{Version: 1, ID: "x", Status: 200, Headers: [][2]string{}, Body: snapshot.Body{SHA256: "a"},
-			SideEffects: &snapshot.SideEffects{Items: []string{"db/table:follows"}, Rows: rows, Volatile: volatile}}
+			SideEffects: &snapshot.SideEffects{Items: []string{"db/table:follows"}, Rows: rows, Volatile: volatile, Learned: []string{"db/table:follows"}}}
 	}
 	row := func(change string, values map[string]string, cols ...string) snapshot.RowChange {
 		return snapshot.RowChange{Item: "db/table:follows", Key: "id=1", Change: change, Columns: cols, Values: values}
@@ -34,16 +34,24 @@ func TestRowValues(t *testing.T) {
 		{"insert, two columns", rec(nil, row("inserted", map[string]string{"target": "a", "n": "1"})), rec(nil, row("inserted", map[string]string{"target": "b", "n": "2"})), LevelValues,
 			"inserted → inserted; other values: n,target", []string{"db/table:follows.n", "db/table:follows.target"}},
 		{"volatile in the baseline", rec([]string{"db/table:follows.target"}, row("inserted", map[string]string{"target": "a"})), rec(nil, row("inserted", map[string]string{"target": "b"})), LevelValues, "", nil},
-		{"volatile in the capture", rec(nil, row("inserted", map[string]string{"target": "a"})), rec([]string{"db/table:follows.target"}, row("inserted", map[string]string{"target": "b"})), LevelValues, "", nil},
+		// The capture's own volatile columns hide nothing the baseline fixed.
+		{"volatile in the capture only", rec(nil, row("inserted", map[string]string{"target": "a"})), rec([]string{"db/table:follows.target"}, row("inserted", map[string]string{"target": "b"})), LevelValues,
+			"inserted → inserted; other value: target", []string{"db/table:follows.target"}},
 		{"ignored on one side", rec(nil, row("inserted", map[string]string{"target": "a", "seen": "1"})), rec(nil, row("inserted", map[string]string{"target": "a"})), LevelValues, "", nil},
 		{"baseline without values", rec(nil, row("inserted", nil)), rec(nil, row("inserted", map[string]string{"target": "b"})), LevelValues, "", nil},
 		{"shape level", rec(nil, row("inserted", map[string]string{"target": "a"})), rec(nil, row("inserted", map[string]string{"target": "b"})), LevelShape, "", nil},
 		{"another kind stays a kind drift", rec(nil, row("inserted", map[string]string{"target": "a"})), rec(nil, row("updated", map[string]string{"target": "b"}, "target")), LevelValues, "inserted → updated target", nil},
 	}
-	// A set compared against that was captured once: not compared.
+	// A table the baseline's record did not learn (captured once, a
+	// request accepted from one capture): its values are not compared,
+	// unless the comparison is of two captures that learn them.
 	b, v := rec(nil, row("inserted", map[string]string{"target": "a"})), rec(nil, row("inserted", map[string]string{"target": "b"}))
-	if got := One("x", Side{Record: b, NoRowValues: true}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 0 {
-		t.Errorf("captured once: %+v", got)
+	b.SideEffects.Learned = nil
+	if got := One("x", Side{Record: b}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 0 {
+		t.Errorf("not learned: %+v", got)
+	}
+	if got := One("x", Side{Record: b, LearnRowValues: true}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 1 {
+		t.Errorf("learning: %+v", got)
 	}
 	for _, c := range cases {
 		got := One("x", Side{Record: c.base}, Side{Record: c.cur}, allowlist.Empty(), c.level)
