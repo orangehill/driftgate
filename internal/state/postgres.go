@@ -551,7 +551,10 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 	if err := nextValues(&two, unusedAt, f); err != nil {
 		return nil, err
 	}
-	return f, hashSchemaItems(&two, f, itemDefs, matviews, mode, defs)
+	if err := hashSchemaItems(&two, f, itemDefs, matviews, mode, defs); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // pgDefinitions are the queries of the definitions of tables (and of the
