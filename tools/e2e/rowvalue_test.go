@@ -209,7 +209,7 @@ func TestRowValueWithoutValues(t *testing.T) {
 	withKey(p, rowValueKey())
 	app.set("Y", "s1")
 	r = p.must(t, 0, "run")
-	if !strings.Contains(r.out, "Not covered by this result") || !strings.Contains(r.out, "2 requests that change data whose row values were not compared (the baseline recorded no row values") {
+	if !strings.Contains(r.out, "Not covered by this result") || !strings.Contains(r.out, "2 requests that change data whose row values were not compared (baseline:local recorded no row values") {
 		t.Errorf("not covered does not name the row values: %v", r)
 	}
 }
