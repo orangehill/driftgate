@@ -265,27 +265,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 	r.sum.Tracked = len(start) > 0
 	r.start = start
-	if opt.Baseline != nil && !opt.SkipFingerprintCheck {
-		meta, err := opt.Baseline.Meta()
-		if err != nil {
-			return nil, err
-		}
-		if meta != nil && meta.State != nil {
-			if d := flatten(diffStates(fromMeta(meta.State), start)); len(d) > 0 {
-				name := filepath.Base(opt.Baseline.Dir)
-				if meta.StateFormat != state.FingerprintFormat {
-					return nil, envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
-				}
-				run := "driftgate run"
-				if name != "local" && filepath.Dir(opt.Baseline.Dir) == filepath.Clean(p.Layout.Baselines) {
-					run += " --baseline " + name
-				}
-				if tr.restoreOnlyNow(d) {
-					return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
-				}
-				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
-			}
-		}
+	if err := checkBaseline(p, tr, opt, start); err != nil {
+		return nil, err
 	}
 	if wait := time.Until(opt.NotBefore); wait > 0 {
 		select {
@@ -500,6 +481,40 @@ func newServices(ctx context.Context, p *config.Project, reqs []catalog.Request,
 		services[req.Target] = s
 	}
 	return services, nil
+}
+
+// checkBaseline refuses a capture whose start state (the fingerprint after
+// the first restore) differs from the one opt.Baseline was captured from,
+// unless --skip-fingerprint-check: a baseline fingerprinted in an older
+// format, items that are restore_only now (the configuration as tr holds
+// it now), or other data; each message says how to go on.
+func checkBaseline(p *config.Project, tr *tracker, opt Options, start states) error {
+	if opt.Baseline == nil || opt.SkipFingerprintCheck {
+		return nil
+	}
+	meta, err := opt.Baseline.Meta()
+	if err != nil {
+		return err
+	}
+	if meta == nil || meta.State == nil {
+		return nil
+	}
+	d := flatten(diffStates(fromMeta(meta.State), start))
+	if len(d) == 0 {
+		return nil
+	}
+	name := filepath.Base(opt.Baseline.Dir)
+	if meta.StateFormat != state.FingerprintFormat {
+		return envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
+	}
+	run := "driftgate run"
+	if name != "local" && filepath.Dir(opt.Baseline.Dir) == filepath.Clean(p.Layout.Baselines) {
+		run += " --baseline " + name
+	}
+	if tr.restoreOnlyNow(d) {
+		return envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
+	}
+	return envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
 }
 
 // markComplete writes the capture's timings, then its meta without
