@@ -528,6 +528,24 @@ func Printable(s string) string {
 	return b.String()
 }
 
+// PrintableRegexp is a regular expression with the characters Printable
+// escapes written as the regexp package's escapes (\x{a} for a newline):
+// it reads as Printable's text does and matches what it matched.
+func PrintableRegexp(s string) string {
+	if strings.IndexFunc(s, unprintable) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unprintable(r) {
+			fmt.Fprintf(&b, `\x{%x}`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func unprintable(r rune) bool {
 	switch {
 	case r < 0x20, r >= 0x7f && r <= 0x9f, r == 0x2028, r == 0x2029, r == 0x200e, r == 0x200f, r == 0x061c,

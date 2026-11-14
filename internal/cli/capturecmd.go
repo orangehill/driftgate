@@ -551,13 +551,23 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		if len(headerNames) > 0 {
 			fmt.Fprintln(out, "headers:")
 			for _, n := range headerNames {
-				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(n, headers[n]))), reason)
+				f, why := proposedFormat(headerFormat(n, headers[n]))
+				if why != "" {
+					fmt.Fprintf(out, "  # name: %s: no format proposed: %s\n", report.Printable(n), why)
+					continue
+				}
+				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), yamlQuote(f), reason)
 			}
 		}
 		if len(keys) > 0 {
 			fmt.Fprintln(out, "body:")
 			for _, r := range mergeRules(cat, keys, values) {
-				fmt.Fprintf(out, "  - request: %s\n    path: %s\n    format: %s\n%s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), report.Printable(yamlQuote(r.format)), reason)
+				f, why := proposedFormat(r.format)
+				if why != "" {
+					fmt.Fprintf(out, "  # request: %s, path: %s: no format proposed: %s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), why)
+					continue
+				}
+				fmt.Fprintf(out, "  - request: %s\n    path: %s\n    format: %s\n%s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), yamlQuote(f), reason)
 			}
 		}
 	}
@@ -570,6 +580,22 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
 	}
 	return ExitDrift, nil
+}
+
+// proposedFormat is a format as a proposal prints it: control and
+// direction characters as the regexp package's escapes, so that the text
+// is safe in a terminal and the allowlist takes it as it is. A format
+// that cannot be written so (bytes that are not UTF-8) is not proposed;
+// why says so.
+func proposedFormat(f string) (text, why string) {
+	text = report.PrintableRegexp(f)
+	if !utf8.ValidString(f) {
+		return "", "the values hold bytes that are not UTF-8, which a format cannot name; allow-list the place by hand"
+	}
+	if _, err := regexp.Compile(text); err != nil {
+		return "", fmt.Sprintf("the format does not compile (%v); allow-list the place by hand", err)
+	}
+	return text, ""
 }
 
 var indexes = lazy.Regexp(`\[\d+\]`)
