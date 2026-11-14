@@ -32,6 +32,13 @@ func TestPattern(t *testing.T) {
 		{[]string{"s=" + strings.Repeat("aB3", 113) + "; path=/", "s=" + strings.Repeat("Zx9", 113) + "; path=/"}, `s=[0-9A-Za-z]+; path=/`},
 		{[]string{"1700000000", "1700000123"}, `\d+`},
 		{[]string{"id ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34", "id 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"}, `id [0-9a-f]{40}`},
+		// A date without dashes that agrees, before a time that does not:
+		// the date is chance. Without a time after it, eight digits that
+		// agree are an id, and the other numbers of the value stay.
+		{[]string{"export 20261114-101530.json", "export 20261114-101612.json"}, `export \d{8}-\d{6}\.json`},
+		{[]string{"tenant 20230405 req 17", "tenant 20230405 req 18"}, `tenant 20230405 req \d{2}`},
+		{[]string{"page 3 of 7, export 20261114-101530", "page 3 of 7, export 20261114-101612"}, `page 3 of 7, export \d{8}-\d{6}`},
+		{[]string{"v 1.20240115.3 build 41", "v 1.20240115.3 build 42"}, `v 1\.20240115\.3 build \d{2}`},
 		{[]string{"same", "same"}, ``},
 		{[]string{"abc", ""}, `[a-z]*`},
 		{[]string{"", "2024-01-01"}, `[0-9\-]*`},

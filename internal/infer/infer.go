@@ -27,7 +27,9 @@ func tokens(s string) []token {
 	last := 0
 	for _, m := range jwtToken().FindAllStringIndex(s, -1) {
 		if c := s[m[0]-min(m[0], 1) : m[0]]; c != "" && strings.ContainsAny(c, base64URL) {
-			continue // inside a longer word
+			// Inside a longer word. Only the start is checked: the match
+			// takes every base64url character after it, so none can follow.
+			continue
 		}
 		out = append(runs(out, s[last:m[0]]), token{run: true, jwt: true, text: s[m[0]:m[1]]})
 		last = m[1]
@@ -224,9 +226,8 @@ var (
 	// something: 12ms, 3 s, 512KB.
 	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
 	// timeLike is a value with a date or a time in it, whose digits that
-	// agree in the samples agree only by chance (the same day, hour). A
-	// date may be written without dashes (report-20261114-101530.json).
-	timeLike = lazy.Regexp(`\d{4}-\d{2}-\d{2}|(?:^|\D)(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:\D|$)|\d{1,2}:\d{2}|\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b`)
+	// agree in the samples agree only by chance (the same day, hour).
+	timeLike = lazy.Regexp(`\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b`)
 )
 
 // digitsIn is the format of the digits inside a word that is the same in
@@ -355,6 +356,10 @@ func Pattern(values []string) string {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
 				b.WriteString(digitsIn(parts[0]))
+				continue
+			}
+			if equal && compactDateAt(toks, j) {
+				b.WriteString(`\d{8}`) // the same day by chance
 				continue
 			}
 			if equal && !timey {
@@ -548,6 +553,28 @@ func equalFold(s []string) bool {
 func allEqual(s []string) bool {
 	for _, v := range s {
 		if v != s[0] {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	compactDate = lazy.Regexp(`^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$`)
+	compactTime = lazy.Regexp(`^(?:[01]\d|2[0-3])[0-5]\d[0-5]\d$`)
+)
+
+// compactDateAt reports a date written without dashes at run j of every
+// sample (report-20261114-101530.json): eight digits of a valid date, then
+// one separator and six digits of a valid time. Only that run is a date
+// that agrees by chance; it does not make the whole value one with a time
+// in it, so other numbers that agree stay (an id of eight digits without a
+// time after it, a page number). The caller has checked that the samples
+// share their tokens.
+func compactDateAt(toks [][]token, j int) bool {
+	for _, t := range toks {
+		if j+2 >= len(t) || !compactDate().MatchString(t[j].text) || t[j+1].run ||
+			!strings.Contains("-_. ", t[j+1].text) || !t[j+2].run || !compactTime().MatchString(t[j+2].text) {
 			return false
 		}
 	}
