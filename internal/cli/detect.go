@@ -206,6 +206,7 @@ var detectors = sync.OnceValue(func() []detector {
 			exclude: [][2]string{
 				{"/_debugbar/*", "Laravel Debugbar: a development tool."},
 				{"/_ignition/*", "Ignition error pages: a development tool."},
+				{"/_dusk/*", "Laravel Dusk routes: a testing tool that logs in as any user."},
 				{"/telescope", "Laravel Telescope: a development tool."},
 				{"/telescope/*", "Laravel Telescope: a development tool."},
 				{"/horizon", "Laravel Horizon dashboard: an operations tool, not the API."},

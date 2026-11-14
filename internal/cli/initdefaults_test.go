@@ -18,6 +18,17 @@ func TestInitDefaults(t *testing.T) {
 			t.Errorf("%s: %v", det.kind, err)
 		}
 	}
+	// Laravel Dusk's routes log in as any user: a testing tool, never the
+	// API, and their error pages differ on every run.
+	dusk := false
+	for _, det := range detectors() {
+		for _, x := range det.exclude {
+			dusk = dusk || det.kind == "laravel" && x[0] == "/_dusk/*"
+		}
+	}
+	if !dusk {
+		t.Error("init does not exclude /_dusk/* for Laravel")
+	}
 	excl := &routes.Exclusions{Routes: []routes.Exclusion{
 		{Route: "/_debugbar/*", Reason: "Laravel Debugbar: a development tool."},
 		{Route: "/old", Reason: "gone"},
