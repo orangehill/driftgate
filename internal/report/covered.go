@@ -40,8 +40,9 @@ type NotCovered struct {
 	Skipped []SkippedGap `json:"skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
-	// Requests that changed tracked rows whose values were not compared,
-	// and why (a side recorded none).
+	// Requests that wrote into tracked rows whose values were not
+	// compared, and why: a side recorded none, or the record compared
+	// against did not learn them from two captures of one state.
 	RowValues *ReasonGap `json:"row_values,omitempty"`
 }
 
@@ -72,9 +73,8 @@ const (
 // SkippedGap is the skipped requests of one kind with one reason (the
 // result's note: no baseline, not sent by a read-only capture …).
 type SkippedGap struct {
-	What   string `json:"what"` // read, mutating or command
-	Reason string `json:"reason"`
-	Gap
+	What string `json:"what"` // read, mutating or command
+	ReasonGap
 }
 
 // ReasonGap is a gap with the reason for it.
@@ -210,6 +210,9 @@ type Dominant struct {
 // RowValuesNote is the hint for a side effect whose tracked row got
 // another value (compare.OtherValue) among the drifts that fail: a column
 // that changes by itself between days goes under ignore. Empty otherwise.
+//
+// It reads the drift's text, not compare.Drift.RowValues: that field is
+// not in the saved report (json:"-"), which report and review read back.
 func (r *Report) RowValuesNote() string {
 	for _, res := range r.Results {
 		for _, d := range res.Drifts {

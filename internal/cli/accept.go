@@ -458,6 +458,13 @@ func interrupted(p *config.Project, out io.Writer) error {
 // into the baseline, with their bodies: public ones into the baseline,
 // private ones (already there) stay in the local store, named by their ref.
 func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) error {
+	// A capture two runs agreed on (capture --repeat) learned the values
+	// of tracked rows itself; one made once learned nothing.
+	meta, err := cur.Meta()
+	if err != nil {
+		return envErr(err)
+	}
+	agreed := meta != nil && meta.Agreed >= 2
 	return rewriteBaseline(base, a, func(work *snapshot.Set) error {
 		for _, id := range ids {
 			rec, err := cur.Record(id)
@@ -471,14 +478,11 @@ func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) e
 				}
 				continue
 			}
-			// What two captures of the baseline's state learned of row
-			// values stays, as far as it still applies: the accepted
-			// capture was made once.
 			var old *snapshot.SideEffects
 			if o, err := work.Record(id); err == nil && o != nil {
 				old = o.SideEffects
 			}
-			acceptLearning(old, rec.SideEffects)
+			acceptLearning(old, rec.SideEffects, agreed)
 			var body []byte // nil for a failed request
 			if rec.Body.SHA256 != "" || rec.Body.Ref != "" {
 				if body, err = cur.Body(rec); err != nil {

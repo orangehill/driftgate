@@ -27,6 +27,7 @@ type rowValueApp struct {
 	ph           func(int) string // the driver's placeholder n
 	mu           sync.Mutex
 	target, seen string
+	updInserts   bool // /upd inserts row 4 with a new random created instead
 }
 
 func (a *rowValueApp) set(target, seen string) {
@@ -37,7 +38,7 @@ func (a *rowValueApp) set(target, seen string) {
 
 func (a *rowValueApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
-	target, seen := a.target, a.seen
+	target, seen, updInserts := a.target, a.seen, a.updInserts
 	a.mu.Unlock()
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -45,6 +46,10 @@ func (a *rowValueApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch r.URL.Path {
 	case "/upd":
+		if updInserts {
+			_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen, created) VALUES (4, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+", "+a.ph(4)+")", target, touched, seen, touched+"c")
+			break
+		}
 		_, err = a.db.Exec("UPDATE follows SET target = "+a.ph(1)+", touched = "+a.ph(2)+", seen = "+a.ph(3)+" WHERE id = 1", target, touched, seen)
 	case "/ins":
 		_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen) VALUES (2, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+")", target, touched, seen)
@@ -62,7 +67,7 @@ const rowValueCatalog = `{"version":1,"requests":[
  {"id":"upd","method":"POST","path":"/upd","mutates":true,"storage":"public"},
  {"id":"ins","method":"POST","path":"/ins","mutates":true,"storage":"public"}]}`
 
-const rowValueSchema = "CREATE TABLE follows (id INT PRIMARY KEY, target VARCHAR(20) NOT NULL, touched VARCHAR(40) NOT NULL, seen VARCHAR(20) NOT NULL)"
+const rowValueSchema = "CREATE TABLE follows (id INT PRIMARY KEY, target VARCHAR(20) NOT NULL, touched VARCHAR(40) NOT NULL, seen VARCHAR(20) NOT NULL, created VARCHAR(40) NOT NULL DEFAULT '')"
 
 func rowValueKey() string {
 	k := make([]byte, 32)
@@ -96,7 +101,7 @@ func rowValueProject(t *testing.T, driver, key string) (*project, *rowValueApp) 
 		app.db, root, env = p.db, p.root, []string{"DG_E2E_SQLSERVER=" + sqlServerE2E(t)}
 		stateYAML = fmt.Sprintf("  db:\n    driver: sqlserver\n    dsn: { env: DG_E2E_SQLSERVER }\n    working: %s\n    pristine: %s_pristine\n    exclude: [sessions]\n", p.work, p.work)
 	}
-	sqlExec(t, app.db, rowValueSchema, "INSERT INTO follows VALUES (1, 'seeded', 'seeded', 'seeded')")
+	sqlExec(t, app.db, rowValueSchema, "INSERT INTO follows (id, target, touched, seen) VALUES (1, 'seeded', 'seeded', 'seeded')")
 	app.set("X", "s1")
 	srv := httptest.NewServer(app)
 	t.Cleanup(srv.Close)
@@ -177,6 +182,21 @@ func TestRowValue(t *testing.T) {
 			app.set("W", "s2")
 			if r := p.must(t, 1, "run"); !strings.Contains(r.out, "follows[id=3]") || !strings.Contains(r.out, "other value: target") {
 				t.Errorf("after the rebase, another value: %v", r)
+			}
+
+			// /upd now inserts a row instead of updating one: accepted from
+			// run's single capture, the baseline did not learn that row
+			// (its created changes on every run), so its values are not
+			// compared and the result says so.
+			app.set("Z", "s2") // the baseline's value again
+			app.mu.Lock()
+			app.updInserts = true
+			app.mu.Unlock()
+			p.must(t, 1, "run")
+			p.must(t, 0, "accept", "upd", "--reason", "upd inserts now")
+			r = p.must(t, 0, "run")
+			if strings.Contains(r.out, "other value: created") || !strings.Contains(r.out, "request that changes data whose row values were not compared (baseline:local did not see them in two captures") {
+				t.Errorf("accepted with another kind of change: %v", r)
 			}
 
 			// Two captures made once: touched, which changes by itself, is

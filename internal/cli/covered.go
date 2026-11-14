@@ -120,7 +120,7 @@ func notCovered(p *config.Project, sel selection, cat *catalog.Catalog, reqs []c
 	rank := map[string]int{report.SkippedMutating: 0, report.SkippedRead: 1, report.SkippedCommand: 2}
 	sort.SliceStable(order, func(i, j int) bool { return rank[order[i].what] < rank[order[j].what] })
 	for _, k := range order {
-		n.Skipped = append(n.Skipped, report.SkippedGap{What: k.what, Reason: k.reason, Gap: *report.NewGap(skipped[k])})
+		n.Skipped = append(n.Skipped, report.SkippedGap{What: k.what, ReasonGap: report.ReasonGap{Reason: k.reason, Gap: *report.NewGap(skipped[k])}})
 	}
 	return n
 }

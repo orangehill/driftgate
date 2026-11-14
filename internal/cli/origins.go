@@ -83,9 +83,6 @@ type sides struct {
 	roots     [2][]string
 	rowTables [2][]string      // the tables whose rows each tracked (meta.RowTracking)
 	folders   *compare.Folders // the forms of roots, made once for every request
-	// learning: two captures of one state are compared, which learn the
-	// values of every tracked row (compare.Side.LearnRowValues).
-	learning bool
 }
 
 // noOrigin says how to capture a set that records no origin again.

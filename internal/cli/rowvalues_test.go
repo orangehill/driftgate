@@ -69,15 +69,11 @@ func TestRowValuesKey(t *testing.T) {
 	}
 }
 
-// TestLearning: two captures learn the tables both recorded values of; a
-// record accepted from one capture keeps the learned tables it still
-// writes values into and the volatile columns, and learns no new table
-// nor one whose values it did not record (no key).
+// TestLearning: two captures learn the tables both recorded values of,
+// and a third without values unlearns them; a gap left by a record
+// without values names the missing key.
 func TestLearning(t *testing.T) {
 	v := map[string]string{"c": "x"}
-	row := func(item string, values map[string]string) snapshot.RowChange {
-		return snapshot.RowChange{Item: item, Key: "id=1", Change: "inserted", Values: values}
-	}
 	rows := map[string]*rowLearning{}
 	first := rowSet(t, "k", v)
 	if err := learnRows(rows, "follow", first, rowSet(t, "k", v)); err != nil || strings.Join(rows["follow"].Learned, ",") != "db/table:follows" {
@@ -87,22 +83,55 @@ func TestLearning(t *testing.T) {
 		t.Errorf("a third capture without values: %+v, %v", rows["follow"], err)
 	}
 
-	old := &snapshot.SideEffects{Learned: []string{"db/table:a", "db/table:b"}, Volatile: []string{"db/table:a.at"}}
-	rec := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:a", v), row("db/table:b", nil), row("db/table:c", v)}}
-	acceptLearning(old, rec)
-	if strings.Join(rec.Learned, ",") != "db/table:a" || strings.Join(rec.Volatile, ",") != "db/table:a.at" {
-		t.Errorf("accepted from one capture: %+v", rec)
+	// A baseline record accepted from a capture without the key: the
+	// result names that cause.
+	if g := rowValuesGap(rowSet(t, "k1", nil), rowSet(t, "k1", v), "baseline:local", []string{"follow"}); g == nil || !strings.Contains(g.Reason, "without the project key") {
+		t.Errorf("accepted without the key: %+v", g)
 	}
-	fresh := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:c", v)}}
-	acceptLearning(nil, fresh)
+}
+
+// TestAcceptLearning: a record accepted from a capture made once keeps a
+// table's learning (and its volatile columns) only when it changed the
+// same rows the same way with their values; one accepted from a capture
+// two runs agreed on keeps its own.
+func TestAcceptLearning(t *testing.T) {
+	v := map[string]string{"c": "x"}
+	upd := func(item string, values map[string]string, cols ...string) snapshot.RowChange {
+		return snapshot.RowChange{Item: item, Key: "id=1", Change: "updated", Columns: cols, Values: values}
+	}
+	old := func() *snapshot.SideEffects {
+		return &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status", "updated_at"), upd("db/table:users", v, "name")},
+			Learned: []string{"db/table:orders", "db/table:users"}, Volatile: []string{"db/table:orders.updated_at", "db/table:users.seen"}}
+	}
+	cases := []struct {
+		name     string
+		rec      *snapshot.SideEffects
+		agreed   bool
+		learned  string
+		volatile string
+	}{
+		{"the same rows", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status", "updated_at")}}, false, "db/table:orders", "db/table:orders.updated_at"},
+		// The reviewer's case: an insert instead of the update.
+		{"an insert", &snapshot.SideEffects{Rows: []snapshot.RowChange{{Item: "db/table:orders", Key: "id=2", Change: "inserted", Values: v}}}, false, "", ""},
+		{"a new column", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "note", "status", "updated_at")}}, false, "", ""},
+		{"another row", &snapshot.SideEffects{Rows: []snapshot.RowChange{{Item: "db/table:orders", Key: "id=9", Change: "updated", Columns: []string{"status", "updated_at"}, Values: v}}}, false, "", ""},
+		{"no values (no key)", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", nil, "status", "updated_at")}}, false, "", ""},
+		{"a new table", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:notes", v, "body")}}, false, "", ""},
+		{"agreed: its own", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:notes", v, "body")}, Learned: []string{"db/table:notes"}, Volatile: []string{"db/table:notes.at"}}, true, "db/table:notes", "db/table:notes.at"},
+		{"agreed: learned nothing", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status", "updated_at")}}, true, "", ""},
+	}
+	for _, c := range cases {
+		acceptLearning(old(), c.rec, c.agreed)
+		if strings.Join(c.rec.Learned, ",") != c.learned || strings.Join(c.rec.Volatile, ",") != c.volatile {
+			t.Errorf("%s: learned %v, volatile %v", c.name, c.rec.Learned, c.rec.Volatile)
+		}
+	}
+	fresh := &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status")}}
+	acceptLearning(nil, fresh, false)
 	if len(fresh.Learned) != 0 {
 		t.Errorf("a new request: %+v", fresh)
 	}
-	own := &snapshot.SideEffects{Rows: []snapshot.RowChange{row("db/table:c", v)}, Learned: []string{"db/table:c"}}
-	acceptLearning(old, own)
-	if strings.Join(own.Learned, ",") != "db/table:c" || len(own.Volatile) != 0 {
-		t.Errorf("accepted from two captures: %+v", own)
-	}
+
 }
 
 // TestRebaseRowValues: a capture whose row values were named under

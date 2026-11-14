@@ -388,7 +388,13 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	}
 	// What the result does not cover, from the records read already.
 	gaps := notCovered(p, o.sel, cat, reqs, o.only != "", baseName, base, results, o.coverage)
-	gaps.RowValues = rowValuesGap(base, cur, baseName, ids)
+	var compared []string // the requests compared: selected, sent, with an answer in both sets
+	for _, r := range results {
+		if r.Outcome == report.Pass || r.Outcome == report.Drift {
+			compared = append(compared, r.ID)
+		}
+	}
+	gaps.RowValues = rowValuesGap(base, cur, baseName, compared)
 	known := catalogIDs(cat)
 	if o.someTargets {
 		known = func(string) bool { return true } // the catalog holds some services only
@@ -470,10 +476,10 @@ func compareAll(reqs []catalog.Request, levels []compare.Level, base, cur *snaps
 	}
 	err = parallel(len(reqs), size, func(i int) error {
 		var err error
-		if results[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], false, digest); err != nil || !showPrivate {
+		if results[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], false, digest, false); err != nil || !showPrivate {
 			return err
 		}
-		shown[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], true, digest)
+		shown[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], true, digest, false)
 		return err
 	})
 	return results, shown, err
@@ -621,12 +627,20 @@ func hideErrors(drifts []compare.Drift) {
 // captured from where that differs (setOrigins), nil for two captures of
 // one origin in one folder.
 func compareOne(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool) (report.Result, error) {
-	return compareOneDigest(req, base, cur, origins, allow, level, showPrivate, nil)
+	return compareOneDigest(req, base, cur, origins, allow, level, showPrivate, nil, false)
+}
+
+// compareToLearn compares one request of two captures of one state at the
+// values level, with every tracked row's values (the captures learn
+// them), its private values shown (infer prints formats only).
+func compareToLearn(req catalog.Request, first, cur *snapshot.Set, allow *allowlist.List) (report.Result, error) {
+	return compareOneDigest(req, first, cur, nil, allow, compare.LevelValues, true, nil, true)
 }
 
 // compareOneDigest is compareOne that also names each drift with digest
-// (compare.Drift.Digest), before the values of a private body are hidden.
-func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool, digest driftDigest) (report.Result, error) {
+// (compare.Drift.Digest), before the values of a private body are hidden;
+// learn compares the values of every tracked row (compareToLearn).
+func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool, digest driftDigest, learn bool) (report.Result, error) {
 	id := req.ID
 	res := report.Result{ID: id, Level: level.String()}
 	bRec, err := base.Record(id)
@@ -666,8 +680,8 @@ func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sid
 		b.Roots, c.Roots = origins.roots[0], origins.roots[1]
 		b.Folders, c.Folders = origins.folders, origins.folders
 		b.RowTables, c.RowTables = origins.rowTables[0], origins.rowTables[1]
-		b.LearnRowValues = origins.learning
 	}
+	b.LearnRowValues = learn
 	// Two bodies with one name are the same bytes, which is all the
 	// comparison needs to know of them: neither is read.
 	// A request that failed (no response) has no body: the comparison

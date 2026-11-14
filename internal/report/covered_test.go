@@ -20,8 +20,8 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 	r := Build("capture:c", "baseline:local", []Result{drifted("a", "d"), drifted("b", "d"), drifted("c", "d"), drifted("d", "d"), drifted("e", "d"), {ID: "ok", Outcome: Pass}})
 	r.NotCovered = &NotCovered{Catalog: CatalogCounts{Requests: 19, Reads: 18, Mutating: 1}, RoutesChecked: true, Against: "baseline:local",
 		NoRequest: NewGap([]string{"GET /api/extra"}), NoInvalidBody: NewGap([]string{"POST /api/posts"}), FailedInBaseline: NewGap([]string{"get-tree"}), Observed: NewGap(ids),
-		Skipped: []SkippedGap{{What: SkippedMutating, Reason: "no baseline", Gap: *NewGap([]string{"post-import"})},
-			{What: SkippedRead, Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}, {What: SkippedCommand, Reason: "no baseline", Gap: *NewGap([]string{"schema"})}},
+		Skipped: []SkippedGap{{What: SkippedMutating, ReasonGap: ReasonGap{Reason: "no baseline", Gap: *NewGap([]string{"post-import"})}},
+			{What: SkippedRead, ReasonGap: ReasonGap{Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}}, {What: SkippedCommand, ReasonGap: ReasonGap{Reason: "no baseline", Gap: *NewGap([]string{"schema"})}}},
 		KnownFailures: NewGap([]string{"get-old"}),
 		RowValues:     &ReasonGap{Reason: "the baseline recorded no row values", Gap: *NewGap([]string{"post-follow"})}}
 	g, drifted, elsewhere, ok := r.FindDominant()

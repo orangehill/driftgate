@@ -500,9 +500,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		}
 		if err := parallel(len(cat.Requests), size, func(i int) error {
 			var err error
-			// infer needs the values; it prints formats only. Every tracked
-			// row's values are compared: the runs learn them.
-			results[i], err = compareOne(cat.Requests[i], first, set, &sides{learning: true}, allow, compare.LevelValues, true)
+			results[i], err = compareToLearn(cat.Requests[i], first, set, allow)
 			return err
 		}); err != nil {
 			return 0, nil, err

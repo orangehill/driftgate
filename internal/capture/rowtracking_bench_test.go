@@ -17,10 +17,10 @@ import (
 
 // BenchmarkCaptureRowTracking is a capture of a read-only request and ten
 // that each insert a row into t0 of benchSchema, with 2000 more rows, under
-// row_tracking: the rows of t0 are read before and after each request
-// that writes, and (from fix/row-value on) the values each wrote are
-// named under the project key, its column at left out by ignore. record-B is the size of the capture's
-// records. On benchServers.
+// row_tracking with an ignore list (its column at is left out): the rows
+// of t0 are read before and after each request that writes, and the
+// values each wrote are named under the project key. record-B is the
+// size of the capture's records. On benchServers.
 func BenchmarkCaptureRowTracking(b *testing.B) {
 	servers := benchServers()
 	reqs := []catalog.Request{{ID: "get", Method: "GET", Path: "/", Storage: snapshot.Public}}

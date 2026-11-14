@@ -801,9 +801,6 @@ type rowIgnore struct {
 // table as the driver names it: by its name without letter case, or, for
 // a table configured without a schema, by its name without the schema.
 func ignoredColumns(tables []rowIgnore, table string) []string {
-	if len(tables) == 0 {
-		return nil
-	}
 	bare := table
 	if i := strings.LastIndexByte(table, '.'); i >= 0 {
 		bare = table[i+1:]

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
@@ -57,24 +58,41 @@ func rowValuesGap(base, cur *snapshot.Set, against string, ids []string) *report
 	}
 	all := !recorded(cur) || !recorded(base)
 	var names []string
+	// noKey: every table left out is one whose rows the baseline's record
+	// holds without values (accepted from a capture without the key).
+	noKey := true
 	for _, id := range ids {
 		var learned []string
+		var baseRows []snapshot.RowChange
 		if rec, err := base.Record(id); err == nil && rec != nil && rec.SideEffects != nil {
-			learned = rec.SideEffects.Learned
+			learned, baseRows = rec.SideEffects.Learned, rec.SideEffects.Rows
 		}
+		named := false
 		for _, s := range []*snapshot.Set{base, cur} {
-			if rec, err := s.Record(id); err == nil && rec != nil && rec.SideEffects != nil &&
-				slices.ContainsFunc(rec.SideEffects.Rows, func(r snapshot.RowChange) bool {
-					return r.Change != "deleted" && (all || !slices.Contains(learned, r.Item))
-				}) {
-				names = append(names, id)
-				break
+			rec, err := s.Record(id)
+			if err != nil || rec == nil || rec.SideEffects == nil {
+				continue
 			}
+			for _, r := range rec.SideEffects.Rows {
+				if r.Change == "deleted" || !all && slices.Contains(learned, r.Item) {
+					continue
+				}
+				named = true
+				noKey = noKey && slices.ContainsFunc(baseRows, func(b snapshot.RowChange) bool {
+					return b.Item == r.Item && b.Change != "deleted" && b.Values == nil
+				})
+			}
+		}
+		if named {
+			names = append(names, id)
 		}
 	}
 	g := report.NewGap(names)
 	if g == nil {
 		return nil
+	}
+	if !all && noKey {
+		reason = against + " holds them from a capture without the project key: driftgate capture <tag> --repeat 2 with the key at hand, then driftgate baselines rebase <name> --from <tag>"
 	}
 	return &report.ReasonGap{Reason: reason, Gap: *g}
 }
@@ -168,22 +186,54 @@ func writeLearned(p *config.Project, tag string, rows map[string]*rowLearning) e
 	return nil
 }
 
-// acceptLearning is what an accepted record keeps of the baseline
-// record's learning. A record of a capture made once learned nothing: it
-// keeps the learned tables it still wrote values into, and the volatile
-// columns; a table it newly writes is not learned. A record whose
-// captures learned (capture --repeat) keeps its own.
-func acceptLearning(old, rec *snapshot.SideEffects) {
-	if rec == nil || len(rec.Learned) > 0 || len(rec.Volatile) > 0 || old == nil {
+// acceptLearning sets what an accepted record (rec) learned of the values
+// of tracked rows. From a capture two runs agreed on (agreed), it keeps
+// what its own runs learned. From a capture made once, it learned
+// nothing: per table, it keeps the baseline record's learning (old) only
+// when it changed exactly the same rows the same way (keys, changes and
+// columns, as compare describes them) with their values recorded; any
+// other table is not learned, and a comparison lists it as not covered.
+func acceptLearning(old, rec *snapshot.SideEffects, agreed bool) {
+	if rec == nil || agreed {
 		return
 	}
-	now := valueItems(rec)
-	for _, it := range old.Learned {
-		if slices.Contains(now, it) {
-			rec.Learned = append(rec.Learned, it)
+	rec.Learned, rec.Volatile = nil, nil
+	if old == nil {
+		return
+	}
+	for _, item := range old.Learned {
+		if sameRows(old, rec, item) {
+			rec.Learned = append(rec.Learned, item)
+			for _, col := range old.Volatile {
+				if strings.HasPrefix(col, item+".") {
+					rec.Volatile = append(rec.Volatile, col)
+				}
+			}
 		}
 	}
-	rec.Volatile = slices.Clone(old.Volatile)
+}
+
+// sameRows reports whether two records changed the same rows of a table
+// the same way, the second with the values of every row it inserted or
+// updated recorded.
+func sameRows(old, rec *snapshot.SideEffects, item string) bool {
+	shape := func(se *snapshot.SideEffects, needValues bool) ([]string, bool) {
+		var out []string
+		for _, r := range se.Rows {
+			if r.Item != item {
+				continue
+			}
+			if needValues && r.Change != "deleted" && r.Values == nil {
+				return nil, false
+			}
+			out = append(out, r.Key+"\x00"+compare.DescribeRow(r))
+		}
+		sort.Strings(out)
+		return out, true
+	}
+	a, _ := shape(old, false)
+	b, ok := shape(rec, true)
+	return ok && len(a) > 0 && slices.Equal(a, b)
 }
 
 // mergeVolatile is the sorted union of two lists of volatile columns.

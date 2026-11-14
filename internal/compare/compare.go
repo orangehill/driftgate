@@ -107,6 +107,16 @@ var kinds = []KindInfo{
 // Kinds returns a copy of the list of drift kinds.
 func Kinds() []KindInfo { return slices.Clone(kinds) }
 
+// DescribeRow is how a side effect describes a changed row of a tracked
+// table: its change, and the columns an update changed ("updated
+// status,updated_at"). Two rows alike in it changed alike.
+func DescribeRow(r snapshot.RowChange) string {
+	if len(r.Columns) > 0 {
+		return r.Change + " " + strings.Join(r.Columns, ",")
+	}
+	return r.Change
+}
+
 // OtherValue marks a side effect whose row changed alike on both sides
 // but got another value: "updated status; other value: status".
 const OtherValue = "other value"
@@ -466,12 +476,7 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 			c.add(KindSideEffect, "side-effects:"+it, "unchanged", "changed")
 		}
 	}
-	describe := func(r snapshot.RowChange) string {
-		if len(r.Columns) > 0 {
-			return r.Change + " " + strings.Join(r.Columns, ",")
-		}
-		return r.Change
-	}
+	describe := DescribeRow
 	// untracked notes, once per item, the rows of a table the other side
 	// did not track: row_tracking came or went after the baseline.
 	noted := map[string]bool{}
