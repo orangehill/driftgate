@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // The subset runs on the seed of the anonymize test, with comments (a
@@ -91,7 +93,7 @@ func testSubset(t *testing.T, s *server) {
 	if s.driver == MySQL {
 		var version string
 		s.admin.QueryRow("SELECT VERSION()").Scan(&version)
-		mariadb = strings.Contains(strings.ToLower(version), "mariadb")
+		mariadb = dbx.IsMariaDB(version)
 	}
 	ps := people(testUsers())
 	s.create(t, src)

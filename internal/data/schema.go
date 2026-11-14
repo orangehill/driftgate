@@ -45,7 +45,7 @@ func (d Database) Hosts() ([]string, error) {
 // PostgreSQL the database of the DSN).
 func open(d Database, db string) (*sql.DB, error) {
 	switch d.Driver {
-	case MySQL, "mariadb":
+	case MySQL:
 		return dbx.OpenMySQL(d.DSN, db, d.Dial)
 	case Postgres:
 		return dbx.OpenPostgres(d.DSN, db, d.Dial)
@@ -251,7 +251,7 @@ type dialect interface {
 
 func dialectFor(driver string) (dialect, error) {
 	switch driver {
-	case MySQL, "mariadb":
+	case MySQL:
 		return mysqlDialect{}, nil
 	case Postgres:
 		return postgresDialect{}, nil

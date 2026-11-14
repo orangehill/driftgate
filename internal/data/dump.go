@@ -32,9 +32,6 @@ type statements struct {
 }
 
 func newStatements(r io.Reader, driver string) *statements {
-	if driver == "mariadb" {
-		driver = MySQL
-	}
 	return &statements{r: bufio.NewReaderSize(r, 1<<20), driver: driver, delim: ";"}
 }
 

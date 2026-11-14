@@ -59,6 +59,20 @@ func TestStateValidation(t *testing.T) {
 	}
 }
 
+// TestDataDriver: data.driver mariadb becomes mysql, the only MySQL driver
+// name data opens.
+func TestDataDriver(t *testing.T) {
+	cfg := Config{Version: Version, Project: "p", Mode: Freeze, Level: "values",
+		Data: Data{Driver: "mariadb", Source: DataDB{DSN: Secret{Env: "X"}, Database: "a"}, Target: DataDB{Database: "b"}}}
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Data.Driver != MySQL {
+		t.Errorf("data.driver %q not normalized", p.Data.Driver)
+	}
+}
+
 func TestBisectValidation(t *testing.T) {
 	base := Config{Version: Version, Project: "p", Mode: Freeze, Level: "values"}
 	cases := []struct {

@@ -51,10 +51,9 @@ func newProbeFixture(t *testing.T, dsn, name string, grants, objects []string) p
 	f := probeFixture{root: mysqlAdmin(t, dsn, ""), dsn: dsn, work: "dgt_" + name, pristine: "dgt_" + name + "_pristine"}
 	var version string
 	f.root.QueryRow("SELECT @@log_bin, VERSION()").Scan(&f.logBin, &version)
-	f.mariadb = strings.Contains(version, "MariaDB")
+	f.mariadb = dbx.IsMariaDB(version)
 	// A Galera node checks triggers as with the binary log on (1419).
-	var wsrep bool
-	if f.root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep {
+	if isGalera(f.root) {
 		f.logBin = true
 	}
 	user := "'dgt_" + name + "'@'%'"

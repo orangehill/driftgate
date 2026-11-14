@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 func TestDiff(t *testing.T) {
@@ -401,11 +403,16 @@ func TestRestoreSpeed(t *testing.T) {
 // as Galera creates no cached sequence with another one (1235).
 func galeraSequence(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	var wsrep int
-	if db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0 {
+	if isGalera(db) {
 		return " INCREMENT BY 0"
 	}
 	return ""
+}
+
+// isGalera reports whether the server is a Galera node (wsrep_on).
+func isGalera(db *sql.DB) bool {
+	var wsrep int
+	return db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0
 }
 
 // TestMySQLEdgeCases covers what a review found: columns with default
@@ -428,7 +435,7 @@ func testMySQLEdgeCases(t *testing.T, dsn string) {
 	db := mysqlAdmin(t, dsn, work)
 	var version string
 	db.QueryRow("SELECT VERSION()").Scan(&version)
-	mariadb := strings.Contains(version, "MariaDB")
+	mariadb := dbx.IsMariaDB(version)
 	mustExec(t, db,
 		"CREATE TABLE ts (id INT PRIMARY KEY, created TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, changed TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
 		"INSERT INTO ts VALUES (1, '2020-01-01 00:00:00', '2020-01-02 00:00:00')",
@@ -924,7 +931,7 @@ func testMySQLWriteCheck(t *testing.T, dsn string, noTables bool) {
 	db := mysqlAdmin(t, dsn, work)
 	var version string
 	db.QueryRow("SELECT VERSION()").Scan(&version)
-	mariadb := strings.Contains(version, "MariaDB")
+	mariadb := dbx.IsMariaDB(version)
 	mustExec(t, db, writeCheckSchema...)
 	var log strings.Builder
 	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Log: &log})
@@ -1396,7 +1403,7 @@ func TestMySQLCountersOff(t *testing.T) {
 			var version string
 			root.QueryRow("SELECT VERSION()").Scan(&version)
 			want := "userstat is OFF"
-			if !strings.Contains(version, "MariaDB") {
+			if !dbx.IsMariaDB(version) {
 				want = "setup_objects"
 				mustExec(t, root, "INSERT INTO performance_schema.setup_objects (OBJECT_TYPE, OBJECT_SCHEMA, OBJECT_NAME, ENABLED, TIMED) VALUES ('TABLE', '"+work+"', '%', 'NO', 'NO')")
 				t.Cleanup(func() {
@@ -1457,8 +1464,7 @@ func TestMySQLGaleraSequences(t *testing.T) {
 		t.Run(u.Host, func(t *testing.T) {
 			ctx := context.Background()
 			root := mysqlAdmin(t, dsn, "")
-			var wsrep int
-			if root.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) != nil || wsrep == 0 {
+			if !isGalera(root) {
 				t.Skip("not a Galera node")
 			}
 			work, pristine := "dgt_galseq", "dgt_galseq_pristine"
@@ -1532,7 +1538,7 @@ func TestMySQLSequenceCycles(t *testing.T) {
 			root := mysqlAdmin(t, dsn, "")
 			var version string
 			root.QueryRow("SELECT VERSION()").Scan(&version)
-			if !strings.Contains(version, "MariaDB") {
+			if !dbx.IsMariaDB(version) {
 				t.Skip("sequences are MariaDB's")
 			}
 			work, pristine := "dgt_seqcycle", "dgt_seqcycle_pristine"
