@@ -73,6 +73,12 @@ func TestPgStageRows(t *testing.T) {
 	if _, err := s.rows(1, -1); err != boom {
 		t.Errorf("the query's error: %v", err)
 	}
+	// The views' query failing while read stops the fingerprint (it once
+	// left the views after the error out).
+	all := func(string) bool { return true }
+	if err := (&Postgres{}).views(&s, 1, Fingerprint{}, all, false, nil); err != boom {
+		t.Errorf("views with the query's error: %v", err)
+	}
 }
 
 // TestPostgresFingerprintPinned: the queries of a fingerprint and how
