@@ -113,6 +113,7 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 			return 0, nil, err
 		}
 		fmt.Fprintf(out, "wrote %s\n", path)
+		suspectAuthNote(out, inv)
 		return ExitClean, whole, nil
 	case len(changes) > 0:
 		fmt.Fprintf(out, "%d changes against %s; review them and run driftgate discover --write\n", len(changes), path)
@@ -120,6 +121,18 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 	}
 	fmt.Fprintln(out, "routes unchanged ✓")
 	return ExitClean, whole, nil
+}
+
+// suspectAuthNote names the middleware that look like they sign a user in
+// on routes no identity is sent to. It is printed when the inventory is
+// written (the first run, discover --write), not on every run.
+func suspectAuthNote(out io.Writer, inv *routes.Inventory) {
+	ms := discover.SuspectAuth(inv.Routes)
+	if len(ms) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "note: routes with %s get no identity; if it signs a user in, name it under discover[].auth (alias or class name, e.g. auth: [%s]) and run driftgate discover --write\n",
+		strings.Join(ms, ", "), ms[0][strings.LastIndex(ms[0], `\`)+1:])
 }
 
 // fetcher reads a specification from the running application: a path is

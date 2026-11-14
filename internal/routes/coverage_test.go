@@ -278,3 +278,26 @@ func TestNoInvalidBodyByAccept(t *testing.T) {
 		t.Errorf("without negotiation: %v", c.NoInvalidBody)
 	}
 }
+
+// TestFailedWithoutIdentity: a 401 or 403 of a request sent without an
+// identity says so, also when a known failure acknowledges it; with an
+// identity, or for another status, the status stands alone.
+func TestFailedWithoutIdentity(t *testing.T) {
+	cat := &catalog.Catalog{Requests: []catalog.Request{
+		generated("me", "GET", "/me", "ok", nil),
+		generated("admin", "GET", "/admin", "ok", nil),
+		generated("signed", "GET", "/signed", "ok", nil),
+		generated("gone", "GET", "/gone", "ok", nil),
+	}}
+	cat.Requests[2].Identity = "admin"
+	answers := map[string]Answer{"me": {Status: 401}, "admin": {Status: 403}, "signed": {Status: 401}, "gone": {Status: 410}}
+	h := CheckHealth(cat, answers, []KnownFailure{{Request: "admin", Status: "403", Reason: "admins only"}})
+	var got []string
+	for _, f := range append(h.Failed, h.Known...) {
+		got = append(got, f.String())
+	}
+	want := []string{"me: 401, without an identity", "signed: 401", "gone: 410", "admin: 403, without an identity (known: admins only)"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}

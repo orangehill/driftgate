@@ -41,6 +41,7 @@ generate:
 |---|---|
 | `templates` | `empty-body` sends `{}` to routes with rules; its `json-errors` twin compares the 422 message. |
 | Rules in controllers | `$request->validate([...])` is not read: such routes get no sample body, and `coverage` lists them. |
+| Own auth middleware | `auth`, `auth:sanctum`, `jwt.auth` routes get `generate.identity`. Name others by alias or class: `discover[].auth: [GetUserFromToken]`; not a broad group such as `api`. |
 | `prepare` | Runs after every restore. Keep it to migrations the upgrade step adds; a migration that rewrites rows belongs in `seed`. |
 | Docker or Sail | Run the adapter in the container: `["docker", "compose", "exec", "-T", "laravel.test", "php", ...]`. |
 | SQLite | `driver: sqlite`, `working: database/database.sqlite`; run `php artisan migrate` before setup. |

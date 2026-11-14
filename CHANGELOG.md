@@ -47,6 +47,8 @@ versioning. Read **Upgrading** before you update an existing project.
 - `driftgate help kinds` lists every drift kind; the docs gain a glossary and a drift kinds reference. ([#23](https://github.com/orangehill/driftgate/pull/23))
 - `driftgate help exclusions`, `help classify` and `help config` list the keys of those files; every help topic links its own reference page, and `driftgate help` names them all. ([#26](https://github.com/orangehill/driftgate/pull/26))
 - Detection reads NestJS/TypeORM `DB_TYPE`. Laravel closure routes with a FormRequest get a body from its rules. ([#15](https://github.com/orangehill/driftgate/pull/15), [#16](https://github.com/orangehill/driftgate/pull/16))
+- `discover[].auth` names a Laravel application's own auth middleware, by alias or class name, such as `auth: [GetUserFromToken]`: its routes get `generate.identity` like those behind `auth`, and keep their bodies from validation rules. `discover --write` and the first run name the middleware that look like they sign a user in (token, JWT, guard) on routes sent without an identity, and `generate` notes when `generate.identity` is set but no route needs authentication. Before, such routes were sent without an identity, and nothing said so.
+- A request meant to succeed that answered 401 or 403 without an identity says `without an identity` in `coverage`, the baseline check and reports, also when a known failure acknowledges it. Exit codes do not change.
 
 ### Changed
 
@@ -67,6 +69,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- Laravel routes with `guest` no longer count as needing authentication: `route:list` lists it as `RedirectIfAuthenticated`, whose name has "auth" in it, so login and registration were sent as `generate.identity`. In an existing project these routes change once: run `driftgate discover --write` and `driftgate generate --write`, and make a new baseline.
 - `allowlist check` no longer reports the rules `init` wrote as `no-place` when the baseline does not reach them, such as Laravel's `x-ratelimit-reset` and `retry-after`, which come only with a rate limit reached. It lists them as not checked. The same rule with a reason of your own is still reported. ([#63](https://github.com/orangehill/driftgate/pull/63))
 - `setup --driver` for a database setting that does not name its driver: the summary names the driver given, and the checks and the configuration's comment no longer say the setting does not say which database it is. Before, the summary said `driver unknown`. ([#63](https://github.com/orangehill/driftgate/pull/63))
 - Proposed formats no longer stop the next run for a value they were meant to allow. A date written without dashes before a time (`report-20261114-101530.json`) now becomes `\d{8}` instead of the day of the capture, when its month, day and time are valid; the other numbers of the value stay as they were. A JSON Web Token now takes any claims and signature in base64url and keeps its header, so a change of the algorithm is still a drift. Before, its format came from the two samples and could fix a `-` of the signature in place. ([#63](https://github.com/orangehill/driftgate/pull/63))

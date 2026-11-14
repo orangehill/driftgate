@@ -173,6 +173,9 @@ func failure(req catalog.Request, a Answer) (Failure, bool) {
 	case !meantToSucceed(req):
 		return Failure{}, false
 	case a.Status >= 400:
+		if (a.Status == 401 || a.Status == 403) && req.Identity == "" {
+			f.Detail = "without an identity"
+		}
 	case a.Status >= 300:
 		path, ok := loginRedirect(a.Location)
 		if !ok {

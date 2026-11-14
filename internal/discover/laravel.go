@@ -55,6 +55,7 @@ func laravel(ctx context.Context, root string, a Adapter, log io.Writer) ([]rout
 	if err != nil {
 		return nil, err
 	}
+	withAuth(rs, a.Auth)
 	if len(a.PHP) == 0 {
 		return rs, nil
 	}

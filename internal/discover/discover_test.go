@@ -491,3 +491,42 @@ func TestOpenAPIAliasBomb(t *testing.T) {
 		t.Error("a specification over the size limit was read")
 	}
 }
+
+// TestLaravelAuthMiddleware: route:list names middleware by class (guest is
+// RedirectIfAuthenticated, which is not authentication), and discover[].auth
+// names the application's own by alias or class, never by a part of a name.
+func TestLaravelAuthMiddleware(t *testing.T) {
+	src := Adapter{Adapter: "laravel", Command: []string{"cat", "testdata/laravel-auth.json"}}
+	rs := run(t, src)
+	if r := find(t, rs, "POST /login"); r.Auth {
+		t.Error("guest (RedirectIfAuthenticated) marked as needing auth")
+	}
+	if !find(t, rs, "GET /api/me").Auth || find(t, rs, "GET /api/profile").Auth {
+		t.Errorf("without auth: %+v", rs)
+	}
+	if got := strings.Join(SuspectAuth(rs), ", "); got != `App\Http\Middleware\GetUserFromToken, App\Http\Middleware\VerifyJwtToken` {
+		t.Errorf("suspects: %s", got)
+	}
+
+	src.Auth = []string{"getuserfromtoken", "adminpanel", "App\\Http\\Middleware\\VerifyJwtToken"}
+	rs = run(t, src)
+	for _, k := range []string{"GET /api/profile", "GET /api/admin/stats", "GET /api/report", "GET /api/me"} {
+		if !find(t, rs, k).Auth {
+			t.Errorf("%s not marked as needing auth", k)
+		}
+	}
+	if find(t, rs, "POST /login").Auth || len(SuspectAuth(rs)) != 0 {
+		t.Errorf("with auth: %+v, suspects %v", rs, SuspectAuth(rs))
+	}
+
+	// A part of a name matches nothing: api is a group of every route.
+	src.Auth = []string{"Token", "Http", "ap"}
+	for _, r := range run(t, src) {
+		if r.Auth != (r.Path == "/api/me") {
+			t.Errorf("%s: auth %v with a part of a name", r.Key(), r.Auth)
+		}
+	}
+	if err := (Adapter{Adapter: "openapi", File: "x.json", Auth: []string{"jwt"}}).Validate(); err == nil || !strings.Contains(err.Error(), "auth is for adapter laravel") {
+		t.Errorf("auth on openapi: %v", err)
+	}
+}

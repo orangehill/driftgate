@@ -190,6 +190,7 @@ it to `seed`.
 | `discover[].command` | command | `laravel`: its `route:list`; `command`: prints the routes as JSON |
 | `discover[].php` | command | `laravel`: runs PHP in the application, to build bodies from validation rules |
 | `discover[].file`, `discover[].url` | path, URL | `openapi`: the description, from a file or the running service |
+| `discover[].auth` | list | `laravel`: the application's own auth middleware, by alias or class name; its routes get `generate.identity` |
 | `discover[].identity` | name | `openapi` with `url`, `spring`: read as this identity |
 | `discover[].target`, `discover[].dir`, `discover[].base_path` | | the service, its folder, and a prefix of every path |
 | `templates` | list | request variants per route ([templates](catalog.md#generate-and-templates)); default `[ok]` |
