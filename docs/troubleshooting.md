@@ -15,6 +15,7 @@ vary. Exit codes are under [exit codes](commands.md#exit-codes).
 | `git does not ignore …, which hold the key, captures and private bodies: …` | `.gitignore` lacks `.driftgate/`, or git tracks files in it. | Add the line the message names; untrack files with `git rm -r --cached`. |
 | `… names the database …, but working is …` | The application's setting and `working:` name different databases, as in a worktree. | Make them agree ([worktrees](workflows.md#worktrees)). |
 | `generate.identity … is not an identity and no tokens source is configured` | `generate.identity` names no identity. | Add it under `identities:`, or configure `tokens:`. |
+| `generate.identity is …, but no route needs authentication` | Discover knows no auth middleware of the application. | Name its class under `discover[].auth`, then run `driftgate discover --write`. |
 | The server refuses to create the pristine database | The database login may not create databases. | Grant the rights in [what every database needs](databases.md#what-every-database-needs). |
 
 ## Capture and state

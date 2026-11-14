@@ -12,6 +12,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +29,7 @@ type Adapter struct {
 	Adapter  string   `yaml:"adapter"`             // laravel, openapi, nextjs, nuxt, spring, symfony, rails, django, command
 	Command  []string `yaml:"command,omitempty"`   // laravel: route:list; command: prints routes as JSON
 	PHP      []string `yaml:"php,omitempty"`       // laravel: runs PHP in the application, for validation rules
+	Auth     []string `yaml:"auth,omitempty"`      // laravel: the application's own middleware that signs a user in, by class
 	File     string   `yaml:"file,omitempty"`      // openapi: specification file (JSON or YAML)
 	URL      string   `yaml:"url,omitempty"`       // openapi: specification the running application serves (a path on the target or a full URL)
 	Identity string   `yaml:"identity,omitempty"`  // openapi url, spring: read as this identity (some applications describe only what the caller may use)
@@ -49,6 +52,15 @@ func (a Adapter) Validate() error {
 	case "nextjs", "nuxt", "spring", "symfony", "rails", "django":
 	default:
 		return fmt.Errorf("unknown adapter %q (laravel, openapi, nextjs, nuxt, spring, symfony, rails, django, command)", a.Adapter)
+	}
+	// Only the laravel adapter reads the middleware of a route.
+	if len(a.Auth) > 0 && a.Adapter != "laravel" {
+		return fmt.Errorf("auth is for adapter laravel (adapter %s)", a.Adapter)
+	}
+	for _, n := range a.Auth {
+		if strings.TrimSpace(n) == "" {
+			return fmt.Errorf("auth has an empty middleware name")
+		}
 	}
 	if a.BasePath != "" && (!strings.HasPrefix(a.BasePath, "/") || strings.HasSuffix(a.BasePath, "/")) {
 		return fmt.Errorf("base_path must start with / and not end with one, got %q", a.BasePath)
@@ -242,13 +254,96 @@ func methodList(ms []string) []string {
 
 // needsAuth guesses from Laravel middleware names whether a route needs an
 // authenticated user (auth, auth:api, jwt.auth, auth.basic, auth:sanctum).
+// route:list resolves aliases to classes, so guest is listed as
+// Illuminate\Auth\Middleware\RedirectIfAuthenticated: it is not one.
 func needsAuth(middleware []string) bool {
 	for _, m := range middleware {
-		if strings.Contains(strings.ToLower(m), "auth") && !strings.Contains(strings.ToLower(m), "guest") {
+		l := strings.ToLower(m)
+		if strings.Contains(l, "auth") && !strings.Contains(l, "guest") && !strings.Contains(l, "redirectifauthenticated") {
 			return true
 		}
 	}
 	return false
+}
+
+// MiddlewareName splits a middleware as route:list lists it into its name
+// without the parameters (App\Http\Middleware\CheckRole:admin gives
+// App\Http\Middleware\CheckRole) and the class without the namespace
+// (CheckRole).
+func MiddlewareName(m string) (full, base string) {
+	full, _, _ = strings.Cut(m, ":")
+	return full, full[strings.LastIndex(full, `\`)+1:]
+}
+
+// named reports whether middleware m is one of names: by its class, with or
+// without the namespace, or its name as listed. It never matches a part of a
+// name, so api does not match every route of the api group. route:list
+// --json lists aliases and groups resolved to classes.
+func named(names []string, m string) bool {
+	full, base := MiddlewareName(m)
+	for _, n := range names {
+		if strings.EqualFold(n, m) || strings.EqualFold(n, full) || strings.EqualFold(n, base) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmatchedAuth lists the names of auth that match no middleware of rs, the
+// routes of that adapter: an alias or a group name, which route:list --json
+// lists as classes, or a misspelt class.
+func UnmatchedAuth(auth []string, rs []routes.Route) []string {
+	var out []string
+	for _, n := range auth {
+		if !slices.ContainsFunc(rs, func(r routes.Route) bool {
+			return slices.ContainsFunc(r.Middleware, func(m string) bool { return named([]string{n}, m) })
+		}) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// withAuth marks the routes that carry one of the adapter's auth middleware.
+func withAuth(rs []routes.Route, auth []string) {
+	if len(auth) == 0 {
+		return
+	}
+	for i := range rs {
+		rs[i].Auth = rs[i].Auth || slices.ContainsFunc(rs[i].Middleware, func(m string) bool { return named(auth, m) })
+	}
+}
+
+// authLike matches middleware names that look like they sign a user in
+// (VerifyJwtToken, ApiGuard); notAuth those that only carry a token: the
+// CSRF check and Passport's CreateFreshApiToken, which sets a cookie for
+// the user already signed in.
+var (
+	authLike = regexp.MustCompile(`(?i)token|jwt|guard|bearer|api.?key`)
+	notAuth  = regexp.MustCompile(`(?i)csrf|createfreshapitoken`)
+)
+
+// SuspectAuth lists, once each and sorted, the middleware of routes that do
+// not need authentication whose name looks like it signs a user in: an
+// application's own middleware that needsAuth does not know and the
+// adapter's auth does not name.
+func SuspectAuth(rs []routes.Route) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range rs {
+		if r.Auth || r.Source != "laravel" {
+			continue
+		}
+		for _, m := range r.Middleware {
+			full, _ := MiddlewareName(m)
+			if !seen[full] && authLike.MatchString(full) && !notAuth.MatchString(full) {
+				seen[full] = true
+				out = append(out, full)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // command runs a command that prints routes as JSON: a list of objects with
