@@ -67,6 +67,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `allowlist check` no longer reports the rules `init` wrote as `no-place` when the baseline does not reach them, such as Laravel's `x-ratelimit-reset` and `retry-after`, which come only with a rate limit reached. It lists them as not checked. The same rule with a reason of your own is still reported.
 - `setup --driver` for a database setting that does not name its driver: the summary names the driver given, and the checks and the configuration's comment no longer say the setting does not say which database it is. Before, the summary said `driver unknown`.
 - Proposed formats no longer stop the next run for a value they were meant to allow. A date written without dashes (`report-20261114-101530.json`) now becomes `\d{8}` instead of the day of the capture, when its month and day are valid. A JSON Web Token now takes any claims and signature in base64url and keeps its header, so a change of the algorithm is still a drift. Before, its format came from the two samples and could fix a `-` of the signature in place.
 - A proposed allowlist format for a value with a newline or another control character (the script of a debug error page) now writes it as a regular expression escape (`\x{a}`). Before, it printed `\u000a`, which the allowlist rejects, so the next run stopped with exit 2. A format that cannot be written so is left out with the reason.
