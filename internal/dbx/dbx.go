@@ -143,20 +143,29 @@ func PostgresDSN(dsn, db string) (string, error) {
 // the host by name: pgx's own lookup is turned off, so the name is
 // resolved once, by the dial function, which checks the address it
 // connects to.
+//
+// Every statement runs in one round trip (pgx's QueryExecModeExec): it is
+// sent with its parameters, which stay bind parameters whose types the
+// server infers, as it did when the statement was prepared first (two
+// round trips; each database/sql pool is short-lived, so the statement
+// cache never saved one). Parameters go as text: a string as it is, a
+// []string as an array literal pgx quotes. Results come as text too;
+// DriftGate's queries read strings, counts and booleans, which read the
+// same in either format.
 func OpenPostgres(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	cs, err := PostgresDSN(dsn, db)
 	if err != nil {
 		return nil, err
 	}
-	if dial == nil {
-		return sql.Open("pgx", cs)
-	}
 	cfg, err := pgx.ParseConfig(cs)
 	if err != nil {
 		return nil, errors.New("the PostgreSQL DSN cannot be read") // pgx's error quotes the DSN
 	}
-	cfg.DialFunc = pgconn.DialFunc(dial)
-	cfg.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
+	if dial != nil {
+		cfg.DialFunc = pgconn.DialFunc(dial)
+		cfg.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	}
 	return stdlib.OpenDB(*cfg), nil
 }
 
