@@ -589,7 +589,7 @@ func TestSQLServerSeedLogHeld(t *testing.T) {
 					_, err = hold.ExecContext(ctx, "BEGIN TRANSACTION; UPDATE big SET pad = 'z' WHERE id = 1")
 				}
 				if err != nil {
-					t.Errorf("holding the log of %s: %v", newDB, err)
+					done <- fmt.Errorf("holding the log of %s: %w", newDB, err)
 					return
 				}
 				go func() {
@@ -626,8 +626,13 @@ func TestSQLServerSeedLogHeld(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := <-done; err != nil {
-				t.Fatal(err)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Minute):
+				t.Fatal("the seed never reached state.sqlserver.seed.restored")
 			}
 			l := size(s.o.Pristine, 1)
 			noted := strings.Contains(log.String(), "the log of the pristine copy stays")
