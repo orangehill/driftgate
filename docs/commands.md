@@ -189,7 +189,7 @@ Checks an output of `data anonymize` for personal values. Exit 1 when it finds a
 `driftgate baselines local|git` moves the project to the other layout. A switch to `git` first checks the baselines as `verify` does.
 
 ## baselines rebase
-`driftgate baselines rebase <name>` makes a capture the content of a baseline, such as after a merge.
+`driftgate baselines rebase <name>` makes a capture the content of a baseline, such as after a merge. Make the capture with `--repeat 2`; a capture made once is refused.
 | Flag | Meaning |
 |---|---|
 | `--from <tag>`, `--reason "…"` | required: the capture, and why |
