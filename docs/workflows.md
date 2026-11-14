@@ -8,7 +8,7 @@ a time. A small step gives a few drifts with one cause.
 1. On the old version, run `driftgate setup`. Keep `mode: freeze` while nothing is meant to change.
 2. Run `driftgate coverage` until it is clean. Add `json`, `anonymous` and `identities` templates, and hand-written requests for logins, uploads and jobs ([catalog](catalog.md)).
 3. Upgrade one version, or one dependency, per branch.
-4. Run `driftgate run`. It compares with the same baseline, on the same restored data.
+4. Restart the application server, or with PHP opcache on it serves the old code. Run `driftgate run`. It compares with the same baseline, on the same restored data.
 5. Read the drifts with `driftgate review`. Fix the code, or accept or expect the change ([review](review.md#accept-expect-or-rebase)).
 6. When a step spans many commits, `driftgate bisect <good> <bad>` names the first commit ([bisect](review.md#bisect)).
 7. Repeat from step 3.

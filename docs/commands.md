@@ -49,6 +49,7 @@ Runs the `seed:` commands and keeps a pristine copy of every database under `sta
 
 ## run
 Routes, catalog, capture and compare in one command. The first run makes the baseline from two equal captures.
+Each run captures into `run-<checkout>` and replaces the last one; to keep a capture, make it with `driftgate capture <tag>`.
 | Flag | Meaning |
 |---|---|
 | `--baseline <name>`, `--skip-private`, `--target <service>` | [common flags](#common-flags); with `--target` the check is reported as partial |

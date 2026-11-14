@@ -75,6 +75,7 @@ Point the client's base URL at the proxy. Stop it with Ctrl-C. `har import <file
 
 Write by hand what `generate` cannot make: a login, a real upload, a queued job, a rate limit.
 A new request is skipped until you `accept` its first answer ([review](review.md#accept-expect-or-rebase)).
+A hand-written request replaces every generated request of its route and method, error variants included. `generate` names them; `generate --all` keeps them.
 
 | Need | Write |
 |---|---|
