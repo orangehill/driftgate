@@ -371,9 +371,10 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 	}
 	// A try the server stops for a lock (retryRead) starts again from a new
 	// snapshot and a new engine, index and sample, so nothing of it reaches
-	// the next try. A failed try keeps its connection until the next try or
-	// the return, after its sample is logged; the deferred closure closes
-	// the last try's sr.
+	// the next try. A failed read closes its connection before the wait for
+	// the next try (readSource); a try that readFault fails after its read
+	// is closed by the next one. The deferred closure closes the last
+	// try's sr.
 	var sr *sourceRead
 	defer func() { sr.close() }()
 	var sampleLog bytes.Buffer
@@ -381,8 +382,9 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 	err = retryRead(ctx, opt.Log, "source", func() error {
 		sr.close()
 		sampleLog.Reset()
-		sr = &sourceRead{}
-		return sr.read(ctx, srcDB, opt, det, galeraTarget, &sampleLog)
+		var err error
+		sr, err = readSource(ctx, srcDB, opt, det, galeraTarget, &sampleLog)
+		return err
 	})
 	// The last try's sample is logged, also when the read failed.
 	opt.Log.Write(sampleLog.Bytes())
@@ -498,55 +500,63 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 // reserved for the originals (in e), the index of originals and the sample.
 type sourceRead struct {
 	e      *engine
-	src    *sql.Conn // open, also after a failed read, until close
+	src    *sql.Conn // open until close
 	schema *Schema
 	x      *leakIndex // nil without opt.Index
 }
 
-// read fills s, a new sourceRead, from a connection of srcDB; det: the
-// detector every try shares. The filter's sample is logged to sampleLog.
-// With galeraTarget, the sequences a Galera target refuses are named.
-// Nothing is written.
-func (s *sourceRead) read(ctx context.Context, srcDB *sql.DB, opt Options, det *pii.Detector, galeraTarget bool, sampleLog io.Writer) error {
-	var err error
+// readSource reads one try of the source phase from a connection of srcDB;
+// det: the detector every try shares. The filter's sample is logged to
+// sampleLog. With galeraTarget, the sequences a Galera target refuses are
+// named. Nothing is written. On an error the snapshot is ended and the
+// connection closed before it returns, and the sourceRead is nil.
+func readSource(ctx context.Context, srcDB *sql.DB, opt Options, det *pii.Detector, galeraTarget bool, sampleLog io.Writer) (_ *sourceRead, err error) {
+	s := &sourceRead{}
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
 	if s.e, err = newEngine(opt.Source.Driver, opt.Key, det, opt.Files); err != nil {
-		return err
+		return nil, err
 	}
 	if s.src, err = srcDB.Conn(ctx); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return nil, fmt.Errorf("source: %w", err)
 	}
 	if err := s.e.dl.session(ctx, s.src); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return nil, fmt.Errorf("source: %w", err)
 	}
 	if err := s.e.dl.snapshot(ctx, s.src); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return nil, fmt.Errorf("source: %w", err)
 	}
 	if s.schema, err = s.e.dl.schema(ctx, s.src, opt.Source.Name); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return nil, fmt.Errorf("source: %w", err)
 	}
 	if err := opt.Rules.Check(s.schema, opt.Files != nil); err != nil {
-		return err
+		return nil, err
 	}
 	if err := opt.Rules.CheckSchema(s.schema, s.e.text.pii); err != nil {
-		return err
+		return nil, err
 	}
 	if opt.Index != nil {
 		if s.x, err = newLeakIndex(opt.Key, s.e.text.pii); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := s.e.r.prepare(ctx, s.src, s.e.dl, s.e.text.pii, s.schema, opt.Rules, s.x); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return nil, fmt.Errorf("source: %w", err)
 	}
 	if p, ok := opt.Filter.(preparer); ok {
 		if err := p.prepare(ctx, s.src, s.e.dl, s.schema, opt.Rules, sampleLog); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if galeraTarget {
-		return galeraSequences(ctx, s.src, opt.Source.Name, s.schema, *opt.Target)
+		if err := galeraSequences(ctx, s.src, opt.Source.Name, s.schema, *opt.Target); err != nil {
+			return nil, err
+		}
 	}
-	return nil
+	return s, nil
 }
 
 // close ends the snapshot and closes the connection, if any; s may be nil.

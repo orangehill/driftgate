@@ -403,8 +403,17 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 	var version string
 	admin.QueryRow("SELECT VERSION()").Scan(&version)
 	sequences := driver == config.Postgres || dbx.IsMariaDB(version)
+	// A Galera node refuses a cached sequence, and checks an ALTER
+	// SEQUENCE against the cache in the statement (1235). Elsewhere the
+	// sequence stays cached, as an application's usually is.
+	nocache := ""
 	if sequences && driver != config.Postgres {
-		create = append(create, "CREATE SEQUENCE numbers")
+		if galera, err := dbx.GaleraNode(ctx, admin); err != nil {
+			t.Fatal(err)
+		} else if galera {
+			nocache = " NOCACHE"
+		}
+		create = append(create, "CREATE SEQUENCE numbers"+nocache)
 	}
 	exec(append(create, "INSERT INTO users (email) VALUES ('a@x')", "INSERT INTO migrations (migration) VALUES ('create_users')")...)
 	if err := Seed(ctx, p, SeedOptions{}); err != nil {
@@ -437,11 +446,11 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 		exec("ALTER TABLE " + table + " DROP COLUMN extra")
 	}
 	if sequences {
-		exec("ALTER SEQUENCE numbers INCREMENT BY 5")
+		exec("ALTER SEQUENCE numbers INCREMENT BY 5" + nocache)
 		if _, err = Run(ctx, p, cat, Options{Tag: "sequence"}); !changedOutside(err, "db/sequence:"+prefix+"numbers (changed)") {
 			t.Fatalf("capture after ALTER SEQUENCE: %v", err)
 		}
-		exec("ALTER SEQUENCE numbers INCREMENT BY 1")
+		exec("ALTER SEQUENCE numbers INCREMENT BY 1" + nocache)
 	}
 	if _, err := Run(ctx, p, cat, Options{Tag: "back"}); err != nil {
 		t.Fatalf("capture with the definitions back: %v", err)
