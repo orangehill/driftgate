@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -505,20 +506,7 @@ func TestSQLServerSeededFingerprint(t *testing.T) {
 // database its log size back. The sizes are reported.
 func TestSQLServerSeedLog(t *testing.T) {
 	ctx := context.Background()
-	s, db := newSQLServerTest(t, Options{Exclude: []string{"audit"}, Log: &ssLog{}})
-	cleanSQLServerSeed(t, s)
-	master := sqlServerTestDB(t, s.o.DSN, "")
-	sqlServerExec(t, db, "CREATE TABLE big (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
-		"INSERT INTO big (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
-		"CREATE TABLE audit (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
-		"INSERT INTO audit (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
-		"CREATE VIEW v AS SELECT id FROM big")
-	var logName string
-	db.QueryRow("SELECT name FROM sys.database_files WHERE type = 1").Scan(&logName)
-	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" MODIFY FILE (NAME = "+sqlServerString(logName)+", SIZE = 300MB)")
-	size := func(db string, typ int) int64 {
-		return sqlServerInt(t, master, fmt.Sprintf("SELECT SUM(CAST(size AS bigint)) * 8 / 1024 FROM sys.master_files WHERE type = %d AND database_id = DB_ID(%s)", typ, sqlServerString(db)))
-	}
+	s, db, size := newSQLServerLogTest(t, &ssLog{})
 	start := time.Now()
 	if err := s.Seed(ctx); err != nil {
 		t.Fatal(err)
@@ -551,6 +539,103 @@ func TestSQLServerSeedLog(t *testing.T) {
 	t.Logf("after a restore of the whole database: working data %d MB, log %d MB", size(s.o.Working, 0), size(s.o.Working, 1))
 	if l := size(s.o.Working, 1); l < 300 {
 		t.Errorf("the working database's log is %d MB after the restore, not 300", l)
+	}
+}
+
+// newSQLServerLogTest makes a working database of 136 MB of data, 40 MB
+// of it in the excluded table audit, with a log of 300 MB, whose active
+// part is not at the start of the file. size gives the MB of the data
+// (typ 0) or log (typ 1) files of a database.
+func newSQLServerLogTest(t *testing.T, log *ssLog) (s *SQLServer, db *sql.DB, size func(db string, typ int) int64) {
+	t.Helper()
+	s, db = newSQLServerTest(t, Options{Exclude: []string{"audit"}, Log: log})
+	cleanSQLServerSeed(t, s)
+	master := sqlServerTestDB(t, s.o.DSN, "")
+	sqlServerExec(t, db, "CREATE TABLE big (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO big (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+		"CREATE TABLE audit (id int IDENTITY PRIMARY KEY, pad char(2000) NOT NULL DEFAULT 'x')",
+		"INSERT INTO audit (pad) SELECT TOP (20000) 'y' FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+		"CREATE VIEW v AS SELECT id FROM big")
+	var logName string
+	db.QueryRow("SELECT name FROM sys.database_files WHERE type = 1").Scan(&logName)
+	sqlServerExec(t, master, "ALTER DATABASE "+qms(s.o.Working)+" MODIFY FILE (NAME = "+sqlServerString(logName)+", SIZE = 300MB)")
+	return s, db, func(db string, typ int) int64 {
+		return sqlServerInt(t, master, fmt.Sprintf("SELECT SUM(CAST(size AS bigint)) * 8 / 1024 FROM sys.master_files WHERE type = %d AND database_id = DB_ID(%s)", typ, sqlServerString(db)))
+	}
+}
+
+// TestSQLServerSeedLogHeld: a transaction holds the active part of the new
+// copy's log while the seed shrinks it, as a task of the server can, so
+// the shrink stops at the end of the held part. Released once the seed is
+// seen waiting to shrink again (WAITFOR), the shrink that runs again frees
+// the rest. Held to the end of the seed (the rename ends it), the log
+// stays and the seed says so.
+func TestSQLServerSeedLogHeld(t *testing.T) {
+	for _, release := range []string{"while the seed waits", "never"} {
+		t.Run(release, func(t *testing.T) {
+			ctx := context.Background()
+			log := &ssLog{}
+			s, _, size := newSQLServerLogTest(t, log)
+			newDB := s.o.Pristine + "_dgnew"
+			copyDB := sqlServerTestDB(t, s.o.DSN, newDB)
+			done, stop := make(chan error, 1), make(chan struct{})
+			defer func() { chaos.At = nil }()
+			chaos.At = func(p string) {
+				if p != "state.sqlserver.seed.restored" {
+					return
+				}
+				hold, err := copyDB.Conn(ctx)
+				if err == nil {
+					_, err = hold.ExecContext(ctx, "BEGIN TRANSACTION; UPDATE big SET pad = 'z' WHERE id = 1")
+				}
+				if err != nil {
+					t.Errorf("holding the log of %s: %v", newDB, err)
+					return
+				}
+				go func() {
+					defer hold.Close()
+					if release == "never" {
+						<-stop
+						done <- nil
+						return
+					}
+					tick := time.NewTicker(10 * time.Millisecond)
+					defer tick.Stop()
+					timeout := time.After(time.Minute)
+					for {
+						select {
+						case <-tick.C:
+							var n int
+							if copyDB.QueryRow("SELECT COUNT(*) FROM sys.dm_exec_requests WHERE database_id = DB_ID() AND command = 'WAITFOR' AND session_id <> @@SPID").Scan(&n) == nil && n > 0 {
+								_, err := hold.ExecContext(ctx, "ROLLBACK")
+								done <- err
+								return
+							}
+						case <-timeout:
+							done <- errors.New("the seed did not wait to shrink the log of the new copy again within a minute")
+							return
+						case <-stop:
+							done <- errors.New("the seed ended without waiting to shrink the log of the new copy again")
+							return
+						}
+					}
+				}()
+			}
+			err := s.Seed(ctx)
+			close(stop)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			l := size(s.o.Pristine, 1)
+			noted := strings.Contains(log.String(), "the log of the pristine copy stays")
+			t.Logf("released %s: the pristine copy's log is %d MB; log: %q", release, l, log.String())
+			if held := release == "never"; held != (l > 16) || held != noted {
+				t.Errorf("the pristine copy's log is %d MB (noted: %v)", l, noted)
+			}
+		})
 	}
 }
 

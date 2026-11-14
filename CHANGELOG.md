@@ -66,6 +66,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- SQL Server: the pristine copy's log no longer stays as large as the working database's log when the server still holds part of it during the seed, as a background task can. The seed shrinks the log again for up to about a second, and if part of it is still held, it says how large the log stays and why. The next seed shrinks it.
 - `data anonymize`: a read of the source that fails and is tried again ends its snapshot and closes its connection at once, before the wait for the next try. Before, they stayed open during the wait.
 - PostgreSQL: an error while the list of views is read stops the fingerprint; before, the views after it were left out of it. ([#61](https://github.com/orangehill/driftgate/pull/61))
 - Laravel with Sanctum: an authenticated read-only request no longer looks like a write. Sanctum writes `personal_access_tokens.last_used_at` on every request signed in with a token. When `composer.json` requires `laravel/sanctum`, `init` and `setup` now propose `restore_only: [personal_access_tokens]`: the tokens are kept as seeded at every restore, and writes to them are not compared, so check login and logout by their responses. `init` writes the framework's reason above the tables it proposes, and comments inside a commented-out `state:` block are commented with it on every driver. In an existing project, add the line to `state:`, run `driftgate seed`, and make the baseline again (the run says so).

@@ -199,6 +199,12 @@ func (s *SQLServer) seed(ctx context.Context) (err error) {
 // the whole database gives the working database again): the copy is
 // read-only and needs none of it. The recovery model is the working
 // database's again after.
+//
+// A shrink stops at the active part of the log. When that part cannot
+// move to the start of the file yet (a transaction of another session or
+// a task of the server still holds it), the log stays as large as the end of the active part, up to the working
+// database's whole log. The shrink then runs again, in the same batch:
+// sqlServerShrinkSQL.
 func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery string) error {
 	if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qms(db)+" SET RECOVERY SIMPLE"); err != nil {
 		return err
@@ -207,22 +213,57 @@ func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery str
 	if err != nil {
 		return err
 	}
-	_, err = c.ExecContext(ctx, `CHECKPOINT;
-DECLARE @f int = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1);
-WHILE @f IS NOT NULL BEGIN
-  DBCC SHRINKFILE (@f, 1) WITH NO_INFOMSGS;
-  SET @f = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1 AND file_id > @f);
-END`)
+	var mb int64
+	var wait string
+	var held bool
+	err = c.QueryRowContext(ctx, sqlServerShrinkSQL).Scan(&mb, &wait, &held)
 	c.Close()
 	s.closePool(db)
 	if err != nil {
 		return fmt.Errorf("state %s: shrinking the log of %s: %w", s.o.Name, db, err)
+	}
+	if held {
+		fmt.Fprintf(s.o.Log, "state %s: the log of the pristine copy stays %d MB: the server still holds part of it (%s); the next seed shrinks it\n", s.o.Name, mb, wait)
 	}
 	if recovery != "" && recovery != "SIMPLE" {
 		_, err = m.ExecContext(ctx, "ALTER DATABASE "+qms(db)+" SET RECOVERY "+recovery)
 	}
 	return err
 }
+
+// sqlServerShrinkSQL shrinks every log file of the current database, up to
+// 5 times 200 ms apart, in one round trip. It stops once nothing more can
+// be freed: no file has a part of the log in use (sys.dm_db_log_info)
+// after its first two parts, as a shrink keeps at least two and a log that
+// is not held keeps its active part at the start. Where that view cannot
+// be read, it shrinks once, as without a check. It returns the log's size
+// in MB, why the server keeps it (log_reuse_wait_desc), and held: whether
+// a part in use still lies after the first two after the last try. That
+// is the threshold of the note rather than a size: how small a clean
+// shrink gets depends on the log's layout, not on a number.
+const sqlServerShrinkSQL = `SET NOCOUNT ON;
+DECLARE @pass int = 0, @done bit = 0, @held bit = 0, @f int;
+WHILE @pass < 5 AND @done = 0 BEGIN
+  IF @pass > 0 WAITFOR DELAY '00:00:00.200';
+  CHECKPOINT;
+  SET @f = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1);
+  WHILE @f IS NOT NULL BEGIN
+    DBCC SHRINKFILE (@f, 1) WITH NO_INFOMSGS;
+    SET @f = (SELECT MIN(file_id) FROM sys.database_files WHERE type = 1 AND file_id > @f);
+  END;
+  SET @pass += 1;
+  BEGIN TRY
+    EXEC sp_executesql N'SET @held = CASE WHEN EXISTS (SELECT 1 FROM (SELECT vlf_active,
+        ROW_NUMBER() OVER (PARTITION BY file_id ORDER BY vlf_begin_offset) AS n FROM sys.dm_db_log_info(DB_ID())) v
+        WHERE v.vlf_active = 1 AND v.n > 2) THEN 1 ELSE 0 END', N'@held bit OUTPUT', @held = @held OUTPUT;
+    SET @done = 1 - @held;
+  END TRY
+  BEGIN CATCH
+    SELECT @done = 1, @held = 0;
+  END CATCH;
+END;
+SELECT CAST(SUM(CAST(f.size AS bigint)) * 8 / 1024 AS bigint), MAX(d.log_reuse_wait_desc), @held
+FROM sys.database_files f CROSS JOIN sys.databases d WHERE f.type = 1 AND d.database_id = DB_ID()`
 
 // readMarkIfOnline reads the mark of the pristine database, nil when there
 // is none or it is not online.
