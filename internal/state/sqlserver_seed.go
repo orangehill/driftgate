@@ -202,9 +202,9 @@ func (s *SQLServer) seed(ctx context.Context) (err error) {
 //
 // A shrink stops at the active part of the log. When that part cannot
 // move to the start of the file yet (a transaction of another session or
-// a task of the server still holds it), the log stays as large as the end of the active part, up to the working
-// database's whole log. The shrink then runs again, in the same batch:
-// sqlServerShrinkSQL.
+// a task of the server still holds it), the log stays as large as the end
+// of the active part, up to the working database's whole log. The shrink
+// then runs again, in the same batch: sqlServerShrinkSQL.
 func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery string) error {
 	if _, err := m.ExecContext(ctx, "ALTER DATABASE "+qms(db)+" SET RECOVERY SIMPLE"); err != nil {
 		return err
@@ -222,7 +222,9 @@ func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery str
 	if err != nil {
 		return fmt.Errorf("state %s: shrinking the log of %s: %w", s.o.Name, db, err)
 	}
-	if held {
+	// NOTHING: no one holds the log; its active part is in a later file of
+	// a log of several, which only the log's own wrap moves.
+	if held && wait != "NOTHING" {
 		fmt.Fprintf(s.o.Log, "state %s: the log of the pristine copy stays %d MB: the server still holds part of it (%s); the next seed shrinks it\n", s.o.Name, mb, wait)
 	}
 	if recovery != "" && recovery != "SIMPLE" {
@@ -238,7 +240,8 @@ func (s *SQLServer) shrinkLog(ctx context.Context, m *sql.Conn, db, recovery str
 // is not held keeps its active part at the start. Where that view cannot
 // be read, it shrinks once, as without a check. It returns the log's size
 // in MB, why the server keeps it (log_reuse_wait_desc), and held: whether
-// a part in use still lies after the first two after the last try. That
+// a part in use still lies after the first two after the last try (MAX
+// only because of the SUM: a database has one reason). That
 // is the threshold of the note rather than a size: how small a clean
 // shrink gets depends on the log's layout, not on a number.
 const sqlServerShrinkSQL = `SET NOCOUNT ON;

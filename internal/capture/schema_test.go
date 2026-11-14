@@ -404,7 +404,8 @@ func testChangedOutsideDatabase(t *testing.T, driver, dsn string) {
 	admin.QueryRow("SELECT VERSION()").Scan(&version)
 	sequences := driver == config.Postgres || dbx.IsMariaDB(version)
 	// A Galera node refuses a cached sequence, and checks an ALTER
-	// SEQUENCE against the cache in the statement (1235).
+	// SEQUENCE against the cache in the statement (1235). Elsewhere the
+	// sequence stays cached, as an application's usually is.
 	nocache := ""
 	if sequences && driver != config.Postgres {
 		if galera, err := dbx.GaleraNode(ctx, admin); err != nil {

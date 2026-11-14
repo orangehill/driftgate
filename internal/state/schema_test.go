@@ -123,7 +123,8 @@ func TestSchemaFingerprintMySQL(t *testing.T) {
 			}
 			if f.mariadb {
 				// A Galera node refuses a cached sequence, and checks an
-				// ALTER SEQUENCE against the cache in the statement (1235).
+				// ALTER SEQUENCE against the cache in the statement (1235);
+				// not galeraSequence: the case changes the increment.
 				nocache := ""
 				if isGalera(f.rootWork) {
 					nocache = " NOCACHE"
