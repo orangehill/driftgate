@@ -75,6 +75,43 @@ func TestPgStageRows(t *testing.T) {
 	}
 }
 
+// TestPostgresFingerprintPinned: the queries of a fingerprint and how
+// their results are joined and hashed are those every stored PostgreSQL
+// fingerprint was made with. A change here changes every baseline, which
+// then stops: it needs a new format (FingerprintAs), not a new pin.
+func TestPostgresFingerprintPinned(t *testing.T) {
+	var all []string
+	for _, format := range []int{1, 2} {
+		for _, mode := range []fpMode{fpRows, fpRestoreOnly, fpSchema} {
+			all = append(all, pgDefinitions(format, mode, false)...)
+			all = append(all, pgDefinitions(format, mode, true)...)
+			all = append(all, pgSequences(format, mode))
+		}
+	}
+	for _, mode := range []fpMode{fpRows, fpRestoreOnly, fpSchema} {
+		all = append(all, pgSchemaItems(mode)...)
+	}
+	all = append(all, pgOwnedSequences, pgRowsQuery("app.news"))
+	if got, want := hash([]byte(strings.Join(all, "\x00"))), "d22e351f95cb9c76c99062994e5b8b084792b7ac4a4bdaebb9b8042953260d38"; got != want {
+		t.Errorf("the queries of a fingerprint hash to %s, want %s", got, want)
+	}
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	s := &pgStage{res: []dbx.PostgresResult{
+		{Rows: [][]sql.NullString{{v("3"), v("abc")}}},
+		{Rows: [][]sql.NullString{{v("public.counter"), v("10")}}},
+	}}
+	if got, err := rowsOf(s, 0, "public.news"); err != nil || got != "3\x00abc" {
+		t.Errorf("rowsOf = %q, %v", got, err)
+	}
+	f := Fingerprint{"sequence:public.counter": "def", "sequence:public.used": "def 7"}
+	if err := nextValues(s, 1, f); err != nil {
+		t.Fatal(err)
+	}
+	if want := (Fingerprint{"sequence:public.counter": hash([]byte("def next 10")), "sequence:public.used": hash([]byte("def 7"))}); !reflect.DeepEqual(f, want) {
+		t.Errorf("sequences %v, want %v", f, want)
+	}
+}
+
 // pgPipelineFixture makes a working database with every kind of object a
 // fingerprint reads, seeds it and changes the working database after.
 func pgPipelineFixture(t *testing.T, o Options) *Postgres {

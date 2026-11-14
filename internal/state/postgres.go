@@ -35,7 +35,8 @@ type Postgres struct {
 	// dropping ends with the drop of the database the last copy replaced
 	// (copyDatabase); nil when there is none to wait for.
 	dropping chan error
-	// run runs the queries of a fingerprint: dbx.PostgresPipeline.
+	// run runs the queries of a fingerprint: dbx.PostgresPipeline; tests
+	// put the same queries sent one by one in its place.
 	run func(context.Context, *sql.Conn, []dbx.PostgresStatement) []dbx.PostgresResult
 }
 
@@ -414,8 +415,8 @@ func rowsOf(s *pgStage, i int, rel string) (string, error) {
 // It reads db in two round trips: the catalog (one), then the rows of the
 // tables and materialized views and the values of sequences not called
 // yet, which the catalog names (two). Each query runs on its own, as it
-// would sent alone, and an error is returned where the query's result is
-// read, in the order the queries were once sent one by one.
+// would sent alone. An error is returned where the query's result is read:
+// the catalog's first, then those of the second round trip.
 func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	d, err := p.open(db)
 	if err != nil {
@@ -469,7 +470,9 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 				rels = append(rels, t)
 			}
 		}
-		defsAt = two.addAll(pgDefinitions(format, mode, true), rels)
+		if len(rels) > 0 {
+			defsAt = two.addAll(pgDefinitions(format, mode, true), rels)
+		}
 	} else if err := addDefinitions(&one, defsAt, defs); err != nil {
 		return nil, err
 	}

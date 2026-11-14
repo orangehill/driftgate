@@ -48,20 +48,25 @@ func PostgresPipeline(ctx context.Context, c *sql.Conn, stmts []PostgresStatemen
 			}
 		}
 		pl := conn.PgConn().StartPipeline(ctx)
-		for i, s := range stmts {
-			pl.SendQueryParams(s.SQL, args[i].ParamValues, nil, args[i].ParamFormats, args[i].ResultFormats)
-			pl.SendPipelineSync()
-		}
-		if err := pl.Flush(); err != nil {
-			return err
-		}
-		for ; read < len(out); read++ {
-			if err := readPipelined(pl, &out[read]); err != nil {
-				pl.Close()
+		err := func() error {
+			for i, s := range stmts {
+				pl.SendQueryParams(s.SQL, args[i].ParamValues, nil, args[i].ParamFormats, args[i].ResultFormats)
+				pl.SendPipelineSync()
+			}
+			if err := pl.Flush(); err != nil {
 				return err
 			}
+			for ; read < len(out); read++ {
+				if err := readPipelined(pl, &out[read]); err != nil {
+					return err
+				}
+			}
+			return nil
+		}()
+		if cerr := pl.Close(); err == nil {
+			err = cerr
 		}
-		return pl.Close()
+		return err
 	})
 	for i := read; i < len(out) && err != nil; i++ {
 		out[i] = PostgresResult{Err: err}
@@ -85,17 +90,22 @@ func readPipelined(pl *pgconn.Pipeline, r *PostgresResult) error {
 		}
 		_, err = rr.Close()
 	}
+	// Read on to the statement's Sync; its first error is its result.
 	for {
-		if pe := (*pgconn.PgError)(nil); err != nil && !errors.As(err, &pe) {
-			return err
-		}
-		if err != nil && r.Err == nil {
-			r.Rows, r.Err = nil, err
+		if err != nil {
+			var pe *pgconn.PgError
+			if !errors.As(err, &pe) {
+				return err // the connection's
+			}
+			if r.Err == nil {
+				r.Rows, r.Err = nil, err
+			}
 		}
 		if _, ok := res.(*pgconn.PipelineSync); ok {
 			return nil
 		}
-		if res, err = pl.GetResults(); res == nil && err == nil {
+		res, err = pl.GetResults()
+		if res == nil && err == nil {
 			return errors.New("pipeline: no Sync after a statement")
 		}
 	}
