@@ -493,15 +493,17 @@ func TestOpenAPIAliasBomb(t *testing.T) {
 }
 
 // TestLaravelAuthMiddleware: route:list names middleware by class (guest is
-// RedirectIfAuthenticated, which is not authentication), and discover[].auth
-// names the application's own by alias or class, never by a part of a name.
+// RedirectIfAuthenticated, which is not authentication; Passport's
+// CreateFreshApiToken signs no one in), and discover[].auth names the
+// application's own by class, never by a part of a name.
 func TestLaravelAuthMiddleware(t *testing.T) {
 	src := Adapter{Adapter: "laravel", Command: []string{"cat", "testdata/laravel-auth.json"}}
 	rs := run(t, src)
 	if r := find(t, rs, "POST /login"); r.Auth {
 		t.Error("guest (RedirectIfAuthenticated) marked as needing auth")
 	}
-	if !find(t, rs, "GET /api/me").Auth || find(t, rs, "GET /api/profile").Auth {
+	// A class in an Auth folder counts by its namespace.
+	if !find(t, rs, "GET /api/me").Auth || !find(t, rs, "GET /api/orders").Auth || find(t, rs, "GET /api/profile").Auth {
 		t.Errorf("without auth: %+v", rs)
 	}
 	if got := strings.Join(SuspectAuth(rs), ", "); got != `App\Http\Middleware\GetUserFromToken, App\Http\Middleware\VerifyJwtToken` {
@@ -522,9 +524,12 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 	// A part of a name matches nothing: api is a group of every route.
 	src.Auth = []string{"Token", "Http", "ap"}
 	for _, r := range run(t, src) {
-		if r.Auth != (r.Path == "/api/me") {
+		if r.Auth != (r.Path == "/api/me" || r.Path == "/api/orders") {
 			t.Errorf("%s: auth %v with a part of a name", r.Key(), r.Auth)
 		}
+	}
+	if got := UnmatchedAuth([]string{"GetUserFromToken", "jwt.auth", "adminpanel"}, run(t, src)); strings.Join(got, ",") != "jwt.auth" {
+		t.Errorf("unmatched: %v", got)
 	}
 	if err := (Adapter{Adapter: "openapi", File: "x.json", Auth: []string{"jwt"}}).Validate(); err == nil || !strings.Contains(err.Error(), "auth is for adapter laravel") {
 		t.Errorf("auth on openapi: %v", err)

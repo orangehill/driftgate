@@ -173,7 +173,7 @@ func failure(req catalog.Request, a Answer) (Failure, bool) {
 	case !meantToSucceed(req):
 		return Failure{}, false
 	case a.Status >= 400:
-		if (a.Status == 401 || a.Status == 403) && req.Identity == "" {
+		if (a.Status == 401 || a.Status == 403) && !sendsCredentials(req) {
 			f.Detail = "without an identity"
 		}
 	case a.Status >= 300:
@@ -186,6 +186,14 @@ func failure(req catalog.Request, a Answer) (Failure, bool) {
 		return Failure{}, false
 	}
 	return f, true
+}
+
+// sendsCredentials reports a request sent as an identity or with its own
+// Authorization header or cookie.
+func sendsCredentials(req catalog.Request) bool {
+	return req.Identity != "" || slices.ContainsFunc(req.Headers, func(h [2]string) bool {
+		return strings.EqualFold(h[0], "authorization") || strings.EqualFold(h[0], "cookie")
+	})
 }
 
 // Health is how the requests of a catalog fared in a baseline.

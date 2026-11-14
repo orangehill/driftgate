@@ -29,7 +29,7 @@ type Adapter struct {
 	Adapter  string   `yaml:"adapter"`             // laravel, openapi, nextjs, nuxt, spring, symfony, rails, django, command
 	Command  []string `yaml:"command,omitempty"`   // laravel: route:list; command: prints routes as JSON
 	PHP      []string `yaml:"php,omitempty"`       // laravel: runs PHP in the application, for validation rules
-	Auth     []string `yaml:"auth,omitempty"`      // laravel: the application's own middleware that signs a user in
+	Auth     []string `yaml:"auth,omitempty"`      // laravel: the application's own middleware that signs a user in, by class
 	File     string   `yaml:"file,omitempty"`      // openapi: specification file (JSON or YAML)
 	URL      string   `yaml:"url,omitempty"`       // openapi: specification the running application serves (a path on the target or a full URL)
 	Identity string   `yaml:"identity,omitempty"`  // openapi url, spring: read as this identity (some applications describe only what the caller may use)
@@ -53,6 +53,7 @@ func (a Adapter) Validate() error {
 	default:
 		return fmt.Errorf("unknown adapter %q (laravel, openapi, nextjs, nuxt, spring, symfony, rails, django, command)", a.Adapter)
 	}
+	// Only the laravel adapter reads the middleware of a route.
 	if len(a.Auth) > 0 && a.Adapter != "laravel" {
 		return fmt.Errorf("auth is for adapter laravel (adapter %s)", a.Adapter)
 	}
@@ -265,19 +266,42 @@ func needsAuth(middleware []string) bool {
 	return false
 }
 
-// named reports whether middleware m is one of names: by its full name, its
-// alias before the parameters (jwt.auth:admin) or its class without the
-// namespace (App\Http\Middleware\GetUserFromToken). It never matches a
-// part of a name, so api does not match every route of the api group.
+// MiddlewareName splits a middleware as route:list lists it into its name
+// without the parameters (App\Http\Middleware\CheckRole:admin gives
+// App\Http\Middleware\CheckRole) and the class without the namespace
+// (CheckRole).
+func MiddlewareName(m string) (full, base string) {
+	full, _, _ = strings.Cut(m, ":")
+	return full, full[strings.LastIndex(full, `\`)+1:]
+}
+
+// named reports whether middleware m is one of names: by its class, with or
+// without the namespace, or its name as listed. It never matches a part of a
+// name, so api does not match every route of the api group. route:list
+// --json lists aliases and groups resolved to classes.
 func named(names []string, m string) bool {
-	full, _, _ := strings.Cut(m, ":")
-	base := full[strings.LastIndex(full, `\`)+1:]
+	full, base := MiddlewareName(m)
 	for _, n := range names {
 		if strings.EqualFold(n, m) || strings.EqualFold(n, full) || strings.EqualFold(n, base) {
 			return true
 		}
 	}
 	return false
+}
+
+// UnmatchedAuth lists the names of auth that match no middleware of rs, the
+// routes of that adapter: an alias or a group name, which route:list --json
+// lists as classes, or a misspelt class.
+func UnmatchedAuth(auth []string, rs []routes.Route) []string {
+	var out []string
+	for _, n := range auth {
+		if !slices.ContainsFunc(rs, func(r routes.Route) bool {
+			return slices.ContainsFunc(r.Middleware, func(m string) bool { return named([]string{n}, m) })
+		}) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // withAuth marks the routes that carry one of the adapter's auth middleware.
@@ -291,8 +315,13 @@ func withAuth(rs []routes.Route, auth []string) {
 }
 
 // authLike matches middleware names that look like they sign a user in
-// (VerifyJwtToken, ApiGuard); CSRF tokens do not.
-var authLike = regexp.MustCompile(`(?i)token|jwt|guard|bearer|api.?key`)
+// (VerifyJwtToken, ApiGuard); notAuth those that only carry a token: the
+// CSRF check and Passport's CreateFreshApiToken, which sets a cookie for
+// the user already signed in.
+var (
+	authLike = regexp.MustCompile(`(?i)token|jwt|guard|bearer|api.?key`)
+	notAuth  = regexp.MustCompile(`(?i)csrf|createfreshapitoken`)
+)
 
 // SuspectAuth lists, once each and sorted, the middleware of routes that do
 // not need authentication whose name looks like it signs a user in: an
@@ -306,8 +335,8 @@ func SuspectAuth(rs []routes.Route) []string {
 			continue
 		}
 		for _, m := range r.Middleware {
-			full, _, _ := strings.Cut(m, ":")
-			if !seen[full] && authLike.MatchString(full) && !strings.Contains(strings.ToLower(full), "csrf") {
+			full, _ := MiddlewareName(m)
+			if !seen[full] && authLike.MatchString(full) && !notAuth.MatchString(full) {
 				seen[full] = true
 				out = append(out, full)
 			}

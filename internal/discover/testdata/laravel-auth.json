@@ -3,5 +3,7 @@
  {"domain":null,"method":"GET|HEAD","uri":"api/admin/stats","name":null,"action":"App\\Http\\Controllers\\StatsController@index","middleware":["api","adminpanel"]},
  {"domain":null,"method":"GET|HEAD","uri":"api/me","name":null,"action":"App\\Http\\Controllers\\MeController","middleware":["api","Illuminate\\Auth\\Middleware\\Authenticate:sanctum"]},
  {"domain":null,"method":"POST","uri":"login","name":"login","action":"App\\Http\\Controllers\\LoginController@store","middleware":["web","Illuminate\\Foundation\\Http\\Middleware\\ValidateCsrfToken","Illuminate\\Auth\\Middleware\\RedirectIfAuthenticated"]},
+ {"domain":null,"method":"GET|HEAD","uri":"home","name":null,"action":"App\\Http\\Controllers\\HomeController","middleware":["web","Laravel\\Passport\\Http\\Middleware\\CreateFreshApiToken"]},
+ {"domain":null,"method":"GET|HEAD","uri":"api/orders","name":null,"action":"App\\Http\\Controllers\\OrderController","middleware":["api","App\\Http\\Middleware\\Auth\\JwtCheck"]},
  {"domain":null,"method":"GET|HEAD","uri":"api/report","name":null,"action":"App\\Http\\Controllers\\ReportController","middleware":["api","App\\Http\\Middleware\\VerifyJwtToken:report"]}
 ]

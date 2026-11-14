@@ -102,9 +102,6 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		g.res.Notes = append(g.res.Notes, fmt.Sprintf("json-errors repeats the requests of %s with Accept: application/json, and templates: has none of them, so it makes nothing; add not-found (as init does) or remove json-errors",
 			strings.Join(routes.ErrorTemplates, ", ")))
 	}
-	if id := p.Generate.Identity; id != "" && len(o.Inventory.Routes) > 0 && !slices.ContainsFunc(o.Inventory.Routes, func(r routes.Route) bool { return r.Auth }) {
-		g.res.Notes = append(g.res.Notes, fmt.Sprintf("generate.identity is %s, but no route needs authentication, so no request is sent as %s; for Laravel, name the application's own auth middleware under discover[].auth and run driftgate discover --write", id, id))
-	}
 	for _, r := range manual.Requests {
 		g.ids[r.ID] = true
 	}
