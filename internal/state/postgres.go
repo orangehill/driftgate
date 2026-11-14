@@ -14,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
 
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/dbdsn"
@@ -1239,7 +1238,7 @@ func (p *Postgres) Rows(ctx context.Context, items []string) (Rows, error) {
 		if len(pk) == 0 {
 			return nil, fmt.Errorf("state %s: row_tracking table %s has no primary key", p.o.Name, t)
 		}
-		r, err := readRows(ctx, c, "SELECT * FROM "+rel, pk)
+		r, err := readRows(ctx, c, "SELECT * FROM "+rel, pk, dbx.PostgresDescribed)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", t, err)
 		}
@@ -1268,7 +1267,7 @@ func (p *Postgres) Query(ctx context.Context, query string) ([]string, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, query)
+	rows, err := tx.QueryContext(ctx, query, dbx.PostgresDescribed)
 	if err != nil {
 		return nil, err
 	}
