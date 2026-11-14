@@ -307,6 +307,9 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	if err != nil {
 		return stop(envErr(err))
 	}
+	if err := rowValuesKey(namedSet{base, baseName}, namedSet{cur, curName}); err != nil {
+		return stop(err)
+	}
 
 	// Every record is read here and again when its request is compared.
 	base.CacheRecords()
@@ -385,6 +388,13 @@ func compareSets(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 	}
 	// What the result does not cover, from the records read already.
 	gaps := notCovered(p, o.sel, cat, reqs, o.only != "", baseName, base, results, o.coverage)
+	var compared []string // the requests compared: selected, sent, with an answer in both sets
+	for _, r := range results {
+		if r.Outcome == report.Pass || r.Outcome == report.Drift {
+			compared = append(compared, r.ID)
+		}
+	}
+	gaps.RowValues = rowValuesGap(base, cur, baseName, compared)
 	known := catalogIDs(cat)
 	if o.someTargets {
 		known = func(string) bool { return true } // the catalog holds some services only
@@ -466,10 +476,10 @@ func compareAll(reqs []catalog.Request, levels []compare.Level, base, cur *snaps
 	}
 	err = parallel(len(reqs), size, func(i int) error {
 		var err error
-		if results[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], false, digest); err != nil || !showPrivate {
+		if results[i], err = compareOneDigest(reqs[i], base, cur, allow, oneOptions{origins: origins, level: levels[i], digest: digest}); err != nil || !showPrivate {
 			return err
 		}
-		shown[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], true, digest)
+		shown[i], err = compareOneDigest(reqs[i], base, cur, allow, oneOptions{origins: origins, level: levels[i], showPrivate: true, digest: digest})
 		return err
 	})
 	return results, shown, err
@@ -617,12 +627,33 @@ func hideErrors(drifts []compare.Drift) {
 // captured from where that differs (setOrigins), nil for two captures of
 // one origin in one folder.
 func compareOne(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool) (report.Result, error) {
-	return compareOneDigest(req, base, cur, origins, allow, level, showPrivate, nil)
+	return compareOneDigest(req, base, cur, allow, oneOptions{origins: origins, level: level, showPrivate: showPrivate})
+}
+
+// compareToLearn compares one request of two captures of one state at the
+// values level, with every tracked row's values (the captures learn
+// them), its private values shown (infer prints formats only).
+func compareToLearn(req catalog.Request, first, cur *snapshot.Set, allow *allowlist.List) (report.Result, error) {
+	return compareOneDigest(req, first, cur, allow, oneOptions{level: compare.LevelValues, showPrivate: true, learn: true})
+}
+
+// oneOptions say how compareOneDigest compares a request: origins (where
+// the sets were captured, setOrigins), the level, whether private values
+// are shown, the digest of drifts for expectations (nil: none), and learn
+// (two captures of one state, which learn the values of tracked rows:
+// compare.OneLearning).
+type oneOptions struct {
+	origins     *sides
+	level       compare.Level
+	showPrivate bool
+	digest      driftDigest
+	learn       bool
 }
 
 // compareOneDigest is compareOne that also names each drift with digest
 // (compare.Drift.Digest), before the values of a private body are hidden.
-func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool, digest driftDigest) (report.Result, error) {
+func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, allow *allowlist.List, o oneOptions) (report.Result, error) {
+	origins, level, showPrivate, digest := o.origins, o.level, o.showPrivate, o.digest
 	id := req.ID
 	res := report.Result{ID: id, Level: level.String()}
 	bRec, err := base.Record(id)
@@ -679,9 +710,12 @@ func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sid
 			}
 		}
 	}
-	if digest != nil { // what expectations digest is written only where they may apply
+	switch {
+	case digest != nil: // what expectations digest is written only where they may apply
 		res.Drifts, res.Notes = compare.OneWitnessed(id, b, c, allow.ForTarget(req.Target), level)
-	} else {
+	case o.learn:
+		res.Drifts, res.Notes = compare.OneLearning(id, b, c, allow.ForTarget(req.Target), level)
+	default:
 		res.Drifts, res.Notes = compare.OneNotes(id, b, c, allow.ForTarget(req.Target), level)
 	}
 	if digest != nil && !noBody {

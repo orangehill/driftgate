@@ -22,7 +22,7 @@ Typical drift after an upgrade:
 | `key-order`, `key-missing`, `key-extra` | The serializer changed. |
 | `item-order` | Rows without `ORDER BY` come in another order. |
 | `status` | A validation or authorization rule behaves differently. |
-| `side-effect` | The request writes other tables than before. |
+| `side-effect` | The request writes other tables, rows or values than before. |
 
 ## Server upgrade
 

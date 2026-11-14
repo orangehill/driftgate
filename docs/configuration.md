@@ -49,7 +49,7 @@ state:
     working: shop
     exclude: [sessions, jobs, failed_jobs]
     restore_empty: [cache, cache_locks]
-    row_tracking: [orders]
+    row_tracking: [orders, users: { ignore: [last_seen_on] }]
   redis:
     restore: ["redis-cli", "FLUSHALL"]
     fingerprint: ["redis-cli", "DBSIZE"]
@@ -141,7 +141,7 @@ An identity's own `env` or `op` wins over `tokens`. Use `command` or
 | `exclude` | globs | tables never fingerprinted or restored: sessions, logs |
 | `restore_only` | globs | tables restored every time, but never compared |
 | `restore_empty` | globs | `restore_only` tables restored to no rows: caches |
-| `row_tracking` | tables | also record which rows and columns each request changes |
+| `row_tracking` | tables | also record which rows each request changes and the values it writes; `name: { ignore: [columns] }` leaves columns out ([row tracking](databases.md#row-tracking)) |
 | `allow_remote` | bool | allow a host that no `allow_hosts` names; it must be a copy |
 | `restore` | command | without a driver: restores the component; required |
 | `fingerprint` | command | without a driver: its output must be the same after every restore |

@@ -335,6 +335,40 @@ func (k Key) RefHash() hash.Hash {
 	return hmac.New(sha256.New, derive.Sum(nil))
 }
 
+const rowLabel = "driftgate row value v1"
+
+// RowValues names the values a request wrote into rows of a tracked table
+// without revealing them: an HMAC-SHA256 under a key derived from the
+// project key, of the table, the column and the value (as the state reads
+// it). Equal values in one column of one table get equal names under one
+// key; a guess of a short value cannot be checked without the key, and
+// equal values of two columns get different names.
+type RowValues struct{ key []byte }
+
+// RowValues returns the namer of row values of k.
+func (k Key) RowValues() *RowValues {
+	derive := hmac.New(sha256.New, k)
+	derive.Write([]byte(rowLabel))
+	return &RowValues{key: derive.Sum(nil)}
+}
+
+// Name names one value of a column of a table (item: <component>/table:<name>).
+func (r *RowValues) Name(item, column, value string) string {
+	mac := hmac.New(sha256.New, r.key)
+	for _, f := range []string{item, column, value} {
+		var n [4]byte
+		n[0], n[1], n[2], n[3] = byte(len(f)>>24), byte(len(f)>>16), byte(len(f)>>8), byte(len(f))
+		mac.Write(n[:])
+		mac.Write([]byte(f))
+	}
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// ID names the key the values were named under, without revealing it:
+// two sets whose IDs differ named their values under different keys, and
+// their values cannot be compared.
+func (r *RowValues) ID() string { return r.Name("", "", "driftgate row values key") }
+
 func (k Key) gcm() (cipher.AEAD, error) {
 	block, err := aes.NewCipher(k)
 	if err != nil {

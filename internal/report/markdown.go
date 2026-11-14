@@ -61,7 +61,7 @@ func (r *Report) Markdown(maxDrifts int) string {
 	}
 	// The expectations not met are named before what may be cut (ten at
 	// most): an expectation that held only in part is never left out.
-	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.UnmetNote(), r.KindsNote(), r.DominantNote(), r.NotCovered.CatalogLine()} {
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.UnmetNote(), r.KindsNote(), r.RowValuesNote(), r.DominantNote(), r.NotCovered.CatalogLine()} {
 		if note != "" {
 			fmt.Fprintf(&b, "\n> %s\n", mdText(note))
 		}

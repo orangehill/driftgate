@@ -20,6 +20,7 @@ import (
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
@@ -158,6 +159,7 @@ func sqliteCatalog() *catalog.Catalog {
 // the application wrote. A pristine copy changed behind DriftGate's back
 // makes the next restore fail its check instead of passing.
 func TestCaptureSQLite(t *testing.T) {
+	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=") // row_tracking names row values with the key; never the Keychain
 	for _, mode := range []string{"wal", "delete"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
@@ -172,7 +174,7 @@ func TestCaptureSQLite(t *testing.T) {
 			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
 				Target: config.Target{BaseURL: srv.URL},
 				State: map[string]config.Component{"db": {Driver: config.SQLite, Working: "database/app.sqlite",
-					Exclude: []string{"sessions", "job_batches"}, RowTracking: []string{"users"}}}}, root)
+					Exclude: []string{"sessions", "job_batches"}, RowTracking: config.Tables("users")}}}, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -571,6 +573,7 @@ func TestPrepareThatWritesSQLite(t *testing.T) {
 // configuration, so a comparison with a capture that ran the writes does
 // not take their rows for untracked.
 func TestRowTrackingRecordedWithoutSteps(t *testing.T) {
+	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=") // row_tracking names row values with the key; never the Keychain
 	t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
 	root := t.TempDir()
 	app := newSQLiteApp(t, filepath.Join(root, "app.sqlite"), "wal")
@@ -578,7 +581,7 @@ func TestRowTrackingRecordedWithoutSteps(t *testing.T) {
 	t.Cleanup(srv.Close)
 	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
 		Target: config.Target{BaseURL: srv.URL},
-		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}, RowTracking: []string{"users"}}}}, root)
+		State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "app.sqlite", Exclude: []string{"sessions"}, RowTracking: config.Tables("users")}}}, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -578,14 +578,90 @@ type Component struct {
 	RestoreOnly []string `yaml:"restore_only,omitempty"` // tables restored, their rows kept in the pristine copy, but never fingerprinted (globs)
 	// RestoreEmpty are restore_only tables restored to no rows: the
 	// pristine copy leaves their rows out, as an excluded table's (a cache).
-	RestoreEmpty []string `yaml:"restore_empty,omitempty"`
-	RowTracking  []string `yaml:"row_tracking,omitempty"`
+	RestoreEmpty []string  `yaml:"restore_empty,omitempty"`
+	RowTracking  RowTables `yaml:"row_tracking,omitempty"`
 	// AllowRemote lets the database be on a host outside target.allow_hosts.
 	// A restore rewrites its tables, so a wrong DSN must not reach a server
 	// that is not a copy.
 	AllowRemote bool     `yaml:"allow_remote,omitempty"`
 	Restore     []string `yaml:"restore,omitempty"`
 	Fingerprint []string `yaml:"fingerprint,omitempty"`
+}
+
+// RowTables are the tables of row_tracking: each a name, or a mapping of
+// the name to the columns whose values are never compared
+// (follows: {ignore: [updated_at]}).
+type RowTables []RowTable
+
+// RowTable is one table of row_tracking.
+type RowTable struct {
+	Name string
+	// Ignore are columns (globs, without letter case) whose values are
+	// not recorded: they change by themselves in a way two captures of
+	// one state cannot show (a date). A column the table does not have
+	// is no error: a migration may drop it.
+	Ignore []string
+}
+
+// Tables is row_tracking of tables named only.
+func Tables(names ...string) RowTables {
+	out := make(RowTables, len(names))
+	for i, n := range names {
+		out[i] = RowTable{Name: n}
+	}
+	return out
+}
+
+// Names are the names of the tables.
+func (r RowTables) Names() []string {
+	if r == nil {
+		return nil
+	}
+	out := make([]string, len(r))
+	for i, t := range r {
+		out[i] = t.Name
+	}
+	return out
+}
+
+func (t *RowTable) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*t = RowTable{}
+		return n.Decode(&t.Name)
+	case yaml.MappingNode:
+		if len(n.Content) == 2 && n.Content[1].Kind == yaml.MappingNode {
+			var opts struct {
+				Ignore []string `yaml:"ignore"`
+			}
+			m := n.Content[1]
+			// A node decodes without the file's KnownFields: unknown keys
+			// are refused here.
+			for i := 0; i < len(m.Content); i += 2 {
+				if k := m.Content[i].Value; k != "ignore" {
+					return fmt.Errorf("line %d: a row_tracking table takes ignore, not %q", m.Content[i].Line, k)
+				}
+			}
+			if err := m.Decode(&opts); err != nil {
+				return err
+			}
+			*t = RowTable{Name: n.Content[0].Value, Ignore: opts.Ignore}
+			for _, c := range t.Ignore {
+				if strings.TrimSpace(c) == "" {
+					return fmt.Errorf("line %d: row_tracking table %s: an empty column in ignore", m.Line, t.Name)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("line %d: a row_tracking table is a name, or name: {ignore: [columns]}", n.Line)
+}
+
+func (t RowTable) MarshalYAML() (any, error) {
+	if len(t.Ignore) == 0 {
+		return t.Name, nil
+	}
+	return map[string]any{t.Name: map[string][]string{"ignore": t.Ignore}}, nil
 }
 
 // Drivers.
@@ -623,7 +699,7 @@ func (c Component) validate() error {
 	if len(c.Restore) > 0 || len(c.Fingerprint) > 0 {
 		return errors.New("restore and fingerprint commands are for components without a driver")
 	}
-	for _, t := range c.RowTracking {
+	for _, t := range c.RowTracking.Names() {
 		if c.matches(c.Exclude, t, false) {
 			return fmt.Errorf("row_tracking table %s is excluded", t)
 		}

@@ -850,7 +850,7 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		}
 	}
 	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %s, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.driftedText(), r.Skipped, r.Observed)
-	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.KindsNote(), r.DominantNote()} {
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.KindsNote(), r.RowValuesNote(), r.DominantNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}

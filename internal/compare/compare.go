@@ -107,6 +107,20 @@ var kinds = []KindInfo{
 // Kinds returns a copy of the list of drift kinds.
 func Kinds() []KindInfo { return slices.Clone(kinds) }
 
+// DescribeRow is how a side effect describes a changed row of a tracked
+// table: its change, and the columns an update changed ("updated
+// status,updated_at"). Two rows alike in it changed alike.
+func DescribeRow(r snapshot.RowChange) string {
+	if len(r.Columns) > 0 {
+		return r.Change + " " + strings.Join(r.Columns, ",")
+	}
+	return r.Change
+}
+
+// OtherValue marks a side effect whose row changed alike on both sides
+// but got another value: "updated status; other value: status".
+const OtherValue = "other value"
+
 // Drift is one difference.
 type Drift struct {
 	Request  string `json:"request"`
@@ -138,6 +152,11 @@ type Drift struct {
 	// neutral origin, so that the drift reads the same captured from
 	// another address (a worktree on another port); empty otherwise.
 	Material string `json:"-"`
+	// RowValues are, of a side effect where a row changed alike on both
+	// sides but with other values, those columns
+	// (<component>/table:<name>.<column>): the drifts two captures of one
+	// state have learn them as volatile.
+	RowValues []string `json:"-"`
 	// parted: rules with parts judge the values; what is digested of them
 	// is the witness (their pieces), not the values as they are.
 	parted bool
@@ -324,14 +343,28 @@ func OneWitnessed(id string, base, cur Side, allow *allowlist.List, level Level)
 	return oneNotes(id, base, cur, allow, level, true)
 }
 
+// OneLearning is OneNotes of two captures of one state, which learn the
+// values of tracked rows: those of every tracked row are compared, not
+// only of the tables the base record learned (SideEffects.Learned).
+func OneLearning(id string, base, cur Side, allow *allowlist.List, level Level) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, learnRows: true}, base, cur, allow)
+}
+
 func oneNotes(id string, base, cur Side, allow *allowlist.List, level Level, witnessing bool) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, witnessing: witnessing}, base, cur, allow)
+}
+
+// compareOne compares with c, which names the request, the level and the
+// options; it takes the request's own list of rules from allow.
+func compareOne(c *comparer, base, cur Side, allow *allowlist.List) ([]Drift, []string) {
+	id, level, witnessing := c.id, c.level, c.witnessing
 	// The request's own list: it counts the rules that applied.
 	if FastPaths {
 		allow = allow.ForRequest(id)
 	} else {
 		allow = allow.Copy()
 	}
-	c := &comparer{id: id, allow: allow, level: level, witnessing: witnessing}
+	c.allow = allow
 	if witnessing {
 		c.own = ownOrigins(base.Origins, cur.Origins)
 	}
@@ -409,7 +442,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, c.learnRows)
 		}
 	}
 }
@@ -435,7 +468,7 @@ func (c *comparer) rawAllowed(base, cur Side) bool {
 // sideEffects compares the items a request changed and, of the tables
 // both sides tracked rows of (bTables, vTables; nil: every table), its
 // rows.
-func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string) {
+func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string, learning bool) {
 	b, v := map[string]bool{}, map[string]bool{}
 	for _, it := range base.Items {
 		b[it] = true
@@ -453,12 +486,7 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 			c.add(KindSideEffect, "side-effects:"+it, "unchanged", "changed")
 		}
 	}
-	describe := func(r snapshot.RowChange) string {
-		if len(r.Columns) > 0 {
-			return r.Change + " " + strings.Join(r.Columns, ",")
-		}
-		return r.Change
-	}
+	describe := DescribeRow
 	// untracked notes, once per item, the rows of a table the other side
 	// did not track: row_tracking came or went after the baseline.
 	noted := map[string]bool{}
@@ -472,8 +500,8 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 		}
 		return true
 	}
-	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string) {
-		m := map[string]string{}
+	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string, map[string]snapshot.RowChange) {
+		m, changes := map[string]string{}, map[string]snapshot.RowChange{}
 		var keys []string
 		for _, r := range list {
 			if untracked(r.Item, other, why) {
@@ -483,16 +511,54 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables
 			if _, ok := m[k]; !ok {
 				keys = append(keys, k)
 			}
-			m[k] = describe(r)
+			m[k], changes[k] = describe(r), r
 		}
-		return m, keys
+		return m, keys, changes
 	}
-	bRows, bKeys := rows(base.Rows, vTables, "row_tracking no longer covers the table")
-	vRows, vKeys := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	bRows, bKeys, bChanges := rows(base.Rows, vTables, "row_tracking no longer covers the table")
+	vRows, vKeys, vChanges := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	// Values are compared of the items whose values the baseline saw in
+	// two captures of one state (Learned; every item when learning),
+	// apart from the columns that differed between them (the baseline's
+	// Volatile only: a capture's own cannot hide a value the baseline
+	// fixed).
+	volatile := map[string]bool{}
+	for _, col := range base.Volatile {
+		volatile[col] = true
+	}
+	learned := func(item string) bool { return learning || slices.Contains(base.Learned, item) }
 	for _, k := range bKeys {
 		if vRows[k] != bRows[k] {
 			c.add(KindSideEffect, "side-effects:"+k, bRows[k], orNone(vRows[k]))
+			continue
 		}
+		if c.level < LevelValues || !learned(bChanges[k].Item) {
+			continue
+		}
+		// The row changed alike: the values it got are compared, of the
+		// columns both sides named a value of (none of a set that
+		// recorded none, nor of a column row_tracking ignores on either
+		// side), apart from those two captures of one state disagree on.
+		b, v := bChanges[k], vChanges[k]
+		var cols, named []string
+		for col, bv := range b.Values {
+			if vv, ok := v.Values[col]; ok && vv != bv && !volatile[b.Item+"."+col] {
+				cols = append(cols, col)
+			}
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		sort.Strings(cols)
+		for _, col := range cols {
+			named = append(named, b.Item+"."+col)
+		}
+		what := OtherValue + ": "
+		if len(cols) > 1 {
+			what = OtherValue + "s: "
+		}
+		c.add(KindSideEffect, "side-effects:"+k, bRows[k], vRows[k]+"; "+what+strings.Join(cols, ","))
+		c.drifts[len(c.drifts)-1].RowValues = named
 	}
 	for _, k := range vKeys {
 		if _, ok := bRows[k]; !ok {
@@ -516,12 +582,14 @@ func outcome(r *snapshot.Record) string {
 }
 
 type comparer struct {
-	id      string
-	allow   *allowlist.List
-	level   Level
-	drifts  []Drift
-	notes   []string // how the comparison went where that is not a drift
-	allowed int      // allow-listed values that changed
+	id    string
+	allow *allowlist.List
+	level Level
+	// learnRows compares the values of every tracked row (OneLearning).
+	learnRows bool
+	drifts    []Drift
+	notes     []string // how the comparison went where that is not a drift
+	allowed   int      // allow-listed values that changed
 	// rewritten counts values a rule covers that are written otherwise.
 	rewritten int
 	lengths   int      // arrays the allowlist let change their length or order

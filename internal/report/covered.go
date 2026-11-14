@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/orangehill/driftgate/internal/compare"
 )
 
 // NotCovered is what a comparison does not cover, next to its result: a
@@ -38,6 +40,10 @@ type NotCovered struct {
 	Skipped []SkippedGap `json:"skipped,omitempty"`
 	// Failed requests acknowledged under known_failures: in exclusions.yaml.
 	KnownFailures *Gap `json:"known_failures,omitempty"`
+	// Requests that wrote into tracked rows whose values were not
+	// compared, and why: a side recorded none, or the record compared
+	// against did not learn them from two captures of one state.
+	RowValues *ReasonGap `json:"row_values,omitempty"`
 }
 
 // CatalogCounts are requests by what they do; Multipart are among the
@@ -67,7 +73,12 @@ const (
 // SkippedGap is the skipped requests of one kind with one reason (the
 // result's note: no baseline, not sent by a read-only capture …).
 type SkippedGap struct {
-	What   string `json:"what"` // read, mutating or command
+	What string `json:"what"` // read, mutating or command
+	ReasonGap
+}
+
+// ReasonGap is a gap with the reason for it.
+type ReasonGap struct {
 	Reason string `json:"reason"`
 	Gap
 }
@@ -85,7 +96,7 @@ func NewGap(names []string) *Gap {
 
 // Empty reports that nothing is left uncovered.
 func (n *NotCovered) Empty() bool {
-	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil
+	return n == nil || n.NoRequest == nil && n.NoInvalidBody == nil && n.FailedInBaseline == nil && n.Observed == nil && len(n.Skipped) == 0 && n.KnownFailures == nil && n.RowValues == nil
 }
 
 // CatalogLine counts the compared requests by what they do: a zero says
@@ -156,6 +167,9 @@ func (n *NotCovered) NotCoveredLines() []string {
 		add(&g, one+" skipped ("+s.Reason+")", many+" skipped ("+s.Reason+")")
 	}
 	add(n.KnownFailures, "known failure (exclusions.yaml)", "known failures (exclusions.yaml)")
+	if g := n.RowValues; g != nil {
+		add(&g.Gap, "request that changes data whose row values were not compared ("+g.Reason+")", "requests that change data whose row values were not compared ("+g.Reason+")")
+	}
 	return out
 }
 
@@ -191,6 +205,23 @@ type Dominant struct {
 	// --skip-fingerprint-check. accept and expect take neither.
 	Captures   bool `json:"captures,omitempty"`
 	Unreliable bool `json:"unreliable,omitempty"`
+}
+
+// RowValuesNote is the hint for a side effect whose tracked row got
+// another value (compare.OtherValue) among the drifts that fail: a column
+// that changes by itself between days goes under ignore. Empty otherwise.
+//
+// It reads the drift's text, not compare.Drift.RowValues: that field is
+// not in the saved report (json:"-"), which report and review read back.
+func (r *Report) RowValuesNote() string {
+	for _, res := range r.Results {
+		for _, d := range res.Drifts {
+			if d.Kind == compare.KindSideEffect && d.Expected == "" && strings.Contains(d.Current, "; "+compare.OtherValue) {
+				return "other value of a tracked row: a column whose value changes by itself between days (a date) goes under ignore: in row_tracking (name: { ignore: [column] })"
+			}
+		}
+	}
+	return ""
 }
 
 // KindsNote counts the drifts by kind, the most first ("kinds:

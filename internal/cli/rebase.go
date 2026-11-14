@@ -281,6 +281,9 @@ func rebaseChecks(p *config.Project, oldMeta *snapshot.Meta, cur *snapshot.Set, 
 		}
 		return nil, configErr("capture %[1]s is not one that two captures of the same state agreed on (it was made once, or its two captures differed), and a baseline takes only such responses (as run makes one); capture it twice, add the allowlist entries it proposes, then rebase:\n  driftgate capture %[1]s --repeat 2 --force%[2]s", tag, skip)
 	}
+	if err := rebaseRowValues(p, oldMeta, meta, tag); err != nil {
+		return nil, err
+	}
 	recs, err := cur.Records()
 	if err != nil {
 		return nil, envErr(err)

@@ -20,9 +20,10 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 	r := Build("capture:c", "baseline:local", []Result{drifted("a", "d"), drifted("b", "d"), drifted("c", "d"), drifted("d", "d"), drifted("e", "d"), {ID: "ok", Outcome: Pass}})
 	r.NotCovered = &NotCovered{Catalog: CatalogCounts{Requests: 19, Reads: 18, Mutating: 1}, RoutesChecked: true, Against: "baseline:local",
 		NoRequest: NewGap([]string{"GET /api/extra"}), NoInvalidBody: NewGap([]string{"POST /api/posts"}), FailedInBaseline: NewGap([]string{"get-tree"}), Observed: NewGap(ids),
-		Skipped: []SkippedGap{{What: SkippedMutating, Reason: "no baseline", Gap: *NewGap([]string{"post-import"})},
-			{What: SkippedRead, Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}, {What: SkippedCommand, Reason: "no baseline", Gap: *NewGap([]string{"schema"})}},
-		KnownFailures: NewGap([]string{"get-old"})}
+		Skipped: []SkippedGap{{What: SkippedMutating, ReasonGap: ReasonGap{Reason: "no baseline", Gap: *NewGap([]string{"post-import"})}},
+			{What: SkippedRead, ReasonGap: ReasonGap{Reason: NoteNotSent, Gap: *NewGap([]string{"get-in-seq"})}}, {What: SkippedCommand, ReasonGap: ReasonGap{Reason: "no baseline", Gap: *NewGap([]string{"schema"})}}},
+		KnownFailures: NewGap([]string{"get-old"}),
+		RowValues:     &ReasonGap{Reason: "the baseline recorded no row values", Gap: *NewGap([]string{"post-follow"})}}
 	g, drifted, elsewhere, ok := r.FindDominant()
 	if !ok || g.Requests != 5 || drifted != 5 || elsewhere != 0 {
 		t.Fatalf("dominant %v %d %d %v", g, drifted, elsewhere, ok)
@@ -35,12 +36,12 @@ func TestNotCoveredInEveryFormat(t *testing.T) {
 	gaps := []string{"1 route method without a request meant to succeed: GET /api/extra",
 		"1 route method whose validation error no request checks (templates empty-body and json-errors): POST /api/posts", "1 request meant to succeed that failed in baseline:local: get-tree",
 		"12 requests observed (measured, not compared): get-r-0, get-r-1, get-r-2, get-r-3, get-r-4 and 7 more", "1 request that changes data skipped (no baseline): post-import", "1 read skipped (" + NoteNotSent + "): get-in-seq", "1 command step skipped (no baseline): schema",
-		"1 known failure (exclusions.yaml): get-old"}
+		"1 known failure (exclusions.yaml): get-old", "1 request that changes data whose row values were not compared (the baseline recorded no row values): post-follow"}
 	dominant := "one change in 5 of 5 drifted requests: header x-a is new; set aside, 0 of 5 drift in something else; fix it, or take it with driftgate accept group:1"
 	mdGaps := []string{"> - 1 route method without a request meant to succeed: GET /api/extra", "> - 12 requests observed (measured, not compared)"}
 	want := map[string][]string{
 		"text":     append([]string{catalogLine, notCoveredTitle, dominant}, gaps...),
-		"json":     {`"not_covered": {`, `"multipart": 0`, `"routes_checked": true`, `"count": 12`, `"get-r-9"`, `"no_invalid_body": {`, `"what": "read"`, `"reason": "not sent: capture --read-only"`, `"dominant": {`, `"elsewhere": 0`, `"get-tree"`},
+		"json":     {`"not_covered": {`, `"multipart": 0`, `"routes_checked": true`, `"count": 12`, `"get-r-9"`, `"no_invalid_body": {`, `"what": "read"`, `"reason": "not sent: capture --read-only"`, `"dominant": {`, `"elsewhere": 0`, `"get-tree"`, `"row_values": {`},
 		"markdown": append([]string{"catalog: 19 requests", "driftgate coverage lists the routes", "one change in 5 of 5 drifted requests"}, mdGaps...),
 		"junit":    append([]string{catalogLine, "driftgate coverage lists the routes", dominant}, gaps...),
 	}
@@ -139,5 +140,26 @@ func TestKindsNote(t *testing.T) {
 	}
 	if n := Build("c", "baseline:local", []Result{{ID: "c", Outcome: Pass}}).KindsNote(); n != "" {
 		t.Errorf("without drift: %q", n)
+	}
+}
+
+// TestRowValuesNote: a stop on another value of a tracked row says how to
+// leave out a column that changes by itself between days; an expected
+// one, or another side effect, does not.
+func TestRowValuesNote(t *testing.T) {
+	d := compare.Drift{Request: "follow", Kind: compare.KindSideEffect, Where: "side-effects:db/table:follows[id=1]", Baseline: "inserted", Current: "inserted; other value: seen_on"}
+	r := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}})
+	var b bytes.Buffer
+	r.Text(&b, DefaultDrifts)
+	if !strings.Contains(b.String(), "goes under ignore: in row_tracking") {
+		t.Errorf("no hint:\n%s", b.String())
+	}
+	d.Expected = "ref"
+	if n := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}}).RowValuesNote(); n != "" {
+		t.Errorf("expected: %s", n)
+	}
+	d.Expected, d.Current = "", "updated seen_on"
+	if n := Build("capture:c", "baseline:local", []Result{{ID: "follow", Outcome: Drift, Drifts: []compare.Drift{d}}}).RowValuesNote(); n != "" {
+		t.Errorf("another side effect: %s", n)
 	}
 }

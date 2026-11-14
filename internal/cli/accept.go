@@ -458,6 +458,21 @@ func interrupted(p *config.Project, out io.Writer) error {
 // into the baseline, with their bodies: public ones into the baseline,
 // private ones (already there) stay in the local store, named by their ref.
 func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) error {
+	// A capture two runs agreed on (capture --repeat) learned the values
+	// of tracked rows itself; one made once learned nothing.
+	meta, err := cur.Meta()
+	if err != nil {
+		return envErr(err)
+	}
+	agreed := meta != nil && meta.Agreed >= 2
+	var rowKey string // the key the capture named row values under
+	if meta != nil {
+		rowKey = meta.RowValues
+	}
+	if err := acceptRowKey(base, rowKey); err != nil {
+		return err
+	}
+	carries := false // an accepted record holds row values
 	return rewriteBaseline(base, a, func(work *snapshot.Set) error {
 		for _, id := range ids {
 			rec, err := cur.Record(id)
@@ -471,6 +486,12 @@ func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) e
 				}
 				continue
 			}
+			var old *snapshot.SideEffects
+			if o, err := work.Record(id); err == nil && o != nil {
+				old = o.SideEffects
+			}
+			acceptLearning(old, rec.SideEffects, agreed, rowKey != "")
+			carries = carries || rec.SideEffects != nil && slices.ContainsFunc(rec.SideEffects.Rows, func(r snapshot.RowChange) bool { return r.Values != nil })
 			var body []byte // nil for a failed request
 			if rec.Body.SHA256 != "" || rec.Body.Ref != "" {
 				if body, err = cur.Body(rec); err != nil {
@@ -481,7 +502,10 @@ func applyAccept(base, cur *snapshot.Set, ids []string, a baseline.Acceptance) e
 				return err
 			}
 		}
-		return addRoots(work, cur)
+		if err := addRoots(work, cur); err != nil {
+			return err
+		}
+		return setRowKey(work, rowKey, carries)
 	})
 }
 
