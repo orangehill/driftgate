@@ -19,7 +19,7 @@ import (
 // that each insert a row into t0 of benchSchema, with 2000 more rows, under
 // row_tracking: the rows of t0 are read before and after each request
 // that writes, and (from fix/row-value on) the values each wrote are
-// named under the project key. record-B is the size of the capture's
+// named under the project key, its column at left out by ignore. record-B is the size of the capture's
 // records. On benchServers.
 func BenchmarkCaptureRowTracking(b *testing.B) {
 	servers := benchServers()
@@ -47,7 +47,7 @@ func BenchmarkCaptureRowTracking(b *testing.B) {
 				b.Fatal(err)
 			}
 			sc := p.State["db"]
-			if err := yaml.Unmarshal([]byte("[t0]"), &sc.RowTracking); err != nil {
+			if err := yaml.Unmarshal([]byte("[t0: {ignore: [AT, x_*]}]"), &sc.RowTracking); err != nil {
 				b.Fatal(err)
 			}
 			p.State["db"] = sc
