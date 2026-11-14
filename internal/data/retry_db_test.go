@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -223,6 +224,35 @@ func testRetrySourceRead(t *testing.T, s *server) {
 	if got, err := Classify(ctx, s.db(src), rules, nil, 5); err != nil || tries != 3 || !reflect.DeepEqual(got, cls) {
 		t.Errorf("classify: %v after %d tries", err, tries)
 	}
+}
+
+// TestMySQLReadSourceFailed: a failed read of the source ends its snapshot
+// and gives its connection back before it returns, so nothing of it stays
+// open during the wait for the next try (retryRead).
+func TestMySQLReadSourceFailed(t *testing.T) {
+	eachMySQL(t, func(t *testing.T, s *server) {
+		const src = "dgretry_failed"
+		t.Cleanup(func() { s.drop(src) })
+		s.create(t, src)
+		s.exec(t, src, "CREATE TABLE unruled (id INT PRIMARY KEY, email VARCHAR(50))")
+		rules, err := ParseRules([]byte(testRules))
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := open(s.db(src), src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		sr, err := readSource(context.Background(), db, Options{Source: s.db(src), Rules: rules, Key: testKey}, nil, false, io.Discard)
+		var ce *CheckError
+		if !errors.As(err, &ce) || sr != nil {
+			t.Fatalf("readSource: %v, %v", sr, err)
+		}
+		if n := db.Stats().InUse; n != 0 {
+			t.Errorf("%d source connections in use after a failed read", n)
+		}
+	})
 }
 
 // TestMySQLGaleraTargetSequences (MariaDB Galera): a target on a Galera
