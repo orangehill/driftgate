@@ -25,12 +25,12 @@ func TestBaselinesRebase(t *testing.T) {
 	if code, out, errOut := runCLI(t, "expect", "me-anonymous", "--ref", "T-2", "--reason", "y", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("expect: %d\n%s\n%s", code, out, errOut)
 	}
-	if code, out, errOut := runCLI(t, "capture", "main", "--config", p.cfg); code != ExitClean {
+	if code, out, errOut := runCLI(t, "capture", "main", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	// news drifts otherwise in main than T-1 expects.
 	editRecord(t, "main", "news", func(r *snapshot.Record) { setHeader(r, "x-powered-by", "demo 2") })
-	if code, out, errOut := runCLI(t, "capture", "part", "--only", "news*", "--config", p.cfg); code != ExitClean {
+	if code, out, errOut := runCLI(t, "capture", "part", "--only", "news*", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	log, _ := os.ReadFile(filepath.Join(base, baseline.LogFile))
@@ -51,8 +51,17 @@ func TestBaselinesRebase(t *testing.T) {
 			t.Errorf("%v: %d %s", tc.args, code, errOut)
 		}
 	}
+	// A capture made once is refused, with the command that checks it, as
+	// run makes a baseline only from two captures that agree.
+	if code, _, errOut := runCLI(t, "capture", "once", "--skip-fingerprint-check", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("capture: %d %s", code, errOut)
+	}
+	if code, _, errOut := rebase("local", "--from", "once", "--reason", "x", "--allow-freeze"); code != ExitConfig ||
+		!strings.Contains(errOut, "capture once is not one that two captures of the same state agreed on") || !strings.Contains(errOut, "driftgate capture once --repeat 2 --force --skip-fingerprint-check") {
+		t.Fatalf("a capture made once: %d %s", code, errOut)
+	}
 	// The private bodies of the capture must be on this machine.
-	if code, _, errOut := runCLI(t, "capture", "nobody", "--config", p.cfg); code != ExitClean {
+	if code, _, errOut := runCLI(t, "capture", "nobody", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d %s", code, errOut)
 	}
 	after, _ := filepath.Glob(filepath.Join(os.Getenv("DRIFTGATE_STORE"), "private", "*.enc"))
@@ -70,7 +79,7 @@ func TestBaselinesRebase(t *testing.T) {
 	}
 	// What goes into the baseline is scanned as verify scans it.
 	setMode(t, p.cfg, "evolve")
-	if code, _, errOut := runCLI(t, "capture", "leak", "--config", p.cfg); code != ExitClean {
+	if code, _, errOut := runCLI(t, "capture", "leak", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d %s", code, errOut)
 	}
 	editRecord(t, "leak", "news", func(r *snapshot.Record) { setHeader(r, "x-contact", "jane.doe@example.com") })
@@ -84,8 +93,7 @@ func TestBaselinesRebase(t *testing.T) {
 
 	code, out, errOut := rebase("local", "--from", "main", "--reason", "main merged v2", "--ref", "M-1", "--allow-freeze")
 	if code != ExitClean || !strings.Contains(out, "rebased baseline local on capture main: 7 requests changed") ||
-		!strings.Contains(out, "closed the expectations of T-2 the baseline now holds: me-anonymous") || !strings.Contains(out, "1 expectation kept") ||
-		!strings.Contains(out, "warning: capture main was made once") {
+		!strings.Contains(out, "closed the expectations of T-2 the baseline now holds: me-anonymous") || !strings.Contains(out, "1 expectation kept") {
 		t.Fatalf("rebase: %d\n%s\n%s", code, out, errOut)
 	}
 	entries, err := baseline.Log(base)
@@ -117,7 +125,7 @@ func TestBaselinesRebase(t *testing.T) {
 	// Data that changed since the baseline (a new seed) stops a capture
 	// checked against it; one made with --skip-fingerprint-check records
 	// the data it ran on, which a rebase makes the baseline's.
-	if code, out, errOut := runCLI(t, "capture", "seeded", "--skip-fingerprint-check", "--config", p.cfg); code != ExitClean {
+	if code, out, errOut := runCLI(t, "capture", "seeded", "--skip-fingerprint-check", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	if code, out, errOut := rebase("local", "--from", "seeded", "--reason", "new seed", "--allow-freeze"); code != ExitClean {
@@ -140,7 +148,7 @@ func TestBaselinesRebase(t *testing.T) {
 	// The checks of a baseline made by run: an error of a request meant to
 	// succeed and a response that came only after a retry are said; the
 	// rebase is done and exits 0, as accept does.
-	if code, out, errOut := runCLI(t, "capture", "broken", "--config", p.cfg); code != ExitClean {
+	if code, out, errOut := runCLI(t, "capture", "broken", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	editRecord(t, "broken", "news", func(r *snapshot.Record) { r.Status = 500 })
@@ -151,7 +159,7 @@ func TestBaselinesRebase(t *testing.T) {
 	// Mode freeze accepts nothing: the title says to rebase instead, with
 	// every argument rebase needs.
 	if code != ExitClean || !strings.Contains(out, failedRequestsTitle(config.Freeze)) ||
-		!strings.Contains(out, `driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze), baseline local:`) ||
+		!strings.Contains(out, `driftgate capture <tag> --repeat 2, then driftgate baselines rebase <baseline> --from <tag> --reason "…" --allow-freeze), baseline local:`) ||
 		strings.Contains(out, "accept the new answer") || !strings.Contains(out, "news") ||
 		!strings.Contains(out, "warning: baseline local holds 1 response that came only after a retry: me-anonymous") {
 		t.Fatalf("rebase of a broken capture: %d\n%s\n%s", code, out, errOut)

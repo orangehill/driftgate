@@ -72,16 +72,24 @@ func staleExclusions(excl *routes.Exclusions, stale []string) []string {
 // unusedRules are the allowlist rules that applied to no change
 // (List.Unused), without init's defaults.
 func unusedRules(allow *allowlist.List, unused []allowlist.Unused) []allowlist.Unused {
-	defaults := initDefaults()
 	var out []allowlist.Unused
 	for _, u := range unused {
-		i := u.Rule - 1
-		switch {
-		case u.Kind == "header" && i >= 0 && i < len(allow.Headers) && defaults.headers[headerKey(allow.Headers[i])]:
-		case u.Kind == "body" && i >= 0 && i < len(allow.Body) && defaults.body[bodyKey(allow.Body[i])]:
-		default:
+		if !isInitDefault(allow, u.RuleRef) {
 			out = append(out, u)
 		}
 	}
 	return out
+}
+
+// isInitDefault reports whether a header or body rule is one init wrote,
+// unchanged.
+func isInitDefault(allow *allowlist.List, ref allowlist.RuleRef) bool {
+	defaults, i := initDefaults(), ref.Rule-1
+	switch {
+	case ref.Kind == "header" && i >= 0 && i < len(allow.Headers):
+		return defaults.headers[headerKey(allow.Headers[i])]
+	case ref.Kind == "body" && i >= 0 && i < len(allow.Body):
+		return defaults.body[bodyKey(allow.Body[i])]
+	}
+	return false
 }

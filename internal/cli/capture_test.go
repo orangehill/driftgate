@@ -678,3 +678,49 @@ func TestGuardsChecked(t *testing.T) {
 		}
 	}
 }
+
+// TestProposalWithControlCharacters: a value with a newline (the script of
+// a debug page) gets a format the allowlist takes: the newline is written
+// as a regular expression escape, not as text the regexp package rejects.
+func TestProposalWithControlCharacters(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = 0
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		v := n
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>\n    window.data = {\"seen\":%d};\n</script></body></html>", 1000+v)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"page","method":"GET","path":"/page","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	_, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	_, proposal, ok := strings.Cut(out, "Proposed allowlist entries (check every format and write the reason):\n")
+	if !ok {
+		t.Fatalf("no proposal:\n%s\n%s", out, errOut)
+	}
+	proposal, _, _ = strings.Cut(proposal, "\n\n")
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n"+strings.ReplaceAll(proposal, "TODO — ", "")+"\n")
+	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2", "--force"); code != ExitClean {
+		t.Fatalf("with the proposal written: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestProposedFormat: escapes compile and match what the format matched;
+// a format that cannot be written so is not proposed.
+func TestProposedFormat(t *testing.T) {
+	text, why := proposedFormat("a\n\u202eb\\d+")
+	if why != "" || text != `a\x{a}\x{202e}b\d+` || !regexp.MustCompile(`^(?:`+text+`)$`).MatchString("a\n\u202eb12") {
+		t.Fatalf("%q %q", text, why)
+	}
+	if text, why := proposedFormat("a\xffb"); why == "" || text != "" {
+		t.Fatalf("bytes that are not UTF-8: %q %q", text, why)
+	}
+}

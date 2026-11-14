@@ -14,14 +14,37 @@ import (
 
 type token struct {
 	run  bool   // a run of letters and digits
+	jwt  bool   // a JSON Web Token, whole (a run too)
 	text string // a literal character otherwise
 }
 
+// jwtToken is a JSON Web Token: a header and claims that are JSON objects
+// and a signature, each in base64url, whose - and _ fall anywhere.
+var jwtToken = lazy.Regexp(`eyJ[0-9A-Za-z_-]*\.eyJ[0-9A-Za-z_-]*\.[0-9A-Za-z_-]*`)
+
 func tokens(s string) []token {
 	var out []token
+	last := 0
+	for _, m := range jwtToken().FindAllStringIndex(s, -1) {
+		if c := s[m[0]-min(m[0], 1) : m[0]]; c != "" && strings.ContainsAny(c, base64URL) {
+			// Inside a longer word. Only the start is checked: the match
+			// takes every base64url character after it, so none can follow.
+			continue
+		}
+		out = append(runs(out, s[last:m[0]]), token{run: true, jwt: true, text: s[m[0]:m[1]]})
+		last = m[1]
+	}
+	return runs(out, s[last:])
+}
+
+const base64URL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
+
+// runs appends the tokens of s: runs of letters and digits, and every
+// other character on its own.
+func runs(out []token, s string) []token {
 	for _, r := range s {
 		alnum := r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-		if alnum && len(out) > 0 && out[len(out)-1].run {
+		if alnum && len(out) > 0 && out[len(out)-1].run && !out[len(out)-1].jwt {
 			out[len(out)-1].text += string(r)
 			continue
 		}
@@ -275,7 +298,7 @@ func Pattern(values []string) string {
 			break
 		}
 		for j := range t {
-			if t[j].run != toks[0][j].run || (!t[j].run && t[j].text != toks[0][j].text) {
+			if t[j].run != toks[0][j].run || t[j].jwt != toks[0][j].jwt || (!t[j].run && t[j].text != toks[0][j].text) {
 				shared = false
 			}
 		}
@@ -288,6 +311,10 @@ func Pattern(values []string) string {
 			t := toks[0][j]
 			if !t.run {
 				b.WriteString(regexp.QuoteMeta(t.text))
+				continue
+			}
+			if t.jwt {
+				b.WriteString(jwtFormat(toks, j))
 				continue
 			}
 			// A UUID that changes is any UUID of the samples' case: its
@@ -329,6 +356,10 @@ func Pattern(values []string) string {
 				// Letters stay; digits inside the word still vary (29T10 in a
 				// time, which only agreed by chance).
 				b.WriteString(digitsIn(parts[0]))
+				continue
+			}
+			if equal && compactDateAt(toks, j) {
+				b.WriteString(`\d{8}`) // the same day by chance
 				continue
 			}
 			if equal && !timey {
@@ -439,6 +470,35 @@ var (
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
 )
 
+// jwtFormat is the format of the JSON Web Tokens at token j: any claims
+// and signature in base64url, and the header as it is when every sample
+// has the same (a change of the algorithm is a change). A token that is
+// the same everywhere stays as it is.
+func jwtFormat(toks [][]token, j int) string {
+	first := toks[0][j].text
+	header, _, _ := strings.Cut(first, ".")
+	same, sameHeader, unsigned := true, true, false
+	for _, t := range toks {
+		h, _, _ := strings.Cut(t[j].text, ".")
+		same = same && t[j].text == first
+		sameHeader = sameHeader && h == header
+		unsigned = unsigned || strings.HasSuffix(t[j].text, ".")
+	}
+	if same {
+		return regexp.QuoteMeta(first)
+	}
+	const segment = `[0-9A-Za-z_-]`
+	f := `eyJ` + segment + `+`
+	if sameHeader {
+		f = regexp.QuoteMeta(header)
+	}
+	f += `\.eyJ` + segment + `+\.` + segment
+	if unsigned {
+		return f + `*`
+	}
+	return f + `+`
+}
+
 var uuid = lazy.Regexp(`^(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // uuidFormat matches any UUID with the letters' case of the samples: a
@@ -493,6 +553,28 @@ func equalFold(s []string) bool {
 func allEqual(s []string) bool {
 	for _, v := range s {
 		if v != s[0] {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	compactDate = lazy.Regexp(`^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$`)
+	compactTime = lazy.Regexp(`^(?:[01]\d|2[0-3])[0-5]\d[0-5]\d$`)
+)
+
+// compactDateAt reports a date written without dashes at run j of every
+// sample (report-20261114-101530.json): eight digits of a valid date, then
+// one separator and six digits of a valid time. Only that run is a date
+// that agrees by chance; it does not make the whole value one with a time
+// in it, so other numbers that agree stay (an id of eight digits without a
+// time after it, a page number). The caller has checked that the samples
+// share their tokens.
+func compactDateAt(toks [][]token, j int) bool {
+	for _, t := range toks {
+		if j+2 >= len(t) || !compactDate().MatchString(t[j].text) || t[j+1].run ||
+			!strings.Contains("-_. ", t[j+1].text) || !t[j+2].run || !compactTime().MatchString(t[j+2].text) {
 			return false
 		}
 	}

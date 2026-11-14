@@ -183,12 +183,6 @@ func rebaseCmd(args []string, out io.Writer) (int, error) {
 		}
 	}
 	fmt.Fprintf(out, "rebased baseline %s on capture %s: %s\n", name, tag, what)
-	if meta.Agreed < 2 {
-		// run makes a baseline only from two equal captures; one capture
-		// may hold a value that changes by itself, which the next run shows
-		// as a drift (it is never a false pass).
-		fmt.Fprintf(out, "warning: capture %s was made once, not checked against a second capture of the same state as run checks a new baseline; a value that changes by itself shows as a drift on the next run (capture --repeat 2 checks it)\n", tag)
-	}
 	for _, s := range a.Signatures {
 		fmt.Fprintf(out, "  %s\n", report.Printable(s))
 	}
@@ -277,6 +271,15 @@ func rebaseChecks(p *config.Project, oldMeta *snapshot.Meta, cur *snapshot.Set, 
 		return nil, configErr("capture %s records no state fingerprint, and the baseline does, so later captures are checked against its data; capture it with the state restored", tag)
 	case meta.State != nil && meta.StateFormat != state.FingerprintFormat:
 		return nil, configErr("capture %s has a state fingerprint of an earlier format; capture it again", tag)
+	case meta.Agreed < 2:
+		// run makes a baseline only from two captures of the same state
+		// that agree: one capture may hold a value that changes by itself
+		// (a time a new request writes), which would drift on the next run.
+		skip := ""
+		if meta.Unreliable {
+			skip = " --skip-fingerprint-check"
+		}
+		return nil, configErr("capture %[1]s is not one that two captures of the same state agreed on (it was made once, or its two captures differed), and a baseline takes only such responses (as run makes one); capture it twice, add the allowlist entries it proposes, then rebase:\n  driftgate capture %[1]s --repeat 2 --force%[2]s", tag, skip)
 	}
 	recs, err := cur.Records()
 	if err != nil {

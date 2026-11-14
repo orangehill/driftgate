@@ -215,18 +215,18 @@ func (r *Report) NoBaselineNote() string {
 }
 
 // JoinAdvice says how new requests join the baseline in the comparison's
-// mode. Mode freeze refuses accept: there a rebase on the capture adds
-// them, with --allow-freeze; it takes the whole capture, so its command is
-// given only when nothing else drifted.
+// mode. Mode freeze refuses accept: there a rebase on a capture made
+// twice adds them, with --allow-freeze; it takes the whole capture, so its
+// command is given only when nothing else drifted.
 func (r *Report) JoinAdvice() string {
-	capture, ok := strings.CutPrefix(r.Tag, "capture:")
+	ok := strings.HasPrefix(r.Tag, "capture:")
 	switch {
 	case r.Mode != "freeze":
 		return "new requests join the baseline with driftgate accept"
 	case r.Baseline == "" || !ok:
 		// Not a capture against a baseline (two captures, two baselines):
 		// there is nothing to rebase on, and freeze refuses accept.
-		return "in mode freeze accept is refused; new requests join a baseline with driftgate baselines rebase <baseline> --from <capture> --allow-freeze, after a capture compared against it shows no other drift"
+		return "in mode freeze accept is refused; new requests join a baseline with driftgate capture <tag> --repeat 2, then driftgate baselines rebase <baseline> --from <tag> --reason \"…\" --allow-freeze, after a capture compared against it shows no other drift"
 	}
 	// A rebase takes the whole capture: next to a drift it would take a
 	// regression into the baseline, so its command is given only when
@@ -236,9 +236,11 @@ func (r *Report) JoinAdvice() string {
 			return "in mode freeze accept is refused; fix or expect the drifts first, then rebase to add the new requests (driftgate baselines rebase " + r.Baseline + " --allow-freeze takes the whole capture)"
 		}
 	}
-	rebase := fmt.Sprintf(`driftgate baselines rebase %s --from %s --reason "…" --allow-freeze`, r.Baseline, capture)
+	// A baseline takes a capture that a second one of the same state
+	// agrees with, as run makes one; run's own capture is made once.
+	rebase := `driftgate capture <tag> --repeat 2, then driftgate baselines rebase ` + r.Baseline + ` --from <tag> --reason "…" --allow-freeze`
 	if r.NotCovered != nil && r.NotCovered.Only {
-		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (run without --only, then " + rebase + "), which takes the whole capture, its drifts too"
+		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (" + rebase + "), which takes the whole capture, its drifts too"
 	}
 	return "in mode freeze new requests join the baseline with " + rebase + ", which takes the whole capture, its drifts too"
 }
@@ -521,6 +523,24 @@ func Printable(s string) string {
 	for _, r := range s {
 		if unprintable(r) {
 			fmt.Fprintf(&b, "\\u%04x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// PrintableRegexp is a regular expression with the characters Printable
+// escapes written as the regexp package's escapes (\x{a} for a newline):
+// it reads as Printable's text does and matches what it matched.
+func PrintableRegexp(s string) string {
+	if strings.IndexFunc(s, unprintable) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unprintable(r) {
+			fmt.Fprintf(&b, `\x{%x}`, r)
 			continue
 		}
 		b.WriteRune(r)

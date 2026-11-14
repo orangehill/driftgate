@@ -34,7 +34,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `--read-only` on `capture` and `run` sends only requests that do not change data, for a server that must not change. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `target.connect_to` sends requests to a fixed address and keeps the host name, like `curl --connect-to`. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `driftgate clean` removes the pristine copies that `seed` made. It never touches a working database. ([#19](https://github.com/orangehill/driftgate/pull/19))
-- `baselines rebase` makes a capture the baseline's content after an intended data change (capture it with `--skip-fingerprint-check`). ([#17](https://github.com/orangehill/driftgate/pull/17))
+- `baselines rebase` makes a capture the baseline's content after an intended data change. The capture must be one that two captures of the same state agree on, as `run` makes a baseline: `driftgate capture <tag> --repeat 2 --force` (with `--skip-fingerprint-check` when the data changed on purpose); a capture made once is refused with that command. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - The result says what it does not cover, such as routes without a request. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - Reports count drifts per kind. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - Warnings when `prepare:` changed the restored state, and when a request that changes data has a fixed numeric id in its path. ([#17](https://github.com/orangehill/driftgate/pull/17), [#19](https://github.com/orangehill/driftgate/pull/19))
@@ -50,6 +50,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
+- `init` excludes Laravel Dusk's routes (`/_dusk/*`) by default: they log in as any user for browser tests and are not the API. In an existing project, add the route to `exclusions.yaml`. ([#63](https://github.com/orangehill/driftgate/pull/63))
 - `--read-only` takes `prepare:` when `state:` is configured: `prepare` should write only to data the restore brings back. Without `state:` it is still refused.
 - `data verify --dump` reads only a dump that starts with the header line `data anonymize` and `data subset` write (format 1 or 2, for the source's database type). Other files, such as a `mysqldump` or `pg_dump` output, are refused unless they carry that line. Dumps with CRLF line endings are read. A format 1 dump in which a comment at the end of a statement hid its `;` is refused with a message to make the dump again, instead of being read with the next statements' rows as text.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))
@@ -66,6 +67,10 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `allowlist check` no longer reports the rules `init` wrote as `no-place` when the baseline does not reach them, such as Laravel's `x-ratelimit-reset` and `retry-after`, which come only with a rate limit reached. It lists them as not checked. The same rule with a reason of your own is still reported. ([#63](https://github.com/orangehill/driftgate/pull/63))
+- `setup --driver` for a database setting that does not name its driver: the summary names the driver given, and the checks and the configuration's comment no longer say the setting does not say which database it is. Before, the summary said `driver unknown`. ([#63](https://github.com/orangehill/driftgate/pull/63))
+- Proposed formats no longer stop the next run for a value they were meant to allow. A date written without dashes before a time (`report-20261114-101530.json`) now becomes `\d{8}` instead of the day of the capture, when its month, day and time are valid; the other numbers of the value stay as they were. A JSON Web Token now takes any claims and signature in base64url and keeps its header, so a change of the algorithm is still a drift. Before, its format came from the two samples and could fix a `-` of the signature in place. ([#63](https://github.com/orangehill/driftgate/pull/63))
+- A proposed allowlist format for a value with a newline or another control character (the script of a debug error page) now writes it as a regular expression escape (`\x{a}`). Before, it printed `\u000a`, which the allowlist rejects, so the next run stopped with exit 2. A format that cannot be written so is left out with the reason. ([#63](https://github.com/orangehill/driftgate/pull/63))
 - SQL Server: when a task of the server still holds part of the pristine copy's log during the seed, the seed shrinks it again for up to about a second; if part stays held, it says how large the log stays and why, and the next seed shrinks it. Before, the log could stay as large as the working database's. ([#62](https://github.com/orangehill/driftgate/pull/62))
 - `data anonymize`: a read of the source that fails and is tried again ends its snapshot and closes its connection at once, before the wait for the next try; before, they stayed open during the wait. ([#62](https://github.com/orangehill/driftgate/pull/62))
 - PostgreSQL: an error while the list of views is read stops the fingerprint; before, the views after it were left out of it. ([#61](https://github.com/orangehill/driftgate/pull/61))

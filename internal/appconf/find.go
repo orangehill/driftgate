@@ -68,9 +68,6 @@ func (f *finder) add(r Ref, hint, other string) {
 	if r.Source == Env {
 		d.Note = "set in this shell's environment; it must be set when DriftGate runs"
 	}
-	if d.Driver == "" {
-		d.Note = join(d.Note, "the setting does not say which database it is: set driver ("+driverList()+")")
-	}
 	if p.driver == SQLite {
 		if n := f.sqliteNote(p); n != "" {
 			d.Note = join(d.Note, n)
