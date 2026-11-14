@@ -551,9 +551,17 @@ func TestSetupChosenNotAlsoFound(t *testing.T) {
 		"Shop.Api.csproj":  `<Project Sdk="Microsoft.NET.Sdk.Web"></Project>`,
 		"appsettings.json": `{"ConnectionStrings": {"Default": "Host=127.0.0.1;Port=` + closedPort(t) + `;Database=shop;Username=shop;Password=S3cr-x"}}`,
 	})
-	runCLI(t, "setup", "--yes", "--driver", "postgres", "--url", "http://127.0.0.1:"+closedPort(t))
-	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); strings.Contains(raw, "# also found:") {
+	code, out, errOut := runCLI(t, "setup", "--yes", "--driver", "postgres", "--url", "http://127.0.0.1:"+closedPort(t))
+	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
+	if strings.Contains(raw, "# also found:") {
 		t.Errorf("the chosen setting is listed as also found:\n%s", raw)
+	}
+	// --driver says which database it is: nothing says it is unknown.
+	for _, text := range []string{out, errOut, raw} {
+		if strings.Contains(text, "driver unknown") || strings.Contains(text, "does not say which database") {
+			t.Errorf("the driver given is said to be unknown: exit %d\n%s\n%s\n%s", code, out, errOut, raw)
+			break
+		}
 	}
 }
 
@@ -691,5 +699,22 @@ func TestSetupSummaryPristine(t *testing.T) {
 		if !strings.Contains(out.String(), w) {
 			t.Errorf("summary without %q:\n%s", w, out.String())
 		}
+	}
+}
+
+// TestSetupSummaryDriver: the summary names the driver of the state
+// component, which --driver set, where the setting itself names none.
+func TestSetupSummaryDriver(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "Shop.Api.csproj"), `<Project Sdk="Microsoft.NET.Sdk.Web"></Project>`)
+	write(t, filepath.Join(root, "appsettings.json"), `{"ConnectionStrings": {"Default": "Host=127.0.0.1;Port=5432;Database=shop;Username=shop;Password=S3cr-x"}}`)
+	found := appconf.Find(root, func(string) (string, bool) { return "", false })
+	if len(found.Databases) != 1 || found.Databases[0].Driver != "" {
+		t.Fatalf("found: %+v", found.Databases)
+	}
+	c := config.Component{Driver: config.Postgres, Working: "shop", DSN: config.SecretFor(found.Databases[0].Ref)}
+	d, known := setting(found, c)
+	if got := stateSummary(d, known, c); !strings.HasPrefix(got, "postgres shop on 127.0.0.1:5432") {
+		t.Errorf("summary %q", got)
 	}
 }
