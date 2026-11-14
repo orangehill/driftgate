@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +35,9 @@ type Postgres struct {
 	// dropping ends with the drop of the database the last copy replaced
 	// (copyDatabase); nil when there is none to wait for.
 	dropping chan error
+	// run runs the queries of a fingerprint: dbx.PostgresPipeline; tests
+	// put the same queries sent one by one in its place.
+	run func(context.Context, *sql.Conn, []dbx.PostgresStatement) []dbx.PostgresResult
 }
 
 // NewPostgres connects to the server. The DSN is a postgres:// URL; its
@@ -53,7 +57,7 @@ func NewPostgres(o Options) (*Postgres, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Postgres{o: o, g: newTableGlobs(o, nil), admin: admin}, nil
+	return &Postgres{o: o, g: newTableGlobs(o, nil), admin: admin, run: dbx.PostgresPipeline}, nil
 }
 
 func (p *Postgres) Name() string  { return p.o.Name }
@@ -254,32 +258,32 @@ func (p *Postgres) restoreOnlyQualified(name string) bool {
 	return p.g.restoreOnly(name) || p.g.restoreOnly(table)
 }
 
-// ownedSequences maps the sequences of serial and identity columns of
-// restore_only tables to their table: they move with every row the
-// application adds, so they are restore_only too.
-func (p *Postgres) ownedSequences(ctx context.Context, d *sql.DB) (map[string]bool, error) {
+// pgOwnedSequences lists the sequences of serial and identity columns with
+// their table.
+var pgOwnedSequences = `SELECT sn.nspname || '.' || s.relname, tn.nspname || '.' || t.relname
+	   FROM pg_depend d JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S' JOIN pg_namespace sn ON sn.oid = s.relnamespace
+	   JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace
+	  WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') AND ` + schemaFilter("sn.nspname")
+
+// ownedSequences are the sequences of serial and identity columns of
+// restore_only tables, read at i of s (pgOwnedSequences; -1: there are no
+// restore_only tables): they move with every row the application adds, so
+// they are restore_only too.
+func (p *Postgres) ownedSequences(s *pgStage, i int) (map[string]bool, error) {
 	out := map[string]bool{}
-	if len(p.g.only) == 0 {
+	if i < 0 {
 		return out, nil
 	}
-	rows, err := d.QueryContext(ctx, `SELECT sn.nspname || '.' || s.relname, tn.nspname || '.' || t.relname
-		   FROM pg_depend d JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S' JOIN pg_namespace sn ON sn.oid = s.relnamespace
-		   JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace
-		  WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') AND `+schemaFilter("sn.nspname"))
+	rows, err := s.rows(i, -1)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var seq, table string
-		if err := rows.Scan(&seq, &table); err != nil {
-			return nil, err
-		}
-		if p.restoreOnlyQualified(table) && !p.excludedQualified(table) {
-			out[seq] = true
+	for _, r := range rows {
+		if p.restoreOnlyQualified(r[1]) && !p.excludedQualified(r[1]) {
+			out[r[0]] = true
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // RestoreOnlyFingerprint hashes the restore_only tables of the working
@@ -345,24 +349,120 @@ func (p *Postgres) FingerprintAs(ctx context.Context, format int, items []string
 // their rows can change, and a restore copies the whole database.
 func schemaFilter(col string) string { return dbx.PostgresUserSchema(col) }
 
+// pgStage is queries of a fingerprint sent together, in one round trip
+// (Postgres.run); add gives the index a query's result is read at.
+type pgStage struct {
+	stmts []dbx.PostgresStatement
+	res   []dbx.PostgresResult
+}
+
+func (s *pgStage) add(query string, args ...any) int {
+	s.stmts = append(s.stmts, dbx.PostgresStatement{SQL: query, Args: args})
+	return len(s.stmts) - 1
+}
+
+func (s *pgStage) addAll(queries []string, args ...any) []int {
+	out := make([]int, len(queries))
+	for i, q := range queries {
+		out[i] = s.add(q, args...)
+	}
+	return out
+}
+
+// rows are the rows of the query at i, or its error. A NULL is an error
+// but in column null (-1: none), where it is "": read as "", it would make
+// a fingerprint that passes where it should not.
+func (s *pgStage) rows(i, null int) ([][]string, error) {
+	r := s.res[i]
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	out := make([][]string, len(r.Rows))
+	for j, row := range r.Rows {
+		out[j] = make([]string, len(row))
+		for k, v := range row {
+			if !v.Valid && k != null {
+				return nil, fmt.Errorf("NULL in column %d of row %d", k+1, j+1)
+			}
+			out[j][k] = v.String
+		}
+	}
+	return out, nil
+}
+
+// pgRowsQuery reads the rows of a table or materialized view: their number
+// and a hash of them.
+func pgRowsQuery(rel string) string {
+	schema, name, _ := strings.Cut(rel, ".")
+	return `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(name) + " AS r"
+}
+
+// rowsOf is the result of the pgRowsQuery at i of s, the number of rows and
+// their hash, or its error, which names rel.
+func rowsOf(s *pgStage, i int, rel string) (string, error) {
+	rows, err := s.rows(i, -1)
+	if err == nil && len(rows) != 1 {
+		err = fmt.Errorf("%d rows", len(rows))
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", rel, err)
+	}
+	return rows[0][0] + "\x00" + rows[0][1], nil
+}
+
 // fingerprint hashes items (nil: all) of db; with fpRestoreOnly only the
 // restore_only tables and their sequences, which it otherwise leaves out.
+// It reads db in two round trips: the catalog (one), then the rows of the
+// tables and materialized views and the values of sequences not called
+// yet, which the catalog names (two). Each query runs on its own, as it
+// would sent alone. An error is returned where the query's result is read:
+// the catalog's first, then those of the second round trip.
 func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	d, err := p.open(db)
 	if err != nil {
 		return nil, err
 	}
 	defer d.Close()
-	want := func(item string) bool { return items == nil || contains(items, item) }
-	keepExcluded := mode == fpSchema // excluded objects count by their definition
-	tables, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname")+` ORDER BY 1`)
+	c, err := d.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer c.Close()
+	want := func(item string) bool { return items == nil || contains(items, item) }
+	keepExcluded := mode == fpSchema // excluded objects count by their definition
+	var one, two pgStage
+	tablesAt := one.add(`SELECT schemaname || '.' || tablename FROM pg_tables WHERE ` + schemaFilter("schemaname") + ` ORDER BY 1`)
 	// The restore_only tables are read on their own at every restore: the
-	// definitions are then read of them only (only), by their names (args).
-	only := func(string) string { return "" }
-	var args []any
+	// definitions are then read of them only, by their names, so after the
+	// table list.
+	var defsAt []int
+	if mode != fpRestoreOnly {
+		defsAt = one.addAll(pgDefinitions(format, mode, false))
+	}
+	ownedAt, viewsAt := -1, -1
+	if len(p.g.only) > 0 {
+		ownedAt = one.add(pgOwnedSequences)
+	}
+	if mode != fpRestoreOnly {
+		viewsAt = one.add(`SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE ` + schemaFilter("schemaname"))
+	}
+	seqAt := one.add(pgSequences(format, mode))
+	var itemsAt []int
+	if format >= 2 && mode != fpRestoreOnly {
+		itemsAt = one.addAll(pgSchemaItems(mode))
+	}
+	one.res = p.run(ctx, c, one.stmts)
+
+	rows, err := one.rows(tablesAt, -1)
+	if err != nil {
+		return nil, err
+	}
+	tables := make([]string, len(rows))
+	for i, r := range rows {
+		tables[i] = r[0]
+	}
+	// Definitions: columns, constraints, indexes and triggers per table.
+	defs := map[string]*strings.Builder{}
 	if mode == fpRestoreOnly {
 		var rels []string
 		for _, t := range tables {
@@ -370,19 +470,105 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 				rels = append(rels, t)
 			}
 		}
-		only = func(rel string) string { return " AND " + rel + " = ANY($1)" }
-		args = []any{rels}
-	}
-
-	// Definitions: columns, constraints, indexes and triggers per table.
-	// What only some tables or columns have is added only where they have
-	// it, so the hash of any other table stays what it was (format 1).
-	defs := map[string]*strings.Builder{}
-	add := func(rel, text string) {
-		if defs[rel] == nil {
-			defs[rel] = &strings.Builder{}
+		if len(rels) > 0 {
+			defsAt = two.addAll(pgDefinitions(format, mode, true), rels)
 		}
-		defs[rel].WriteString(text + "\n")
+	} else if err := addDefinitions(&one, defsAt, defs); err != nil {
+		return nil, err
+	}
+	var hashed []string // the tables the fingerprint has
+	counts := map[string]int{}
+	for _, t := range tables {
+		if p.excludedQualified(t) {
+			if p.restoreOnlyQualified(t) {
+				return nil, p.o.bothErr(t)
+			}
+			if !keepExcluded {
+				continue
+			}
+		}
+		if !mode.takes(p.restoreOnlyQualified(t)) || !want("table:"+t) {
+			continue
+		}
+		hashed = append(hashed, t)
+		if mode.rows() {
+			counts[t] = two.add(pgRowsQuery(t))
+		}
+	}
+	owned, err := p.ownedSequences(&one, ownedAt)
+	if err != nil {
+		return nil, err
+	}
+	f := Fingerprint{}
+	if mode != fpRestoreOnly {
+		if err := p.views(&one, viewsAt, f, want, keepExcluded, defs); err != nil {
+			return nil, err
+		}
+	}
+	unused, err := p.sequences(&one, seqAt, f, func(item string) bool {
+		if mode == fpRestoreOnly {
+			return want(item) && owned[strings.TrimPrefix(item, "sequence:")]
+		}
+		return want(item) && (mode == fpSchema || !owned[strings.TrimPrefix(item, "sequence:")])
+	}, keepExcluded)
+	if err != nil {
+		return nil, err
+	}
+	unusedAt := -1
+	if len(unused) > 0 {
+		unusedAt = two.add(strings.Join(unused, " UNION ALL "))
+	}
+	var itemDefs map[string]string
+	matviews := map[string]int{} // populated, by item
+	if itemsAt != nil {
+		if itemDefs, err = p.schemaItems(&one, itemsAt, want, keepExcluded); err != nil {
+			return nil, err
+		}
+		for _, item := range slices.Sorted(maps.Keys(itemDefs)) {
+			if name, ok := strings.CutPrefix(item, "matview:"); ok && mode.rows() && strings.HasSuffix(itemDefs[item], " true") {
+				matviews[item] = two.add(pgRowsQuery(name))
+			}
+		}
+	}
+	two.res = p.run(ctx, c, two.stmts)
+
+	if mode == fpRestoreOnly {
+		if err := addDefinitions(&two, defsAt, defs); err != nil {
+			return nil, err
+		}
+	}
+	for _, t := range hashed {
+		def := ""
+		if defs[t] != nil {
+			def = defs[t].String()
+		}
+		if mode.rows() {
+			sum, err := rowsOf(&two, counts[t], t)
+			if err != nil {
+				return nil, err
+			}
+			def += "\x00" + sum
+		}
+		f["table:"+t] = hash([]byte(def))
+	}
+	if err := nextValues(&two, unusedAt, f); err != nil {
+		return nil, err
+	}
+	if err := hashSchemaItems(&two, f, itemDefs, matviews, mode, defs); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// pgDefinitions are the queries of the definitions of tables (and of the
+// rules, privileges and comments of views): per relation, a line each.
+// What only some tables or columns have is added only where they have it,
+// so the hash of any other table stays what it was (format 1). With only,
+// they read the tables named by $1 only.
+func pgDefinitions(format int, mode fpMode, only bool) []string {
+	where := func(string) string { return "" }
+	if only {
+		where = func(rel string) string { return " AND " + rel + " = ANY($1)" }
 	}
 	// A column's collation (format_type leaves it out), privileges and
 	// comment, where it has them (format 2).
@@ -401,37 +587,37 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		   LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> ty.typcollation
 		   LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
 		   LEFT JOIN pg_description ds ON ds.objoid = a.attrelid AND ds.classoid = 'pg_class'::regclass AND ds.objsubid = a.attnum
-		  WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + `
+		  WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + `
 		  ORDER BY 1, a.attnum`,
 		`SELECT n.nspname || '.' || c.relname, 'constraint ' || con.conname || ' ' || pg_get_constraintdef(con.oid)
 		   FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
-		`SELECT schemaname || '.' || tablename, 'index ' || indexdef FROM pg_indexes WHERE ` + schemaFilter("schemaname") + only("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
+		  WHERE ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
+		`SELECT schemaname || '.' || tablename, 'index ' || indexdef FROM pg_indexes WHERE ` + schemaFilter("schemaname") + where("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
 		`SELECT n.nspname || '.' || c.relname, 'trigger ' || pg_get_triggerdef(t.oid)
 		   FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE NOT t.tgisinternal AND ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
+		  WHERE NOT t.tgisinternal AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 		// Row security and its policies, only where a table has them, so
 		// the hash of any other table stays what it was.
 		`SELECT n.nspname || '.' || c.relname, 'row security ' || c.relrowsecurity::text || ' ' || c.relforcerowsecurity::text
 		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
+		  WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 		`SELECT schemaname || '.' || tablename, 'policy ' || policyname || ' ' || permissive || ' ' || roles::text || ' ' || cmd || ' ' ||
 		        coalesce(qual, '') || ' ' || coalesce(with_check, '')
-		   FROM pg_policies WHERE ` + schemaFilter("schemaname") + only("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
+		   FROM pg_policies WHERE ` + schemaFilter("schemaname") + where("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
 		// Rules (CREATE RULE) of tables and views (a view's own rule is its
 		// definition); and of tables and views, UNLOGGED, the replica
 		// identity, privileges and the comment where they are not the
 		// default. One query: most databases have none of them.
 		`SELECT n.nspname || '.' || c.relname, 'rule ' || pg_get_ruledef(r.oid)
 		   FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE r.rulename <> '_RETURN' AND ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + `
+		  WHERE r.rulename <> '_RETURN' AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + `
 		 UNION ALL
 		 SELECT n.nspname || '.' || c.relname, 'relation ' || c.relpersistence::text || ' ' || c.relreplident::text ||
 		        coalesce(' acl ' || c.relacl::text, '') || coalesce(' comment ' || quote_literal(ds.description), '')
 		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		   LEFT JOIN pg_description ds ON ds.objoid = c.oid AND ds.classoid = 'pg_class'::regclass AND ds.objsubid = 0
 		  WHERE c.relkind IN ('r', 'p', 'v') AND (c.relpersistence <> 'p' OR (c.relkind <> 'v' AND c.relreplident <> 'd') OR c.relacl IS NOT NULL OR ds.description IS NOT NULL)
-		    AND ` + schemaFilter("n.nspname") + only("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
+		    AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 	}
 	if format < 2 {
 		queries = queries[:4] // no row security, policies, rules, privileges…
@@ -448,73 +634,36 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 			  WHERE c.relkind IN ('r', 'p', 'v', 'm') AND (c.relispartition OR c.reloptions IS NOT NULL) AND `+schemaFilter("n.nspname")+` ORDER BY 1, 2`)
 	}
-	for _, q := range queries {
-		rows, err := d.QueryContext(ctx, q, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var rel, text string
-			if err := rows.Scan(&rel, &text); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			add(rel, text)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-	}
+	return queries
+}
 
-	f := Fingerprint{}
-	for _, t := range tables {
-		if p.excludedQualified(t) {
-			if p.restoreOnlyQualified(t) {
-				return nil, p.o.bothErr(t)
+// addDefinitions adds the lines the pgDefinitions queries at at of s read to
+// the definition of their relation.
+func addDefinitions(s *pgStage, at []int, defs map[string]*strings.Builder) error {
+	for _, i := range at {
+		rows, err := s.rows(i, -1)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if defs[r[0]] == nil {
+				defs[r[0]] = &strings.Builder{}
 			}
-			if !keepExcluded {
-				continue
-			}
+			defs[r[0]].WriteString(r[1] + "\n")
 		}
-		if !mode.takes(p.restoreOnlyQualified(t)) || !want("table:"+t) {
-			continue
-		}
-		def := ""
-		if defs[t] != nil {
-			def = defs[t].String()
-		}
-		if !mode.rows() {
-			f["table:"+t] = hash([]byte(def))
-			continue
-		}
-		schema, name, _ := strings.Cut(t, ".")
-		var count int64
-		var sum string
-		q := `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(name) + " AS r"
-		if err := d.QueryRowContext(ctx, q).Scan(&count, &sum); err != nil {
-			return nil, fmt.Errorf("%s: %w", t, err)
-		}
-		f["table:"+t] = hash([]byte(fmt.Sprintf("%s\x00%d\x00%s", def, count, sum)))
 	}
-	owned, err := p.ownedSequences(ctx, d)
+	return nil
+}
+
+// views hashes the views, read at i of s, by their definition with their
+// rules, privileges and comment (defs).
+func (p *Postgres) views(s *pgStage, i int, f Fingerprint, want func(string) bool, keepExcluded bool, defs map[string]*strings.Builder) error {
+	rows, err := s.rows(i, -1)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if mode == fpRestoreOnly {
-		err := p.sequences(ctx, d, f, func(item string) bool { return want(item) && owned[strings.TrimPrefix(item, "sequence:")] }, format, mode)
-		return f, err
-	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE `+schemaFilter("schemaname"))
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var v, def string
-		if err := rows.Scan(&v, &def); err != nil {
-			rows.Close()
-			return nil, err
-		}
+	for _, r := range rows {
+		v, def := r[0], r[1]
 		if (keepExcluded || !p.excludedQualified(v)) && want("view:"+v) {
 			if defs[v] != nil {
 				def += "\x00" + defs[v].String()
@@ -522,34 +671,21 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 			f["view:"+v] = hash([]byte(def))
 		}
 	}
-	rows.Close()
-	if err := p.sequences(ctx, d, f, func(item string) bool {
-		return want(item) && (mode == fpSchema || !owned[strings.TrimPrefix(item, "sequence:")])
-	}, format, mode); err != nil {
-		return nil, err
-	}
-	if format < 2 {
-		return f, nil
-	}
-	if err := p.schemaItems(ctx, d, f, want, mode, defs); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return nil
 }
 
-// sequences hashes the sequences: the last value, or "not called", and,
-// where they are not those CREATE SEQUENCE gives a sequence of its type,
-// its parameters (ALTER SEQUENCE … INCREMENT, MAXVALUE…) and the value
-// setval(…, false) left for the first nextval. (Its type alone is left
-// out: a sequence of serial and one of CREATE SEQUENCE differ in it, and
-// their hash stays that of format 1.) pg_sequences shows no
-// value for a sequence not called yet; that value is read from the
-// sequence itself, in one query for all of them.
-// Format 1 has the last value only; fpSchema the parameters only, of
-// excluded sequences too.
-func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, format int, mode fpMode) error {
+// pgSequences is the query of the sequences: the last value, or "not
+// called", and, where they are not those CREATE SEQUENCE gives a sequence
+// of its type, its parameters (ALTER SEQUENCE … INCREMENT, MAXVALUE…) and
+// the value setval(…, false) left for the first nextval. (Its type alone
+// is left out: a sequence of serial and one of CREATE SEQUENCE differ in
+// it, and their hash stays that of format 1.) pg_sequences shows no value
+// for a sequence not called yet; the third column is then a SELECT of
+// that value from the sequence itself (NULL for the others), all of them
+// run as one query (nextValues). Format 1 has the last value only; fpSchema
+// the parameters only, of excluded sequences too.
+func pgSequences(format int, mode fpMode) string {
 	value, params, own := "coalesce(last_value::text, 'not called') || ", "''", "NULL"
-	keepExcluded := mode == fpSchema
 	if format >= 2 {
 		params = `CASE WHEN start_value = 1 AND min_value = 1 AND increment_by = 1 AND NOT cycle AND cache_size = 1 AND
 		                 max_value = CASE data_type WHEN 'smallint'::regtype THEN 32767 WHEN 'integer'::regtype THEN 2147483647 ELSE 9223372036854775807 END
@@ -561,48 +697,41 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 	if !mode.rows() {
 		value, own = "", "NULL"
 	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || sequencename, `+value+params+`, `+own+`
-		  FROM pg_sequences WHERE `+schemaFilter("schemaname"))
+	return `SELECT schemaname || '.' || sequencename, ` + value + params + `, ` + own + `
+		  FROM pg_sequences WHERE ` + schemaFilter("schemaname")
+}
+
+// sequences puts the sequences want takes, read at i of s (pgSequences),
+// in f, unhashed (nextValues hashes them), and returns the SELECTs of the
+// values of those not called yet.
+func (p *Postgres) sequences(s *pgStage, i int, f Fingerprint, want func(string) bool, keepExcluded bool) (unused []string, err error) {
+	rows, err := s.rows(i, 2)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var unused []string // not called yet: SELECTs of their own value
-	for rows.Next() {
-		var s, v string
-		var q sql.NullString
-		if err := rows.Scan(&s, &v, &q); err != nil {
-			rows.Close()
-			return err
-		}
-		if (!keepExcluded && p.excludedQualified(s)) || !want("sequence:"+s) {
+	for _, r := range rows {
+		if (!keepExcluded && p.excludedQualified(r[0])) || !want("sequence:"+r[0]) {
 			continue
 		}
-		f["sequence:"+s] = v // hashed below, with the value of unused
-		if q.Valid {
-			unused = append(unused, q.String)
+		f["sequence:"+r[0]] = r[1]
+		if r[2] != "" {
+			unused = append(unused, r[2])
 		}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(unused) > 0 {
-		rows, err := d.QueryContext(ctx, strings.Join(unused, " UNION ALL "))
+	return unused, nil
+}
+
+// nextValues adds to the sequences of f not called yet the value they
+// start from, read at i of s (-1: there are none), and hashes the
+// sequences.
+func nextValues(s *pgStage, i int, f Fingerprint) error {
+	if i >= 0 {
+		rows, err := s.rows(i, -1)
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var s string
-			var last int64
-			if err := rows.Scan(&s, &last); err != nil {
-				rows.Close()
-				return err
-			}
-			f["sequence:"+s] += fmt.Sprintf(" next %d", last)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
+		for _, r := range rows {
+			f["sequence:"+r[0]] += " next " + r[1]
 		}
 	}
 	for item, v := range f {
@@ -613,19 +742,18 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 	return nil
 }
 
-// schemaItems hashes the objects of the schema that hold no rows of a
-// table but change what the application gets: functions and procedures
-// (CREATE OR REPLACE), enum types with their labels in order (ALTER TYPE …
-// ADD VALUE), domains with their constraints, composite types with their
-// attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other than public, and
-// materialized views with their rows (REFRESH). Objects of extensions
-// are left out: CREATE EXTENSION makes them, and a library such as PostGIS
-// has thousands. fpSchema adds aggregates and every extension with its
-// version (CREATE EXTENSION), and hashes a materialized view, excluded too,
-// by its definition with its indexes and options (rels, by relation), not
-// its rows or whether it is populated.
-func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, mode fpMode, rels map[string]*strings.Builder) error {
-	keepExcluded := mode == fpSchema
+// pgSchemaItems are the queries of the objects of the schema that hold no
+// rows of a table but change what the application gets: functions and
+// procedures (CREATE OR REPLACE), enum types with their labels in order
+// (ALTER TYPE … ADD VALUE), domains with their constraints, composite
+// types with their attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other
+// than public, and materialized views with whether they are populated
+// (their rows are read after, rowsOf). Objects of extensions are left out:
+// CREATE EXTENSION makes them, and a library such as PostGIS has
+// thousands. fpSchema adds aggregates and every extension with its version
+// (CREATE EXTENSION), and reads a materialized view by its definition only
+// (hashSchemaItems).
+func pgSchemaItems(mode fpMode) []string {
 	matview := "definition || ' ' || ispopulated::text"
 	if !mode.rows() {
 		matview = "definition"
@@ -659,18 +787,20 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 			   FROM pg_aggregate a JOIN pg_proc f ON f.oid = a.aggfnoid JOIN pg_namespace n ON n.oid = f.pronamespace
 			  WHERE `+schemaFilter("n.nspname")+` AND `+dbx.PostgresNotExtension("f.oid", "pg_proc"))
 	}
+	return queries
+}
+
+// schemaItems are the definitions of the schema items want takes, read at
+// at of s (pgSchemaItems), by item.
+func (p *Postgres) schemaItems(s *pgStage, at []int, want func(string) bool, keepExcluded bool) (map[string]string, error) {
 	defs := map[string]string{}
-	for _, q := range queries {
-		rows, err := d.QueryContext(ctx, q)
+	for _, i := range at {
+		rows, err := s.rows(i, -1)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		for rows.Next() {
-			var item, def string
-			if err := rows.Scan(&item, &def); err != nil {
-				rows.Close()
-				return err
-			}
+		for _, r := range rows {
+			item, def := r[0], r[1]
 			if !want(item) {
 				continue
 			}
@@ -680,30 +810,31 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 			}
 			defs[item] = def
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
 	}
-	for item, def := range defs {
+	return defs, nil
+}
+
+// hashSchemaItems hashes the schema items (defs, by item), a populated
+// materialized view with its rows, read at matviews[item] of s; fpSchema
+// hashes a materialized view, excluded too, by its definition with its
+// indexes and options (rels, by relation), not its rows or whether it is
+// populated.
+func hashSchemaItems(s *pgStage, f Fingerprint, defs map[string]string, matviews map[string]int, mode fpMode, rels map[string]*strings.Builder) error {
+	for _, item := range slices.Sorted(maps.Keys(defs)) {
+		def := defs[item]
 		kind, name, _ := strings.Cut(item, ":")
 		sum := ""
 		if kind == "matview" && !mode.rows() {
 			if rels[name] != nil {
 				sum = rels[name].String()
 			}
+		} else if i, ok := matviews[item]; ok {
+			var err error
+			if sum, err = rowsOf(s, i, name); err != nil {
+				return err
+			}
 		} else if kind == "matview" {
 			sum = "not populated"
-			if strings.HasSuffix(def, " true") {
-				schema, rel, _ := strings.Cut(name, ".")
-				var count int64
-				var rowsSum string
-				q := `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(rel) + " AS r"
-				if err := d.QueryRowContext(ctx, q).Scan(&count, &rowsSum); err != nil {
-					return fmt.Errorf("%s: %w", name, err)
-				}
-				sum = fmt.Sprintf("%d\x00%s", count, rowsSum)
-			}
 		}
 		f[item] = hash([]byte(def + "\x00" + sum))
 	}
