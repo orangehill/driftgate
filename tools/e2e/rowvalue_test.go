@@ -152,6 +152,11 @@ func TestRowValue(t *testing.T) {
 			if r := p.must(t, 1, "run"); !strings.Contains(r.out, "other value: target") {
 				t.Errorf("after accept, another value: %v", r)
 			}
+			// A rebase takes a capture two runs agreed on, with what they
+			// learned: touched stays out of the comparison.
+			p.must(t, 0, "capture", "r", "--repeat", "2")
+			p.must(t, 0, "baselines", "rebase", "local", "--from", "r", "--reason", "Z is intended")
+			p.must(t, 0, "run")
 
 			// Two captures made once: touched, which changes by itself, is
 			// not known, so no values are compared, and the result says so.
