@@ -17,7 +17,7 @@ Treat it like a production password.
 | `.driftgate/key` | `baselines: local`, made by `driftgate key create` |
 | the macOS Keychain | `baselines: git`, made by `driftgate key create` |
 
-- Without the key, private bodies cannot be captured or compared (exit 3), and row values are not recorded.
+- Without the key, private bodies cannot be captured or compared (exit 3), and row values are not recorded. A configured key that cannot be read stops a capture with `row_tracking` (exit 3).
 - Changing the key is not supported: bodies encrypted with the old one become unreadable.
 - `.driftgate/key` must be readable by its owner only.
 - With `baselines: local`, commands stop (exit 2) when git does not ignore `.driftgate/`.

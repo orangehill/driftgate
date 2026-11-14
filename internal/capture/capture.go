@@ -1098,6 +1098,20 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 	return cur, err
 }
 
+// rowTable is a table of row_tracking as the driver names it: in public
+// (PostgreSQL) or dbo (SQL Server) when the configuration names no
+// schema.
+func rowTable(driver, t string) string {
+	switch {
+	case strings.Contains(t, "."):
+	case driver == config.Postgres:
+		t = "public." + t
+	case driver == config.SQLServer || driver == "mssql":
+		t = "dbo." + t
+	}
+	return t
+}
+
 // rowTrackingItems are the tables whose rows the capture tracks
 // (meta.RowTracking), from the configuration, named as the rows of a side
 // effect name them (the drivers' Rows): PostgreSQL's in public and SQL
@@ -1108,14 +1122,7 @@ func rowTrackingItems(p *config.Project) []string {
 	out := []string{}
 	for name, sc := range p.State {
 		for _, t := range sc.RowTracking.Names() {
-			switch {
-			case strings.Contains(t, "."):
-			case sc.Driver == config.Postgres:
-				t = "public." + t
-			case sc.Driver == config.SQLServer || sc.Driver == "mssql":
-				t = "dbo." + t
-			}
-			out = append(out, name+"/table:"+t)
+			out = append(out, name+"/table:"+rowTable(sc.Driver, t))
 		}
 	}
 	sort.Strings(out)

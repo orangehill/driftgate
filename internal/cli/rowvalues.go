@@ -105,8 +105,9 @@ type rowLearning struct {
 
 // learnRows narrows what the captures learned of request id by one more
 // capture (cur) compared with the first: the tables whose values both
-// recorded.
-func learnRows(rows map[string]*rowLearning, id string, first, cur *snapshot.Set) error {
+// recorded. keyedSets says of each whether it was captured with the key
+// (keyed), read once per capture by the caller.
+func learnRows(rows map[string]*rowLearning, id string, first, cur *snapshot.Set, keyedSets [2]bool) error {
 	l := rows[id]
 	if l == nil {
 		l = &rowLearning{}
@@ -119,7 +120,7 @@ func learnRows(rows map[string]*rowLearning, id string, first, cur *snapshot.Set
 			return envErr(err)
 		}
 		if rec != nil {
-			items[i] = valueItems(rec.SideEffects, keyed(s))
+			items[i] = valueItems(rec.SideEffects, keyedSets[i])
 		}
 	}
 	both := slices.DeleteFunc(items[0], func(it string) bool { return !slices.Contains(items[1], it) })

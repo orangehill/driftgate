@@ -76,16 +76,16 @@ func TestLearning(t *testing.T) {
 	v := map[string]string{"c": "x"}
 	rows := map[string]*rowLearning{}
 	first := rowSet(t, "k", v)
-	if err := learnRows(rows, "follow", first, rowSet(t, "k", v)); err != nil || strings.Join(rows["follow"].Learned, ",") != "db/table:follows" {
+	if err := learnRows(rows, "follow", first, rowSet(t, "k", v), [2]bool{true, true}); err != nil || strings.Join(rows["follow"].Learned, ",") != "db/table:follows" {
 		t.Fatalf("learned %+v, %v", rows["follow"], err)
 	}
-	if err := learnRows(rows, "follow", first, rowSet(t, "", nil)); err != nil || len(rows["follow"].Learned) != 0 {
+	if err := learnRows(rows, "follow", first, rowSet(t, "", nil), [2]bool{true, false}); err != nil || len(rows["follow"].Learned) != 0 {
 		t.Errorf("a third capture without the key: %+v, %v", rows["follow"], err)
 	}
 	// A row whose written columns are all ignored has no values, in sets
 	// captured with the key: nothing to compare, and the table is learned.
 	ping := map[string]*rowLearning{}
-	if err := learnRows(ping, "follow", rowSet(t, "k", nil), rowSet(t, "k", nil)); err != nil || strings.Join(ping["follow"].Learned, ",") != "db/table:follows" {
+	if err := learnRows(ping, "follow", rowSet(t, "k", nil), rowSet(t, "k", nil), [2]bool{true, true}); err != nil || strings.Join(ping["follow"].Learned, ",") != "db/table:follows" {
 		t.Errorf("every column ignored: %+v, %v", ping["follow"], err)
 	}
 

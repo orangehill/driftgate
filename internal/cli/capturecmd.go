@@ -474,6 +474,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		return 0, nil, failed(err)
 	}
 	first.CacheRecords()
+	firstKeyed := keyed(first)
 	values := map[key][]string{}
 	var keys []key
 	headers := map[string][][]string{} // name → values at each position, over all runs
@@ -486,6 +487,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			return 0, nil, failed(err)
 		}
 		set.CacheRecords()
+		keyedSets := [2]bool{firstKeyed, keyed(set)}
 		// The requests are compared in parallel; their results are taken
 		// below in catalog order.
 		results := make([]report.Result, len(cat.Requests))
@@ -507,7 +509,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		}
 		for ri, req := range cat.Requests {
 			res := results[ri]
-			if err := learnRows(rows, req.ID, first, set); err != nil {
+			if err := learnRows(rows, req.ID, first, set, keyedSets); err != nil {
 				return 0, nil, err
 			}
 			hidden := res.Drifts

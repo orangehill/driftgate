@@ -324,7 +324,7 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 					for i, g := range rt.Ignore {
 						globs[i] = strings.ToLower(g)
 					}
-					t.ignore[c.Name()] = append(t.ignore[c.Name()], rowIgnore{table: rt.Name, globs: globs})
+					t.ignore[c.Name()] = append(t.ignore[c.Name()], rowIgnore{table: rowTable(sc.Driver, rt.Name), globs: globs})
 				}
 			}
 		}
@@ -799,16 +799,13 @@ type rowIgnore struct {
 }
 
 // ignoredColumns are the ignore globs (lower case) of row_tracking for
-// table as the driver names it: by its name without letter case, or, for
-// a table configured without a schema, by its name without the schema.
+// table as the driver names it, matched without letter case: a table
+// configured without a schema is in the driver's default one (rowTable),
+// never a same-named table of another schema.
 func ignoredColumns(tables []rowIgnore, table string) []string {
-	bare := table
-	if i := strings.LastIndexByte(table, '.'); i >= 0 {
-		bare = table[i+1:]
-	}
 	var out []string
 	for _, rt := range tables {
-		if strings.EqualFold(rt.table, table) || !strings.Contains(rt.table, ".") && strings.EqualFold(rt.table, bare) {
+		if strings.EqualFold(rt.table, table) {
 			out = append(out, rt.globs...)
 		}
 	}
