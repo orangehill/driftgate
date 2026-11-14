@@ -144,14 +144,15 @@ func PostgresDSN(dsn, db string) (string, error) {
 // resolved once, by the dial function, which checks the address it
 // connects to.
 //
-// Every statement runs in one round trip (pgx's QueryExecModeExec): it is
-// sent with its parameters, which stay bind parameters whose types the
-// server infers, as it did when the statement was prepared first (two
-// round trips; each database/sql pool is short-lived, so the statement
-// cache never saved one). Parameters go as text: a string as it is, a
-// []string as an array literal pgx quotes. Results come as text too;
-// DriftGate's queries read strings, counts and booleans, which read the
-// same in either format.
+// Every query runs in one round trip (pgx's QueryExecModeExec, whatever
+// the DSN's default_query_exec_mode): it is sent with its parameters,
+// which stay bind parameters whose types the server infers, as it did when
+// the statement was prepared first (two round trips; each database/sql
+// pool is short-lived, so the statement cache never saved one). Parameters
+// go as text: a string as it is, a []string as an array literal pgx
+// quotes. Results come as text too; DriftGate's own queries read strings,
+// counts and booleans, which read the same in either format, and a query
+// that reads a user's columns of any type passes PostgresDescribed.
 func OpenPostgres(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	cs, err := PostgresDSN(dsn, db)
 	if err != nil {
@@ -168,6 +169,15 @@ func OpenPostgres(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	}
 	return stdlib.OpenDB(*cfg), nil
 }
+
+// PostgresDescribed, passed as the first argument of a query on a
+// connection from OpenPostgres, runs that query described first (two round
+// trips, as before exec mode): its bool, bytea, date, float, int and
+// timestamp columns then come in binary, so the Go value read from them
+// does not depend on the session's DateStyle, bytea_output or
+// extra_float_digits, which text results would. For queries that read
+// columns of any type: row tracking and check queries.
+const PostgresDescribed = pgx.QueryExecModeDescribeExec
 
 // AllowDial returns a dial function that connects only to a host one of
 // the allow lists (config.Config.AllowHostLists) allows, as AllowHost

@@ -1954,8 +1954,8 @@ func (m *MySQL) rows(ctx context.Context, items []string) (Rows, error) {
 }
 
 // readRows reads every row of a query into key → column → value hash.
-func readRows(ctx context.Context, c *sql.Conn, query string, pk []string) (map[string]map[string]string, error) {
-	rows, err := c.QueryContext(ctx, query)
+func readRows(ctx context.Context, c *sql.Conn, query string, pk []string, args ...any) (map[string]map[string]string, error) {
+	rows, err := c.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

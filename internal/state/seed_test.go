@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -660,5 +661,63 @@ func TestPgSettingValue(t *testing.T) {
 		if got := pgSettingValue(c.name, c.value); got != c.want {
 			t.Errorf("%s=%s: %s, want %s", c.name, c.value, got, c.want)
 		}
+	}
+}
+
+// TestPostgresOutputSettings: tracked rows and a check query read the same
+// values, without an error, when the database's own settings print dates,
+// bytea and floats in other formats than the defaults.
+func TestPostgresOutputSettings(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_output", "dgt_output_pristine"
+	p, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine, RowTracking: []string{"t"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine} {
+			p.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+	}
+	drop()
+	t.Cleanup(func() {
+		p.Close()
+		drop()
+	})
+	mustExec(t, p.admin, "CREATE DATABASE "+work)
+	db, err := p.open(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, at timestamptz, ts timestamp, day date, b bytea, f float8, r real)",
+		`INSERT INTO t VALUES (1, '2026-01-02 03:04:05.678901+00', '2026-01-02 03:04:05', '2026-02-03', '\x00ff27', 0.1 + 0.2, 1.1)`)
+	db.Close()
+	read := func() (Rows, []string) {
+		t.Helper()
+		if err := p.Seed(ctx); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := p.Rows(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := p.Query(ctx, "SELECT at, ts, day, b, f, r FROM t")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows, got
+	}
+	rows0, query0 := read()
+	mustExec(t, p.admin,
+		"ALTER DATABASE "+work+" SET datestyle TO 'SQL, DMY'",
+		"ALTER DATABASE "+work+" SET bytea_output TO 'escape'",
+		"ALTER DATABASE "+work+" SET extra_float_digits TO -3")
+	rows1, query1 := read()
+	if d := RowDiff(rows0, rows1); len(d) > 0 {
+		t.Errorf("tracked rows read differently under other output settings: %+v", d)
+	}
+	if !reflect.DeepEqual(query0, query1) {
+		t.Errorf("check query %q, under other output settings %q", query0, query1)
 	}
 }

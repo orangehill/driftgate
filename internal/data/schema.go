@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
-
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
 )

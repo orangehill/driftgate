@@ -220,11 +220,7 @@ func TestPostgresSchemaFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Exec("DROP DATABASE IF EXISTS " + QuotePostgres(name) + " WITH (FORCE)") })
-	cs, err := PostgresDSN(dsn, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("pgx", cs)
+	db, err := OpenPostgres(dsn, name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,5 +379,37 @@ func TestMySQLCreateTable(t *testing.T) {
 		if got := MySQLCreateTable(c.def); got != want {
 			t.Errorf("MySQLCreateTable(%q)\n= %q\nwant %q", c.def, got, want)
 		}
+	}
+}
+
+// TestPostgresExecMode: a query with a parameter runs without a prepared
+// statement (one round trip), which pgx's default mode would leave behind
+// in pg_prepared_statements.
+func TestPostgresExecMode(t *testing.T) {
+	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
+	}
+	ctx := context.Background()
+	db, err := OpenPostgres(dsn, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	var got string
+	if err := c.QueryRowContext(ctx, "SELECT $1::text", "x").Scan(&got); err != nil || got != "x" {
+		t.Fatalf("SELECT $1::text = %q, %v", got, err)
+	}
+	var n int
+	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM pg_prepared_statements").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d prepared statements, want 0", n)
 	}
 }
