@@ -50,6 +50,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Changed
 
+- `baselines rebase` refuses a capture made once and prints the command that captures it twice (`driftgate capture <tag> --repeat 2 --force`). A baseline now always holds responses that two captures of the same state agree on, as `run` makes one. Before, a request added by a rebase could hold a value that changes by itself (a `created_at`), which drifted on the next run. The rebase command that `run` prints in mode freeze captures twice first.
 - `--read-only` takes `prepare:` when `state:` is configured: `prepare` should write only to data the restore brings back. Without `state:` it is still refused.
 - `data verify --dump` reads only a dump that starts with the header line `data anonymize` and `data subset` write (format 1 or 2, for the source's database type). Other files, such as a `mysqldump` or `pg_dump` output, are refused unless they carry that line. Dumps with CRLF line endings are read. A format 1 dump in which a comment at the end of a statement hid its `;` is refused with a message to make the dump again, instead of being read with the next statements' rows as text.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))

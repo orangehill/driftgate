@@ -138,7 +138,7 @@ const (
 // rebase takes the whole capture, drifts included (as JoinAdvice says).
 func fixAdvice(mode string) string {
 	if mode == config.Freeze {
-		return `rebase the baseline on a capture with no other drift: driftgate baselines rebase <baseline> --from <capture> --reason "…" --allow-freeze`
+		return `rebase the baseline on a capture made twice with no other drift: driftgate capture <tag> --repeat 2 --force, then driftgate baselines rebase <baseline> --from <tag> --reason "…" --allow-freeze`
 	}
 	return "accept the new answers"
 }

@@ -435,7 +435,7 @@ func TestRebaseClosesGoneRequests(t *testing.T) {
 	raw, _ := os.ReadFile(cat)
 	write(t, cat, strings.Replace(string(raw), `,
  {"id":"faq-create","method":"POST","path":"/api/faq","body":{"q":"?"},"mutates":true,"storage":"public"}`, "", 1))
-	if code, out, errOut := runCLI(t, "capture", "main", "--config", p.cfg); code != ExitClean {
+	if code, out, errOut := runCLI(t, "capture", "main", "--repeat", "2", "--config", p.cfg); code != ExitClean {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	code, out, errOut := runCLI(t, "baselines", "rebase", "local", "--from", "main", "--reason", "faq gone", "--allow-freeze", "--config", p.cfg)

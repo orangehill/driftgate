@@ -84,10 +84,10 @@ git commit -m "DriftGate baseline"
 - The key never enters git. Give each developer it in `DRIFTGATE_KEY` or `key:`.
 - Private bodies stay in each machine's store. Others compare the rest with `--skip-private`.
 - Protect `/driftgate/baselines/` with a CODEOWNERS entry.
-- After a merge, rebase the baseline onto a capture of the merged code:
+- After a merge, rebase the baseline onto a capture of the merged code. Capture it twice, as `run` does for a new baseline; a capture made once is refused.
 
 ```sh
-driftgate capture main
+driftgate capture main --repeat 2 --force
 driftgate baselines rebase local --from main --reason "Merged SHOP-7 and SHOP-9" --allow-freeze
 ```
 

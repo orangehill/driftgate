@@ -92,7 +92,7 @@ func rebaseAfterNewSeed(t *testing.T, root string, db *sql.DB, component, item s
 		!strings.Contains(out, "driftgate baselines rebase local --from <tag>") {
 		t.Fatalf("capture on new data:\n%s", out)
 	}
-	cli(ExitClean, "capture", "new", "--skip-fingerprint-check")
+	cli(ExitClean, "capture", "new", "--skip-fingerprint-check", "--repeat", "2")
 	if out := cli(ExitClean, "baselines", "rebase", "local", "--from", "new", "--reason", "new seed"); !strings.Contains(out, "the state differs from the old baseline's in 1 items") {
 		t.Fatalf("rebase:\n%s", out)
 	}
