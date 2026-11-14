@@ -67,6 +67,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- Proposed formats no longer stop the next run for a value they were meant to allow. A date written without dashes (`report-20261114-101530.json`) now becomes `\d{8}` instead of the day of the capture, when its month and day are valid. A JSON Web Token now takes any claims and signature in base64url and keeps its header, so a change of the algorithm is still a drift. Before, its format came from the two samples and could fix a `-` of the signature in place.
 - A proposed allowlist format for a value with a newline or another control character (the script of a debug error page) now writes it as a regular expression escape (`\x{a}`). Before, it printed `\u000a`, which the allowlist rejects, so the next run stopped with exit 2. A format that cannot be written so is left out with the reason.
 - SQL Server: when a task of the server still holds part of the pristine copy's log during the seed, the seed shrinks it again for up to about a second; if part stays held, it says how large the log stays and why, and the next seed shrinks it. Before, the log could stay as large as the working database's. ([#62](https://github.com/orangehill/driftgate/pull/62))
 - `data anonymize`: a read of the source that fails and is tried again ends its snapshot and closes its connection at once, before the wait for the next try; before, they stayed open during the wait. ([#62](https://github.com/orangehill/driftgate/pull/62))

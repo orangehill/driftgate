@@ -14,14 +14,35 @@ import (
 
 type token struct {
 	run  bool   // a run of letters and digits
+	jwt  bool   // a JSON Web Token, whole (a run too)
 	text string // a literal character otherwise
 }
 
+// jwtToken is a JSON Web Token: a header and claims that are JSON objects
+// and a signature, each in base64url, whose - and _ fall anywhere.
+var jwtToken = lazy.Regexp(`eyJ[0-9A-Za-z_-]*\.eyJ[0-9A-Za-z_-]*\.[0-9A-Za-z_-]*`)
+
 func tokens(s string) []token {
 	var out []token
+	last := 0
+	for _, m := range jwtToken().FindAllStringIndex(s, -1) {
+		if c := s[m[0]-min(m[0], 1) : m[0]]; c != "" && strings.ContainsAny(c, base64URL) {
+			continue // inside a longer word
+		}
+		out = append(runs(out, s[last:m[0]]), token{run: true, jwt: true, text: s[m[0]:m[1]]})
+		last = m[1]
+	}
+	return runs(out, s[last:])
+}
+
+const base64URL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
+
+// runs appends the tokens of s: runs of letters and digits, and every
+// other character on its own.
+func runs(out []token, s string) []token {
 	for _, r := range s {
 		alnum := r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-		if alnum && len(out) > 0 && out[len(out)-1].run {
+		if alnum && len(out) > 0 && out[len(out)-1].run && !out[len(out)-1].jwt {
 			out[len(out)-1].text += string(r)
 			continue
 		}
@@ -203,8 +224,9 @@ var (
 	// something: 12ms, 3 s, 512KB.
 	unitAfter = lazy.Regexp(`(?i)^\s?(?:ms|s|sec|secs|seconds|us|µs|ns|min|minutes|h|hours|b|kb|mb|gb|bytes)(?:[^a-z]|$)`)
 	// timeLike is a value with a date or a time in it, whose digits that
-	// agree in the samples agree only by chance (the same day, hour).
-	timeLike = lazy.Regexp(`\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b`)
+	// agree in the samples agree only by chance (the same day, hour). A
+	// date may be written without dashes (report-20261114-101530.json).
+	timeLike = lazy.Regexp(`\d{4}-\d{2}-\d{2}|(?:^|\D)(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:\D|$)|\d{1,2}:\d{2}|\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b`)
 )
 
 // digitsIn is the format of the digits inside a word that is the same in
@@ -275,7 +297,7 @@ func Pattern(values []string) string {
 			break
 		}
 		for j := range t {
-			if t[j].run != toks[0][j].run || (!t[j].run && t[j].text != toks[0][j].text) {
+			if t[j].run != toks[0][j].run || t[j].jwt != toks[0][j].jwt || (!t[j].run && t[j].text != toks[0][j].text) {
 				shared = false
 			}
 		}
@@ -288,6 +310,10 @@ func Pattern(values []string) string {
 			t := toks[0][j]
 			if !t.run {
 				b.WriteString(regexp.QuoteMeta(t.text))
+				continue
+			}
+			if t.jwt {
+				b.WriteString(jwtFormat(toks, j))
 				continue
 			}
 			// A UUID that changes is any UUID of the samples' case: its
@@ -438,6 +464,35 @@ var (
 	integer  = lazy.Regexp(`^-?\d+$`)
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
 )
+
+// jwtFormat is the format of the JSON Web Tokens at token j: any claims
+// and signature in base64url, and the header as it is when every sample
+// has the same (a change of the algorithm is a change). A token that is
+// the same everywhere stays as it is.
+func jwtFormat(toks [][]token, j int) string {
+	first := toks[0][j].text
+	header, _, _ := strings.Cut(first, ".")
+	same, sameHeader, unsigned := true, true, false
+	for _, t := range toks {
+		h, _, _ := strings.Cut(t[j].text, ".")
+		same = same && t[j].text == first
+		sameHeader = sameHeader && h == header
+		unsigned = unsigned || strings.HasSuffix(t[j].text, ".")
+	}
+	if same {
+		return regexp.QuoteMeta(first)
+	}
+	const segment = `[0-9A-Za-z_-]`
+	f := `eyJ` + segment + `+`
+	if sameHeader {
+		f = regexp.QuoteMeta(header)
+	}
+	f += `\.eyJ` + segment + `+\.` + segment
+	if unsigned {
+		return f + `*`
+	}
+	return f + `+`
+}
 
 var uuid = lazy.Regexp(`^(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 

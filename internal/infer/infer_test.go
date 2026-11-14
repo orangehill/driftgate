@@ -1,6 +1,7 @@
 package infer
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 	"testing"
@@ -192,6 +193,82 @@ func TestPatternLong(t *testing.T) {
 		for _, v := range vals {
 			if !re.MatchString(v) {
 				t.Errorf("%s: %s rejects a sample", name, p)
+			}
+		}
+	}
+}
+
+// jwt is a token with the header and claims given as JSON and a signature
+// of the text given (base64url, so - and _ fall where the text puts them).
+func jwt(header, claims, sig string) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(header)) + "." + enc([]byte(claims)) + "." + sig
+}
+
+// TestPatternNext: a format learned from two samples takes the next value
+// of the same kind (the next day, the next token), and still rejects a
+// value that changed in what the samples agree on.
+func TestPatternNext(t *testing.T) {
+	hs256 := `{"typ":"JWT","alg":"HS256"}`
+	cases := []struct {
+		name         string
+		values       []string
+		next, change []string
+	}{
+		{
+			name:   "a file name with the date and time of its export",
+			values: []string{"attachment; filename=report-20261114-101530.json", "attachment; filename=report-20261114-101612.json"},
+			next:   []string{"attachment; filename=report-20261115-090000.json", "attachment; filename=report-20270101-000001.json"},
+			change: []string{"attachment; filename=summary-20261115-090000.json", "attachment; filename=report-20261115-090000.csv"},
+		},
+		{
+			// Eight digits that are not a date stay as they are.
+			name:   "a number of eight digits that is no date",
+			values: []string{"ref 20261399 build 7", "ref 20261399 build 8"},
+			change: []string{"ref 20261398 build 9"},
+		},
+		{
+			// The signatures happen to have a - at the same place.
+			name: "a JWT",
+			values: []string{
+				jwt(hs256, `{"sub":1,"iat":1763114130}`, "Ab3dE5gH9jK-mN0pQ1sT2vW3yZ4aB5cD6eF7gH8iJ9k"),
+				jwt(hs256, `{"sub":1,"iat":1763114191}`, "Zx9wV8uT7sR-qP6oN5mL4kJ3iH2gF1eD0cB9aZ8yX7w"),
+			},
+			next: []string{
+				jwt(hs256, `{"sub":1,"iat":1763117000}`, "a_b-c-dEfGhIjKlMnOpQrStUvWxYz0123456789AbCd"),
+				jwt(hs256, `{"sub":12,"iat":1763117000,"exp":1763120600}`, "NoDashOrUnderscoreHere0123456789abcdefghijk"),
+			},
+			change: []string{
+				jwt(`{"typ":"JWT","alg":"HS512"}`, `{"sub":1,"iat":1763117000}`, "Ab3dE5gH9jK-mN0pQ1sT2vW3yZ4aB5cD6eF7gH8iJ9k"),
+				"not a token",
+			},
+		},
+		{
+			name: "a JWT inside a text",
+			values: []string{
+				"Bearer " + jwt(hs256, `{"sub":1,"iat":1763114130}`, "Ab3dE5gH9jK-mN0pQ1sT2vW3yZ4aB5cD6eF7gH8iJ9k"),
+				"Bearer " + jwt(hs256, `{"sub":1,"iat":1763114191}`, "Zx9wV8uT7sR-qP6oN5mL4kJ3iH2gF1eD0cB9aZ8yX7w"),
+			},
+			next:   []string{"Bearer " + jwt(hs256, `{"sub":1,"iat":1763117000}`, "a_b-c-dEfGhIjKlMnOpQrStUvWxYz0123456789AbCd")},
+			change: []string{"Basic " + jwt(hs256, `{"sub":1,"iat":1763117000}`, "a_b-c-dEfGhIjKlMnOpQrStUvWxYz0123456789AbCd")},
+		},
+	}
+	for _, c := range cases {
+		p := Pattern(c.values)
+		re := regexp.MustCompile("^(?:" + p + ")$")
+		for _, v := range c.values {
+			if !re.MatchString(v) {
+				t.Errorf("%s: %q rejects the sample %q", c.name, p, v)
+			}
+		}
+		for _, v := range c.next {
+			if !re.MatchString(v) {
+				t.Errorf("%s: %q rejects the next value %q", c.name, p, v)
+			}
+		}
+		for _, v := range c.change {
+			if re.MatchString(v) {
+				t.Errorf("%s: %q takes the change %q", c.name, p, v)
 			}
 		}
 	}
