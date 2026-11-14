@@ -117,6 +117,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - SQL Server connections never use weaker TLS than the client asks for. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - `meta.json` records a folder in a person's home as `~/…`, so it names no person. ([#16](https://github.com/orangehill/driftgate/pull/16))
 - With `connect_to`, `allow_hosts` and the remote-mutation guard check the address actually dialled. ([#19](https://github.com/orangehill/driftgate/pull/19))
+- Built with Go 1.27.4, which fixes GO-2026-6859 in `net/http`.
 
 ## [1.0.2] - 2026-11-02
 
