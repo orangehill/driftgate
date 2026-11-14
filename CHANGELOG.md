@@ -34,7 +34,7 @@ versioning. Read **Upgrading** before you update an existing project.
 - `--read-only` on `capture` and `run` sends only requests that do not change data, for a server that must not change. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `target.connect_to` sends requests to a fixed address and keeps the host name, like `curl --connect-to`. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - `driftgate clean` removes the pristine copies that `seed` made. It never touches a working database. ([#19](https://github.com/orangehill/driftgate/pull/19))
-- `baselines rebase` makes a capture the baseline's content after an intended data change (capture it with `--skip-fingerprint-check`). ([#17](https://github.com/orangehill/driftgate/pull/17))
+- `baselines rebase` makes a capture the baseline's content after an intended data change. The capture must be one that two captures of the same state agree on, as `run` makes a baseline: `driftgate capture <tag> --repeat 2 --force` (with `--skip-fingerprint-check` when the data changed on purpose); a capture made once is refused with that command. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - The result says what it does not cover, such as routes without a request. ([#17](https://github.com/orangehill/driftgate/pull/17))
 - Reports count drifts per kind. ([#19](https://github.com/orangehill/driftgate/pull/19))
 - Warnings when `prepare:` changed the restored state, and when a request that changes data has a fixed numeric id in its path. ([#17](https://github.com/orangehill/driftgate/pull/17), [#19](https://github.com/orangehill/driftgate/pull/19))
@@ -51,7 +51,6 @@ versioning. Read **Upgrading** before you update an existing project.
 ### Changed
 
 - `init` excludes Laravel Dusk's routes (`/_dusk/*`) by default: they log in as any user for browser tests and are not the API. In an existing project, add the route to `exclusions.yaml`.
-- `baselines rebase` refuses a capture made once and prints the command that captures it twice (`driftgate capture <tag> --repeat 2 --force`). A baseline now always holds responses that two captures of the same state agree on, as `run` makes one. Before, a request added by a rebase could hold a value that changes by itself (a `created_at`), which drifted on the next run. The rebase advice that `run` and a capture on changed data print captures twice first.
 - `--read-only` takes `prepare:` when `state:` is configured: `prepare` should write only to data the restore brings back. Without `state:` it is still refused.
 - `data verify --dump` reads only a dump that starts with the header line `data anonymize` and `data subset` write (format 1 or 2, for the source's database type). Other files, such as a `mysqldump` or `pg_dump` output, are refused unless they carry that line. Dumps with CRLF line endings are read. A format 1 dump in which a comment at the end of a statement hid its `;` is refused with a message to make the dump again, instead of being read with the next statements' rows as text.
 - The command reference is split into pages per command group; `driftgate help <command>` links its page. A build from a checkout links the docs of the `development` branch. ([#24](https://github.com/orangehill/driftgate/pull/24))

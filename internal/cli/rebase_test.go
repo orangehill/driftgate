@@ -57,7 +57,7 @@ func TestBaselinesRebase(t *testing.T) {
 		t.Fatalf("capture: %d %s", code, errOut)
 	}
 	if code, _, errOut := rebase("local", "--from", "once", "--reason", "x", "--allow-freeze"); code != ExitConfig ||
-		!strings.Contains(errOut, "capture once was made once") || !strings.Contains(errOut, "driftgate capture once --repeat 2 --force --skip-fingerprint-check") {
+		!strings.Contains(errOut, "capture once is not one that two captures of the same state agreed on") || !strings.Contains(errOut, "driftgate capture once --repeat 2 --force --skip-fingerprint-check") {
 		t.Fatalf("a capture made once: %d %s", code, errOut)
 	}
 	// The private bodies of the capture must be on this machine.

@@ -279,7 +279,7 @@ func rebaseChecks(p *config.Project, oldMeta *snapshot.Meta, cur *snapshot.Set, 
 		if meta.Unreliable {
 			skip = " --skip-fingerprint-check"
 		}
-		return nil, configErr("capture %[1]s was made once, and a baseline takes only responses that two captures of the same state agree on (as run makes one); capture it twice, add the allowlist entries it proposes, then rebase:\n  driftgate capture %[1]s --repeat 2 --force%[2]s", tag, skip)
+		return nil, configErr("capture %[1]s is not one that two captures of the same state agreed on (it was made once, or its two captures differed), and a baseline takes only such responses (as run makes one); capture it twice, add the allowlist entries it proposes, then rebase:\n  driftgate capture %[1]s --repeat 2 --force%[2]s", tag, skip)
 	}
 	recs, err := cur.Records()
 	if err != nil {
