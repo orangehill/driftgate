@@ -122,10 +122,16 @@ func TestSchemaFingerprintMySQL(t *testing.T) {
 				{"a restore_only table dropped", []string{"DROP TABLE tokens"}, "table:tokens"},
 			}
 			if f.mariadb {
-				mustExec(t, f.rootWork, "CREATE SEQUENCE numbers")
+				// A Galera node refuses a cached sequence, and checks an
+				// ALTER SEQUENCE against the cache in the statement (1235).
+				nocache := ""
+				if isGalera(f.rootWork) {
+					nocache = " NOCACHE"
+				}
+				mustExec(t, f.rootWork, "CREATE SEQUENCE numbers"+nocache)
 				cases = append(cases,
 					schemaCase{"a sequence that moved", []string{"SELECT NEXT VALUE FOR numbers", "SELECT SETVAL(numbers, 50)"}, ""},
-					schemaCase{"ALTER SEQUENCE", []string{"ALTER SEQUENCE numbers INCREMENT BY 5"}, "sequence:numbers"})
+					schemaCase{"ALTER SEQUENCE", []string{"ALTER SEQUENCE numbers INCREMENT BY 5" + nocache}, "sequence:numbers"})
 			}
 			m := f.open(t, f.dsn, Options{Exclude: []string{"sessions"}, RestoreOnly: []string{"tokens"}, RestoreEmpty: []string{"cache"}})
 			testSchemaFingerprint(t, m, func(t *testing.T, stmts ...string) { mustExec(t, f.rootWork, stmts...) }, cases)
