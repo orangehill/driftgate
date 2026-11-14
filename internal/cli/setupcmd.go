@@ -606,11 +606,7 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 			return dsnErr(c.DSN, err, fmt.Errorf("state %s: dsn: %v\nfix it in %s (or the setting it names), then run %s: it goes on from here", name, err, rel(p.Root, path), s.resume))
 		}
 		d, known := setting(found, c)
-		if known {
-			s.database = describe(d)
-		} else {
-			s.database = fmt.Sprintf("%s %s (dsn: %s)", c.Driver, c.Working, flow(c.DSN))
-		}
+		s.database = stateSummary(d, known, c)
 		pristine := c.Pristine
 		if c.Driver == config.SQLite && pristine == "" {
 			pristine = "file in DriftGate's store" // capture.sqliteStorePristine
@@ -764,6 +760,19 @@ func setting(found appconf.Found, c config.Component) (appconf.Database, bool) {
 		}
 	}
 	return appconf.Database{}, false
+}
+
+// stateSummary describes a state component for setup's summary: as the
+// setting it was made from (d, when known), with the component's driver
+// (which --driver or an answer gave where the setting names none).
+func stateSummary(d appconf.Database, known bool, c config.Component) string {
+	if !known {
+		return fmt.Sprintf("%s %s (dsn: %s)", c.Driver, c.Working, flow(c.DSN))
+	}
+	if d.Driver == "" {
+		d.Driver = c.Driver
+	}
+	return describe(d)
 }
 
 // driverChoices names the drivers setup takes.

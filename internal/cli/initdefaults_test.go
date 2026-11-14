@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,12 @@ func TestInitDefaults(t *testing.T) {
 		if _, err := allowlist.Parse([]byte("headers:\n" + det.headers + "body:\n" + det.allow)); err != nil {
 			t.Errorf("%s: %v", det.kind, err)
 		}
+	}
+	// Laravel Dusk's routes log in as any user: a testing tool, never the
+	// API, and their error pages differ on every run.
+	laravel := slices.IndexFunc(detectors(), func(d detector) bool { return d.kind == "laravel" })
+	if laravel < 0 || !slices.ContainsFunc(detectors()[laravel].exclude, func(x [2]string) bool { return x[0] == "/_dusk/*" }) {
+		t.Error("init does not exclude /_dusk/* for Laravel")
 	}
 	excl := &routes.Exclusions{Routes: []routes.Exclusion{
 		{Route: "/_debugbar/*", Reason: "Laravel Debugbar: a development tool."},

@@ -49,6 +49,7 @@ Runs the `seed:` commands and keeps a pristine copy of every database under `sta
 
 ## run
 Routes, catalog, capture and compare in one command. The first run makes the baseline from two equal captures.
+Each run captures into `run-<checkout>` and replaces the last one; to keep a capture, make it with `driftgate capture <tag>`.
 | Flag | Meaning |
 |---|---|
 | `--baseline <name>`, `--skip-private`, `--target <service>` | [common flags](#common-flags); with `--target` the check is reported as partial |
@@ -188,7 +189,7 @@ Checks an output of `data anonymize` for personal values. Exit 1 when it finds a
 `driftgate baselines local|git` moves the project to the other layout. A switch to `git` first checks the baselines as `verify` does.
 
 ## baselines rebase
-`driftgate baselines rebase <name>` makes a capture the content of a baseline, such as after a merge.
+`driftgate baselines rebase <name>` makes a capture the content of a baseline, such as after a merge. Make the capture with `--repeat 2`; a capture made once is refused.
 | Flag | Meaning |
 |---|---|
 | `--from <tag>`, `--reason "…"` | required: the capture, and why |

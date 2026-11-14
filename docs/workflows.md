@@ -8,7 +8,7 @@ a time. A small step gives a few drifts with one cause.
 1. On the old version, run `driftgate setup`. Keep `mode: freeze` while nothing is meant to change.
 2. Run `driftgate coverage` until it is clean. Add `json`, `anonymous` and `identities` templates, and hand-written requests for logins, uploads and jobs ([catalog](catalog.md)).
 3. Upgrade one version, or one dependency, per branch.
-4. Run `driftgate run`. It compares with the same baseline, on the same restored data.
+4. Restart the application server so it serves the new code (PHP opcache keeps the old). Run `driftgate run`. It compares with the same baseline, on the same restored data.
 5. Read the drifts with `driftgate review`. Fix the code, or accept or expect the change ([review](review.md#accept-expect-or-rebase)).
 6. When a step spans many commits, `driftgate bisect <good> <bad>` names the first commit ([bisect](review.md#bisect)).
 7. Repeat from step 3.
@@ -42,11 +42,11 @@ driftgate compare new --against old --skip-fingerprint-check
 - Fingerprints differ between engines and versions. So the check that both sides hold the same data is lost.
 - Prove the data yourself: diff the schema from `information_schema.COLUMNS`, and sorted per-table dumps from both servers.
 - `accept` and `expect` do not apply to two captures. Name each difference in the pull request.
-- Keep the new stack as the baseline: capture again with `--repeat 2 --force`, then rebase.
+- Keep the new stack as the baseline: capture it twice under a tag of its own, then rebase.
 
 ```sh
-driftgate capture new --repeat 2 --skip-fingerprint-check --force
-driftgate baselines rebase local --from new --reason "Moved to MySQL 8.4" --ref SHOP-12 --allow-freeze
+driftgate capture new-base --repeat 2 --skip-fingerprint-check
+driftgate baselines rebase local --from new-base --reason "Moved to MySQL 8.4" --ref SHOP-12 --allow-freeze
 ```
 
 Never compare the same code against newer data: every data change shows
@@ -84,10 +84,10 @@ git commit -m "DriftGate baseline"
 - The key never enters git. Give each developer it in `DRIFTGATE_KEY` or `key:`.
 - Private bodies stay in each machine's store. Others compare the rest with `--skip-private`.
 - Protect `/driftgate/baselines/` with a CODEOWNERS entry.
-- After a merge, rebase the baseline onto a capture of the merged code:
+- After a merge, rebase the baseline onto a capture of the merged code. Capture it twice, as `run` does for a new baseline; a capture made once is refused.
 
 ```sh
-driftgate capture main
+driftgate capture main --repeat 2 --force
 driftgate baselines rebase local --from main --reason "Merged SHOP-7 and SHOP-9" --allow-freeze
 ```
 

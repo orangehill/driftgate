@@ -521,7 +521,7 @@ func checkBaseline(p *config.Project, tr *tracker, opt Options, start states) er
 	if tr.restoreOnlyNow(d) {
 		return envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
 	}
-	return envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture with --skip-fingerprint-check and make that capture the baseline's content: driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
+	return envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture twice with --skip-fingerprint-check and make that capture the baseline's content: driftgate capture <tag> --repeat 2 --skip-fingerprint-check, then driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
 }
 
 // markComplete writes the capture's timings, then its meta without

@@ -128,7 +128,7 @@ arrays:
 | intended; the team may change the baseline (`mode: evolve`) | `driftgate accept group:3 --reason "…" --ref SHOP-12` |
 | intended by a ticket; the baseline stays | `driftgate expect group:3 --ref SHOP-12 --reason "…"` |
 | a new request, or one no longer captured | `driftgate accept <id> --reason "…"` (evolve; in freeze: rebase, below) |
-| the baseline should become a capture, after a merge | `driftgate baselines rebase local --from <tag> --reason "…"` |
+| the baseline should become a capture, after a merge | `driftgate capture <tag> --repeat 2`, then `driftgate baselines rebase local --from <tag> --reason "…"` |
 
 - `accept` takes whole requests into the baseline, and logs who, when and why in `acceptances.jsonl`.
 - Pass `--comparison <id>` as `review` prints it, so you accept exactly what you reviewed.
