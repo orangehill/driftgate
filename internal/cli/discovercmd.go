@@ -113,6 +113,7 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 			return 0, nil, err
 		}
 		fmt.Fprintf(out, "wrote %s\n", path)
+		authNotes(out, p, adapters, inv)
 		return ExitClean, whole, nil
 	case len(changes) > 0:
 		fmt.Fprintf(out, "%d changes against %s; review them and run driftgate discover --write\n", len(changes), path)
@@ -120,6 +121,34 @@ func discoverRoutes(ctx context.Context, p *config.Project, sel selection, write
 	}
 	fmt.Fprintln(out, "routes unchanged ✓")
 	return ExitClean, whole, nil
+}
+
+// authNotes names the discover[].auth entries that match no middleware of
+// their service, and the middleware that look like they sign a user in on
+// routes no identity is sent to. They are printed when the inventory is
+// written (the first run, discover --write), not on every run.
+func authNotes(out io.Writer, p *config.Project, adapters []discover.Adapter, inv *routes.Inventory) {
+	for _, a := range adapters {
+		if len(a.Auth) == 0 {
+			continue
+		}
+		var rs []routes.Route
+		for _, r := range inv.Routes {
+			if r.Source == a.Adapter && r.Target == p.Canonical(a.Target) {
+				rs = append(rs, r)
+			}
+		}
+		for _, n := range discover.UnmatchedAuth(a.Auth, rs) {
+			fmt.Fprintf(out, "note: discover[].auth %s matches no middleware of a route; route:list --json lists aliases and groups as classes, so name the class as it shows there, with or without its namespace\n", n)
+		}
+	}
+	ms := discover.SuspectAuth(inv.Routes)
+	if len(ms) == 0 {
+		return
+	}
+	_, base := discover.MiddlewareName(ms[0])
+	fmt.Fprintf(out, "note: routes with %s get no identity; if it signs a user in, name its class under discover[].auth (e.g. auth: [%s]) and run driftgate discover --write\n",
+		strings.Join(ms, ", "), base)
 }
 
 // fetcher reads a specification from the running application: a path is
@@ -258,6 +287,16 @@ func generateCmd(args []string, out, errOut io.Writer) (int, error) {
 	return generateCatalog(ctx, p, sel, whole, generateOptions{write: *write, check: *check, all: *all}, out, errOut)
 }
 
+// identityUnused notes a generate.identity no route of any service needs:
+// discover knows none of the application's auth middleware.
+func identityUnused(p *config.Project, inv *routes.Inventory) []string {
+	id := p.Generate.Identity
+	if id == "" || len(inv.Routes) == 0 || slices.ContainsFunc(inv.Routes, func(r routes.Route) bool { return r.Auth }) {
+		return nil
+	}
+	return []string{fmt.Sprintf("generate.identity is %s, but no route needs authentication, so no generated request is sent as %s; for Laravel, name the class of the application's own auth middleware under discover[].auth and run driftgate discover --write", id, id)}
+}
+
 // generateOptions are the flags of generate.
 type generateOptions struct {
 	write bool
@@ -274,6 +313,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	if err != nil {
 		return 0, err
 	}
+	unused := identityUnused(p, inv)
 	inv = sel.routes(inv)
 	opts := generate.Options{Project: p, Inventory: inv, Exclusions: excl, Existing: cat, All: o.all}
 	for _, pr := range p.Params {
@@ -319,7 +359,7 @@ func generateCatalog(ctx context.Context, p *config.Project, sel selection, whol
 	if len(res.Skipped) > 0 {
 		printSkipped(out, res.Skipped, rel(p.Root, p.Layout.Config))
 	}
-	for _, n := range res.Notes {
+	for _, n := range append(res.Notes, unused...) {
 		fmt.Fprintf(out, "\nnote: %s\n", n)
 	}
 	printReplaced(out, res.Replaced)
