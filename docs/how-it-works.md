@@ -53,7 +53,7 @@ the data instead of the code.
 | seed | `driftgate seed`, or the first `run`, copies the working database to a pristine copy |
 | restore | before each capture, the working database is restored from the pristine copy |
 | fingerprint | a hash of the restored data; when it differs from the baseline's, the capture stops (exit 3) |
-| side effects | what each request changed; a request that writes elsewhere is a drift |
+| side effects | what each request changed; a request that writes elsewhere, or other values into tracked rows, is a drift |
 
 `state:` names what is restored: databases with a built-in driver, or
 anything else through `restore` and `fingerprint` commands

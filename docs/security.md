@@ -7,7 +7,7 @@ protects, and what it leaves to you. Report a vulnerability as
 
 ## The project key
 
-The project key encrypts private bodies and names them by a keyed hash.
+The project key encrypts private bodies. It names them, and the row values `row_tracking` records, by a keyed hash.
 Treat it like a production password.
 
 | Source, in order | When |
@@ -17,7 +17,7 @@ Treat it like a production password.
 | `.driftgate/key` | `baselines: local`, made by `driftgate key create` |
 | the macOS Keychain | `baselines: git`, made by `driftgate key create` |
 
-- Without the key, private bodies cannot be captured or compared (exit 3).
+- Without the key, private bodies cannot be captured or compared (exit 3), and row values are not recorded.
 - Changing the key is not supported: bodies encrypted with the old one become unreadable.
 - `.driftgate/key` must be readable by its owner only.
 - With `baselines: local`, commands stop (exit 2) when git does not ignore `.driftgate/`.

@@ -74,7 +74,7 @@ The kind is the first word of a drift line, and `kind` in JSON reports. The name
 | `side-effect` | the request changed other data than in the baseline | — |
 | `not-captured` | the baseline has a response, the capture has none | capture again, or accept by ID |
 
-A dash means: fix the code, or accept or expect the change. A side effect names what changed, not the values, so it cannot be expected.
+A dash means: fix the code, or accept or expect the change. A side effect names a changed value only by its column, so it cannot be expected ([row tracking](databases.md#row-tracking)).
 
 ## Allowlist rules
 

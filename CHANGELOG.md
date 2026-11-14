@@ -66,6 +66,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- `row_tracking` now compares the values a request writes into tracked rows. Before, a request that wrote another value into the same row than in the baseline passed, because only the changed rows and columns were compared. Columns that change by themselves between the two captures of a baseline, such as `updated_at`, are learned and left out. List other columns under `ignore`, for example `row_tracking: [users: { ignore: [last_seen_on] }]`. Values are stored as a keyed hash and need the project key. Make the baseline again to compare values; until then, the result lists the requests whose row values were not compared.
 - SQL Server: when a task of the server still holds part of the pristine copy's log during the seed, the seed shrinks it again for up to about a second; if part stays held, it says how large the log stays and why, and the next seed shrinks it. Before, the log could stay as large as the working database's. ([#62](https://github.com/orangehill/driftgate/pull/62))
 - `data anonymize`: a read of the source that fails and is tried again ends its snapshot and closes its connection at once, before the wait for the next try; before, they stayed open during the wait. ([#62](https://github.com/orangehill/driftgate/pull/62))
 - PostgreSQL: an error while the list of views is read stops the fingerprint; before, the views after it were left out of it. ([#61](https://github.com/orangehill/driftgate/pull/61))

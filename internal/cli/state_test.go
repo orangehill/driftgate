@@ -103,7 +103,7 @@ state:
     dsn: { env: DG_TEST_DSN }
     working: dgt_demo
     pristine: dgt_demo_pristine
-    row_tracking: [faq]
+    row_tracking: [faq: { ignore: [created_at] }] # the tests' captures may share a second (runGap 0)
 guards:
   - name: always
     command: ["true"]
@@ -160,6 +160,14 @@ func TestStateCapture(t *testing.T) {
 		t.Fatalf("news side effects: %+v", se)
 	}
 	se := p.record(t, "c1", "faq-b").SideEffects
+	// The inserted row's values are named under the project key: every
+	// column but the ignored one, none as it is.
+	if se != nil && len(se.Rows) == 1 {
+		if v := se.Rows[0].Values; len(v) != 1 || len(v["id"]) != 32 {
+			t.Fatalf("faq-b row values: %v", v)
+		}
+		se.Rows[0].Values = nil
+	}
 	want := &snapshot.SideEffects{Items: []string{"db/table:faq"}, Rows: []snapshot.RowChange{{Item: "db/table:faq", Key: "id=2", Change: "inserted"}}}
 	if !reflect.DeepEqual(se, want) {
 		t.Fatalf("faq-b side effects: %+v", se)

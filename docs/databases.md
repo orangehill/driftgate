@@ -31,6 +31,18 @@ is the real limit of what a `params` query can do ([security](security.md#remote
 Versions tested in CI: MariaDB 10.3, 10.6, 11.4; MySQL 8.0, 8.4;
 PostgreSQL 13, 16, 17; SQL Server 2017, 2019, 2022, 2025.
 
+## Row tracking
+
+`row_tracking` names tables whose rows a capture follows. Per request, it
+records the rows inserted, updated or deleted, the changed columns and the
+values written. Another value than in the baseline drifts as `side-effect`,
+naming the column (`other value: status`).
+
+- Values are stored as a keyed hash under the [project key](security.md#the-project-key), never as plain values. Without the key, the result says that values were not compared.
+- A column that changes by itself (a timestamp, a token) is learned from the two captures `run` makes the baseline from; `accept` keeps it.
+- A column that two captures cannot show changing, such as a date, goes in `ignore`. A column `ignore` names may be missing, as after a migration.
+- Values are compared at level `values`, against a set made from two captures (`run`, `capture --repeat 2`). Against an older baseline, or one captured once, only rows count: make the baseline again.
+
 ## MySQL and MariaDB
 
 <!-- check: config-fragment -->
