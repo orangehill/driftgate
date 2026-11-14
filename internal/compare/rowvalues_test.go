@@ -50,7 +50,7 @@ func TestRowValues(t *testing.T) {
 	if got := One("x", Side{Record: b}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 0 {
 		t.Errorf("not learned: %+v", got)
 	}
-	if got := One("x", Side{Record: b, LearnRowValues: true}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 1 {
+	if got, _ := OneLearning("x", Side{Record: b}, Side{Record: v}, allowlist.Empty(), LevelValues); len(got) != 1 {
 		t.Errorf("learning: %+v", got)
 	}
 	for _, c := range cases {

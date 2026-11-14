@@ -53,6 +53,12 @@ func (a *rowValueApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, err = a.db.Exec("UPDATE follows SET target = "+a.ph(1)+", touched = "+a.ph(2)+", seen = "+a.ph(3)+" WHERE id = 1", target, touched, seen)
 	case "/ins":
 		_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen) VALUES (2, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+")", target, touched, seen)
+	case "/ping": // writes an ignored column only
+		_, err = a.db.Exec("UPDATE follows SET seen = "+a.ph(1)+" WHERE id = 1", seen+touched)
+	case "/mix": // an ignored column of one row, target of another
+		if _, err = a.db.Exec("UPDATE follows SET seen = "+a.ph(1)+" WHERE id = 1", seen+touched); err == nil {
+			_, err = a.db.Exec("UPDATE follows SET target = "+a.ph(1)+" WHERE id = 5", target)
+		}
 	case "/ins3":
 		_, err = a.db.Exec("INSERT INTO follows (id, target, touched, seen) VALUES (3, "+a.ph(1)+", "+a.ph(2)+", "+a.ph(3)+")", target, touched, seen)
 	}
@@ -231,5 +237,46 @@ func TestRowValueWithoutValues(t *testing.T) {
 	r = p.must(t, 0, "run")
 	if !strings.Contains(r.out, "Not covered by this result") || !strings.Contains(r.out, "2 requests that change data whose row values were not compared (baseline:local recorded no row values") {
 		t.Errorf("not covered does not name the row values: %v", r)
+	}
+}
+
+// TestRowValueIgnoredOnly: a request whose rows change only in ignored
+// columns has no values to compare: its table is learned like any other
+// and never listed as not compared; a request that also writes another
+// row keeps its learning through an accept of the same changes, and a
+// later value change still drifts.
+func TestRowValueIgnoredOnly(t *testing.T) {
+	for _, driver := range []string{"mysql", "postgres", "sqlite", "sqlserver"} {
+		t.Run(driver, func(t *testing.T) {
+			p, app := rowValueProject(t, driver, rowValueKey())
+			sqlExec(t, app.db, "INSERT INTO follows (id, target, touched, seen) VALUES (5, 'seeded', 'seeded', 'seeded')")
+			cat := `{"version":1,"requests":[
+ {"id":"ping","method":"POST","path":"/ping","mutates":true,"storage":"public"},
+ {"id":"mix","method":"POST","path":"/mix","mutates":true,"storage":"public"}]}`
+			write(t, filepath.Join(p.root, "driftgate", "catalog.json"), cat)
+			p.must(t, 0, "seed")
+			p.must(t, 0, "run")
+			const notCompared = "row values were not compared"
+			if r := p.must(t, 0, "run"); strings.Contains(r.out, notCompared) {
+				t.Errorf("ignored columns only, listed: %v", r)
+			}
+			p.must(t, 0, "capture", "r", "--repeat", "2")
+			p.must(t, 0, "baselines", "rebase", "local", "--from", "r", "--reason", "again")
+			if r := p.must(t, 0, "run"); strings.Contains(r.out, notCompared) {
+				t.Errorf("after a rebase, listed: %v", r)
+			}
+			app.set("Y", "s1")
+			if r := p.must(t, 1, "run"); !strings.Contains(r.out, "follows[id=5]") || !strings.Contains(r.out, "other value: target") {
+				t.Errorf("another value: %v", r)
+			}
+			p.must(t, 0, "accept", "mix", "--reason", "Y is intended")
+			if r := p.must(t, 0, "run"); strings.Contains(r.out, notCompared) {
+				t.Errorf("after a same-shape accept, listed: %v", r)
+			}
+			app.set("Z", "s1")
+			if r := p.must(t, 1, "run"); !strings.Contains(r.out, "other value: target") {
+				t.Errorf("after the accept, another value: %v", r)
+			}
+		})
 	}
 }

@@ -757,10 +757,11 @@ func (t *tracker) rowChanges(before, after map[string]state.Rows) []snapshot.Row
 	return out
 }
 
-// rowValues names the values a request wrote into a row (row, the column
-// → value hash the state read after it): every column of an inserted
-// row, the changed ones of an updated row, apart from ignored columns.
-// nil when no column is left.
+// rowValues names the values a request wrote into a row (row: the column
+// → value hash read after the request): every column of an inserted row,
+// the changed ones of an updated row, apart from ignored columns. nil
+// when no column is left; in a capture with the key (meta.RowValues),
+// such a row has nothing to compare, and counts as recorded.
 func (t *tracker) rowValues(comp, item string, ch state.RowChange, row map[string]string) map[string]string {
 	cols := ch.Columns
 	if ch.Change == "inserted" {

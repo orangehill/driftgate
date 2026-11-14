@@ -79,14 +79,21 @@ func TestLearning(t *testing.T) {
 	if err := learnRows(rows, "follow", first, rowSet(t, "k", v)); err != nil || strings.Join(rows["follow"].Learned, ",") != "db/table:follows" {
 		t.Fatalf("learned %+v, %v", rows["follow"], err)
 	}
-	if err := learnRows(rows, "follow", first, rowSet(t, "k", nil)); err != nil || len(rows["follow"].Learned) != 0 {
-		t.Errorf("a third capture without values: %+v, %v", rows["follow"], err)
+	if err := learnRows(rows, "follow", first, rowSet(t, "", nil)); err != nil || len(rows["follow"].Learned) != 0 {
+		t.Errorf("a third capture without the key: %+v, %v", rows["follow"], err)
+	}
+	// A row whose written columns are all ignored has no values, in sets
+	// captured with the key: nothing to compare, and the table is learned.
+	ping := map[string]*rowLearning{}
+	if err := learnRows(ping, "follow", rowSet(t, "k", nil), rowSet(t, "k", nil)); err != nil || strings.Join(ping["follow"].Learned, ",") != "db/table:follows" {
+		t.Errorf("every column ignored: %+v, %v", ping["follow"], err)
 	}
 
-	// A baseline record accepted from a capture without the key: the
-	// result names that cause.
-	if g := rowValuesGap(rowSet(t, "k1", nil), rowSet(t, "k1", v), "baseline:local", []string{"follow"}); g == nil || !strings.Contains(g.Reason, "without the project key") {
-		t.Errorf("accepted without the key: %+v", g)
+	// The reason comes from the sets' meta, not from the rows: a keyed
+	// baseline whose record did not learn the table says so, whatever its
+	// rows hold.
+	if g := rowValuesGap(rowSet(t, "k1", nil), rowSet(t, "k1", v), "baseline:local", []string{"follow"}); g == nil || !strings.Contains(g.Reason, "did not see them in two captures") {
+		t.Errorf("not learned: %+v", g)
 	}
 }
 
@@ -109,25 +116,27 @@ func TestAcceptLearning(t *testing.T) {
 		agreed   bool
 		learned  string
 		volatile string
-	}{
+	}{ // captured with the key, but for "no values (no key)"
 		{"the same rows", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status", "updated_at")}}, false, "db/table:orders", "db/table:orders.updated_at"},
 		// The reviewer's case: an insert instead of the update.
 		{"an insert", &snapshot.SideEffects{Rows: []snapshot.RowChange{{Item: "db/table:orders", Key: "id=2", Change: "inserted", Values: v}}}, false, "", ""},
 		{"a new column", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "note", "status", "updated_at")}}, false, "", ""},
 		{"another row", &snapshot.SideEffects{Rows: []snapshot.RowChange{{Item: "db/table:orders", Key: "id=9", Change: "updated", Columns: []string{"status", "updated_at"}, Values: v}}}, false, "", ""},
 		{"no values (no key)", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", nil, "status", "updated_at")}}, false, "", ""},
+		// With the key, a row without values had every column ignored.
+		{"every column ignored", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", nil, "status", "updated_at")}}, false, "db/table:orders", "db/table:orders.updated_at"},
 		{"a new table", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:notes", v, "body")}}, false, "", ""},
 		{"agreed: its own", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:notes", v, "body")}, Learned: []string{"db/table:notes"}, Volatile: []string{"db/table:notes.at"}}, true, "db/table:notes", "db/table:notes.at"},
 		{"agreed: learned nothing", &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status", "updated_at")}}, true, "", ""},
 	}
 	for _, c := range cases {
-		acceptLearning(old(), c.rec, c.agreed)
+		acceptLearning(old(), c.rec, c.agreed, c.name != "no values (no key)")
 		if strings.Join(c.rec.Learned, ",") != c.learned || strings.Join(c.rec.Volatile, ",") != c.volatile {
 			t.Errorf("%s: learned %v, volatile %v", c.name, c.rec.Learned, c.rec.Volatile)
 		}
 	}
 	fresh := &snapshot.SideEffects{Rows: []snapshot.RowChange{upd("db/table:orders", v, "status")}}
-	acceptLearning(nil, fresh, false)
+	acceptLearning(nil, fresh, false, true)
 	if len(fresh.Learned) != 0 {
 		t.Errorf("a new request: %+v", fresh)
 	}
@@ -176,5 +185,40 @@ func TestValuesOnly(t *testing.T) {
 	}
 	if got := mergeVolatile([]string{"b", "a"}, []string{"a", "c"}); strings.Join(got, ",") != "a,b,c" {
 		t.Errorf("merge %v", got)
+	}
+}
+
+// TestAcceptRowKey: accept into a baseline that recorded no row values
+// records the capture's key when the accepted records hold values; a
+// capture under another key than the baseline's is refused.
+func TestAcceptRowKey(t *testing.T) {
+	v := map[string]string{"c": "x"}
+	if err := acceptRowKey(rowSet(t, "k1", v), "k2"); err == nil || classify(err) != ExitEnv || !strings.Contains(err.Error(), "another key than the baseline") {
+		t.Errorf("another key: %v", err)
+	}
+	for _, c := range [][2]string{{"k1", "k1"}, {"", "k1"}, {"k1", ""}} {
+		if err := acceptRowKey(rowSet(t, c[0], v), c[1]); err != nil {
+			t.Errorf("%q into %q: %v", c[1], c[0], err)
+		}
+	}
+	none := rowSet(t, "", nil)
+	if err := setRowKey(none, "k1", false); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := none.Meta(); m.RowValues != "" {
+		t.Errorf("no values accepted, key set: %q", m.RowValues)
+	}
+	if err := setRowKey(none, "k1", true); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := none.Meta(); m.RowValues != "k1" {
+		t.Errorf("values accepted, key %q", m.RowValues)
+	}
+	kept := rowSet(t, "k1", v)
+	if err := setRowKey(kept, "k2", true); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := kept.Meta(); m.RowValues != "k1" {
+		t.Errorf("a baseline's key changed: %q", m.RowValues)
 	}
 }

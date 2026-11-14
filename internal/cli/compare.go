@@ -476,10 +476,10 @@ func compareAll(reqs []catalog.Request, levels []compare.Level, base, cur *snaps
 	}
 	err = parallel(len(reqs), size, func(i int) error {
 		var err error
-		if results[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], false, digest, false); err != nil || !showPrivate {
+		if results[i], err = compareOneDigest(reqs[i], base, cur, allow, oneOptions{origins: origins, level: levels[i], digest: digest}); err != nil || !showPrivate {
 			return err
 		}
-		shown[i], err = compareOneDigest(reqs[i], base, cur, origins, allow, levels[i], true, digest, false)
+		shown[i], err = compareOneDigest(reqs[i], base, cur, allow, oneOptions{origins: origins, level: levels[i], showPrivate: true, digest: digest})
 		return err
 	})
 	return results, shown, err
@@ -627,20 +627,33 @@ func hideErrors(drifts []compare.Drift) {
 // captured from where that differs (setOrigins), nil for two captures of
 // one origin in one folder.
 func compareOne(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool) (report.Result, error) {
-	return compareOneDigest(req, base, cur, origins, allow, level, showPrivate, nil, false)
+	return compareOneDigest(req, base, cur, allow, oneOptions{origins: origins, level: level, showPrivate: showPrivate})
 }
 
 // compareToLearn compares one request of two captures of one state at the
 // values level, with every tracked row's values (the captures learn
 // them), its private values shown (infer prints formats only).
 func compareToLearn(req catalog.Request, first, cur *snapshot.Set, allow *allowlist.List) (report.Result, error) {
-	return compareOneDigest(req, first, cur, nil, allow, compare.LevelValues, true, nil, true)
+	return compareOneDigest(req, first, cur, allow, oneOptions{level: compare.LevelValues, showPrivate: true, learn: true})
+}
+
+// oneOptions say how compareOneDigest compares a request: origins (where
+// the sets were captured, setOrigins), the level, whether private values
+// are shown, the digest of drifts for expectations (nil: none), and learn
+// (two captures of one state, which learn the values of tracked rows:
+// compare.OneLearning).
+type oneOptions struct {
+	origins     *sides
+	level       compare.Level
+	showPrivate bool
+	digest      driftDigest
+	learn       bool
 }
 
 // compareOneDigest is compareOne that also names each drift with digest
-// (compare.Drift.Digest), before the values of a private body are hidden;
-// learn compares the values of every tracked row (compareToLearn).
-func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sides, allow *allowlist.List, level compare.Level, showPrivate bool, digest driftDigest, learn bool) (report.Result, error) {
+// (compare.Drift.Digest), before the values of a private body are hidden.
+func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, allow *allowlist.List, o oneOptions) (report.Result, error) {
+	origins, level, showPrivate, digest := o.origins, o.level, o.showPrivate, o.digest
 	id := req.ID
 	res := report.Result{ID: id, Level: level.String()}
 	bRec, err := base.Record(id)
@@ -681,7 +694,6 @@ func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sid
 		b.Folders, c.Folders = origins.folders, origins.folders
 		b.RowTables, c.RowTables = origins.rowTables[0], origins.rowTables[1]
 	}
-	b.LearnRowValues = learn
 	// Two bodies with one name are the same bytes, which is all the
 	// comparison needs to know of them: neither is read.
 	// A request that failed (no response) has no body: the comparison
@@ -698,9 +710,12 @@ func compareOneDigest(req catalog.Request, base, cur *snapshot.Set, origins *sid
 			}
 		}
 	}
-	if digest != nil { // what expectations digest is written only where they may apply
+	switch {
+	case digest != nil: // what expectations digest is written only where they may apply
 		res.Drifts, res.Notes = compare.OneWitnessed(id, b, c, allow.ForTarget(req.Target), level)
-	} else {
+	case o.learn:
+		res.Drifts, res.Notes = compare.OneLearning(id, b, c, allow.ForTarget(req.Target), level)
+	default:
 		res.Drifts, res.Notes = compare.OneNotes(id, b, c, allow.ForTarget(req.Target), level)
 	}
 	if digest != nil && !noBody {

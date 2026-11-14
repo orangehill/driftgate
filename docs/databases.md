@@ -39,8 +39,8 @@ values written. Another value than in the baseline drifts as `side-effect`,
 naming the column (`other value: status`).
 
 - Values are stored as a keyed hash under the [project key](security.md#the-project-key), never as plain values. Without the key, the result says that values were not compared.
-- Values are compared at level `values`, per request and table, once two captures of one state saw them. `run` makes a baseline so; for a rebase, use `capture --repeat 2`.
-- A column whose value differed between those two captures (a timestamp, a token) is left out. A column that changes only between days, such as a date, goes in `ignore`; it may be missing, as after a migration.
+- Values are compared at level `values`, per request and table, once two captures of one state saw them. `run` makes its baseline that way; for a rebase, use `capture --repeat 2`.
+- A column whose value differed between those two captures (a timestamp, a token) is left out. A column that changes only between days, such as a date, goes in `ignore`; it may be missing, as after a migration. A column taken out of `ignore` is compared only after a new baseline.
 - `accept` of a single run keeps what a table learned only when the request changes the same rows the same way. Otherwise the result lists it, until `capture <tag> --repeat 2` and `baselines rebase`.
 
 ## MySQL and MariaDB

@@ -28,6 +28,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Added
 
+- `row_tracking` takes `name: { ignore: [columns] }` to leave columns out of the values it compares ([row tracking](docs/databases.md#row-tracking)).
 - SQLite state support: seed, restore and fingerprint, as for MySQL and PostgreSQL. The data commands (`classify`, `anonymize`, `subset`, `verify`) do not support SQLite and SQL Server yet. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - SQL Server 2017 and later state support, with an SQL login. After a restore of the whole database, the first read-only request on each dead application connection is sent once more, and the report says so. ([#15](https://github.com/orangehill/driftgate/pull/15))
 - `restore_only` and `restore_empty` for tables the application writes on its own, such as caches, sessions and queues. ([#16](https://github.com/orangehill/driftgate/pull/16))

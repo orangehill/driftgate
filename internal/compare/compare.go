@@ -310,10 +310,6 @@ type Side struct {
 	// release). Rows of an item the other side did not track are not
 	// compared: a note says so.
 	RowTables []string
-	// LearnRowValues: the values of every tracked row are compared, not
-	// only of the items the side learned (SideEffects.Learned): two
-	// captures of one state, which learn them.
-	LearnRowValues bool
 	// Folders are the forms of the two sides' Roots, made once for many
 	// requests (NewFolders, the same on both sides); nil: made from Roots.
 	Folders *Folders
@@ -347,14 +343,28 @@ func OneWitnessed(id string, base, cur Side, allow *allowlist.List, level Level)
 	return oneNotes(id, base, cur, allow, level, true)
 }
 
+// OneLearning is OneNotes of two captures of one state, which learn the
+// values of tracked rows: those of every tracked row are compared, not
+// only of the tables the base record learned (SideEffects.Learned).
+func OneLearning(id string, base, cur Side, allow *allowlist.List, level Level) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, learnRows: true}, base, cur, allow)
+}
+
 func oneNotes(id string, base, cur Side, allow *allowlist.List, level Level, witnessing bool) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, witnessing: witnessing}, base, cur, allow)
+}
+
+// compareOne compares with c, which names the request, the level and the
+// options; it takes the request's own list of rules from allow.
+func compareOne(c *comparer, base, cur Side, allow *allowlist.List) ([]Drift, []string) {
+	id, level, witnessing := c.id, c.level, c.witnessing
 	// The request's own list: it counts the rules that applied.
 	if FastPaths {
 		allow = allow.ForRequest(id)
 	} else {
 		allow = allow.Copy()
 	}
-	c := &comparer{id: id, allow: allow, level: level, witnessing: witnessing}
+	c.allow = allow
 	if witnessing {
 		c.own = ownOrigins(base.Origins, cur.Origins)
 	}
@@ -432,7 +442,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, base.LearnRowValues)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, c.learnRows)
 		}
 	}
 }
@@ -572,12 +582,14 @@ func outcome(r *snapshot.Record) string {
 }
 
 type comparer struct {
-	id      string
-	allow   *allowlist.List
-	level   Level
-	drifts  []Drift
-	notes   []string // how the comparison went where that is not a drift
-	allowed int      // allow-listed values that changed
+	id    string
+	allow *allowlist.List
+	level Level
+	// learnRows compares the values of every tracked row (OneLearning).
+	learnRows bool
+	drifts    []Drift
+	notes     []string // how the comparison went where that is not a drift
+	allowed   int      // allow-listed values that changed
 	// rewritten counts values a rule covers that are written otherwise.
 	rewritten int
 	lengths   int      // arrays the allowlist let change their length or order
