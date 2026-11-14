@@ -27,7 +27,8 @@ type retryingKey struct{}
 // seed, which copy from the pristine or working database whatever a try
 // before left (a restore or a seed stopped at any point is completed by the
 // next one). A try's result is never kept from one that failed. When every
-// try fails, the last error is returned.
+// try fails, the last error is returned, or, after a cancel, the error as
+// dbx.RetryMySQLLock names it; a try stopped after ctx ended is not noted.
 func (m *MySQL) retryLocked(ctx context.Context, what string, f func(context.Context) error) error {
 	if ctx.Value(retryingKey{}) != nil {
 		return m.lockTry(ctx, what, f)

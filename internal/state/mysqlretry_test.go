@@ -51,6 +51,80 @@ func TestRetryLockedNested(t *testing.T) {
 	}
 }
 
+// TestRetryLockedCancelled: a step within a step stopped for a lock as the
+// run is cancelled ends the outer step with the cancel, after one try, and
+// is not noted: the lock error would blame the server for the interrupt.
+func TestRetryLockedCancelled(t *testing.T) {
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	var log bytes.Buffer
+	m := &MySQL{o: Options{Name: "db", Log: &log}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tries := 0
+	err := m.retryLocked(ctx, "restore", func(ctx context.Context) error {
+		tries++
+		return m.retryLocked(ctx, "query", func(context.Context) error {
+			cancel()
+			return &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+		})
+	})
+	if !errors.Is(err, context.Canceled) || tries != 1 || log.Len() != 0 {
+		t.Errorf("%v after %d tries; log %q", err, tries, log.String())
+	}
+}
+
+// TestUndoDropsCancelled: a drop the server refused for a lock (1213),
+// with Ctrl-C landing while undoDrops makes the dropped objects again,
+// reports the cancel and keeps what was made again and what is gone for
+// good, through retryLocked.
+func TestUndoDropsCancelled(t *testing.T) {
+	retryNoted.Clear()
+	defer retryNoted.Clear()
+	var log bytes.Buffer
+	m := &MySQL{o: Options{Name: "db", Log: &log}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tries := 0
+	err := m.retryLocked(ctx, "restore", func(ctx context.Context) error {
+		tries++
+		dropped := []dropItem{{kind: "view", name: "v"}, {kind: "view", name: "old"}}
+		create := func(string, string, string) error { cancel(); return nil }
+		return undoDrops(ctx, "work", "they are made again from the pristine copy", dropped, map[string]string{"v": "view"}, nil, nil, nil,
+			map[string]viewDef{"v": {def: "CREATE VIEW v AS SELECT 1"}}, create, nil, &mysql.MySQLError{Number: 1213, Message: "Deadlock"})
+	})
+	want := "context canceled. Dropped before the refusal and made again from the pristine copy: view v. Dropped from work, as the pristine copy has nothing of that name, which no restore makes again: view old"
+	if !errors.Is(err, context.Canceled) || err.Error() != want || tries != 1 || log.Len() != 0 {
+		t.Errorf("%v after %d tries; log %q", err, tries, log.String())
+	}
+}
+
+// TestStaleDropFailed: a probe left behind whose drop the cancel stopped,
+// by its own error or a lock, is not to be dropped by hand: the next seed
+// or restore drops it; any other failure, cancelled or not, is.
+func TestStaleDropFailed(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadlock := &mysql.MySQLError{Number: 1213, Message: "Deadlock"}
+	denied := &mysql.MySQLError{Number: 1142, Message: "DROP command denied"}
+	for _, c := range []struct {
+		ctx    context.Context
+		err    error
+		byHand bool
+	}{
+		{ended, context.Canceled, false},
+		{ended, deadlock, false},
+		{ended, denied, true},
+		{context.Background(), deadlock, true},
+		{context.Background(), denied, true},
+	} {
+		got := staleDropFailed(c.ctx, "view", "dgprobe_x", "work", c.err)
+		if !errors.Is(got, c.err) || strings.Contains(got.Error(), "drop it by hand") != c.byHand {
+			t.Errorf("%v (ctx %v): %v", c.err, c.ctx.Err(), got)
+		}
+	}
+}
+
 // TestMySQLRetryLocked: a fingerprint, restore or seed the server stops for
 // a lock (1213, injected) runs again and then gives what a run without the
 // stop gives; a retried read sees a write made between the tries; one that

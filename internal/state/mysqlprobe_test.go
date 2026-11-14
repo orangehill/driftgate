@@ -454,6 +454,29 @@ func TestMySQLSeedNotMade(t *testing.T) {
 	}
 }
 
+// TestMySQLSeedNotMadeCancelled: a seed whose copy the server stopped for
+// a lock as the run was cancelled reports the cancel, not the lock error,
+// and still names what it did not make.
+func TestMySQLSeedNotMadeCancelled(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			f := newProbeFixture(t, dsn, "seedcancel", nil,
+				[]string{"CREATE TABLE items (id INT PRIMARY KEY)", "CREATE TABLE log (id INT)",
+					"CREATE TRIGGER t1 AFTER INSERT ON items FOR EACH ROW INSERT INTO log VALUES (NEW.id)", "CREATE VIEW v AS SELECT id FROM items"})
+			m := f.open(t, f.dsn, Options{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			m.hooks = &mysqlHooks{copyFails: func() error { cancel(); return &mysql.MySQLError{Number: 1213, Message: "Deadlock"} }}
+			err := m.Seed(ctx)
+			if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "1213") ||
+				!strings.Contains(err.Error(), "context canceled. Not made, so missing from "+f.pristine+" until driftgate seed runs again: trigger t1, view v") {
+				t.Fatalf("seed: %v", err)
+			}
+		})
+	}
+}
+
 // TestMySQLUndoRenamedTable: a trigger dropped with a table the pristine
 // copy has under another name is named as on another table there, not as
 // one the pristine copy lacks.
