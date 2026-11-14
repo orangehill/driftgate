@@ -159,7 +159,7 @@ func TestBaselinesRebase(t *testing.T) {
 	// Mode freeze accepts nothing: the title says to rebase instead, with
 	// every argument rebase needs.
 	if code != ExitClean || !strings.Contains(out, failedRequestsTitle(config.Freeze)) ||
-		!strings.Contains(out, `driftgate capture <tag> --repeat 2 --force, then driftgate baselines rebase <baseline> --from <tag> --reason "…" --allow-freeze), baseline local:`) ||
+		!strings.Contains(out, `driftgate capture <tag> --repeat 2, then driftgate baselines rebase <baseline> --from <tag> --reason "…" --allow-freeze), baseline local:`) ||
 		strings.Contains(out, "accept the new answer") || !strings.Contains(out, "news") ||
 		!strings.Contains(out, "warning: baseline local holds 1 response that came only after a retry: me-anonymous") {
 		t.Fatalf("rebase of a broken capture: %d\n%s\n%s", code, out, errOut)

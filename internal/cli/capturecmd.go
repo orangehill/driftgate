@@ -588,10 +588,10 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 // that cannot be written so (bytes that are not UTF-8) is not proposed;
 // why says so.
 func proposedFormat(f string) (text, why string) {
-	text = report.PrintableRegexp(f)
 	if !utf8.ValidString(f) {
 		return "", "the values hold bytes that are not UTF-8, which a format cannot name; allow-list the place by hand"
 	}
+	text = report.PrintableRegexp(f)
 	if _, err := regexp.Compile(text); err != nil {
 		return "", fmt.Sprintf("the format does not compile (%v); allow-list the place by hand", err)
 	}

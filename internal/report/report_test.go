@@ -413,7 +413,7 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 	for mode, want := range map[string]string{
 		"evolve": "1 request without a baseline, not compared: new; new requests join the baseline with driftgate accept",
 		"":       "new requests join the baseline with driftgate accept",
-		"freeze": `in mode freeze new requests join the baseline with driftgate capture new --repeat 2 --force, then driftgate baselines rebase local --from new --reason "…" --allow-freeze, which takes the whole capture, its drifts too`,
+		"freeze": `in mode freeze new requests join the baseline with driftgate capture <tag> --repeat 2, then driftgate baselines rebase local --from <tag> --reason "…" --allow-freeze, which takes the whole capture, its drifts too`,
 	} {
 		r.Mode = mode
 		if n := r.NoBaselineNote(); !strings.Contains(n, want) || mode == "freeze" && strings.Contains(n, "accept") {
@@ -421,7 +421,7 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 		}
 	}
 	r.Mode, r.NotCovered = "freeze", &NotCovered{Only: true}
-	if n := r.NoBaselineNote(); !strings.Contains(n, "a capture of the whole catalog (driftgate capture new --repeat 2 --force, then driftgate baselines rebase local") {
+	if n := r.NoBaselineNote(); !strings.Contains(n, "a capture of the whole catalog (driftgate capture <tag> --repeat 2, then driftgate baselines rebase local") {
 		t.Errorf("--only: %q", n)
 	}
 	// Next to a drift, even an expected one, no rebase command: it would
@@ -447,7 +447,8 @@ func TestNoBaselineAdviceByMode(t *testing.T) {
 		}
 		r.Mode = "freeze"
 		n := r.NoBaselineNote()
-		if strings.Contains(n, "join the baseline with driftgate accept") || strings.Contains(n, "--from next") || !strings.Contains(n, "in mode freeze accept is refused") {
+		if strings.Contains(n, "join the baseline with driftgate accept") || strings.Contains(n, "--from next") || !strings.Contains(n, "in mode freeze accept is refused") ||
+			!strings.Contains(n, `driftgate baselines rebase <baseline> --from <tag> --reason "…" --allow-freeze`) {
 			t.Errorf("%s against %s: %q", sides[0], sides[1], n)
 		}
 		r.Mode = "evolve"

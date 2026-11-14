@@ -226,7 +226,7 @@ func (r *Report) JoinAdvice() string {
 	case r.Baseline == "" || !ok:
 		// Not a capture against a baseline (two captures, two baselines):
 		// there is nothing to rebase on, and freeze refuses accept.
-		return "in mode freeze accept is refused; new requests join a baseline with driftgate capture <tag> --repeat 2 --force, then driftgate baselines rebase <baseline> --from <tag> --allow-freeze, after a capture compared against it shows no other drift"
+		return "in mode freeze accept is refused; new requests join a baseline with driftgate capture <tag> --repeat 2, then driftgate baselines rebase <baseline> --from <tag> --reason \"…\" --allow-freeze, after a capture compared against it shows no other drift"
 	}
 	// A rebase takes the whole capture: next to a drift it would take a
 	// regression into the baseline, so its command is given only when
@@ -238,15 +238,12 @@ func (r *Report) JoinAdvice() string {
 	}
 	// A baseline takes a capture that a second one of the same state
 	// agrees with, as run makes one; run's own capture is made once.
-	rebase := fmt.Sprintf(`driftgate capture %[2]s --repeat 2 --force, then driftgate baselines rebase %[1]s --from %[2]s --reason "…" --allow-freeze`, r.Baseline, rebaseTag)
+	rebase := `driftgate capture <tag> --repeat 2, then driftgate baselines rebase ` + r.Baseline + ` --from <tag> --reason "…" --allow-freeze`
 	if r.NotCovered != nil && r.NotCovered.Only {
 		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (" + rebase + "), which takes the whole capture, its drifts too"
 	}
 	return "in mode freeze new requests join the baseline with " + rebase + ", which takes the whole capture, its drifts too"
 }
-
-// rebaseTag is the capture JoinAdvice names for a rebase.
-const rebaseTag = "new"
 
 // ResentNote counts the requests sent again after a restore (Resent), so
 // that a resend is seen even when the list of notes is cut; empty when

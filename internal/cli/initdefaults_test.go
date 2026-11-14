@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,13 +21,8 @@ func TestInitDefaults(t *testing.T) {
 	}
 	// Laravel Dusk's routes log in as any user: a testing tool, never the
 	// API, and their error pages differ on every run.
-	dusk := false
-	for _, det := range detectors() {
-		for _, x := range det.exclude {
-			dusk = dusk || det.kind == "laravel" && x[0] == "/_dusk/*"
-		}
-	}
-	if !dusk {
+	laravel := slices.IndexFunc(detectors(), func(d detector) bool { return d.kind == "laravel" })
+	if laravel < 0 || !slices.ContainsFunc(detectors()[laravel].exclude, func(x [2]string) bool { return x[0] == "/_dusk/*" }) {
 		t.Error("init does not exclude /_dusk/* for Laravel")
 	}
 	excl := &routes.Exclusions{Routes: []routes.Exclusion{
