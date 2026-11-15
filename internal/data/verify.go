@@ -1,7 +1,6 @@
 package data
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -160,21 +159,29 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 				return nil, err
 			}
 		}
-		var err error
-		if x, err = newLeakIndex(opt.Key, det); err != nil {
-			return nil, err
-		}
 		dl, err := dialectFor(opt.Source.Driver)
 		if err != nil {
 			return nil, err
 		}
-		schema, err = inSnapshot(ctx, opt.Source, opt.Rules, func(c *sql.Conn, s *Schema) error {
-			return x.fill(func(fn func(PersonalValue) error) error {
-				return eachPersonal(ctx, c, dl, det, s, opt.Rules, x.ahead, fn)
-			}, nil)
+		// A try the server stops for a lock starts again from a new
+		// snapshot and a new index (retryRead).
+		err = retryRead(ctx, opt.Log, "source", func() error {
+			var err error
+			if x, err = newLeakIndex(opt.Key, det); err != nil {
+				return err
+			}
+			schema, err = inSnapshot(ctx, opt.Source, opt.Rules, func(c *sql.Conn, s *Schema) error {
+				return x.fill(func(fn func(PersonalValue) error) error {
+					return eachPersonal(ctx, c, dl, det, s, opt.Rules, x.ahead, fn)
+				}, nil)
+			})
+			if err != nil {
+				return fmt.Errorf("source: %w", err)
+			}
+			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("source: %w", err)
+			return nil, err
 		}
 	}
 	x.rules = opt.Rules
@@ -202,7 +209,25 @@ func Verify(ctx context.Context, opt VerifyOptions) (*VerifyReport, error) {
 		}()
 	}
 	if opt.Target != nil {
-		scan(&db, "database "+opt.Target.Name, func(sc *scanner) error { return sc.database(ctx, *opt.Target, log) })
+		// A scan the server stops for a lock starts again with a new
+		// scanner and snapshot (retryRead); its log is kept until it ends.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var buf bytes.Buffer
+			output := "database " + opt.Target.Name
+			db.err = retryRead(ctx, log, "target", func() error {
+				buf.Reset()
+				sc := x.scanner(output)
+				defer sc.close()
+				if err := sc.database(ctx, *opt.Target, &buf); err != nil {
+					return err
+				}
+				db.values, db.findings = sc.values, sc.findings()
+				return nil
+			})
+			log.Write(buf.Bytes())
+		}()
 	}
 	if opt.Dump != nil {
 		scan(&dump, "dump", func(sc *scanner) error { return sc.dump(opt.Dump, schema, log) })
@@ -1527,6 +1552,9 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 		heads[dl.insert(t, cols)] = &dumpTable{t: t, cols: cols, label: newRowLabel(t, cols)}
 	}
 	st := newStatements(r, schema.Driver)
+	if err := st.header(schema.Driver); err != nil {
+		return err
+	}
 	var last *dumpTable
 	for {
 		q, err := st.next()
@@ -1540,19 +1568,19 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 			s.value(schemaTable, objectName(q), "", q, true)
 			continue
 		}
-		i := strings.Index(q, " VALUES\n")
-		if i < 0 {
+		head, rows, ok := splitInsert(q)
+		if !ok {
 			return fmt.Errorf("an INSERT without rows: %.80s", q)
 		}
-		dt := heads[q[:i+len(" VALUES")]]
+		dt := heads[head]
 		if dt == nil {
-			return fmt.Errorf("an INSERT into a table the source does not have with these columns: %.120s", q[:i])
+			return fmt.Errorf("an INSERT into a table the source does not have with these columns: %.120s", strings.TrimSuffix(head, " VALUES"))
 		}
 		if last != nil && last != dt {
 			fmt.Fprintf(log, "%-40s verified %d rows\n", last.t.Name, last.n)
 		}
 		last = dt
-		if err := parseRows(q[i+len(" VALUES\n"):], len(dt.cols), schema.Driver, func(vals [][]byte) {
+		if err := parseRows(rows, len(dt.cols), schema.Driver, func(vals [][]byte) {
 			dt.n++
 			s.row(dt.t, dt.cols, dt.label, dt.n, vals)
 		}); err != nil {
@@ -1563,281 +1591,4 @@ func (s *scanner) dump(r io.Reader, schema *Schema, log io.Writer) error {
 		fmt.Fprintf(log, "%-40s verified %d rows\n", last.t.Name, last.n)
 	}
 	return nil
-}
-
-// statements reads a dump statement by statement, the way mysql and psql
-// split it: quotes, PostgreSQL dollar quotes, comments and the DELIMITER
-// lines of MySQL. A statement is at most one INSERT batch (about 1 MiB), so
-// memory stays bounded.
-type statements struct {
-	r      *bufio.Reader
-	driver string
-	delim  string
-	b      []byte
-}
-
-func newStatements(r io.Reader, driver string) *statements {
-	if driver == "mariadb" {
-		driver = MySQL
-	}
-	return &statements{r: bufio.NewReaderSize(r, 1<<20), driver: driver, delim: ";"}
-}
-
-func isIdentByte(c byte) bool {
-	return c == '_' || c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
-var errUnterminated = errors.New("the dump ends inside a quoted string or a comment")
-
-// next returns the next statement without its delimiter, or io.EOF.
-func (st *statements) next() (string, error) {
-	st.b = st.b[:0]
-	for {
-		// Between statements: blank lines, comment lines, DELIMITER.
-		p, err := st.r.Peek(1)
-		if err != nil {
-			return "", err
-		}
-		if c := p[0]; c == ' ' || c == '\n' || c == '\r' || c == '\t' {
-			st.r.ReadByte()
-			continue
-		}
-		if p, _ := st.r.Peek(2); string(p) == "--" {
-			if _, err := st.r.ReadString('\n'); err != nil {
-				return "", err
-			}
-			continue
-		}
-		if p, _ := st.r.Peek(10); st.driver == MySQL && string(p) == "DELIMITER " {
-			l, err := st.r.ReadString('\n')
-			if err != nil && err != io.EOF {
-				return "", err
-			}
-			st.delim = strings.TrimSpace(l[len("DELIMITER "):])
-			continue
-		}
-		break
-	}
-	var quote byte // ' " ` or $ for a dollar quote
-	var tag string // the dollar-quote tag, with its dollars
-	opened := 0    // where the text of the dollar quote starts
-	escapes := false
-	read := func() (byte, error) {
-		c, err := st.r.ReadByte()
-		if err == io.EOF {
-			err = errUnterminated
-		}
-		if err == nil {
-			st.b = append(st.b, c)
-		}
-		return c, err
-	}
-	for {
-		c, err := st.r.ReadByte()
-		if err == io.EOF {
-			if quote != 0 {
-				return "", errUnterminated
-			}
-			if s := strings.TrimSpace(string(st.b)); s != "" {
-				return s, nil
-			}
-			return "", io.EOF
-		}
-		if err != nil {
-			return "", err
-		}
-		st.b = append(st.b, c)
-		n := len(st.b)
-		switch {
-		case quote == '$':
-			if c == '$' && n-len(tag) >= opened && string(st.b[n-len(tag):]) == tag {
-				quote = 0
-			}
-			continue
-		case quote != 0:
-			if c == '\\' && escapes {
-				if _, err := read(); err != nil {
-					return "", err
-				}
-			} else if c == quote {
-				if p, _ := st.r.Peek(1); len(p) == 1 && p[0] == quote {
-					read()
-				} else {
-					quote = 0
-				}
-			}
-			continue
-		case c == '\'' || c == '"' || (c == '`' && st.driver == MySQL):
-			quote = c
-			// MySQL escapes with a backslash in strings; PostgreSQL only in E'…'.
-			escapes = c != '`' && (st.driver == MySQL ||
-				(c == '\'' && n >= 2 && (st.b[n-2] == 'E' || st.b[n-2] == 'e') && (n < 3 || !isIdentByte(st.b[n-3]))))
-			continue
-		case c == '$' && st.driver == Postgres && (n < 2 || !isIdentByte(st.b[n-2])):
-			// $tag$ or $$; not $1.
-			p, _ := st.r.Peek(64)
-			if end := strings.IndexByte(string(p), '$'); end >= 0 {
-				t := p[:end]
-				ok := len(t) == 0 || !(t[0] >= '0' && t[0] <= '9')
-				for _, b := range t {
-					ok = ok && isIdentByte(b)
-				}
-				if ok {
-					st.b = append(st.b, p[:end+1]...)
-					st.r.Discard(end + 1)
-					quote, tag, opened = '$', "$"+string(t)+"$", len(st.b)
-					continue
-				}
-			}
-		case c == '-' && n >= 2 && st.b[n-2] == '-':
-			// A comment to the end of the line (MySQL: "-- " with a space).
-			if p, _ := st.r.Peek(1); st.driver != MySQL || len(p) == 0 || p[0] == ' ' || p[0] == '\t' || p[0] == '\n' || p[0] == '\r' {
-				l, err := st.r.ReadString('\n')
-				st.b = append(st.b, l...)
-				if err != nil && err != io.EOF {
-					return "", err
-				}
-				continue
-			}
-		case c == '*' && n >= 2 && st.b[n-2] == '/':
-			for {
-				c, err := read()
-				if err != nil {
-					return "", err
-				}
-				if c == '/' && st.b[len(st.b)-2] == '*' {
-					break
-				}
-			}
-			continue
-		}
-		if len(st.b) >= len(st.delim) && string(st.b[len(st.b)-len(st.delim):]) == st.delim {
-			s := strings.TrimSpace(string(st.b[:len(st.b)-len(st.delim)]))
-			st.b = st.b[:0]
-			if s == "" {
-				continue
-			}
-			return s, nil
-		}
-	}
-}
-
-// parseRows reads the rows of an INSERT as Anonymize writes them:
-// (v, v, …),\n(…) with NULL, numbers, '…' strings (MySQL with backslash
-// escapes, PostgreSQL with doubled quotes) and MySQL X'…' bytes.
-func parseRows(s string, ncols int, driver string, fn func(vals [][]byte)) error {
-	mysql := driver != Postgres
-	vals := make([][]byte, 0, ncols)
-	var b []byte
-	i := 0
-	skip := func() {
-		for i < len(s) && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t') {
-			i++
-		}
-	}
-	for {
-		skip()
-		if i >= len(s) || s[i] != '(' {
-			return fmt.Errorf("a row does not start with ( at byte %d", i)
-		}
-		i++
-		vals = vals[:0]
-		b = b[:0]
-		for {
-			skip()
-			if i >= len(s) {
-				return errors.New("a row is not closed")
-			}
-			start := len(b)
-			switch {
-			case strings.HasPrefix(s[i:], "NULL"):
-				i += 4
-				vals = append(vals, nil)
-			case s[i] == '\'':
-				i++
-				for {
-					if i >= len(s) {
-						return errors.New("a string is not closed")
-					}
-					c := s[i]
-					if c == '\\' && mysql && i+1 < len(s) {
-						i += 2
-						switch e := s[i-1]; e {
-						case '0':
-							b = append(b, 0)
-						case 'n':
-							b = append(b, '\n')
-						case 'r':
-							b = append(b, '\r')
-						case 'Z':
-							b = append(b, 0x1a)
-						default:
-							b = append(b, e)
-						}
-						continue
-					}
-					if c == '\'' {
-						if i+1 < len(s) && s[i+1] == '\'' {
-							b = append(b, '\'')
-							i += 2
-							continue
-						}
-						i++
-						break
-					}
-					b = append(b, c)
-					i++
-				}
-				vals = append(vals, b[start:len(b):len(b)])
-			case mysql && strings.HasPrefix(s[i:], "X'"):
-				i += 2
-				end := strings.IndexByte(s[i:], '\'')
-				if end < 0 || end%2 != 0 {
-					return errors.New("a hex literal is not closed")
-				}
-				for j := i; j < i+end; j += 2 {
-					hi, lo := unhex(s[j]), unhex(s[j+1])
-					if hi < 0 || lo < 0 {
-						return errors.New("a hex literal has a non-hex digit")
-					}
-					b = append(b, byte(hi<<4|lo))
-				}
-				i += end + 1
-				vals = append(vals, b[start:len(b):len(b)])
-			default:
-				j := i
-				for j < len(s) && s[j] != ',' && s[j] != ')' {
-					j++
-				}
-				b = append(b, strings.TrimSpace(s[i:j])...)
-				i = j
-				vals = append(vals, b[start:len(b):len(b)])
-			}
-			skip()
-			if i >= len(s) {
-				return errors.New("a row is not closed")
-			}
-			if s[i] == ',' {
-				i++
-				continue
-			}
-			if s[i] != ')' {
-				return fmt.Errorf("unexpected %q in a row", s[i])
-			}
-			i++
-			break
-		}
-		if len(vals) != ncols {
-			return fmt.Errorf("a row has %d values, the table %d columns", len(vals), ncols)
-		}
-		fn(vals)
-		skip()
-		if i >= len(s) {
-			return nil
-		}
-		if s[i] != ',' {
-			return fmt.Errorf("unexpected %q after a row", s[i])
-		}
-		i++
-	}
 }

@@ -74,7 +74,7 @@ func (p *placer) json(path string, v *jsonx.Value) {
 	case jsonx.Array:
 		p.emit(PlaceArray, path)
 		var steps []string
-		if r := p.allow.ArrayKey(p.id, path); r != nil {
+		if r := p.allow.ArrayKey(p.id, path); r != nil && r.Key != "" {
 			_, steps, _ = itemKeys(r, v)
 		}
 		for i, item := range v.Items {

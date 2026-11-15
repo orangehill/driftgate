@@ -2,6 +2,7 @@ package data
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,15 +14,10 @@ import (
 	"github.com/orangehill/driftgate/internal/pii"
 )
 
-// DumpFormat is the version of the dump format; it changes when the same
-// input would give different bytes.
-const DumpFormat = 1
-
 // FileValue is one value of a file column: the path the application stored.
 type FileValue struct {
 	Table, Column string
-	Path          string            // the original value of the column
-	Options       map[string]string // the rule's options from classify.yaml
+	Path          string // the original value of the column
 }
 
 // FilePlaceholder makes a placeholder for the file a file column names (same
@@ -274,7 +270,7 @@ func (e *engine) row(ctx context.Context, t *Table, plans []*plan, vals [][]byte
 			if e.files == nil {
 				return errors.New("file placeholders are not available")
 			}
-			out, err = e.files.Placeholder(ctx, FileValue{Table: t.Name, Column: p.col.Name, Path: s, Options: p.rule.Options})
+			out, err = e.files.Placeholder(ctx, FileValue{Table: t.Name, Column: p.col.Name, Path: s})
 		default:
 			var n int
 			switch p.rule.Strategy {
@@ -365,44 +361,42 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 		return nil, err
 	}
 	defer srcDB.Close()
-	src, err := srcDB.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	defer src.Close()
-	if err := e.dl.session(ctx, src); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	if err := e.dl.snapshot(ctx, src); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	defer src.ExecContext(context.Background(), "ROLLBACK")
-	schema, err := e.dl.schema(ctx, src, opt.Source.Name)
-	if err != nil {
-		return nil, fmt.Errorf("source: %w", err)
-	}
-	if err := opt.Rules.Check(schema, opt.Files != nil); err != nil {
-		return nil, err
-	}
-	if err := opt.Rules.CheckSchema(schema, e.text.pii); err != nil {
-		return nil, err
-	}
-	var x *leakIndex
-	if opt.Index != nil {
-		if x, err = newLeakIndex(opt.Key, e.text.pii); err != nil {
-			return nil, err
+	// A Galera target refuses some sequences (1235): they are named before
+	// anything is written (galeraSequences, in the source phase).
+	galeraTarget := false
+	if opt.Target != nil && opt.Target.Driver == MySQL {
+		if galeraTarget, err = galeraNode(ctx, *opt.Target); err != nil {
+			return nil, fmt.Errorf("target: %w", err)
 		}
 	}
-	if err := e.r.prepare(ctx, src, e.dl, e.text.pii, schema, opt.Rules, x); err != nil {
-		return nil, fmt.Errorf("source: %w", err)
+	// A try the server stops for a lock (retryRead) starts again from a new
+	// snapshot and a new engine, index and sample, so nothing of it reaches
+	// the next try. A failed read closes its connection before the wait for
+	// the next try (readSource); a try that readFault fails after its read
+	// is closed by the next one. The deferred closure closes the last
+	// try's sr.
+	var sr *sourceRead
+	defer func() { sr.close() }()
+	var sampleLog bytes.Buffer
+	det := e.text.pii
+	err = retryRead(ctx, opt.Log, "source", func() error {
+		sr.close()
+		sampleLog.Reset()
+		var err error
+		sr, err = readSource(ctx, srcDB, opt, det, galeraTarget, &sampleLog)
+		return err
+	})
+	// The last try's sample is logged, also when the read failed.
+	opt.Log.Write(sampleLog.Bytes())
+	if err != nil {
+		return nil, err
 	}
-	if x != nil {
-		*opt.Index = VerifyIndex{key: opt.Key, x: x, schema: schema}
-	}
-	if p, ok := opt.Filter.(preparer); ok {
-		if err := p.prepare(ctx, src, e.dl, schema, opt.Rules, opt.Log); err != nil {
-			return nil, err
-		}
+	// The try's engine, whose stand-ins were reserved, replaces the
+	// pre-flight one.
+	e = sr.e
+	src, schema := sr.src, sr.schema
+	if sr.x != nil {
+		*opt.Index = VerifyIndex{key: opt.Key, x: sr.x, schema: schema}
 	}
 
 	var staging *Database
@@ -453,7 +447,7 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 	if opt.Dump != nil {
 		w := bufio.NewWriterSize(opt.Dump, 1<<20)
 		dump = &dumpSink{w: w}
-		fmt.Fprintf(w, "-- DriftGate anonymized data, dump format %d (%s)\n", DumpFormat, schema.Driver)
+		w.WriteString(dumpHeader(DumpFormat, schema.Driver))
 		fmt.Fprintf(w, "-- Pseudonymised: personal values replaced by rules in classify.yaml under a project key.\n\n")
 		for _, st := range schema.header {
 			if err := dump.exec(st); err != nil {
@@ -499,6 +493,78 @@ func Anonymize(ctx context.Context, opt Options) (rep *Report, err error) {
 	}
 	rep.Seconds = time.Since(start).Seconds()
 	return rep, nil
+}
+
+// sourceRead is one try of the source phase of Anonymize: a snapshot of
+// the source, its schema, the rules checked against it, the stand-ins
+// reserved for the originals (in e), the index of originals and the sample.
+type sourceRead struct {
+	e      *engine
+	src    *sql.Conn // open until close
+	schema *Schema
+	x      *leakIndex // nil without opt.Index
+}
+
+// readSource reads one try of the source phase from a connection of srcDB;
+// det: the detector every try shares. The filter's sample is logged to
+// sampleLog. With galeraTarget, the sequences a Galera target refuses are
+// named. Nothing is written. On an error the snapshot is ended and the
+// connection closed before it returns, and the sourceRead is nil.
+func readSource(ctx context.Context, srcDB *sql.DB, opt Options, det *pii.Detector, galeraTarget bool, sampleLog io.Writer) (_ *sourceRead, err error) {
+	s := &sourceRead{}
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
+	if s.e, err = newEngine(opt.Source.Driver, opt.Key, det, opt.Files); err != nil {
+		return nil, err
+	}
+	if s.src, err = srcDB.Conn(ctx); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if err := s.e.dl.session(ctx, s.src); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if err := s.e.dl.snapshot(ctx, s.src); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if s.schema, err = s.e.dl.schema(ctx, s.src, opt.Source.Name); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if err := opt.Rules.Check(s.schema, opt.Files != nil); err != nil {
+		return nil, err
+	}
+	if err := opt.Rules.CheckSchema(s.schema, s.e.text.pii); err != nil {
+		return nil, err
+	}
+	if opt.Index != nil {
+		if s.x, err = newLeakIndex(opt.Key, s.e.text.pii); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.e.r.prepare(ctx, s.src, s.e.dl, s.e.text.pii, s.schema, opt.Rules, s.x); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
+	if p, ok := opt.Filter.(preparer); ok {
+		if err := p.prepare(ctx, s.src, s.e.dl, s.schema, opt.Rules, sampleLog); err != nil {
+			return nil, err
+		}
+	}
+	if galeraTarget {
+		if err := galeraSequences(ctx, s.src, opt.Source.Name, s.schema, *opt.Target); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// close ends the snapshot and closes the connection, if any; s may be nil.
+func (s *sourceRead) close() {
+	if s != nil && s.src != nil {
+		s.src.ExecContext(context.Background(), "ROLLBACK")
+		s.src.Close()
+	}
 }
 
 // copy writes the schema and the rows to the sinks.
@@ -583,8 +649,10 @@ func (e *engine) copy(ctx context.Context, src *sql.Conn, schema *Schema, opt Op
 		if err != nil || len(rows) != 1 {
 			return nil, fmt.Errorf("sequence %s: %v", sq.name, err)
 		}
-		if err := out.exec(ctx, Stmt{SQL: sq.set(rows[0])}); err != nil {
-			return nil, err
+		for _, set := range sq.set(rows[0]) {
+			if err := out.exec(ctx, Stmt{SQL: set}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, st := range schema.after {

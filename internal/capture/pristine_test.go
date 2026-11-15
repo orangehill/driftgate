@@ -3,11 +3,15 @@ package capture
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
@@ -124,7 +128,7 @@ func TestSeedKeepsAdoption(t *testing.T) {
 	if err := Seed(ctx, p, SeedOptions{}); err != nil {
 		t.Fatalf("seed over the adopted copy: %v", err)
 	}
-	pf, err := readPristine(p, "db", server)
+	pf, _, err := readPristine(p, "db", server)
 	if err != nil || pf.Format != state.FingerprintFormat || len(pf.Fingerprint) != 1 {
 		t.Fatalf("record after the seed: %+v %v", pf, err)
 	}
@@ -144,7 +148,223 @@ func TestWorkingFollowsTheSetting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Seeded(context.Background(), p); !errors.Is(err, ErrConfig) || !strings.Contains(err.Error(), "names the database shop_wt42, but working is shop") {
+	if _, err := Seeded(context.Background(), p); !errors.Is(err, ErrConfig) || !strings.Contains(err.Error(), "state db: dsn: .env names the database shop_wt42, but working is shop") || strings.Contains(err.Error(), "dsn: dsn:") {
 		t.Errorf("Seeded: %v", err)
+	}
+}
+
+// TestStalePristineHint: a restore that leaves items different says so
+// with a hint when the pristine copy itself no longer matches its record
+// (a pristine copy seeded by an earlier release on MySQL 8), and without
+// one otherwise.
+func TestStalePristineHint(t *testing.T) {
+	servers := os.Getenv("DRIFTGATE_TEST_MYSQL")
+	if servers == "" {
+		t.Skip("DRIFTGATE_TEST_MYSQL not set")
+	}
+	for _, dsn := range strings.Split(servers, ",") {
+		t.Run(dsn[strings.Index(dsn, "@")+1:], func(t *testing.T) {
+			ctx := context.Background()
+			t.Setenv(config.EnvStore, t.TempDir())
+			t.Setenv("DG_STALE_DSN", dsn)
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+				State: map[string]config.Component{"db": {Driver: config.MySQL, DSN: config.Secret{Env: "DG_STALE_DSN"}, Working: "dgt_stale", Pristine: "dgt_stale_pristine"}}}, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, err := dbx.OpenMySQL(dsn, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			exec := func(stmts ...string) {
+				t.Helper()
+				for _, s := range stmts {
+					if _, err := root.Exec(s); err != nil {
+						t.Fatalf("%s: %v", s, err)
+					}
+				}
+			}
+			exec("DROP DATABASE IF EXISTS dgt_stale", "DROP DATABASE IF EXISTS dgt_stale_pristine", "CREATE DATABASE dgt_stale",
+				"CREATE TABLE dgt_stale.news (id INT PRIMARY KEY, title VARCHAR(20))", "INSERT INTO dgt_stale.news VALUES (1, 'a')")
+			t.Cleanup(func() {
+				root.Exec("DROP DATABASE IF EXISTS dgt_stale")
+				root.Exec("DROP DATABASE IF EXISTS dgt_stale_pristine")
+			})
+			if err := Seed(ctx, p, SeedOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			restore := func() error {
+				t.Helper()
+				tr, err := newTracker(ctx, p, nil, io.Discard, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tr.close()
+				return tr.restore(ctx)
+			}
+			exec("UPDATE dgt_stale.news SET title = 'b'")
+			if err := restore(); err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			// The pristine copy changed after its record was made.
+			exec("UPDATE dgt_stale_pristine.news SET title = 'c'", "UPDATE dgt_stale.news SET title = 'b'")
+			err = restore()
+			if err == nil || !strings.Contains(err.Error(), "left 1 items different") || !strings.Contains(err.Error(), "re-create the working database") {
+				t.Fatalf("restore from a stale pristine copy: %v", err)
+			}
+		})
+	}
+}
+
+// TestStaleHintMatches: no hint when the pristine copy matches its record.
+func TestStaleHintMatches(t *testing.T) {
+	c := pristineComp{f: state.Fingerprint{"table:a": "1", "table:b": "2"}}
+	if h := staleHint(context.Background(), c, state.Fingerprint{"table:a": "1", "table:b": "3"}, []string{"table:a"}); h != "" {
+		t.Errorf("hint for a matching item: %q", h)
+	}
+	if h := staleHint(context.Background(), c, state.Fingerprint{"table:a": "9"}, []string{"table:a"}); h == "" {
+		t.Error("no hint for a pristine copy that differs from its record")
+	}
+}
+
+type pristineComp struct {
+	state.Component
+	f state.Fingerprint
+}
+
+func (c pristineComp) PristineFingerprint(_ context.Context, items []string) (state.Fingerprint, error) {
+	return c.f.Subset(items), nil
+}
+
+// TestSeedWhileWriting: the application writes to the working database
+// after the seed copied it and before it recorded the copy. The record is
+// of the pristine copy, so a restore brings the working database back to
+// it; a record of the working database would hold the application's row
+// and fail every restore of the table until the next seed.
+func TestSeedWhileWriting(t *testing.T) {
+	var servers []string
+	if v := os.Getenv("DRIFTGATE_TEST_MYSQL"); v != "" {
+		servers = strings.Split(v, ",")
+	}
+	if v := os.Getenv("DRIFTGATE_TEST_POSTGRES"); v != "" {
+		servers = append(servers, v)
+	}
+	if len(servers) == 0 {
+		t.Skip("DRIFTGATE_TEST_MYSQL and DRIFTGATE_TEST_POSTGRES not set")
+	}
+	for _, dsn := range servers {
+		driver := config.MySQL
+		if strings.HasPrefix(dsn, "postgres") {
+			driver = config.Postgres
+		}
+		server, err := dbdsn.Server(driver, dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Run(server, func(t *testing.T) { testSeedWhileWriting(t, driver, dsn) })
+	}
+}
+
+func testSeedWhileWriting(t *testing.T, driver, dsn string) {
+	ctx := context.Background()
+	t.Setenv(config.EnvStore, t.TempDir())
+	t.Setenv("DG_SEEDW_DSN", dsn)
+	work, pristine := "dgt_seedw", "dgt_seedw_pristine"
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+		State: map[string]config.Component{"db": {Driver: driver, DSN: config.Secret{Env: "DG_SEEDW_DSN"}, Working: work, Pristine: pristine, Exclude: []string{"sessions"}}}}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, drop, users := dbx.OpenMySQL, "DROP DATABASE IF EXISTS ", "CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(50))"
+	if driver == config.Postgres {
+		open, users = dbx.OpenPostgres, "CREATE TABLE users (id serial PRIMARY KEY, email text)"
+	}
+	admin, err := open(dsn, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Close() })
+	dropAll := func() {
+		suffix := ""
+		if driver == config.Postgres {
+			suffix = " WITH (FORCE)"
+		}
+		for _, db := range []string{work, pristine} {
+			if _, err := admin.Exec(drop + db + suffix); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	dropAll()
+	t.Cleanup(dropAll)
+	if _, err := admin.Exec("CREATE DATABASE " + work); err != nil {
+		t.Fatal(err)
+	}
+	// The application's own connection, to the working database.
+	exec := func(stmts ...string) {
+		t.Helper()
+		app, err := open(dsn, work, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		for _, s := range stmts {
+			if _, err := app.Exec(s); err != nil {
+				t.Fatalf("%s: %v", s, err)
+			}
+		}
+	}
+	count := func() int {
+		t.Helper()
+		app, err := open(dsn, work, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		var n int
+		if err := app.QueryRow("SELECT COUNT(*) FROM users").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	exec(users, "CREATE TABLE sessions (id VARCHAR(40) PRIMARY KEY)", "INSERT INTO users (email) VALUES ('a@x'), ('b@x')")
+
+	// The table is copied (MySQL) or the database (PostgreSQL), and then
+	// the application writes.
+	var once sync.Once
+	chaos.At = func(point string) {
+		if point == "state.copy" {
+			once.Do(func() { exec("INSERT INTO users (email) VALUES ('written-during-seed@x')") })
+		}
+	}
+	t.Cleanup(func() { chaos.At = nil })
+	var out strings.Builder
+	if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	chaos.At = nil
+	if w := out.String(); !strings.Contains(w, "warning: db: the working database differs from the pristine copy just made in ") || !strings.Contains(w, "users]") {
+		t.Errorf("seed did not warn of the write during it:\n%s", out.String())
+	}
+	if n := count(); n != 3 {
+		t.Fatalf("%d users after the seed, want the 2 copied and the one written during it", n)
+	}
+
+	// A request writes; the restore after it brings back the pristine copy.
+	for i := range 2 {
+		exec("INSERT INTO users (email) VALUES ('request@x')", "INSERT INTO sessions VALUES ('s"+fmt.Sprint(i)+"')")
+		tr, err := newTracker(ctx, p, nil, io.Discard, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tr.restore(ctx)
+		tr.close()
+		if err != nil {
+			t.Fatalf("restore %d after a seed the application wrote during: %v", i, err)
+		}
+		if n := count(); n != 2 {
+			t.Fatalf("%d users after restore %d, want the 2 of the pristine copy", n, i)
+		}
 	}
 }

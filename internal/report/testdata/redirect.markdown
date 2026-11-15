@@ -6,10 +6,12 @@
 |---:|---:|---:|---:|---:|
 | 2 | 1 | 1 | 0 | 0 |
 
+> kinds: element-extra 3, text 2, element-missing 1, header-extra 1, header-missing 1, status 1
+
 #### What changed
 
-- [4] 1 drift in 1 request: header location is new
-- [6] 1 drift in 1 request: status changed (200 → 302)
+- [1] 1 drift in 1 request: header location is new
+- [2] 1 drift in 1 request: status changed (200 → 302)
    - 1 request: 200 → 302 to http://localhost:8080: `home`
 
 _6 more groups only in requests whose status changed, summarized there; `driftgate review` lists them._

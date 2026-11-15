@@ -341,14 +341,17 @@ func keepsOrder(driver string, t *Table) bool {
 type dumpSink struct{ w *bufio.Writer }
 
 func (s *dumpSink) exec(st Stmt) error {
+	// A comment to the end of the line (--, MySQL's #) on the last line
+	// would hide the delimiter: it goes on a line of its own.
+	sep := ""
+	if last := st.SQL[strings.LastIndexByte(st.SQL, '\n')+1:]; strings.Contains(last, "--") || strings.Contains(last, "#") {
+		sep = "\n"
+	}
 	if st.Compound {
-		_, err := s.w.WriteString("DELIMITER ;;\n" + st.SQL + ";;\nDELIMITER ;\n")
+		_, err := s.w.WriteString("DELIMITER ;;\n" + st.SQL + sep + ";;\nDELIMITER ;\n")
 		return err
 	}
-	if _, err := s.w.WriteString(st.SQL); err != nil {
-		return err
-	}
-	_, err := s.w.WriteString(";\n")
+	_, err := s.w.WriteString(st.SQL + sep + ";\n")
 	return err
 }
 

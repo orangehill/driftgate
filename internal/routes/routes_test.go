@@ -65,7 +65,7 @@ func TestCoverage(t *testing.T) {
 		{Route: "GET _debugbar/*", Reason: "development only"},
 		{Route: "/nothing/*", Reason: "stale"},
 	}}
-	c := Check(inv, cat, excl)
+	c := CheckWith(inv, cat, excl, nil)
 	if !reflect.DeepEqual(c.Requests["GET /api/news/latest"], []string{"latest"}) || !reflect.DeepEqual(c.Requests["GET /api/news/{id}"], []string{"news"}) {
 		t.Errorf("most specific route not chosen: %v", c.Requests)
 	}
@@ -134,12 +134,12 @@ func TestCoverageNeedsASucceedingRequest(t *testing.T) {
 	cat := &catalog.Catalog{Requests: []catalog.Request{
 		{ID: "nf", Method: "GET", Path: "/carts/{id}", Params: map[string]string{"id": "999999999"}, Source: &catalog.Source{Route: "GET /carts/{id}", Template: "not-found"}},
 	}}
-	c := Check(inv, cat, &Exclusions{})
+	c := CheckWith(inv, cat, &Exclusions{}, nil)
 	if len(c.Covered) != 0 || !reflect.DeepEqual(c.Uncovered, []string{"GET /carts/{id}"}) || !reflect.DeepEqual(c.Negative, c.Uncovered) {
 		t.Fatalf("covered %v uncovered %v negative %v", c.Covered, c.Uncovered, c.Negative)
 	}
 	cat.Requests = append(cat.Requests, catalog.Request{ID: "hand", Method: "GET", Path: "/carts/5"})
-	if c := Check(inv, cat, &Exclusions{}); len(c.Covered) != 1 {
+	if c := CheckWith(inv, cat, &Exclusions{}, nil); len(c.Covered) != 1 {
 		t.Fatalf("a hand-written request should cover: %+v", c)
 	}
 }

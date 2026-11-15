@@ -99,7 +99,7 @@ func TestFind(t *testing.T) {
 		{
 			dir:   "dotnet-pg",
 			dbs:   []string{"postgres localhost:5432/app app <- appsettings Api/Api.csproj ConnectionStrings:AppDb"},
-			notes: []string{"Legacy/Legacy.csproj: ConnectionStrings:DefaultConnection names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
+			notes: []string{"Legacy/Legacy.csproj: ConnectionStrings:DefaultConnection: " + errSQLServerLocalDB.Error()},
 			dsns:  []string{"postgres://app:S3cr-npgsql@localhost:5432/"},
 		},
 		{
@@ -165,6 +165,21 @@ func TestFind(t *testing.T) {
 				"postgres localhost:5434/svc svc <- yaml config.yaml ",
 			},
 			dsns: []string{"svc:S3cr-go-env@tcp(127.0.0.1:3306)/svc?parseTime=true", "postgres://svc:S3cr-go-yaml@localhost:5434/"},
+		},
+		{
+			dir:  "nestjs",
+			dbs:  []string{"postgres 127.0.0.1:5433/nest_dev nest <- dotenv .env "},
+			dsns: []string{"postgres://nest:S3cr-nest@127.0.0.1:5433/"},
+		},
+		{
+			dir:  "typeorm",
+			dbs:  []string{"mysql 127.0.0.1:3307/orm_dev orm <- dotenv .env "},
+			dsns: []string{"mysql://orm:S3cr-typeorm@127.0.0.1:3307/"},
+		},
+		{
+			dir:  "nest-database",
+			dbs:  []string{"postgres localhost:5434/api root <- dotenv .env "},
+			dsns: []string{"postgres://root:S3cr-boiler@localhost:5434/"},
 		},
 		{
 			dir:  "compose",

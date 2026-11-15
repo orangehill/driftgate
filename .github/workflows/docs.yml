@@ -1,0 +1,58 @@
+name: docs
+
+# The docs test: check markers loaded with DriftGate's own parsers, links and
+# anchors between the pages, sentence length, the line budget of every page
+# and the TOTAL, the help's links, a section for every command and every key
+# of driftgate.yaml. ci.yml ignores changes to documents alone; this workflow
+# runs on them, and needs no database. A code change runs the same tests in
+# ci.yml (go test ./...).
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "internal/cli/help.go"
+      - "internal/cli/topics.go"
+      - "internal/compare/**"
+      - "internal/config/**"
+      - "internal/catalog/**"
+      - "internal/docscheck/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "internal/cli/help.go"
+      - "internal/cli/topics.go"
+      - "internal/compare/**"
+      - "internal/config/**"
+      - "internal/catalog/**"
+      - "internal/docscheck/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Docs test
+        env:
+          DRIFTGATE_DOCS_STRICT: "1"   # sentence length, page budgets and TOTAL fail, not warn
+        run: |
+          go test -count=1 ./internal/docscheck/
+          go test -count=1 -run 'Help|Docs|Parity|Topic|DriftKinds' ./internal/cli/

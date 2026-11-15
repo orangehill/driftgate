@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 func TestDiff(t *testing.T) {
@@ -59,13 +62,13 @@ func mysqlServers(t *testing.T) []string {
 func mustExec(t *testing.T, db *sql.DB, stmts ...string) {
 	t.Helper()
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+		if err := RetryInTransition(func() error { _, err := db.Exec(s); return err }); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
 }
 
-func mysqlAdmin(t *testing.T, dsn, database string) *sql.DB {
+func mysqlAdmin(t testing.TB, dsn, database string) *sql.DB {
 	t.Helper()
 	cfg, err := mysqlDSN(dsn)
 	if err != nil {
@@ -128,6 +131,20 @@ func testMySQL(t *testing.T, dsn string) {
 	}
 	if len(fp0) != 5 { // 3 tables, 1 view, 1 trigger
 		t.Fatalf("fingerprint items: %v", fp0)
+	}
+	// What a seed records is the pristine copy's own fingerprint: the
+	// working database's while nothing wrote in between. Reading it leaves
+	// the working database's counters as they were.
+	last, tables := maps.Clone(m.last), m.tables
+	seeded, err := m.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(fp0, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	if !maps.Equal(m.last, last) || m.tables != tables {
+		t.Fatal("the seeded fingerprint changed the working database's counters")
 	}
 	rows0, err := m.Rows(ctx, []string{"table:news", "table:tags"})
 	if err != nil {
@@ -270,6 +287,18 @@ func testPostgres(t *testing.T, dsn string) {
 	if len(fp0) != 5 { // 2 tables, 1 view, 2 sequences
 		t.Fatalf("fingerprint items: %v", fp0)
 	}
+	seeded, err := p.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(fp0, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	// The pristine database accepts connections only while it is read.
+	var allow bool
+	if err := p.admin.QueryRow("SELECT datallowconn FROM pg_database WHERE datname = $1", pristine).Scan(&allow); err != nil || allow {
+		t.Fatalf("the pristine database accepts connections after its fingerprint: %v %v", allow, err)
+	}
 	rows0, err := p.Rows(ctx, []string{"table:public.news"})
 	if err != nil {
 		t.Fatal(err)
@@ -369,6 +398,23 @@ func TestRestoreSpeed(t *testing.T) {
 	}
 }
 
+// galeraSequence returns what a CREATE SEQUENCE needs on a Galera node to
+// keep MariaDB's default cache: an increment of 0 (auto_increment_increment),
+// as Galera creates no cached sequence with another one (1235).
+func galeraSequence(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	if isGalera(db) {
+		return " INCREMENT BY 0"
+	}
+	return ""
+}
+
+// isGalera reports whether the server is a Galera node (wsrep_on).
+func isGalera(db *sql.DB) bool {
+	var wsrep int
+	return db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0
+}
+
 // TestMySQLEdgeCases covers what a review found: columns with default
 // expressions, triggers during a restore, their SQL mode and firing order,
 // views on excluded tables, an object that changes kind, a dot in a table
@@ -389,7 +435,7 @@ func testMySQLEdgeCases(t *testing.T, dsn string) {
 	db := mysqlAdmin(t, dsn, work)
 	var version string
 	db.QueryRow("SELECT VERSION()").Scan(&version)
-	mariadb := strings.Contains(version, "MariaDB")
+	mariadb := dbx.IsMariaDB(version)
 	mustExec(t, db,
 		"CREATE TABLE ts (id INT PRIMARY KEY, created TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, changed TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
 		"INSERT INTO ts VALUES (1, '2020-01-01 00:00:00', '2020-01-02 00:00:00')",
@@ -409,7 +455,7 @@ func testMySQLEdgeCases(t *testing.T, dsn string) {
 		"INSERT INTO t (n) VALUES (1), (2)",
 	)
 	if mariadb {
-		mustExec(t, db, "CREATE SEQUENCE seq1")
+		mustExec(t, db, "CREATE SEQUENCE seq1"+galeraSequence(t, db))
 	}
 	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine, Exclude: []string{"excl*"}})
 	if err != nil {
@@ -885,7 +931,7 @@ func testMySQLWriteCheck(t *testing.T, dsn string, noTables bool) {
 	db := mysqlAdmin(t, dsn, work)
 	var version string
 	db.QueryRow("SELECT VERSION()").Scan(&version)
-	mariadb := strings.Contains(version, "MariaDB")
+	mariadb := dbx.IsMariaDB(version)
 	mustExec(t, db, writeCheckSchema...)
 	var log strings.Builder
 	m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Log: &log})
@@ -1028,7 +1074,7 @@ func testMySQLWriteCheck(t *testing.T, dsn string, noTables bool) {
 			sql   string
 			read  []string
 			alone bool
-		}{"CREATE SEQUENCE s", nil, false}, struct {
+		}{"CREATE SEQUENCE s" + galeraSequence(t, db), nil, false}, struct {
 			sql   string
 			read  []string
 			alone bool
@@ -1357,7 +1403,7 @@ func TestMySQLCountersOff(t *testing.T) {
 			var version string
 			root.QueryRow("SELECT VERSION()").Scan(&version)
 			want := "userstat is OFF"
-			if !strings.Contains(version, "MariaDB") {
+			if !dbx.IsMariaDB(version) {
 				want = "setup_objects"
 				mustExec(t, root, "INSERT INTO performance_schema.setup_objects (OBJECT_TYPE, OBJECT_SCHEMA, OBJECT_NAME, ENABLED, TIMED) VALUES ('TABLE', '"+work+"', '%', 'NO', 'NO')")
 				t.Cleanup(func() {
@@ -1392,6 +1438,185 @@ func TestMySQLCountersOff(t *testing.T) {
 				fresh.noTables = true
 				if d := Diff(got, mustFingerprint(t, fresh)); len(d) > 0 {
 					t.Errorf("after %s the fingerprint missed %v", w, d)
+				}
+			}
+		})
+	}
+}
+
+// TestRunErrorHidesSecrets: the error of a failed command names it with
+// its secrets as *** (seed, prepare, a command component's restore).
+func TestRunErrorHidesSecrets(t *testing.T) {
+	err := Run(context.Background(), t.TempDir(), []string{"sh", "-c", "exit 3", "PGPASSWORD=S3cret", "-pS3cret"}, nil, nil)
+	if err == nil || strings.Contains(err.Error(), "S3cret") || !strings.Contains(err.Error(), "PGPASSWORD=***") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// TestMySQLGaleraSequences (MariaDB Galera): a sequence the node cannot
+// create (a cache with an increment other than 0, another engine than
+// InnoDB) is named before the pristine copy is dropped, not copied as
+// another object; a cached sequence with INCREMENT BY 0 and a NOCACHE one
+// are copied and restored as they were.
+func TestMySQLGaleraSequences(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			if !isGalera(root) {
+				t.Skip("not a Galera node")
+			}
+			work, pristine := "dgt_galseq", "dgt_galseq_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db, "CREATE SEQUENCE auto START WITH 5 INCREMENT BY 0 CACHE 10", "CREATE SEQUENCE plain START WITH 5 NOCACHE",
+				"CREATE TABLE t (id INT PRIMARY KEY)")
+			// Only a session without wsrep makes what the node refuses.
+			c, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []string{"SET SESSION wsrep_on = 0", "CREATE SEQUENCE cached CACHE 10", "CREATE SEQUENCE aria NOCACHE ENGINE=Aria", "SET SESSION wsrep_on = 1"} {
+				if _, err := c.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			c.Close()
+
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			err = m.Seed(ctx)
+			if err == nil || !strings.Contains(err.Error(), "cached (CACHE 10, INCREMENT BY 1)") || !strings.Contains(err.Error(), "aria (ENGINE=Aria)") ||
+				strings.Contains(err.Error(), "auto") || strings.Contains(err.Error(), "plain") {
+				t.Fatalf("seed: %v", err)
+			}
+			var n int
+			root.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", pristine).Scan(&n)
+			if n != 0 {
+				t.Fatal("a refused seed made the pristine copy")
+			}
+
+			mustExec(t, db, "DROP SEQUENCE cached", "DROP SEQUENCE aria")
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			fp0 := mustFingerprint(t, m)
+			mustExec(t, db, "SELECT NEXTVAL(auto)", "SELECT NEXTVAL(plain)", "SELECT NEXTVAL(plain)")
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if !contains(changed, "sequence:auto") || !contains(changed, "sequence:plain") {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			var next int64
+			db.QueryRow("SELECT NEXTVAL(plain)").Scan(&next)
+			if next != 5 {
+				t.Fatalf("plain goes on at %d, want 5", next)
+			}
+		})
+	}
+}
+
+// TestMySQLSequenceCycles (MariaDB, Galera too): a sequence that has cycled
+// is seeded and restored with its count of cycles (cycle_count), which the
+// fingerprint reads: the pristine copy equals the working database, and a
+// restore makes it as it was, going on at the same value.
+func TestMySQLSequenceCycles(t *testing.T) {
+	for _, dsn := range mysqlServers(t) {
+		u, _ := url.Parse(dsn)
+		t.Run(u.Host, func(t *testing.T) {
+			ctx := context.Background()
+			root := mysqlAdmin(t, dsn, "")
+			var version string
+			root.QueryRow("SELECT VERSION()").Scan(&version)
+			if !dbx.IsMariaDB(version) {
+				t.Skip("sequences are MariaDB's")
+			}
+			work, pristine := "dgt_seqcycle", "dgt_seqcycle_pristine"
+			mustExec(t, root, "DROP DATABASE IF EXISTS "+work, "DROP DATABASE IF EXISTS "+pristine, "CREATE DATABASE "+work)
+			t.Cleanup(func() { root.Exec("DROP DATABASE IF EXISTS " + work); root.Exec("DROP DATABASE IF EXISTS " + pristine) })
+			db := mysqlAdmin(t, dsn, work)
+			mustExec(t, db,
+				"CREATE SEQUENCE up MINVALUE 1 MAXVALUE 3 NOCACHE CYCLE",
+				"CREATE SEQUENCE down START WITH -1 MINVALUE -3 MAXVALUE -1 INCREMENT BY -1 NOCACHE CYCLE",
+				"CREATE SEQUENCE cached MINVALUE 1 MAXVALUE 30 CACHE 5 CYCLE"+galeraSequence(t, db))
+			nextvals := func(seq string, n int) {
+				for i := 0; i < n; i++ {
+					mustExec(t, db, "SELECT NEXTVAL("+seq+")")
+				}
+			}
+			state := func(database, seq string) (next, cycles int64) {
+				t.Helper()
+				if err := root.QueryRow("SELECT next_not_cached_value, cycle_count FROM "+database+"."+seq).Scan(&next, &cycles); err != nil {
+					t.Fatal(err)
+				}
+				return next, cycles
+			}
+			nextvals("up", 8)      // two cycles, next 3
+			nextvals("down", 4)    // one cycle
+			nextvals("cached", 40) // one cycle at least
+			m, err := NewMySQL(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Seed(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for _, seq := range []string{"up", "down", "cached"} {
+				wn, wc := state(work, seq)
+				pn, pc := state(pristine, seq)
+				if wc == 0 || wn != pn || wc != pc {
+					t.Errorf("%s: working %d/%d, pristine %d/%d", seq, wn, wc, pn, pc)
+				}
+			}
+			c, err := m.session(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			fp0, err := m.fingerprint(ctx, c, work, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fpPristine, err := m.fingerprint(ctx, c, pristine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, fpPristine); len(d) > 0 {
+				t.Fatalf("pristine copy differs: %v", d)
+			}
+			wantNext := map[string]int64{}
+			for _, seq := range []string{"up", "down"} {
+				wantNext[seq], _ = state(work, seq)
+			}
+			nextvals("up", 3)
+			nextvals("down", 1)
+			nextvals("cached", 30)
+			changed := Diff(fp0, mustFingerprint(t, m))
+			if len(changed) != 3 {
+				t.Fatalf("changed %v", changed)
+			}
+			if err := m.Restore(ctx, changed); err != nil {
+				t.Fatal(err)
+			}
+			if d := Diff(fp0, mustFingerprint(t, m)); len(d) > 0 {
+				t.Fatalf("after restore still different: %v", d)
+			}
+			for seq, want := range wantNext {
+				var got int64
+				db.QueryRow("SELECT NEXTVAL(" + seq + ")").Scan(&got)
+				if got != want {
+					t.Errorf("%s goes on at %d, want %d", seq, got, want)
 				}
 			}
 		})

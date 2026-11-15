@@ -22,7 +22,6 @@ import (
 	"github.com/orangehill/driftgate/internal/capture"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
-	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/routes"
 	"github.com/orangehill/driftgate/internal/secret"
@@ -143,7 +142,9 @@ type setup struct {
 	check    []string // what the user must check by hand
 	database string   // the database line of the summary
 	adopted  string   // the main worktree whose project this run took (relative), if any
+	copied   string   // what became of the pristine copy, for the summary
 	answered []string // what answered at each address
+	keyed    bool     // the key step ran already, before a new project was written
 }
 
 func setupCmd(args []string, out, errOut io.Writer) (int, error) {
@@ -162,12 +163,12 @@ func setupCmd(args []string, out, errOut io.Writer) (int, error) {
 	if len(pos) != 0 {
 		return 0, usageErr("setup")
 	}
-	switch *driver {
-	case "", config.MySQL, config.Postgres:
-	case "mariadb":
-		*driver = config.MySQL
-	default:
-		return 0, configErr("setup: --driver must be mysql or postgres, got %q", *driver)
+	if *driver != "" {
+		d := driverOf(*driver)
+		if d == "" {
+			return 0, configErr("setup: --driver must be %s, got %q", driverChoices, *driver)
+		}
+		*driver = d
 	}
 	if *appURL != "" {
 		if err := checkURL(*appURL); err != nil {
@@ -213,9 +214,11 @@ func (s *setup) run(cfg, project, mode, driver, database, appURL string) (int, e
 		return 0, configErr("%v", err)
 	}
 	d, _ := detect(p.Root, p.Project, nil)
-	s.step("key")
-	if err := s.key(p); err != nil {
-		return 0, err
+	if !s.keyed {
+		s.step("key")
+		if err := s.key(p); err != nil {
+			return 0, err
+		}
 	}
 	if p, err = s.ownDatabase(p, path); err != nil {
 		return 0, err
@@ -321,6 +324,18 @@ func (s *setup) project(ctx context.Context, cfg, project, mode, driver, databas
 	for _, c := range s.chosen {
 		fmt.Fprintln(s.out, "chosen: "+c)
 	}
+	// The key step runs before the project's files are written, so a key
+	// that cannot be read or made leaves none of them behind. The ignore
+	// entries come first and may stay: a key file's folder must be ignored
+	// before the key is made.
+	if err := dr.p.Layout.WriteIgnores(); err != nil {
+		return "", envErr(err)
+	}
+	s.step("key")
+	if err := s.key(dr.p); err != nil {
+		return "", err
+	}
+	s.keyed = true
 	if err := dr.write(); err != nil {
 		return "", envErr(err)
 	}
@@ -349,7 +364,7 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 			return configErr("setup: --driver and --database complete a database setting of the project, and none was found; add state: to the configuration by hand")
 		}
 		fmt.Fprintln(s.out, "no database settings found: without state:, requests that change data are not sent")
-		s.check = append(s.check, "no database settings found: if the application has a database, add state: (configuration.md#state)")
+		s.check = append(s.check, "no database settings found: if the application has a database, add state: ("+docsBase()+"databases.md)")
 		return nil
 	}
 	var options []string
@@ -388,25 +403,35 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 	if db.Note != "" {
 		s.check = append(s.check, where(db)+": "+db.Note)
 	}
+	if err := checkSQLiteDriver(db, driver); err != nil {
+		return err
+	}
 	if driver != "" {
 		db.Driver = driver
 	}
 	if db.Driver == "" {
-		v, err := s.a.value("Which database server is it, mysql or postgres?", "the settings do not say which database server it is: pass --driver mysql or --driver postgres", func(v string) error {
-			if v != config.MySQL && v != config.Postgres {
-				return errors.New("mysql or postgres")
+		v, err := s.a.value("Which database is it, "+driverChoices+"?", "the settings do not say which database it is: pass --driver with "+driverChoices, func(v string) error {
+			if driverOf(v) == "" {
+				return errors.New(driverChoices)
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		db.Driver = v
+		db.Driver = driverOf(v)
 	}
-	if database != "" {
+	if err := checkSQLiteDriver(db, db.Driver); err != nil {
+		return err
+	}
+	if db.Driver == appconf.SQLite {
+		if err := s.sqliteDatabase(&db, database); err != nil {
+			return err
+		}
+	} else if database != "" {
 		db.Name = database
 	}
-	if db.Name == "" && !s.a.yes {
+	if db.Name == "" && db.Driver != appconf.SQLite && !s.a.yes {
 		v, err := s.a.value("Which database does the application use (its name)?", "the settings name no database: pass --database <name>", databaseName)
 		if err != nil {
 			return err
@@ -430,9 +455,18 @@ func (s *setup) chooseDatabase(dr *draft, driver, database string) error {
 	if db.Ref.IsZero() {
 		s.check = append(s.check, fmt.Sprintf("%s cannot be read from a file: set %s to the DSN before DriftGate runs (dsn: { env: %s })", where(db), dsnEnv, dsnEnv))
 	}
+	if workingOf(db) != "" {
+		if err := s.askTables(dr, db); err != nil {
+			return err
+		}
+	}
 	dr.db, dr.enable = &db, true
-	if db.Name == "" {
-		s.check = append(s.check, fmt.Sprintf("state: is commented out: the settings name no database the application uses; set working: and uncomment it in %s (or start over with --database <name>), then run %s", rel(dr.p.Root, dr.p.Layout.Config), s.resume))
+	if workingOf(db) == "" {
+		what := "name"
+		if db.Driver == appconf.SQLite {
+			what = "file"
+		}
+		s.check = append(s.check, fmt.Sprintf("state: is commented out: the settings name no database the application uses; set working: and uncomment it in %s (or start over with --database <%s>), then run %s", rel(dr.p.Root, dr.p.Layout.Config), what, s.resume))
 		fmt.Fprintf(s.out, "state: db %s, commented out: no database named\n", describe(db))
 		return nil
 	}
@@ -575,21 +609,32 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	}
 	s.step("pristine copy")
 	found := appconf.Find(p.Root, os.LookupEnv)
-	var lines, grants []string
+	var lines, grants, notes []string
 	for _, name := range names {
 		c := p.State[name]
+		if c.Driver == config.SQLite {
+			if err := s.sqliteMissing(p, name, c); err != nil {
+				return err
+			}
+		}
 		if _, err := c.ReadDSN(ctx, p.Root); err != nil {
 			return dsnErr(c.DSN, err, fmt.Errorf("state %s: dsn: %v\nfix it in %s (or the setting it names), then run %s: it goes on from here", name, err, rel(p.Root, path), s.resume))
 		}
 		d, known := setting(found, c)
-		if known {
-			s.database = describe(d)
-		} else {
-			s.database = fmt.Sprintf("%s %s (dsn: %s)", c.Driver, c.Working, flow(c.DSN))
+		s.database = stateSummary(d, known, c)
+		pristine := c.Pristine
+		if c.Driver == config.SQLite && pristine == "" {
+			pristine = "file in DriftGate's store" // capture.sqliteStorePristine
 		}
-		lines = append(lines, fmt.Sprintf("%s, a copy of %s", c.Pristine, c.Working))
-		if !known || !canCreate(d) {
-			grants = append(grants, grant(c, d.User))
+		lines = append(lines, fmt.Sprintf("%s, a copy of %s", pristine, c.Working))
+		if g := grant(c, d.User); g != "" && (!known || !canCreate(d)) {
+			grants = append(grants, g)
+			if c.Driver == config.SQLServer {
+				notes = append(notes, sqlServerNarrow(c, d.User), sqlServerFast(d.User))
+			}
+		}
+		if c.Driver == config.SQLServer {
+			notes = append(notes, sqlServerCopy(c))
 		}
 	}
 	if len(names) > 1 {
@@ -601,10 +646,14 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	}
 	if seeded {
 		fmt.Fprintln(s.out, "the pristine copy is there already; kept")
+		s.copied = "the one made before is kept; driftgate seed --skip-commands makes it again of the data as it is then (driftgate seed runs the seed: commands first)"
 		return nil
 	}
 	if len(grants) > 0 {
 		fmt.Fprintln(s.out, "the pristine copy needs a user that may create a database; if the user of the setting may not, grant it (as an administrator): "+strings.Join(grants, " "))
+	}
+	for _, n := range notes {
+		fmt.Fprintln(s.out, n)
 	}
 	q := "Make the pristine copy now? It creates the database " + strings.Join(lines, "; the database ") + ", and every seed replaces it"
 	ok, err := s.a.confirm(q, "pass --yes to make it")
@@ -617,6 +666,9 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 	_, err = s.interruptible(func() (int, error) {
 		return 0, seedCmd([]string{"--config", path, "--skip-commands"}, s.out, s.errOut)
 	})
+	if err == nil {
+		s.copied = "the data in the database as it was now: every capture starts from it; after the data changes, driftgate seed --skip-commands takes it as it is again (driftgate seed runs the seed: commands first)"
+	}
 	if err != nil && len(grants) > 0 && denied().MatchString(err.Error()) {
 		var e *exitError
 		code := ExitEnv
@@ -630,10 +682,12 @@ func (s *setup) pristine(ctx context.Context, p *config.Project, path string) er
 
 // denied matches the errors of a user without the right to create a
 // database: MySQL and MariaDB 1044 (database), 1142 (table) and 1227
-// (privilege), PostgreSQL 42501.
+// (privilege), PostgreSQL 42501, SQL Server's permission errors (229,
+// 230, 262, 297, 3110, 5011, 15247) and those of a login without a user
+// in the working database (916, 4060, 4063).
 // (A pattern built on first use: setup's code must not slow the start of
 // every other command.)
-var denied = lazy.Regexp(`Error (1044|1142|1227)\b|SQLSTATE 42501`)
+var denied = lazy.Regexp(`Error (1044|1142|1227)\b|SQLSTATE 42501|mssql: [^\n]*\((229|230|262|297|916|3110|4060|4063|5011|15247)\)`)
 
 // interruptible runs a command of setup's that handles the stop signals
 // itself (seed, run): when one came, setup says how to go on rather than
@@ -672,8 +726,8 @@ func (s *setup) noState(p *config.Project, path string) (*config.Project, error)
 	text := string(raw)
 	at := strings.Index(text, stateOff)
 	if at < 0 || (at > 0 && text[at-1] != '\n') {
-		return nil, configErr("the project's settings name a database (%s), and %s has no state: database: requests would run without restoring it. Add state: (configuration.md#state), or uncomment the block driftgate init wrote, then run %s",
-			describe(dbs[0]), rel(p.Root, path), s.resume)
+		return nil, configErr("the project's settings name a database (%s), and %s has no state: database: requests would run without restoring it. Add state: (%s), or uncomment the block driftgate init wrote, then run %s",
+			describe(dbs[0]), rel(p.Root, path), docsBase()+"databases.md", s.resume)
 	}
 	s.step("state")
 	ok, err := s.a.confirm("Turn on state: in "+rel(p.Root, path)+", the database driftgate init found and wrote commented out?", "pass --yes to turn it on")
@@ -723,13 +777,49 @@ func setting(found appconf.Found, c config.Component) (appconf.Database, bool) {
 	return appconf.Database{}, false
 }
 
-// grant is the statement that lets user create the pristine copy of c.
+// stateSummary describes a state component for setup's summary: as the
+// setting it was made from (d, when known), with the component's driver
+// (which --driver or an answer gave where the setting names none).
+func stateSummary(d appconf.Database, known bool, c config.Component) string {
+	if !known {
+		return fmt.Sprintf("%s %s (dsn: %s)", c.Driver, c.Working, flow(c.DSN))
+	}
+	if d.Driver == "" {
+		d.Driver = c.Driver
+	}
+	return describe(d)
+}
+
+// driverChoices names the drivers setup takes.
+const driverChoices = "mysql, postgres, sqlite or sqlserver"
+
+// driverOf is the driver a --driver value or an answer names: mariadb is
+// mysql, mssql is sqlserver; "" for none DriftGate has.
+func driverOf(v string) string {
+	switch v {
+	case config.MySQL, "mariadb":
+		return config.MySQL
+	case config.Postgres, config.SQLite:
+		return v
+	case config.SQLServer, "mssql":
+		return config.SQLServer
+	}
+	return ""
+}
+
+// grant is the statement that lets user create the pristine copy of c; ""
+// when there is none to grant (an SQLite file).
 func grant(c config.Component, user string) string {
 	if user == "" {
 		user = "<user>"
 	}
-	if c.Driver == config.Postgres {
+	switch c.Driver {
+	case config.Postgres:
 		return fmt.Sprintf(`ALTER ROLE "%s" CREATEDB;`, user)
+	case config.SQLite:
+		return ""
+	case config.SQLServer:
+		return sqlServerGrant(c, user)
 	}
 	return fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%%';", c.Pristine, user)
 }
@@ -798,7 +888,7 @@ func answers(ctx context.Context, t config.Target) (string, error) {
 	if err != nil || u.Host == "" {
 		return "", fmt.Errorf("%q is not an address", t.BaseURL)
 	}
-	allow, err := httpx.NewAllow(t.AllowHosts, false)
+	allow, err := t.Allow(false)
 	if err != nil {
 		return "", err
 	}
@@ -840,7 +930,11 @@ func (s *setup) summary(p *config.Project, d detected) {
 		row("framework", "none recognised")
 	}
 	if s.database != "" {
-		row("database", s.database+"; the password stays where it is")
+		note := "; the password stays where it is"
+		if sqliteOnly(p) {
+			note = ""
+		}
+		row("database", s.database+note)
 	} else {
 		row("database", "none (no state:)")
 	}
@@ -852,6 +946,14 @@ func (s *setup) summary(p *config.Project, d detected) {
 	}
 	if len(s.answered) > 0 {
 		urls = s.answered
+	}
+	if s.copied != "" {
+		row("pristine", s.copied)
+	}
+	if p.Mode == config.Evolve {
+		row("mode", "evolve: a drift may be accepted with a reason (driftgate accept)")
+	} else {
+		row("mode", "freeze: every drift fails, and driftgate accept is refused; mode: evolve in "+rel(p.Root, p.Layout.Config)+" lets a drift be accepted with a reason")
 	}
 	row("app", strings.Join(urls, ", "))
 	row("routes", s.coverage(p))
@@ -870,7 +972,7 @@ func (s *setup) summary(p *config.Project, d detected) {
 	}
 	check := s.check
 	if len(databases(p)) > 0 {
-		check = append(check, "guards: the application must not send mail or payments while DriftGate sends requests that change data (configuration.md: seed, prepare, guards)")
+		check = append(check, "guards: the application must not send mail or payments while DriftGate sends requests that change data ("+docsBase()+"configuration.md#seed-prepare-and-guards)")
 	}
 	s.printCheck(check)
 	fmt.Fprintln(s.out, "\nnext: driftgate run after every upgrade step compares with the baseline")
@@ -901,10 +1003,14 @@ func (s *setup) coverage(p *config.Project) string {
 	if err != nil {
 		return err.Error()
 	}
-	c := routes.Check(inv, cat, excl)
+	answers, _ := readAnswers(p, "local", nil) // without it, the catalog alone
+	c := routes.CheckWith(inv, cat, excl, answers)
 	line := fmt.Sprintf("%d found: %d covered, %d excluded, %d uncovered", len(inv.Routes), len(c.Covered), len(c.Excluded), len(c.Uncovered))
 	if len(c.Uncovered) > 0 {
 		s.check = append(s.check, fmt.Sprintf("uncovered routes (%d): driftgate coverage lists them; give their parameters under params: or exclude them with a reason", len(c.Uncovered)))
+	}
+	if n := len(c.Health.Failed); n > 0 {
+		s.check = append(s.check, fmt.Sprintf("requests meant to succeed that failed in the baseline (%d): driftgate coverage lists them; an error the baseline keeps passes every comparison", n))
 	}
 	return line
 }

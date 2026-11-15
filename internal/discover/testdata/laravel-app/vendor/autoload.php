@@ -1,6 +1,8 @@
 <?php
 // A stand-in for Laravel, just enough for laravel_rules.php: a router with
-// routes to controller methods, an invokable controller and a closure.
+// routes to controller methods, an invokable controller and closures, one
+// of them with a form request.
+require __DIR__ . '/illuminate.php';
 spl_autoload_register(function ($class) {
     $prefix = 'App\\';
     if (strpos($class, $prefix) === 0) {
@@ -42,4 +44,5 @@ class FakeApp implements ArrayAccess
     public function offsetSet($key, $value): void {}
     public function offsetUnset($key): void {}
     public function getRoutes() { return $this->routes; }
+    public function call($callable) { return call_user_func($callable); }
 }

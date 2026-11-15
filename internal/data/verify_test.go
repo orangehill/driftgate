@@ -220,6 +220,20 @@ func TestStatementsAndRows(t *testing.T) {
 	}
 }
 
+// TestParseRowsEmptyIsNotNull: an empty string read before any other
+// quoted value is an empty value, not NULL.
+func TestParseRowsEmptyIsNotNull(t *testing.T) {
+	for _, driver := range []string{MySQL, Postgres} {
+		var got [][]byte
+		if err := parseRows("('', NULL, 1)", 3, driver, func(v [][]byte) { got = append(got, v...) }); err != nil {
+			t.Fatal(err)
+		}
+		if got[0] == nil || len(got[0]) != 0 || got[1] != nil || string(got[2]) != "1" {
+			t.Errorf("%s: %q (nil: %v, %v)", driver, got, got[0] == nil, got[1] == nil)
+		}
+	}
+}
+
 // TestVerifyScanSpeed measures the scan of text without findings over an
 // index of originals: DRIFTGATE_TEST_SCAN_ORIGINALS sets how many names
 // (each with an e-mail address; default 5000), go test -run ScanSpeed -v.

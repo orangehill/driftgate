@@ -12,11 +12,15 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/appconf"
 	"github.com/orangehill/driftgate/internal/config"
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
+	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 	"github.com/orangehill/driftgate/internal/state"
 )
@@ -77,11 +81,24 @@ type pristineFile struct {
 	Format      int               `json:"format,omitempty"` // state.FingerprintFormat; 0 in a file of format 1
 	Component   string            `json:"component"`
 	Driver      string            `json:"driver"`
-	Server      string            `json:"server,omitempty"` // dbdsn.Server; none in a file of an earlier release
+	Server      string            `json:"server,omitempty"` // serverOf; none in a file of an earlier release
 	Working     string            `json:"working"`
 	Pristine    string            `json:"pristine"`
 	Created     string            `json:"created"`
+	PristineID  string            `json:"pristine_id,omitempty"` // pristineIdentifier; none for other components and in a file of an earlier release
 	Fingerprint state.Fingerprint `json:"fingerprint"`
+	// RestoreOnly is the component's restore_only at the seed, sorted, and
+	// RestoreOnlyFingerprint the fingerprint of those tables in the
+	// pristine copy (state.RestoreOnly); a capture with another
+	// restore_only asks for a seed.
+	RestoreOnly            []string          `json:"restore_only,omitempty"`
+	RestoreEmpty           []string          `json:"restore_empty,omitempty"` // as RestoreOnly, for restore_empty (their fingerprint is in RestoreOnlyFingerprint)
+	RestoreOnlyFingerprint state.Fingerprint `json:"restore_only_fingerprint,omitempty"`
+	// Schema is the pristine copy's schema at the seed (state.Schemer) in
+	// SchemaFormat, which spares checkSchema its read when the working
+	// schema equals it.
+	Schema       state.Fingerprint `json:"schema,omitempty"`
+	SchemaFormat int               `json:"schema_format,omitempty"`
 }
 
 // pristinePath is the pristine file of a database component on a server.
@@ -117,21 +134,33 @@ func pristinePath(p *config.Project, name, server string) (string, error) {
 }
 
 // readPristine reads the record of a component's pristine copy on a server
-// (see pristinePath, which also takes over a record of an earlier release).
-func readPristine(p *config.Project, name, server string) (pristineFile, error) {
+// (see pristinePath, which also takes over a record of an earlier release),
+// and returns its path.
+func readPristine(p *config.Project, name, server string) (pristineFile, string, error) {
 	var pf pristineFile
 	path, err := pristinePath(p, name, server)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return pf, err
+		return pf, path, err
 	}
 	if err := json.Unmarshal(raw, &pf); err != nil {
-		return pf, fmt.Errorf("%s: %w", path, err)
+		return pf, path, fmt.Errorf("%s: %w", path, err)
 	}
-	return pf, nil
+	return pf, path, nil
+}
+
+// removeRecords removes the record of a pristine copy (path) and the
+// schemaRecord beside it.
+func removeRecords(path string) error {
+	for _, f := range []string{path, schemaPath(path)} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // recorded reports whether DriftGate's record of a pristine copy names the
@@ -139,7 +168,7 @@ func readPristine(p *config.Project, name, server string) (pristineFile, error) 
 // even without the mark seeds now leave in it (state.Options.AdoptPristine).
 // A record of an earlier release is found too: pristinePath takes it over first.
 func recorded(p *config.Project, name, server string, sc config.Component) bool {
-	pf, err := readPristine(p, name, server)
+	pf, _, err := readPristine(p, name, server)
 	return err == nil && pf.Driver == sc.Driver && pf.Working == sc.Working && pf.Pristine == sc.Pristine
 }
 
@@ -149,10 +178,31 @@ type tracker struct {
 	time     *Time
 	comps    []state.Component
 	pristine states              // fingerprint of the pristine copy, per database component
+	ro       states              // fingerprint of the restore_only tables of the pristine copy, per component that has them
 	formats  map[string]int      // the format the pristine fingerprints were recorded in
 	dirty    map[string][]string // changed since the last restore; nil: unknown
 	rows     bool                // some component tracks rows
-	out      io.Writer
+	// values names the values requests write into tracked rows; nil: not
+	// recorded (no project key). ignore are row_tracking's ignored
+	// columns, per component.
+	values *secret.RowValues
+	ignore map[string][]rowIgnore
+	out    io.Writer
+	// resends is how many requests may still be sent again after the last
+	// restore (resendAfterRestore): the application's sessions with a
+	// database it ended (state.SessionEnder), each a pooled connection
+	// that fails once; resentAfter says which restore.
+	resends     atomic.Int64
+	resentAfter string
+	// databases names every database component (endedDatabase); endedBy
+	// are those whose last restore ended sessions.
+	databases map[string]endedDatabase
+	endedBy   []endedDatabase
+	// The whole-restore check against the record of the pristine copy
+	// (checkWhole, compareWhole), part of the restore's own checks.
+	copiedWhole map[string]bool // the components the last restore copied whole (not Partial)
+	compared    map[string]bool // the components whose whole copy was compared with the record in this run
+	schemaCheck
 }
 
 // openComponents connects to every state component, in name order.
@@ -162,7 +212,7 @@ func openComponents(ctx context.Context, p *config.Project, env []string, log io
 }
 
 // openServers is openComponents that also returns the server of every
-// database component (dbdsn.Server), by name. For a seed, a component
+// database component (serverOf), by name. For a seed, a component
 // removes the record of its pristine copy right before it replaces that
 // copy (state.Options.Replacing).
 func openServers(ctx context.Context, p *config.Project, env []string, log io.Writer, seed bool) ([]state.Component, map[string]string, error) {
@@ -189,29 +239,37 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			closeAll()
 			return nil, nil, dsnErr(sc.DSN, n, err)
 		}
-		if servers[n], err = dbdsn.Server(sc.Driver, dsn); err != nil {
+		if servers[n], err = serverOf(p, sc, dsn); err != nil {
 			closeAll()
 			return nil, nil, configErr("state %s: %v", n, err)
 		}
-		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RowTracking: sc.RowTracking, Log: log,
+		o := state.Options{Name: n, DSN: dsn, Working: sc.Working, Pristine: sc.Pristine, Exclude: sc.Exclude, RestoreOnly: sc.RestoreOnly, RestoreEmpty: sc.RestoreEmpty, RowTracking: sc.RowTracking.Names(), Log: log,
 			AdoptPristine: recorded(p, n, servers[n], sc)}
-		if seed {
-			path, err := pristinePath(p, n, servers[n])
-			if err != nil {
+		// The record's path names the pristine file of SQLite and is
+		// removed by a seed; MySQL and PostgreSQL need it for neither.
+		var path string
+		if seed || sc.Driver == config.SQLite {
+			if path, err = pristinePath(p, n, servers[n]); err != nil {
 				closeAll()
 				return nil, nil, err
 			}
-			o.Replacing = func() error {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				return nil
+		}
+		if sc.Driver == config.SQLite {
+			if o.Working, o.Pristine, err = sqliteFiles(p, sc, servers[n], path); err != nil {
+				closeAll()
+				return nil, nil, configErr("state %s: %v", n, err)
 			}
+		}
+		if seed {
+			// A new pristine copy takes the working schema in: an earlier
+			// run's schemaRecord no longer applies.
+			o.Replacing = func() error { return removeRecords(path) }
 		}
 		// A restore rewrites the tables: the database must be on an allowed
 		// host, and every host the driver may connect to is checked, first
-		// by name and then at every connection, on the address dialled.
-		if !sc.AllowRemote {
+		// by name and then at every connection, on the address dialled. An
+		// SQLite database is a file of the project, on no host.
+		if !sc.AllowRemote && sc.Driver != config.SQLite {
 			const hint = "allow_remote: true for this component"
 			if err := dbx.AllowHosts(ctx, sc.Driver, dsn, p.AllowHostLists(), hint); err != nil {
 				closeAll()
@@ -223,9 +281,14 @@ func openServers(ctx context.Context, p *config.Project, env []string, log io.Wr
 			}
 		}
 		var c state.Component
-		if sc.Driver == config.Postgres {
+		switch sc.Driver {
+		case config.Postgres:
 			c, err = state.NewPostgres(o)
-		} else {
+		case config.SQLite:
+			c, err = state.NewSQLite(o)
+		case config.SQLServer:
+			c, err = state.NewSQLServer(o)
+		default:
 			c, err = state.NewMySQL(o)
 		}
 		if err != nil {
@@ -242,7 +305,9 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 	if err != nil {
 		return nil, err
 	}
-	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, formats: map[string]int{}, out: out}
+	t := &tracker{time: &Time{}, comps: comps, pristine: states{}, ro: states{}, formats: map[string]int{}, out: out, databases: map[string]endedDatabase{},
+		compared:    map[string]bool{},
+		schemaCheck: schemaCheck{prepare: len(p.Prepare) > 0, config: configPath(p), records: map[string]string{}, schemas: states{}}}
 	for _, c := range comps {
 		sc := p.State[c.Name()]
 		if sc.Driver == "" {
@@ -250,8 +315,20 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 		}
 		if len(sc.RowTracking) > 0 {
 			t.rows = true
+			if t.ignore == nil {
+				t.ignore = map[string][]rowIgnore{}
+			}
+			for _, rt := range sc.RowTracking {
+				if len(rt.Ignore) > 0 {
+					globs := make([]string, len(rt.Ignore))
+					for i, g := range rt.Ignore {
+						globs[i] = strings.ToLower(g)
+					}
+					t.ignore[c.Name()] = append(t.ignore[c.Name()], rowIgnore{table: rowTable(sc.Driver, rt.Name), globs: globs})
+				}
+			}
 		}
-		pf, err := readPristine(p, c.Name(), servers[c.Name()])
+		pf, path, err := readPristine(p, c.Name(), servers[c.Name()])
 		if errors.Is(err, os.ErrNotExist) {
 			t.close()
 			return nil, envErr("state %s has no pristine copy yet; run driftgate seed", c.Name())
@@ -264,6 +341,42 @@ func newTracker(ctx context.Context, p *config.Project, env []string, out, log i
 			t.close()
 			return nil, envErr("state %s: the pristine copy was made for another configuration; run driftgate seed", c.Name())
 		}
+		// The pristine copy keeps the rows of restore_only tables, not of
+		// excluded ones, and its record has their fingerprint apart.
+		if !slices.Equal(pf.RestoreOnly, sortedCopy(sc.RestoreOnly)) {
+			t.close()
+			return nil, envErr("state %s: restore_only changed since the pristine copy was made (it was %v); run driftgate seed", c.Name(), pf.RestoreOnly)
+		}
+		if !slices.Equal(pf.RestoreEmpty, sortedCopy(sc.RestoreEmpty)) {
+			t.close()
+			return nil, envErr("state %s: restore_empty changed since the pristine copy was made (it was %v); run driftgate seed", c.Name(), pf.RestoreEmpty)
+		}
+		if len(sc.RestoreOnly)+len(sc.RestoreEmpty) > 0 {
+			if _, ok := c.(state.RestoreOnly); !ok {
+				t.close()
+				return nil, configErr("state %s: restore_only is not supported by driver %s", c.Name(), sc.Driver)
+			}
+			t.ro[c.Name()] = pf.RestoreOnlyFingerprint
+		}
+		// The record is of one pristine copy; a seed that keeps its record
+		// in another store (another project or machine on the same server,
+		// a checkout with its own DRIFTGATE_STORE) may have replaced it.
+		if pi, ok := c.(pristineIdentifier); ok && pf.PristineID != "" {
+			id, err := pi.PristineID(ctx)
+			if err != nil {
+				t.close()
+				return nil, envErr("state %s: %v", c.Name(), err)
+			}
+			if id != pf.PristineID {
+				t.close()
+				return nil, envErr("state %s: the pristine copy is not the one driftgate seed recorded here: another seed replaced it (from another checkout or project on the same databases); run driftgate seed", c.Name())
+			}
+		}
+		t.records[c.Name()] = schemaPath(path)
+		if pf.SchemaFormat == state.SchemaFormat {
+			t.schemas[c.Name()] = pf.Schema
+		}
+		t.databases[c.Name()] = endedDatabase{Component: c.Name(), Working: sc.Working, Server: serverHash(servers[c.Name()])}
 		t.pristine[c.Name()] = pf.Fingerprint
 		t.formats[c.Name()] = max(pf.Format, 1)
 	}
@@ -329,6 +442,17 @@ func (t *tracker) markDirty(d map[string][]string) {
 // pristine fingerprint; a command component always runs its restore command.
 func (t *tracker) restore(ctx context.Context) error {
 	defer func(start time.Time) { t.time.Restore += time.Since(start) }(time.Now())
+	t.resends.Store(0)
+	t.resentAfter = ""
+	t.endedBy = nil
+	t.copiedWhole = map[string]bool{}
+	ended := 0
+	first := t.dirty == nil
+	if first {
+		if err := t.checkSchema(ctx); err != nil {
+			return err
+		}
+	}
 	for _, c := range t.comps {
 		pf, isDB := t.pristine[c.Name()]
 		if !isDB {
@@ -348,28 +472,145 @@ func (t *tracker) restore(ctx context.Context) error {
 		} else {
 			items = t.dirty[c.Name()]
 		}
-		if len(items) == 0 {
+		// The restore_only tables are no part of the fingerprints that
+		// tell what changed: they are read now, every time.
+		var ro []string
+		if want, ok := t.ro[c.Name()]; ok {
+			cur, err := c.(state.RestoreOnly).RestoreOnlyFingerprint(ctx, false)
+			if err != nil {
+				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			}
+			ro = state.Diff(cur, want)
+		}
+		if len(items)+len(ro) == 0 {
 			continue
 		}
-		fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
+		if len(ro) > 0 {
+			fmt.Fprintf(t.out, "restoring %s: %d changed %s, %d restore_only %s …\n", c.Name(), len(items), plural(len(items), "item", "items"), len(ro), plural(len(ro), "table", "tables"))
+		} else {
+			fmt.Fprintf(t.out, "restoring %s: %d changed %s …\n", c.Name(), len(items), plural(len(items), "item", "items"))
+		}
 		start := time.Now()
-		if err := c.Restore(ctx, items); err != nil {
+		err := c.Restore(ctx, append(append([]string{}, items...), ro...))
+		if e, ok := c.(state.SessionEnder); ok && e.EndedSessions() > 0 {
+			n := e.EndedSessions()
+			ended += n
+			t.resends.Add(int64(n))
+			t.endedBy = append(t.endedBy, t.databases[c.Name()])
+			t.resentAfter = fmt.Sprintf("the restore of %s ended %d database %s of the application", c.Name(), ended, plural(ended, "session", "sessions"))
+		}
+		if err != nil {
 			return envErr("restore of %s failed: %v", c.Name(), err)
 		}
-		got, err := c.Fingerprint(ctx, items)
-		if err != nil {
-			return envErr("state %s: fingerprint: %v", c.Name(), err)
+		if !c.Partial() {
+			t.copiedWhole[c.Name()] = true
+		}
+		// The restore_only tables are not checked: the application may
+		// write them at any time, and they decide no pass.
+		var got state.Fingerprint
+		if len(items) > 0 {
+			if got, err = c.Fingerprint(ctx, items); err != nil {
+				return envErr("state %s: fingerprint: %v", c.Name(), err)
+			}
 		}
 		if d := state.Diff(got, pf.Subset(items)); len(d) > 0 {
 			if t.formats[c.Name()] != state.FingerprintFormat {
 				return envErr("state %s: re-seed needed: the fingerprint format changed (the current format fingerprints these items another way: %v); run driftgate seed, then, if a capture says the baseline's state differs, driftgate verify --baseline <name> --migrate-state", c.Name(), limit(d, 20))
 			}
-			return envErr("restore of %s left %d items different from the pristine copy: %v", c.Name(), len(d), limit(d, 20))
+			return restoreLeft(ctx, c, pf, d)
 		}
 		fmt.Fprintf(t.out, "restored %s in %s\n", c.Name(), time.Since(start).Round(time.Millisecond))
 	}
 	t.dirty = map[string][]string{}
 	return nil
+}
+
+// restoreLeft is the stop of a restore of c that left items d different
+// from the record of its pristine copy (pf).
+func restoreLeft(ctx context.Context, c state.Component, pf state.Fingerprint, d []string) error {
+	return envErr("restore of %s left %d items different from the fingerprint driftgate seed recorded of the pristine copy: %v; the working database now holds what the pristine copy has now. When the pristine copy changed since the seed (or the application wrote while it ran) or the application wrote during this restore, run driftgate seed again while the application does not write, or stop the application's background writers during the capture%s", c.Name(), len(d), limit(d, 20), staleHint(ctx, c, pf, d))
+}
+
+// checkWhole compares, for each component the last restore copied whole
+// and not compared in this run yet, the fingerprint read right after it
+// (now) with the record of its pristine copy (compareWhole).
+func (t *tracker) checkWhole(ctx context.Context, now states) error {
+	for _, c := range t.comps {
+		if t.copiedWhole[c.Name()] && !t.compared[c.Name()] {
+			if err := t.compareWhole(ctx, c, now[c.Name()]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// wholeFingerprint reads in full each component the last restore copied
+// whole and not compared in this run yet, for checkWhole, when commands
+// that may write (prepare, tokens) run before the run reads its own.
+func (t *tracker) wholeFingerprint(ctx context.Context) (states, error) {
+	defer func(start time.Time) {
+		t.time.Fingerprint += time.Since(start)
+		t.time.Fingerprints++
+	}(time.Now())
+	out := states{}
+	for _, c := range t.comps {
+		if t.copiedWhole[c.Name()] && !t.compared[c.Name()] {
+			f, err := c.Fingerprint(ctx, nil)
+			if err != nil {
+				return nil, envErr("state %s: fingerprint: %v", c.Name(), err)
+			}
+			out[c.Name()] = f
+		}
+	}
+	return out, nil
+}
+
+// compareWhole compares f, the fingerprint of c right after a restore
+// copied its whole database, with the record of its pristine copy, once in
+// a run: the restore checks only the items it found different, and copies
+// every other item too, as the pristine copy has it now, which another
+// seed or a hand may have changed since the record. A record of an older
+// format is not compared.
+func (t *tracker) compareWhole(ctx context.Context, c state.Component, f state.Fingerprint) error {
+	t.compared[c.Name()] = true
+	if t.formats[c.Name()] != state.FingerprintFormat {
+		return nil
+	}
+	if d := state.Diff(f, t.pristine[c.Name()]); len(d) > 0 {
+		return restoreLeft(ctx, c, t.pristine[c.Name()], d)
+	}
+	return nil
+}
+
+// restoreOnlyNow reports whether every item of d (<component>/<item>) is a
+// restore_only table now (its pristine copy's record has it): the
+// baseline's state holds it from before it was restore_only.
+func (t *tracker) restoreOnlyNow(d []string) bool {
+	for _, it := range d {
+		comp, item, _ := strings.Cut(it, "/")
+		if _, ok := t.ro[comp][item]; !ok {
+			return false
+		}
+	}
+	return len(d) > 0
+}
+
+// staleHint explains a restore that left items different when the
+// pristine copy itself no longer matches its record: a pristine copy seeded
+// by v1.0.2 or earlier on MySQL 8 names column collations the working
+// database left implicit, and its first restore has already rewritten the
+// working tables from it. It is read only on that error path.
+func staleHint(ctx context.Context, c state.Component, record state.Fingerprint, items []string) string {
+	pc, ok := c.(state.PristineFingerprinter)
+	if !ok {
+		return ""
+	}
+	p, err := pc.PristineFingerprint(ctx, items)
+	if err != nil || len(state.Diff(p, record.Subset(items))) == 0 {
+		return ""
+	}
+	return "; the pristine copy no longer matches its record (seeded by an earlier release on MySQL 8?): re-create the working database (migrations or your dump), then run driftgate seed"
 }
 
 // MigrateState proves that the state now is the one a baseline whose
@@ -386,6 +627,7 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 		return nil, err
 	}
 	defer tr.close()
+	tr.run = runMigrateState
 	for _, c := range tr.comps {
 		if f, ok := tr.formats[c.Name()]; ok && f != state.FingerprintFormat {
 			return nil, envErr("state %s: the record of the pristine copy has the older fingerprint format too; run driftgate seed first", c.Name())
@@ -396,6 +638,9 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 	}
 	now, err := tr.fingerprint(ctx, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := tr.checkWhole(ctx, now); err != nil {
 		return nil, err
 	}
 	then := fromMeta(meta.State)
@@ -433,6 +678,16 @@ func MigrateState(ctx context.Context, p *config.Project, meta *snapshot.Meta, o
 	return toMeta(now), nil
 }
 
+// sortedCopy is list sorted, without changing list; nil for none.
+func sortedCopy(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	out := slices.Clone(list)
+	sort.Strings(out)
+	return out
+}
+
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
@@ -445,6 +700,25 @@ func limit(items []string, n int) []string {
 		return items
 	}
 	return append(items[:n:n], fmt.Sprintf("and %d more", len(items)-n))
+}
+
+// loadRowValues takes the project key that names the values requests
+// write into tracked rows, when rows are tracked. Without a key the values
+// are not recorded (none): never by a plain hash, which would let a short
+// value be guessed from the capture.
+func (t *tracker) loadRowValues(p *config.Project) (none bool, err error) {
+	if !t.rows {
+		return false, nil
+	}
+	key, err := p.LoadKey()
+	if errors.Is(err, secret.ErrNoKey) {
+		return true, nil
+	}
+	if err != nil {
+		return false, envErr("row_tracking names the values requests write with the project key: %v", err)
+	}
+	t.values = key.RowValues()
+	return false, nil
 }
 
 // readRows reads the tracked tables of every component.
@@ -463,7 +737,7 @@ func (t *tracker) readRows(ctx context.Context) (map[string]state.Rows, error) {
 	return out, nil
 }
 
-func rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
+func (t *tracker) rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
 	var out []snapshot.RowChange
 	names := make([]string, 0, len(after))
 	for n := range after {
@@ -472,7 +746,67 @@ func rowChanges(before, after map[string]state.Rows) []snapshot.RowChange {
 	sort.Strings(names)
 	for _, n := range names {
 		for _, ch := range state.RowDiff(before[n], after[n]) {
-			out = append(out, snapshot.RowChange{Item: n + "/table:" + ch.Table, Key: ch.Key, Change: ch.Change, Columns: ch.Columns})
+			item := n + "/table:" + ch.Table
+			rc := snapshot.RowChange{Item: item, Key: ch.Key, Change: ch.Change, Columns: ch.Columns}
+			if t.values != nil && ch.Change != "deleted" {
+				rc.Values = t.rowValues(n, item, ch, after[n][ch.Table][ch.Key])
+			}
+			out = append(out, rc)
+		}
+	}
+	return out
+}
+
+// rowValues names the values a request wrote into a row (row: the column
+// → value hash read after the request): every column of an inserted row,
+// the changed ones of an updated row, apart from ignored columns. nil
+// when no column is left; in a capture with the key (meta.RowValues),
+// such a row has nothing to compare, and counts as recorded.
+func (t *tracker) rowValues(comp, item string, ch state.RowChange, row map[string]string) map[string]string {
+	cols := ch.Columns
+	if ch.Change == "inserted" {
+		cols = make([]string, 0, len(row))
+		for c := range row {
+			cols = append(cols, c)
+		}
+	}
+	ignored := ignoredColumns(t.ignore[comp], ch.Table)
+	var out map[string]string
+	for _, c := range cols {
+		v, ok := row[c]
+		if !ok {
+			continue
+		}
+		if len(ignored) > 0 {
+			lower := strings.ToLower(c)
+			if slices.ContainsFunc(ignored, func(g string) bool { return glob.Match(g, lower) }) {
+				continue
+			}
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[c] = t.values.Name(item, c, v)
+	}
+	return out
+}
+
+// rowIgnore is the ignore list of one row_tracking table, its globs in
+// lower case.
+type rowIgnore struct {
+	table string
+	globs []string
+}
+
+// ignoredColumns are the ignore globs (lower case) of row_tracking for
+// table as the driver names it, matched without letter case: a table
+// configured without a schema is in the driver's default one (rowTable),
+// never a same-named table of another schema.
+func ignoredColumns(tables []rowIgnore, table string) []string {
+	var out []string
+	for _, rt := range tables {
+		if strings.EqualFold(rt.table, table) {
+			out = append(out, rt.globs...)
 		}
 	}
 	return out
@@ -484,6 +818,18 @@ type SeedOptions struct {
 	// commands: the data was loaded another way (a cached dump in CI).
 	SkipCommands bool
 	Out, Log     io.Writer
+}
+
+// seededFingerprinter is a component that fingerprints its pristine copy
+// (state.MySQL, state.Postgres, state.SQLite, state.SQLServer).
+type seededFingerprinter interface {
+	SeededFingerprint(ctx context.Context) (state.Fingerprint, error)
+}
+
+// pristineIdentifier is a component that names its pristine copy, new with
+// every seed (state.SQLServer: the backup in its mark).
+type pristineIdentifier interface {
+	PristineID(ctx context.Context) (string, error)
 }
 
 // Seed runs the seed commands, which load the data into the working state,
@@ -499,12 +845,17 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 	if len(p.State) == 0 {
 		return configErr("no state components are configured")
 	}
+	if !opt.SkipCommands {
+		if err := checkCommands(p, "seed", p.Seed); err != nil {
+			return err
+		}
+	}
 	for _, cmd := range p.Seed {
 		if opt.SkipCommands {
 			break
 		}
-		fmt.Fprintf(opt.Out, "seed: %s\n", cmd[0])
-		if err := state.Run(ctx, p.Root, cmd, nil, opt.Log); err != nil {
+		fmt.Fprintf(opt.Out, "seed: %s\n", commandLine(cmd))
+		if err := runCommand(ctx, p, cmd, nil, opt.Log); err != nil {
 			return envErr("seed: %v", err)
 		}
 	}
@@ -535,16 +886,71 @@ func Seed(ctx context.Context, p *config.Project, opt SeedOptions) error {
 		if err := c.Seed(ctx); err != nil {
 			return envErr("seed of %s failed: %v", c.Name(), err)
 		}
-		f, err := c.Fingerprint(ctx, nil)
+		// The record is of the pristine copy itself where the component
+		// can read it (all database drivers): the working data may
+		// have moved on since the copy was made, while the application
+		// kept writing.
+		var f state.Fingerprint
+		pc, seeded := c.(seededFingerprinter)
+		if seeded {
+			f, err = pc.SeededFingerprint(ctx)
+		} else {
+			f, err = c.Fingerprint(ctx, nil)
+		}
 		if err != nil {
 			return envErr("state %s: fingerprint: %v", c.Name(), err)
 		}
+		if seeded {
+			// A working database that differs from the copy just made
+			// means the application wrote during the seed or right after
+			// it. On MySQL/MariaDB a write during the copy may leave a
+			// copy that mixes data from before and after it (each table
+			// is copied on its own), which no check can tell from a
+			// consistent one; a PostgreSQL template copy, an SQLite
+			// VACUUM INTO and a SQL Server backup are of one moment.
+			// The check only warns: an error here leaves the copy and its
+			// record as they are.
+			if w, err := c.Fingerprint(ctx, nil); err != nil {
+				fmt.Fprintf(opt.Out, "warning: %s: the working database could not be compared with the pristine copy just made: %v\n", c.Name(), err)
+			} else if d := state.Diff(w, f); len(d) > 0 {
+				advice := "the copy is of one moment and stays the pristine copy"
+				if sc.Driver == config.MySQL {
+					advice = "a write during the copy can leave a copy that mixes data from before and after it, so run driftgate seed again while the application does not write"
+				}
+				fmt.Fprintf(opt.Out, "warning: %s: the working database differs from the pristine copy just made in %d %s (%v): the application wrote during the seed or right after it; %s\n", c.Name(), len(d), plural(len(d), "item", "items"), limit(d, 20), advice)
+			}
+		}
 		pf := pristineFile{Version: 1, Format: state.FingerprintFormat, Component: c.Name(), Driver: sc.Driver, Server: servers[c.Name()], Working: sc.Working, Pristine: sc.Pristine,
 			Created: time.Now().UTC().Format(time.RFC3339), Fingerprint: f}
+		if len(sc.RestoreOnly)+len(sc.RestoreEmpty) > 0 {
+			ro, ok := c.(state.RestoreOnly)
+			if !ok {
+				return configErr("state %s: restore_only is not supported by driver %s", c.Name(), sc.Driver)
+			}
+			if pf.RestoreOnlyFingerprint, err = ro.RestoreOnlyFingerprint(ctx, true); err != nil {
+				return envErr("state %s: fingerprint of the restore_only tables: %v", c.Name(), err)
+			}
+			pf.RestoreOnly, pf.RestoreEmpty = sortedCopy(sc.RestoreOnly), sortedCopy(sc.RestoreEmpty)
+		}
+		if s, ok := c.(state.Schemer); ok {
+			if pf.Schema, err = s.SchemaFingerprint(ctx, true); err != nil {
+				return envErr("state %s: schema of the pristine copy: %v", c.Name(), err)
+			}
+			pf.SchemaFormat = state.SchemaFormat
+		}
+		if pi, ok := c.(pristineIdentifier); ok {
+			if pf.PristineID, err = pi.PristineID(ctx); err != nil {
+				return envErr("state %s: %v", c.Name(), err)
+			}
+		}
 		if err := snapshot.WriteJSON(path, pf); err != nil {
 			return err
 		}
-		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), sc.Pristine, len(f), time.Since(start).Round(time.Millisecond))
+		pristine := sc.Pristine
+		if sc.Driver == config.SQLite && pristine == "" {
+			pristine = sqliteStorePristine(path)
+		}
+		fmt.Fprintf(opt.Out, "pristine copy of %s: %s (%d items, %s)\n", c.Name(), pristine, len(f), time.Since(start).Round(time.Millisecond))
 	}
 	return nil
 }
@@ -586,6 +992,31 @@ func dsnErr(dsn config.Secret, name string, err error) error {
 	return configErr("state %s: dsn: %v", name, err)
 }
 
+// serverOf names the server of the database component sc whose DSN is dsn
+// (dbdsn.Server). An SQLite database has none: it is named by its file,
+// file: and the real path of working (appconf.SQLitePath: the file the
+// system opens), which must exist inside the project.
+func serverOf(p *config.Project, sc config.Component, dsn string) (string, error) {
+	if sc.Driver == config.SQLite {
+		working, err := appconf.SQLitePath(p.Root, sc.Working)
+		if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		// Stat only: closing a handle of a file SQLite has open in this
+		// process would drop its locks.
+		if _, err := os.Stat(working); errors.Is(err, os.ErrNotExist) {
+			if config.MainCheckout(p.Root) != "" {
+				return "", fmt.Errorf("working: %s: not found in this worktree (git does not carry it): driftgate setup makes it a copy of the main worktree's pristine copy, or the application's migrations make it", sc.Working)
+			}
+			return "", fmt.Errorf("working: %s: not found; the application's migrations make it", sc.Working)
+		} else if err != nil {
+			return "", fmt.Errorf("working: %w", err)
+		}
+		return sqliteServerPrefix + working, nil
+	}
+	return dbdsn.Server(sc.Driver, dsn)
+}
+
 // Seeded reports whether every database component has a pristine copy on
 // the server its DSN names now.
 func Seeded(ctx context.Context, p *config.Project) (bool, error) {
@@ -597,7 +1028,7 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 		if err != nil {
 			return false, dsnErr(sc.DSN, name, err)
 		}
-		server, err := dbdsn.Server(sc.Driver, dsn)
+		server, err := serverOf(p, sc, dsn)
 		if err != nil {
 			return false, configErr("state %s: %v", name, err)
 		}
@@ -611,3 +1042,7 @@ func Seeded(ctx context.Context, p *config.Project) (bool, error) {
 	}
 	return true, nil
 }
+
+// commandLine is a command of driftgate.yaml as one line, with its stdin
+// file and dir, its secrets shown as *** (config.Command.String).
+func commandLine(cmd config.Command) string { return cmd.String() }

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 )
 
@@ -47,7 +49,7 @@ func parallel(n int, size func(i int) int64, do func(i int) error) error {
 		wg.Go(func() {
 			for i := range next {
 				w := size(i)
-				if errs[i] = do(i); errs[i] != nil {
+				if errs[i] = guarded(do, i); errs[i] != nil {
 					failed.Do(func() { close(stop) })
 				}
 				budget.release(w)
@@ -75,6 +77,18 @@ feed:
 		}
 	}
 	return nil
+}
+
+// guarded runs one item: a panic in it is its error (exit 3), so that a
+// body the code cannot handle fails the command with what went wrong
+// instead of ending the process from a goroutine.
+func guarded(do func(i int) error, i int) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = envErr(fmt.Errorf("internal error, please report it: %v\n%s", v, debug.Stack()))
+		}
+	}()
+	return do(i)
 }
 
 // budget is a weighted semaphore over bytes. A weight larger than the whole

@@ -262,6 +262,13 @@ func TestOriginsSameGolden(t *testing.T) {
 			{{baseOrigin}, nil},
 		} {
 			got := both(t, nil, at(p[0], o[0]...), at(p[1], o[1]...))
+			// What expectations digest is written with neutral origins
+			// whatever the sides share (TestOriginsNeutralMaterial).
+			for _, ds := range [][]Drift{got, want} {
+				for j := range ds {
+					ds[j].Material, ds[j].Witness = "", ""
+				}
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("pair %d, origins %v: %+v, want %+v", i, o, got, want)
 			}
@@ -269,5 +276,45 @@ func TestOriginsSameGolden(t *testing.T) {
 	}
 	if newOrigins([]string{baseOrigin}, []string{baseOrigin + "/"}) != nil {
 		t.Error("the same origin written differently")
+	}
+}
+
+// TestOriginsNeutralMaterial: what an expectation digests is the same for
+// a pair of responses captured from one address and for the same pair
+// captured from another (a worktree on another port), also for content
+// only one side has; another URL still differs.
+func TestOriginsNeutralMaterial(t *testing.T) {
+	pair := func(origin, link string) []Drift {
+		base := side(200, jsonType, `{"self":"`+origin+`/a"}`)
+		cur := side(200, jsonType, `{"self":"`+origin+`/b","next":{"href":"`+link+`/c"}}`)
+		return both(t, nil, at(base, origin), at(cur, origin))
+	}
+	material := func(ds []Drift) string {
+		var out []string
+		for _, d := range ds {
+			out = append(out, d.DigestText())
+		}
+		return strings.Join(out, "\n")
+	}
+	a, b := pair(baseOrigin, baseOrigin), pair(curOrigin, curOrigin)
+	if len(a) != 2 || material(a) != material(b) {
+		t.Fatalf("another address:\n%s\n%s", material(a), material(b))
+	}
+	if c := pair(baseOrigin, "http://elsewhere.test"); material(c) == material(a) {
+		t.Fatalf("another host read as the own origin:\n%s", material(c))
+	}
+}
+
+// TestOriginsNeutralLengths: origins of other lengths (another port's
+// digits, an IP address) are written neutrally before the encoding takes
+// their length, in headers, keys and texts alike.
+func TestOriginsNeutralLengths(t *testing.T) {
+	pair := func(origin string) string {
+		base := at(side(200, jsonType, `{"a":1}`), origin)
+		cur := at(side(200, append([][2]string{{"link", origin + "/next"}}, jsonType...), `{"a":1,"next":{"href":"`+origin+`/c"}}`), origin)
+		return material(both(t, nil, base, cur))
+	}
+	if a, b := pair("http://localhost:8080"), pair("http://127.0.0.1:61212"); a != b {
+		t.Fatalf("another address:\n%q\n%q", a, b)
 	}
 }

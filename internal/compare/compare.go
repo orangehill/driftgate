@@ -62,6 +62,65 @@ const (
 	KindSideEffect    = "side-effect"
 )
 
+// KindInfo is a drift kind and what it means, in one line.
+type KindInfo struct{ Name, Text string }
+
+// kinds lists every drift kind with what it means: the text of driftgate
+// help kinds and the Meaning column of docs/review.md#drift-kinds, which
+// the docs test checks against it and the Kind constants.
+var kinds = []KindInfo{
+	{KindStatus, "the HTTP status changed, or the request got no answer"},
+	{KindHeaderMissing, "a header of the baseline is gone"},
+	{KindHeaderExtra, "a header is new"},
+	{KindHeaderValue, "a header's value changed"},
+	{KindKeyMissing, "a JSON key, or an array item paired by key, is gone"},
+	{KindKeyExtra, "a JSON key, or an array item paired by key, is new"},
+	{KindKeyOrder, "the same keys in another order"},
+	{KindArrayLength, "an array has more or fewer items"},
+	{KindItemOrder, "the same items of an array in another order"},
+	{KindType, "a value's type changed, in JSON or in a spreadsheet cell"},
+	{KindNumberLiteral, "the same number of the same type written differently, such as 1.00 for 1.0"},
+	{KindValue, "a JSON value changed"},
+	{KindFormat, "a value an allowlist rule covers no longer matches its format"},
+	{KindEncoding, "the same values in other bytes: layout, escapes, byte order mark, charset"},
+	{KindBody, "a body that is not JSON changed, or JSON became non-JSON"},
+	{KindElementMissing, "an HTML element is gone"},
+	{KindElementExtra, "an HTML element is new"},
+	{KindElementOrder, "the same HTML elements in another order"},
+	{KindAttributeMissing, "an attribute of an HTML element is gone"},
+	{KindAttributeExtra, "an attribute of an HTML element is new"},
+	{KindAttributeValue, "an attribute's value changed"},
+	{KindText, "the text of an HTML element changed"},
+	{KindDoctype, "the document type declaration came, went or changed"},
+	{KindCell, "a spreadsheet or CSV cell's value changed"},
+	{KindCellFormat, "a cell's number format or style changed"},
+	{KindCellFormula, "a cell's formula changed"},
+	{KindSheetMissing, "a worksheet is gone"},
+	{KindSheetExtra, "a worksheet is new"},
+	{KindSheetOrder, "the worksheets are in another order"},
+	{KindExit, "a command step ended with another exit code"},
+	{KindRepeat, "the statuses of a repeated request changed"},
+	{KindSideEffect, "the request changed other data than in the baseline"},
+	{KindNotCaptured, "the baseline has a response, the capture has none"},
+}
+
+// Kinds returns a copy of the list of drift kinds.
+func Kinds() []KindInfo { return slices.Clone(kinds) }
+
+// DescribeRow is how a side effect describes a changed row of a tracked
+// table: its change, and the columns an update changed ("updated
+// status,updated_at"). Two rows alike in it changed alike.
+func DescribeRow(r snapshot.RowChange) string {
+	if len(r.Columns) > 0 {
+		return r.Change + " " + strings.Join(r.Columns, ",")
+	}
+	return r.Change
+}
+
+// OtherValue marks a side effect whose row changed alike on both sides
+// but got another value: "updated status; other value: status".
+const OtherValue = "other value"
+
 // Drift is one difference.
 type Drift struct {
 	Request  string `json:"request"`
@@ -69,11 +128,146 @@ type Drift struct {
 	Where    string `json:"where"`
 	Baseline string `json:"baseline,omitempty"`
 	Current  string `json:"current,omitempty"`
+	// Digest names the drift with its values and witness, for the
+	// expectations of a baseline (driftgate expect); Expected is the ref
+	// of an expectation in force that names it.
+	Digest   string `json:"digest,omitempty"`
+	Expected string `json:"expected,omitempty"`
 	// Texts holds a changed scalar or single header value as the allowlist
 	// sees it (strings without quotes), for proposing a format.
 	Texts [2]string `json:"-"`
-	// Values holds the values of a changed header (baseline, current).
+	// Values holds the values of a changed header (baseline, current); of
+	// a format drift of a header, only when their number changed.
 	Values [2][]string `json:"-"`
+	// Witness is the SHA-256 of what the description leaves out: the
+	// source of a key, item, element or worksheet only one side has, the
+	// items past the shorter array, both values of a type change, both
+	// bodies of a drift that only names their sizes, both full texts of
+	// an excerpt. An expectation digests it with the description, so a
+	// drift is expected only with the same content. Empty when the
+	// description says everything.
+	Witness string `json:"-"`
+	// Material is what an expectation digests (DigestText) of a drift that
+	// names an origin of either side (or an alias): written with one
+	// neutral origin, so that the drift reads the same captured from
+	// another address (a worktree on another port); empty otherwise.
+	Material string `json:"-"`
+	// RowValues are, of a side effect where a row changed alike on both
+	// sides but with other values, those columns
+	// (<component>/table:<name>.<column>): the drifts two captures of one
+	// state have learn them as volatile.
+	RowValues []string `json:"-"`
+	// parted: rules with parts judge the values; what is digested of them
+	// is the witness (their pieces), not the values as they are.
+	parted bool
+	// named: what is digested in place of the values of a key or item
+	// only one side has, whose description shows its value (memberText):
+	// its name. The witness digests its content, with what the allowlist
+	// lets change in it written neutrally; the value as shown would not.
+	named *[2]string
+}
+
+// witness sets the witness of the drift added last, from parts with the
+// origins written neutrally.
+func (c *comparer) witness(parts ...[]byte) {
+	if c.own != nil {
+		for i, p := range parts {
+			parts[i] = c.own.replace(p)
+		}
+	}
+	c.drifts[len(c.drifts)-1].Witness = witness(parts...)
+}
+
+// digestAs sets what expectations digest in place of the values of the
+// drift added last (Drift.named).
+func (c *comparer) digestAs(base, cur string) {
+	if c.witnessing {
+		c.drifts[len(c.drifts)-1].named = &[2]string{base, cur}
+	}
+}
+
+// sources writes the members of an object with a key, for a witness.
+func (c *comparer) sources(path string, o *jsonx.Value, key string) []byte {
+	var list [][]byte
+	for _, m := range o.Members {
+		if m.Key == key {
+			list = append(list, c.source(jsonx.KeyPath(path, m.Key), m.Value))
+		}
+	}
+	e := c.enc()
+	e.list(len(list))
+	for _, b := range list {
+		e.bytes(b)
+	}
+	return e.b
+}
+
+// material sets, when witnessing, what expectations digest of a drift that names an own
+// origin: the same with the origins written neutrally. Of every other
+// drift it is its fields as they are (Drift.DigestText), which costs
+// nothing to keep.
+func (c *comparer) material() {
+	if !c.witnessing {
+		return
+	}
+	for i, d := range c.drifts {
+		if c.own == nil && c.level >= LevelValues && !d.parted && d.named == nil {
+			continue
+		}
+		where, base, cur := d.Where, d.Baseline, d.Current
+		if d.named != nil {
+			base, cur = d.named[0], d.named[1]
+		}
+		if c.own != nil {
+			where, base, cur = c.own.text(where), c.own.text(base), c.own.text(cur)
+		}
+		if d.parted {
+			base, cur = "", ""
+		}
+		if c.level < LevelValues && !structural[d.Kind] {
+			// The values the drift shows are not compared at this level
+			// (a new attribute's value at types): only that it is there.
+			base, cur = presence(base), presence(cur)
+		}
+		if c.level < LevelTypes && d.Kind == KindType {
+			base, cur = shapeKind(base), shapeKind(cur) // a scalar's kind is no shape
+		}
+		if where != d.Where || base != d.Baseline || cur != d.Current || d.named != nil {
+			c.drifts[i].Material = digestText(d.Kind, where, base, cur, d.Witness)
+		}
+	}
+}
+
+// structural are the kinds whose values the comparison checks below the
+// values level too: a status, types, lengths, keys, orders, names.
+var structural = map[string]bool{
+	KindNotCaptured: true, KindStatus: true, KindType: true, KindArrayLength: true, KindKeyOrder: true, KindItemOrder: true,
+	KindKeyMissing: true, KindKeyExtra: true, KindElementMissing: true, KindElementExtra: true, KindElementOrder: true,
+	KindSheetMissing: true, KindSheetExtra: true, KindSheetOrder: true, KindExit: true, KindRepeat: true, KindBody: true,
+}
+
+func shapeKind(k string) string {
+	if k == "object" || k == "array" {
+		return k
+	}
+	return "scalar"
+}
+
+// presence is a value below the values level: whether there is one.
+func presence(v string) string {
+	if v == "" {
+		return ""
+	}
+	return "\x00present"
+}
+
+// DigestText is what an expectation digests of a drift: its kind, place,
+// both values and its witness, with own origins written neutrally.
+func (d Drift) DigestText() string {
+	if d.Material != "" {
+		return d.Material
+	}
+	return digestText(d.Kind, d.Where, d.Baseline, d.Current, d.Witness)
 }
 
 // indexRE is an array index in a path, or the key of an item of an array
@@ -107,6 +301,18 @@ type Side struct {
 	// was captured from and its aliases. When the two sides have different
 	// ones, all of them are taken as the same origin (origin.go).
 	Origins []string
+	// Roots are the folders of the checkout the side was captured in (the
+	// project folder and its real path): when the two sides have
+	// different ones, each is taken as the same folder (roots.go).
+	Roots []string
+	// RowTables are the items whose rows the side's capture tracked
+	// (row_tracking); nil when it does not say (a set of an earlier
+	// release). Rows of an item the other side did not track are not
+	// compared: a note says so.
+	RowTables []string
+	// Folders are the forms of the two sides' Roots, made once for many
+	// requests (NewFolders, the same on both sides); nil: made from Roots.
+	Folders *Folders
 }
 
 // FastPaths turns on the shortcuts that only save work: rules narrowed to
@@ -127,16 +333,57 @@ func One(id string, base, cur Side, allow *allowlist.List, level Level) []Drift 
 // not a drift: an array the allowlist pairs by key whose items had to be
 // paired by position.
 func OneNotes(id string, base, cur Side, allow *allowlist.List, level Level) ([]Drift, []string) {
+	return oneNotes(id, base, cur, allow, level, false)
+}
+
+// OneWitnessed is OneNotes that also writes what expectations digest of
+// each drift (Drift.Witness, Drift.Material, DigestText): for a
+// comparison with a baseline, whose expectations may apply.
+func OneWitnessed(id string, base, cur Side, allow *allowlist.List, level Level) ([]Drift, []string) {
+	return oneNotes(id, base, cur, allow, level, true)
+}
+
+// OneLearning is OneNotes of two captures of one state, which learn the
+// values of tracked rows: those of every tracked row are compared, not
+// only of the tables the base record learned (SideEffects.Learned).
+func OneLearning(id string, base, cur Side, allow *allowlist.List, level Level) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, learnRows: true}, base, cur, allow)
+}
+
+func oneNotes(id string, base, cur Side, allow *allowlist.List, level Level, witnessing bool) ([]Drift, []string) {
+	return compareOne(&comparer{id: id, level: level, witnessing: witnessing}, base, cur, allow)
+}
+
+// compareOne compares with c, which names the request, the level and the
+// options; it takes the request's own list of rules from allow.
+func compareOne(c *comparer, base, cur Side, allow *allowlist.List) ([]Drift, []string) {
+	id, level, witnessing := c.id, c.level, c.witnessing
 	// The request's own list: it counts the rules that applied.
 	if FastPaths {
 		allow = allow.ForRequest(id)
 	} else {
 		allow = allow.Copy()
 	}
-	c := &comparer{id: id, allow: allow, level: level}
+	c.allow = allow
+	if witnessing {
+		c.own = ownOrigins(base.Origins, cur.Origins)
+	}
 	if cur.Record == nil {
 		c.add(KindNotCaptured, "", "", "")
+		c.material()
 		return c.drifts, nil
+	}
+	r := base.Folders
+	if r == nil {
+		r = newRoots(base.Roots, cur.Roots)
+	}
+	if r != nil {
+		// Bodies that differ only in the folders are equal now: their
+		// Content-Length still differs, which is no drift either. Equal
+		// bodies stay equal, both sides' folders being replaced on both:
+		// they are not read for them.
+		c.rawDiffer = !bytes.Equal(base.Body, cur.Body)
+		base, cur = r.side(base, r.base, c.rawDiffer), r.side(cur, r.cur, c.rawDiffer)
 	}
 	if c.origins = newOrigins(base.Origins, cur.Origins); c.origins != nil {
 		c.compare(base, cur)
@@ -144,6 +391,8 @@ func OneNotes(id string, base, cur Side, allow *allowlist.List, level Level) ([]
 	} else {
 		c.compare(base, cur)
 	}
+	c.foldEncodings()
+	c.material()
 	failed := base.Record.Error != "" || cur.Record.Error != ""
 	allow.Done(id, level >= LevelValues && !failed, level >= LevelShape && !failed && !base.NoBody && !cur.NoBody)
 	return c.drifts, c.notes
@@ -174,7 +423,7 @@ func (c *comparer) compare(base, cur Side) {
 		// A different body has a different length: Content-Length then says
 		// nothing new, and the body itself is compared below.
 		noBody := base.NoBody || cur.NoBody
-		if !noBody && !bytes.Equal(base.Body, cur.Body) {
+		if !noBody && (c.rawDiffer || !bytes.Equal(base.Body, cur.Body)) {
 			kept := c.drifts[:0]
 			for _, d := range c.drifts {
 				if !(d.Kind == KindHeaderValue && d.Where == "header:content-length") {
@@ -193,7 +442,7 @@ func (c *comparer) compare(base, cur Side) {
 		}
 		// Side effects are compared only when both captures tracked the state.
 		if base.Record.SideEffects != nil && cur.Record.SideEffects != nil {
-			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects)
+			c.sideEffects(base.Record.SideEffects, cur.Record.SideEffects, base.RowTables, cur.RowTables, c.learnRows)
 		}
 	}
 }
@@ -216,7 +465,10 @@ func (c *comparer) rawAllowed(base, cur Side) bool {
 
 // sideEffects compares what two requests changed in the state: the changed
 // items, and for tracked tables the changed rows and columns.
-func (c *comparer) sideEffects(base, cur *snapshot.SideEffects) {
+// sideEffects compares the items a request changed and, of the tables
+// both sides tracked rows of (bTables, vTables; nil: every table), its
+// rows.
+func (c *comparer) sideEffects(base, cur *snapshot.SideEffects, bTables, vTables []string, learning bool) {
 	b, v := map[string]bool{}, map[string]bool{}
 	for _, it := range base.Items {
 		b[it] = true
@@ -234,30 +486,79 @@ func (c *comparer) sideEffects(base, cur *snapshot.SideEffects) {
 			c.add(KindSideEffect, "side-effects:"+it, "unchanged", "changed")
 		}
 	}
-	describe := func(r snapshot.RowChange) string {
-		if len(r.Columns) > 0 {
-			return r.Change + " " + strings.Join(r.Columns, ",")
+	describe := DescribeRow
+	// untracked notes, once per item, the rows of a table the other side
+	// did not track: row_tracking came or went after the baseline.
+	noted := map[string]bool{}
+	untracked := func(item string, other []string, why string) bool {
+		if other == nil || tracks(other, item) {
+			return false
 		}
-		return r.Change
+		if !noted[item] {
+			noted[item] = true
+			c.notes = append(c.notes, fmt.Sprintf("side-effects:%s: rows not compared: %s; make the baseline again to compare them (accept keeps the baseline's tracking)", item, why))
+		}
+		return true
 	}
-	rows := func(list []snapshot.RowChange) (map[string]string, []string) {
-		m := map[string]string{}
+	rows := func(list []snapshot.RowChange, other []string, why string) (map[string]string, []string, map[string]snapshot.RowChange) {
+		m, changes := map[string]string{}, map[string]snapshot.RowChange{}
 		var keys []string
 		for _, r := range list {
+			if untracked(r.Item, other, why) {
+				continue
+			}
 			k := r.Item + "[" + r.Key + "]"
 			if _, ok := m[k]; !ok {
 				keys = append(keys, k)
 			}
-			m[k] = describe(r)
+			m[k], changes[k] = describe(r), r
 		}
-		return m, keys
+		return m, keys, changes
 	}
-	bRows, bKeys := rows(base.Rows)
-	vRows, vKeys := rows(cur.Rows)
+	bRows, bKeys, bChanges := rows(base.Rows, vTables, "row_tracking no longer covers the table")
+	vRows, vKeys, vChanges := rows(cur.Rows, bTables, "not tracked in the baseline (row_tracking came after it)")
+	// Values are compared of the items whose values the baseline saw in
+	// two captures of one state (Learned; every item when learning),
+	// apart from the columns that differed between them (the baseline's
+	// Volatile only: a capture's own cannot hide a value the baseline
+	// fixed).
+	volatile := map[string]bool{}
+	for _, col := range base.Volatile {
+		volatile[col] = true
+	}
+	learned := func(item string) bool { return learning || slices.Contains(base.Learned, item) }
 	for _, k := range bKeys {
 		if vRows[k] != bRows[k] {
 			c.add(KindSideEffect, "side-effects:"+k, bRows[k], orNone(vRows[k]))
+			continue
 		}
+		if c.level < LevelValues || !learned(bChanges[k].Item) {
+			continue
+		}
+		// The row changed alike: the values it got are compared, of the
+		// columns both sides named a value of (none of a set that
+		// recorded none, nor of a column row_tracking ignores on either
+		// side), apart from those two captures of one state disagree on.
+		b, v := bChanges[k], vChanges[k]
+		var cols, named []string
+		for col, bv := range b.Values {
+			if vv, ok := v.Values[col]; ok && vv != bv && !volatile[b.Item+"."+col] {
+				cols = append(cols, col)
+			}
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		sort.Strings(cols)
+		for _, col := range cols {
+			named = append(named, b.Item+"."+col)
+		}
+		what := OtherValue + ": "
+		if len(cols) > 1 {
+			what = OtherValue + "s: "
+		}
+		c.add(KindSideEffect, "side-effects:"+k, bRows[k], vRows[k]+"; "+what+strings.Join(cols, ","))
+		c.drifts[len(c.drifts)-1].RowValues = named
 	}
 	for _, k := range vKeys {
 		if _, ok := bRows[k]; !ok {
@@ -281,14 +582,55 @@ func outcome(r *snapshot.Record) string {
 }
 
 type comparer struct {
-	id      string
-	allow   *allowlist.List
-	level   Level
-	drifts  []Drift
-	notes   []string // how the comparison went where that is not a drift
-	allowed int      // allow-listed values that changed
-	lengths int      // arrays the allowlist let change their length or order
-	origins *origins // nil: the sides share their origins
+	id    string
+	allow *allowlist.List
+	level Level
+	// learnRows compares the values of every tracked row (OneLearning).
+	learnRows bool
+	drifts    []Drift
+	notes     []string // how the comparison went where that is not a drift
+	allowed   int      // allow-listed values that changed
+	// rewritten counts values a rule covers that are written otherwise.
+	rewritten int
+	lengths   int      // arrays the allowlist let change their length or order
+	origins   *origins // nil: the sides share their origins
+	// witnessing: write what expectations digest of the drifts (Witness,
+	// Material); a comparison no expectation applies to costs nothing
+	// more for it (OneWitnessed).
+	witnessing bool
+	shapes     map[*element]string // shape hashes of elements (shapeSum), below the values level
+	moved      [][2]int            // runs of the items of arrays with drifts by position (items), a stack
+	orders     []order             // orders of items a rule allowed, in the document being compared
+	// docs are the body documents whose bytes differ, for what they write
+	// beyond their values (foldEncodings).
+	docs []encDoc
+	// devalue: the JSON being compared is a devalue payload, compared
+	// decoded.
+	devalue bool
+	// own writes the origins of both sides as one neutral origin, for what
+	// expectations digest (also when the sides share their origins).
+	own *originSide
+	// rawDiffer: the bodies differed before the project folders were
+	// replaced (roots.go).
+	rawDiffer bool
+}
+
+// memberTextMax bounds the text of a key's value in a key-missing or
+// key-extra drift.
+const memberTextMax = 200
+
+// memberText is the value of a key that is missing or new, as JSON (the
+// key itself is in the drift's place): an object or array cut to
+// memberTextMax characters.
+func memberText(v *jsonx.Value) string {
+	if v.Kind != jsonx.Object && v.Kind != jsonx.Array {
+		return v.ScalarText()
+	}
+	t := string(jsonx.Marshal(v, false))
+	if r := []rune(t); len(r) > memberTextMax {
+		t = string(r[:memberTextMax]) + "…"
+	}
+	return t
 }
 
 func (c *comparer) add(kind, where, base, cur string) {
@@ -305,6 +647,37 @@ func group(headers [][2]string) (names []string, values map[string][]string) {
 		values[n] = append(values[n], h[1])
 	}
 	return names, values
+}
+
+// headerWitness makes the drift added last digest a header's values as
+// the comparison sees them: in any order, a value the header's rule
+// accepts as the rule, in any letter case under an ignore_case rule;
+// below the values level not at all (only whether the header is there).
+func (c *comparer) headerWitness(name string, b, v []string) {
+	rule := c.allow.HeaderFor(c.id, name)
+	side := func(vs []string) []byte {
+		if c.level < LevelValues {
+			return nil
+		}
+		out := make([]string, len(vs))
+		for i, x := range vs {
+			x = c.neutral(x)
+			switch {
+			case rule != nil && rule.IgnoreCase:
+				out[i] = "\x00lower " + strings.ToLower(x)
+			case rule != nil && rule.Matches(x):
+				out[i] = "\x00rule"
+			default:
+				out[i] = "\x00exact " + x
+			}
+		}
+		slices.Sort(out)
+		return c.textsSource(out)
+	}
+	if c.witnessing {
+		c.witness(side(b), side(v))
+	}
+	c.drifts[len(c.drifts)-1].parted = true
 }
 
 func listText(vs []string) string {
@@ -331,9 +704,15 @@ func (c *comparer) headers(base, cur [][2]string) {
 		switch {
 		case !inCur:
 			c.add(KindHeaderMissing, where, listText(b), "")
+			if c.witnessing {
+				c.headerWitness(n, b, v)
+			}
 			continue
 		case !inBase:
 			c.add(KindHeaderExtra, where, "", listText(v))
+			if c.witnessing {
+				c.headerWitness(n, b, v)
+			}
 			continue
 		case c.level < LevelValues:
 			continue
@@ -352,6 +731,14 @@ func (c *comparer) headers(base, cur [][2]string) {
 			}
 			if !ok {
 				c.add(KindFormat, where, listText(b), listText(v))
+				if len(b) != len(v) {
+					// A value came or went (a cookie no longer set): the
+					// explanation says so rather than call it a format.
+					c.drifts[len(c.drifts)-1].Values = [2][]string{b, v}
+				}
+				if c.witnessing {
+					c.headerWitness(n, b, v)
+				}
 			}
 			continue
 		}
@@ -369,6 +756,9 @@ func (c *comparer) headers(base, cur [][2]string) {
 			}
 		}
 		c.add(KindHeaderValue, where, listText(b), listText(v))
+		if c.witnessing {
+			c.headerWitness(n, b, v)
+		}
 		c.drifts[len(c.drifts)-1].Values = [2][]string{b, v}
 		if len(b) == 1 && len(v) == 1 {
 			c.drifts[len(c.drifts)-1].Texts = [2]string{b[0], v[0]}
@@ -395,6 +785,9 @@ func (c *comparer) body(base, cur Side) {
 	}
 	if errB != nil || errC != nil {
 		c.add(KindBody, "", fmt.Sprintf("%d bytes", len(base.Body)), fmt.Sprintf("%d bytes", len(cur.Body)))
+		if c.witnessing {
+			c.witness(base.Body, cur.Body)
+		}
 		return
 	}
 	c.json("$", base.Body, cur.Body, jb, jc)
@@ -421,22 +814,161 @@ func parseBoth(b, c []byte) (jb *jsonx.Value, errB error, jc *jsonx.Value, errC 
 // json compares two JSON documents whose root has the path root: a body ($)
 // or JSON inside an HTML page (html>body>script#__NEXT_DATA__$).
 func (c *comparer) json(root string, rawB, rawC []byte, jb, jc *jsonx.Value) {
-	before, allowed := len(c.drifts), c.allowed+c.lengths
+	before, allowed, rewritten, orders := len(c.drifts), c.allowed+c.lengths, c.rewritten, len(c.orders)
 	c.walk(root, jb, jc)
 	if c.level < LevelValues {
+		c.orders = c.orders[:orders]
 		return
 	}
+	c.document(false, root, rawB, rawC)
 	// Same values written differently: the layout (compact or
 	// pretty-printed, the indentation, line ends) changed, or nothing else
-	// explains the byte difference (escaping of keys, a byte order mark):
+	// explains the byte difference (escaping of keys, other whitespace):
 	// no drift, and no value or array length the allowlist let change.
 	// Two documents of one encoder have the same layout however deep they
-	// nest.
-	if jsonx.StyleOf(rawB) != jsonx.StyleOf(rawC) {
-		c.add(KindEncoding, root, "layout", "layout")
-	} else if len(c.drifts) == before && c.allowed+c.lengths == allowed {
-		c.add(KindEncoding, root, fmt.Sprintf("%d bytes", len(rawB)), fmt.Sprintf("%d bytes", len(rawC)))
+	// nest. A byte order mark is a drift whatever else changed.
+	// A document in UTF-16 or UTF-32 is read as its text, and its
+	// encoding is compared as a byte order mark is: whatever else changed.
+	tb, eb := textOf(rawB)
+	tc, ec := textOf(rawC)
+	bb, ba := edges(tb)
+	cb, ca := edges(tc)
+	if eb != ec {
+		c.add(KindEncoding, root, encodingText(eb), encodingText(ec))
+		if c.witnessing {
+			c.witness([]byte(eb), []byte(ec))
+		}
+	} else if mb, mc := marks(bb, ba), marks(cb, ca); mb != mc {
+		c.add(KindEncoding, root, edgesText(bb, ba), edgesText(cb, ca))
+		if c.witnessing {
+			c.witness([]byte(mb), []byte(mc))
+		}
 	}
+	if sb, sc := jsonx.StyleOf(tb), jsonx.StyleOf(tc); sb != sc {
+		c.add(KindEncoding, root, "layout", "layout")
+		if c.witnessing {
+			c.witness(styleSource(sb), styleSource(sc))
+		}
+	} else if len(c.drifts) == before {
+		// Only orders a rule allowed: the document with those items in the
+		// baseline's order is written as the baseline's, or that differs.
+		// A document that cannot be written so is compared as it is: a
+		// drift is then reported that may be the order alone, never an
+		// order that hides another change.
+		base, cur, plain := rawB, rawC, c.allowed+c.lengths == allowed
+		if n := len(c.orders) - orders; !plain && n > 0 && c.allowed+c.lengths-allowed == n {
+			plain = true
+			if u, ok := unorder(tb, tc, jb, jc, c.orders[orders:]); ok {
+				base, cur, plain = tb, u, !bytes.Equal(tb, u)
+			}
+		}
+		// Values a rule covers written otherwise are no drift; the rest
+		// of the document is compared without them.
+		if plain && (c.rewritten == rewritten || c.beyondRules(root, base, cur)) {
+			c.add(KindEncoding, root, fmt.Sprintf("%d bytes", len(rawB)), fmt.Sprintf("%d bytes", len(rawC)))
+			if c.witnessing {
+				c.witness(rawB, rawC)
+			}
+		}
+	}
+	c.orders = c.orders[:orders]
+}
+
+// textOf is a JSON document as the comparison reads its layout: a
+// document in UTF-8 as it is, one in UTF-16 or UTF-32 as its text, with
+// its encoding (jsonx.Decode); "" for UTF-8.
+func textOf(raw []byte) ([]byte, string) {
+	if plainJSON(raw) {
+		return raw, ""
+	}
+	if enc, text, ok := decoded(raw); ok {
+		return text, enc
+	}
+	return raw, ""
+}
+
+// encodingText names an encoding of a document in a drift.
+func encodingText(enc string) string {
+	if enc == "" {
+		return "UTF-8"
+	}
+	if name, ok := strings.CutSuffix(enc, "-bom"); ok {
+		return strings.ToUpper(name) + " with a byte order mark"
+	}
+	return strings.ToUpper(enc)
+}
+
+// beyondRules reports whether two JSON documents differ apart from how
+// the values a rule covers are written.
+func (c *comparer) beyondRules(root string, b, v []byte) bool {
+	if c.devalue {
+		// A payload's values are read at the paths of the value it
+		// decodes to, not of its JSON: its bytes are compared as they are.
+		return true
+	}
+	if !plainJSON(b) || !plainJSON(v) {
+		// UTF-16 or UTF-32: their texts in one encoding.
+		eb, tb, okB := decoded(b)
+		ev, tv, okV := decoded(v)
+		if !okB || !okV || eb != ev {
+			return true
+		}
+		b, v = tb, tv
+	}
+	// The document between what stands around it (a byte order mark,
+	// whitespace), which is compared as it is.
+	bb, ba := edges(b)
+	vb, va := edges(v)
+	if !bytes.Equal(bb, vb) || !bytes.Equal(ba, va) {
+		return true
+	}
+	r := c.ruled(root)
+	return !bytes.Equal(r.masked(b[len(bb):len(b)-len(ba)]), r.masked(v[len(vb):len(v)-len(va)]))
+}
+
+// marks are what stands around a JSON document that is not whitespace (a
+// byte order mark).
+func marks(before, after []byte) string {
+	trim := func(b []byte) []byte { return bytes.Trim(b, " \t\r\n") }
+	return string((&canon{}).bytes(trim(before)).bytes(trim(after)).b)
+}
+
+// edges are the bytes of a JSON document before and after its value.
+func edges(raw []byte) (before, after []byte) {
+	start := 0
+	for start < len(raw) && !strings.ContainsRune("{[\"-0123456789tfnNI", rune(raw[start])) {
+		start++
+	}
+	end := len(raw)
+	for end > start && strings.ContainsRune(" \t\r\n", rune(raw[end-1])) {
+		end--
+	}
+	return raw[:start], raw[end:]
+}
+
+// edgesText says what stands before and after a document.
+func edgesText(before, after []byte) string {
+	var parts []string
+	if rest, ok := bytes.CutPrefix(before, []byte("\xef\xbb\xbf")); ok {
+		parts = append(parts, "byte order mark")
+		before = rest
+	}
+	if len(before) > 0 {
+		parts = append(parts, fmt.Sprintf("%d bytes before", len(before)))
+	}
+	switch string(after) {
+	case "":
+	case "\n":
+		parts = append(parts, "final line end")
+	case "\r\n":
+		parts = append(parts, "final CRLF line end")
+	default:
+		parts = append(parts, fmt.Sprintf("%d bytes after", len(after)))
+	}
+	if len(parts) == 0 {
+		return "nothing before or after the value"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func isContainer(k jsonx.Kind) bool { return k == jsonx.Object || k == jsonx.Array }
@@ -446,6 +978,9 @@ func (c *comparer) walk(path string, b, v *jsonx.Value) {
 		// Below LevelTypes only a change of structure counts.
 		if c.level >= LevelTypes || isContainer(b.Kind) || isContainer(v.Kind) {
 			c.add(KindType, path, b.Kind.String(), v.Kind.String())
+			if c.witnessing {
+				c.witness(c.source(path, b), c.source(path, v))
+			}
 		}
 		return
 	}
@@ -459,14 +994,29 @@ func (c *comparer) walk(path string, b, v *jsonx.Value) {
 	case jsonx.Object:
 		c.object(path, b, v)
 	case jsonx.Array:
-		if r := c.allow.ArrayKey(c.id, path); r != nil && c.keyed(path, r, b, v) {
+		if r := c.allow.ArrayKey(c.id, path); r != nil && r.Key != "" && c.keyed(path, r, b, v) {
 			return
 		}
-		if len(b.Items) != len(v.Items) {
-			if c.allow.AnyLength(c.id, path) {
-				c.lengths++
-			} else {
-				c.add(KindArrayLength, path, strconv.Itoa(len(b.Items)), strconv.Itoa(len(v.Items)))
+		if len(b.Items) == len(v.Items) {
+			c.items(path, b, v)
+			return
+		}
+		if c.allow.AnyLength(c.id, path) {
+			c.lengths++
+		} else {
+			c.add(KindArrayLength, path, strconv.Itoa(len(b.Items)), strconv.Itoa(len(v.Items)))
+			// The items past the shorter array are not walked.
+			n := min(len(b.Items), len(v.Items))
+			tail := func(items []*jsonx.Value) []byte {
+				e := c.enc()
+				e.list(len(items) - n)
+				for i := n; i < len(items); i++ {
+					e.bytes(c.source(path+"["+strconv.Itoa(i)+"]", items[i]))
+				}
+				return e.b
+			}
+			if c.witnessing {
+				c.witness(tail(b.Items), tail(v.Items))
 			}
 		}
 		for i := 0; i < len(b.Items) && i < len(v.Items); i++ {
@@ -492,10 +1042,11 @@ func (c *comparer) scalar(path string, b, v *jsonx.Value) {
 	}
 	rule, parts := c.allow.ValueRules(c.id, path)
 	switch {
+	case same && (rule != nil || len(parts) > 0):
+		// Written differently: a rule covers how its value is written
+		// too, as it lets the value change (json compares the rest).
+		c.rewritten++
 	case rule != nil:
-		if same {
-			return // written differently: the rule covers how it is written too
-		}
 		if !rule.Matches(v.FormatText()) {
 			c.add(KindFormat, path, b.ScalarText(), v.ScalarText())
 		} else {
@@ -507,10 +1058,31 @@ func (c *comparer) scalar(path string, b, v *jsonx.Value) {
 		c.allowed++
 	case sameNumber(b, v):
 		c.add(KindNumberLiteral, path, b.ScalarText(), v.ScalarText())
+		if c.witnessing {
+			c.parted(path, b.FormatText(), v.FormatText(), len(parts) > 0, false)
+		}
 	default:
 		c.add(KindValue, path, b.ScalarText(), v.ScalarText())
 		c.drifts[len(c.drifts)-1].Texts = [2]string{b.FormatText(), v.FormatText()}
+		if c.witnessing {
+			c.parted(path, b.FormatText(), v.FormatText(), len(parts) > 0, false)
+		}
 	}
+}
+
+// parted makes the drift added last digest two values by the pieces
+// rules with parts leave of them (what the comparison judges), when such
+// rules apply.
+func (c *comparer) parted(path, b, v string, parts, cells bool) {
+	if !parts {
+		return
+	}
+	nb, okB := c.normal(path, b, cells)
+	nv, okV := c.normal(path, v, cells)
+	e := c.enc()
+	e.value(nb, okB, b).value(nv, okV, v)
+	d := &c.drifts[len(c.drifts)-1]
+	d.Witness, d.parted = e.sum(), true
 }
 
 // object reports missing and extra keys and a change in the order of the keys
@@ -521,7 +1093,13 @@ func (c *comparer) object(path string, b, v *jsonx.Value) {
 		// Nothing is missing, extra or moved, and the n-th occurrence of a
 		// key is at the same position on both sides.
 		for i, m := range b.Members {
+			before := len(c.drifts)
 			c.walk(jsonx.KeyPath(path, m.Key), m.Value, v.Members[i].Value)
+			if len(c.drifts) > before {
+				if c.witnessing {
+					c.occurrence(b, m.Key, i, before)
+				}
+			}
 		}
 		return
 	}
@@ -536,14 +1114,23 @@ func (c *comparer) object(path string, b, v *jsonx.Value) {
 	seen := map[string]bool{}
 	for _, m := range b.Members {
 		if !seen[m.Key] && nc[m.Key] < nb[m.Key] {
-			c.add(KindKeyMissing, jsonx.KeyPath(path, m.Key), jsonx.Quote(m.Key), "")
+			c.add(KindKeyMissing, jsonx.KeyPath(path, m.Key), memberText(m.Value), "")
+			c.digestAs(jsonx.Quote(m.Key), "")
+			if c.witnessing {
+				c.witness(c.sources(path, b, m.Key), c.sources(path, v, m.Key))
+			}
 		}
 		seen[m.Key] = true
 	}
 	seen = map[string]bool{}
 	for _, m := range v.Members {
 		if !seen[m.Key] && nb[m.Key] < nc[m.Key] {
-			c.add(KindKeyExtra, jsonx.KeyPath(path, m.Key), "", jsonx.Quote(m.Key))
+			c.add(KindKeyExtra, jsonx.KeyPath(path, m.Key), "", memberText(m.Value))
+			c.digestAs("", jsonx.Quote(m.Key))
+			// Where the new key stands: the keys of the object in order.
+			if c.witnessing {
+				c.witness(c.sources(path, b, m.Key), c.sources(path, v, m.Key), c.textsSource(v.Keys()))
+			}
 		}
 		seen[m.Key] = true
 	}
@@ -575,7 +1162,42 @@ func (c *comparer) object(path string, b, v *jsonx.Value) {
 	for _, k := range kb {
 		i := idx[k]
 		idx[k]++
+		before := len(c.drifts)
 		c.walk(jsonx.KeyPath(path, k), ob[k][i], oc[k][i])
+		if len(c.drifts) > before && len(ob[k]) > 1 {
+			if c.witnessing {
+				c.mark(before, i)
+			}
+		}
+	}
+}
+
+// occurrence marks the drifts from before on as of the n-th occurrence of
+// a key that an object has more than once: they share one path.
+func (c *comparer) occurrence(o *jsonx.Value, key string, at, before int) {
+	n, total := 0, 0
+	for i, m := range o.Members {
+		if m.Key == key {
+			if i < at {
+				n++
+			}
+			total++
+		}
+	}
+	if total > 1 {
+		if c.witnessing {
+			c.mark(before, n)
+		}
+	}
+}
+
+// mark adds to the witness of the drifts from before on which occurrence
+// of a repeated key they are of.
+func (c *comparer) mark(before, n int) {
+	for i := before; i < len(c.drifts); i++ {
+		e := c.enc()
+		e.text(c.drifts[i].Witness).int(n)
+		c.drifts[i].Witness = e.sum()
 	}
 }
 
@@ -601,4 +1223,35 @@ func sameNumber(a, b *jsonx.Value) bool {
 	x, ok1 := new(big.Float).SetPrec(4096).SetString(a.Text)
 	y, ok2 := new(big.Float).SetPrec(4096).SetString(b.Text)
 	return ok1 && ok2 && x.Cmp(y) == 0
+}
+
+// tracks reports whether the tables another side tracked (meta.RowTracking:
+// <component>/table:<name>, from the configuration) hold item, the table
+// a row change names as the driver read it. The drivers match a table
+// more loosely than its configured name: SQL Server and others without
+// letter case, PostgreSQL a name without a schema in any schema. So does
+// this, without letter case and by the name without its schema too: a
+// table taken for tracked keeps its rows compared, and a looser match can
+// only show a difference, never hide one.
+func tracks(other []string, item string) bool {
+	comp, name, ok := strings.Cut(item, "/table:")
+	if !ok {
+		return slices.Contains(other, item)
+	}
+	bare := func(n string) string {
+		if i := strings.LastIndexByte(n, '.'); i >= 0 {
+			return n[i+1:]
+		}
+		return n
+	}
+	for _, o := range other {
+		oc, on, ok := strings.Cut(o, "/table:")
+		if !ok || oc != comp {
+			continue
+		}
+		if strings.EqualFold(on, name) || strings.EqualFold(bare(on), bare(name)) {
+			return true
+		}
+	}
+	return false
 }

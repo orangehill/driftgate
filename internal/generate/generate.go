@@ -10,8 +10,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -51,7 +54,27 @@ type Result struct {
 	Catalog   *catalog.Catalog
 	Generated int
 	Skipped   []Skip
+	// Unused are the entries of requests: in the configuration that name
+	// no generated request (requests 2: match …).
+	Unused []string
+	// Notes are remarks on the configuration, once per run.
+	Notes []string
+	// Replaced are the route methods that entries written by hand reach,
+	// whose generated requests they take the place of (without --all).
+	Replaced []Replaced
 }
+
+// Replaced is a route method generate makes no requests for, as entries
+// written by hand or imported reach it.
+type Replaced struct {
+	Route     string   // method and route ("GET /api/limited"), with its service
+	ByHand    []string // the entries that reach it
+	Generated []string // the requests generate would make for it
+}
+
+// ErrSetting is an entry of requests: in the configuration that generate
+// refuses.
+var ErrSetting = errors.New("requests")
 
 // IsGenerated reports whether an entry came from generate.
 func IsGenerated(r catalog.Request) bool { return r.Source != nil && r.Source.Template != "" }
@@ -75,13 +98,17 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		templates = []string{"ok"}
 	}
 	g := &generator{o: o, res: &Result{}, ids: map[string]bool{}, values: map[string][]string{}}
+	if slices.Contains(templates, routes.JSONErrors) && !slices.ContainsFunc(routes.ErrorTemplates, func(t string) bool { return slices.Contains(templates, t) }) {
+		g.res.Notes = append(g.res.Notes, fmt.Sprintf("json-errors repeats the requests of %s with Accept: application/json, and templates: has none of them, so it makes nothing; add not-found (as init does) or remove json-errors",
+			strings.Join(routes.ErrorTemplates, ", ")))
+	}
 	for _, r := range manual.Requests {
 		g.ids[r.ID] = true
 	}
-	// Each method of a route is generated unless it is excluded or (without
-	// --all) a hand-written entry already reaches it.
-	g.skipUnit = func(route routes.Route, unit string) bool {
-		return o.Exclusions.ExcludedUnit(route, unit) != nil || (!o.All && reached(o.Inventory, manual, route, unit))
+	// Without --all, no requests are generated for a route method a
+	// hand-written entry already reaches.
+	if !o.All {
+		g.byHand = reached(o.Inventory, manual)
 	}
 	g.assignBases(o.Inventory.Routes)
 	var generated []catalog.Request
@@ -92,6 +119,9 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		}
 		generated = append(generated, reqs...)
 	}
+	if err := g.checkSettings(); err != nil {
+		return nil, err
+	}
 	out := &catalog.Catalog{Version: catalog.Version, Requests: append(manual.Requests, generated...), Sequences: manual.Sequences}
 	g.res.Generated = len(generated)
 	out.Sequences = append(out.Sequences, g.sequences(out)...)
@@ -99,25 +129,71 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	return g.res, nil
 }
 
-// reached reports whether an entry written by hand already reaches the
-// route with this method.
-func reached(inv *routes.Inventory, cat *catalog.Catalog, route routes.Route, unit string) bool {
+// reached is the IDs of the entries written by hand that reach each route
+// method, by reachKey.
+func reached(inv *routes.Inventory, cat *catalog.Catalog) map[string][]string {
+	m := routes.NewMatcher(inv)
+	out := map[string][]string{}
 	for _, r := range cat.Requests {
-		if m := routes.Match(inv, r); m != nil && m.Target == route.Target && m.Key() == route.Key() && m.Domain == route.Domain && m.UnitOf(r.Method) == unit {
-			return true
+		if route := m.Match(r); route != nil {
+			k := reachKey(*route, route.UnitOf(r.Method))
+			out[k] = append(out[k], r.ID)
 		}
 	}
-	return false
+	return out
+}
+
+func reachKey(route routes.Route, unit string) string {
+	return route.Target + "\x00" + route.Domain + "\x00" + route.Key() + "\x00" + unit
 }
 
 type generator struct {
-	o        Options
-	res      *Result
-	ids      map[string]bool
-	values   map[string][]string // query results, by state and SQL
-	bases    map[string]string   // ID base of each route and method
-	skipUnit func(routes.Route, string) bool
-	from     []catalog.Request // generated requests that take a value from a response
+	o      Options
+	res    *Result
+	ids    map[string]bool
+	values map[string][]string // query results, by state and SQL
+	bases  map[string]string   // ID base of each route and method
+	byHand map[string][]string // route method → entries written by hand that reach it (nil with --all)
+	from   []catalog.Request   // generated requests that take a value from a response
+	hits   []settingHits       // what each entry of requests: named
+}
+
+// settingHits are the routes and methods an entry of requests: named.
+type settingHits struct {
+	routes  map[string]bool
+	methods map[string]bool
+}
+
+// checkSettings refuses an entry of requests: that says mutates: false
+// of a request whose method changes data other than POST (DELETE, PUT,
+// PATCH, any other verb), or of requests of more than one route: such
+// a request would run with the read-only ones, at the same time, without
+// a restore before it, and a glob that marks many at once (match: "POST
+// *") would turn off that guard for every write it covers. It lists the
+// entries that name no generated request.
+func (g *generator) checkSettings() error {
+	for i, rs := range g.o.Project.Requests {
+		h := settingHits{}
+		if i < len(g.hits) {
+			h = g.hits[i]
+		}
+		if len(h.routes) == 0 {
+			g.res.Unused = append(g.res.Unused, fmt.Sprintf("requests %d (match %q)", i+1, rs.Match))
+			continue
+		}
+		if rs.Mutates == nil || *rs.Mutates {
+			continue
+		}
+		for _, m := range slices.Sorted(maps.Keys(h.methods)) {
+			if m != "POST" && !catalog.SafeMethod(m) {
+				return fmt.Errorf("%w %d (match %q): mutates: false names a %s request, which changes data; say it only of a request that only reads, such as a search sent as POST", ErrSetting, i+1, rs.Match, m)
+			}
+		}
+		if len(h.routes) > 1 {
+			return fmt.Errorf("%w %d (match %q): mutates: false names requests of %d routes (%s); say it of one route at a time, as each must only read", ErrSetting, i+1, rs.Match, len(h.routes), strings.Join(slices.Sorted(maps.Keys(h.routes)), ", "))
+		}
+	}
+	return nil
 }
 
 func (g *generator) skip(route routes.Route, tpl, format string, a ...any) {
@@ -139,6 +215,34 @@ func observed(p *config.Project, target, method, path, id string) bool {
 		}
 	}
 	return false
+}
+
+// setting is what requests: in the configuration sets for the request,
+// matched as observed matches: the last entry that names it wins, for
+// mutates and for the body each. It notes what each entry named.
+func (g *generator) setting(route string, target, method, path, id string) (mutates *bool, body json.RawMessage) {
+	p := g.o.Project
+	for i, rs := range p.Requests {
+		if rs.Target != "" && rs.Target != target {
+			continue
+		}
+		if !glob.Match(rs.Match, method+" "+path) && !glob.Match(rs.Match, path) && !glob.Match(rs.Match, id) {
+			continue
+		}
+		for len(g.hits) <= i {
+			g.hits = append(g.hits, settingHits{routes: map[string]bool{}, methods: map[string]bool{}})
+		}
+		g.hits[i].routes[route] = true
+		g.hits[i].methods[method] = true
+		if rs.Mutates != nil {
+			v := *rs.Mutates
+			mutates = &v
+		}
+		if b, err := rs.JSONBody(); err == nil && b != nil {
+			body = b
+		}
+	}
+	return mutates, body
 }
 
 // queryString writes the required query parameters of a route: a value under
@@ -416,7 +520,11 @@ func takesBody(m string) bool { return m == "POST" || m == "PUT" || m == "PATCH"
 func (g *generator) route(ctx context.Context, route routes.Route, templates []string) ([]catalog.Request, error) {
 	var out []catalog.Request
 	for _, m := range methods(route) {
-		if g.skipUnit != nil && g.skipUnit(route, m) {
+		if g.o.Exclusions.ExcludedUnit(route, m) != nil {
+			continue
+		}
+		if hand := g.byHand[reachKey(route, m)]; len(hand) > 0 {
+			g.replaced(ctx, route, m, templates, hand)
 			continue
 		}
 		reqs, err := g.routeMethod(ctx, route, m, templates)
@@ -426,6 +534,34 @@ func (g *generator) route(ctx context.Context, route routes.Route, templates []s
 		out = append(out, reqs...)
 	}
 	return out, nil
+}
+
+// replaced notes a route method that entries written by hand reach, with
+// the requests generate would make for it: their IDs come from a copy of
+// the generator, so the IDs taken, the entries of requests: named, the
+// sequences and the skips of this one do not change. The copy shares the
+// query results (values) and adds to them: a value read here is not
+// read again. A query for a parameter value that fails here only
+// leaves the generated IDs out: the route is not generated, so it never
+// fails generate.
+func (g *generator) replaced(ctx context.Context, route routes.Route, m string, templates []string, hand []string) {
+	scratch := &generator{o: g.o, res: &Result{}, ids: maps.Clone(g.ids), values: g.values, bases: g.bases}
+	reqs, err := scratch.routeMethod(ctx, route, m, templates)
+	if err == nil && len(reqs) == 0 {
+		return // generate would make nothing here: nothing is replaced
+	}
+	label := m + " " + route.Path
+	if route.Domain != "" {
+		label = route.Domain + " " + label
+	}
+	if route.Target != "" {
+		label = route.Target + ": " + label
+	}
+	r := Replaced{Route: label, ByHand: hand}
+	for _, req := range reqs {
+		r.Generated = append(r.Generated, req.ID)
+	}
+	g.res.Replaced = append(g.res.Replaced, r)
 }
 
 func (g *generator) routeMethod(ctx context.Context, route routes.Route, m string, templates []string) ([]catalog.Request, error) {
@@ -449,12 +585,20 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 	}
 	var out []catalog.Request
 	add := func(tpl, suffix string, b binding, ident string, headers [][2]string, reqBody json.RawMessage) {
-		if len(reqBody) > 0 && route.BodyType != "" {
+		id := g.id(base + b.label + suffix)
+		mutates, setBody := g.setting(route.Label(), route.Target, m, route.Path, id)
+		if mutates == nil {
+			mutates = catalog.MutatesFor(m)
+		}
+		switch {
+		case setBody != nil && tpl != "empty-body":
+			reqBody = setBody // JSON: sent as application/json
+		case len(reqBody) > 0 && route.BodyType != "":
 			headers = append(append([][2]string{}, headers...), [2]string{"content-type", route.BodyType})
 		}
 		r := catalog.Request{
-			ID: g.id(base + b.label + suffix), Target: route.Target, Method: m, Path: b.path(route) + query, Identity: ident,
-			Headers: headers, Body: reqBody, Mutates: catalog.MutatesFor(m),
+			ID: id, Target: route.Target, Method: m, Path: b.path(route) + query, Identity: ident,
+			Headers: headers, Body: reqBody, Mutates: mutates,
 			Source: &catalog.Source{Route: route.Key(), Template: tpl},
 		}
 		r.Observe = observed(g.o.Project, route.Target, m, route.Path, r.ID)
@@ -485,7 +629,11 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 		return b, any
 	}
 	for _, tpl := range templates {
-		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" {
+		// Without a value, not-found and invalid-param still make their
+		// requests, and json-errors (added below) makes the twins of those
+		// when one of them is a template.
+		twins := slices.Contains(templates, "not-found") || slices.Contains(templates, "invalid-param")
+		if bindings == nil && tpl != "not-found" && tpl != "invalid-param" && (tpl != routes.JSONErrors || !twins) {
 			g.skip(route, tpl, "%s", missing)
 			continue
 		}
@@ -530,7 +678,49 @@ func (g *generator) routeMethod(ctx context.Context, route routes.Route, m strin
 			}
 		}
 	}
-	return withMultipart(route, out), nil
+	out = withMultipart(route, out)
+	if slices.Contains(templates, routes.JSONErrors) {
+		// A route none of the error templates makes a request for (no
+		// required parameter, no auth, no body) gets no twin, as it gets
+		// no not-found: nothing to list.
+		out = g.jsonErrors(route, out)
+	}
+	return out, nil
+}
+
+// jsonErrors adds after each request of an error template the same request
+// with Accept: application/json (ID suffix -json): frameworks such as
+// Laravel, Symfony, Rails and Spring Boot render an error as a page or a
+// redirect for a browser and as JSON for an API client, and a change of
+// the JSON error body would otherwise go unseen.
+func (g *generator) jsonErrors(route routes.Route, reqs []catalog.Request) []catalog.Request {
+	out := make([]catalog.Request, 0, 2*len(reqs))
+	for _, r := range reqs {
+		out = append(out, r)
+		if r.Source == nil || !slices.Contains(routes.ErrorTemplates, r.Source.Template) {
+			continue
+		}
+		j := r
+		j.ID = g.id(r.ID + "-json")
+		j.Headers = [][2]string{{"accept", "application/json"}}
+		for _, h := range r.Headers {
+			if !strings.EqualFold(h[0], "accept") {
+				j.Headers = append(j.Headers, h)
+			}
+		}
+		j.Source = &catalog.Source{Route: r.Source.Route, Template: routes.JSONErrors}
+		if r.Multipart != nil {
+			mp := *r.Multipart
+			j.Multipart = &mp
+		}
+		j.Storage = g.storage(j.ID)
+		j.Observe = observed(g.o.Project, route.Target, r.Method, route.Path, j.ID)
+		if len(r.ParamsFrom) > 0 {
+			g.from = append(g.from, j)
+		}
+		out = append(out, j)
+	}
+	return out
 }
 
 // sequences puts every request that takes a value from a response into one

@@ -13,6 +13,10 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // Integration tests on real servers: DRIFTGATE_TEST_MYSQL lists mysql://
@@ -59,13 +63,33 @@ func newPerson(i int) person {
 	}
 }
 
+// invoiceSequence is the sequence of seedStatements on MariaDB, "" on
+// other servers. A Galera node creates a sequence with MariaDB's default
+// cache only with an increment of 0 (auto_increment_increment, 1235).
+func invoiceSequence(s *server, mariadb bool) string {
+	if !mariadb {
+		return ""
+	}
+	def := "CREATE SEQUENCE invoice_numbers START WITH 100"
+	if isGalera(s.admin) {
+		def += " INCREMENT BY 0"
+	}
+	return def
+}
+
+// isGalera reports whether the server is a Galera node (wsrep_on).
+func isGalera(db *sql.DB) bool {
+	var wsrep int
+	return db.QueryRow("SELECT @@wsrep_on").Scan(&wsrep) == nil && wsrep != 0
+}
+
 func lit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // seedStatements builds the source database: references (also on a personal
 // column), a generated column, a trigger, views over views, JSON, HTML and
 // free text with embedded personal data, serialized PHP, a table without a
-// primary key.
-func seedStatements(driver string, ps []person, mariadb bool) []string {
+// primary key; on MariaDB (sequence, from invoiceSequence) a sequence.
+func seedStatements(driver string, ps []person, sequence string) []string {
 	var st []string
 	if driver == MySQL {
 		st = append(st,
@@ -91,8 +115,10 @@ func seedStatements(driver string, ps []person, mariadb bool) []string {
 			"CREATE TRIGGER post_log_bi BEFORE INSERT ON post_log FOR EACH ROW SET NEW.action = IF('a' = 'A', NEW.action, CONCAT(NEW.action, ':bin'))",
 			"SET NAMES utf8mb4",
 		)
-		if mariadb {
-			st = append(st, "CREATE SEQUENCE invoice_numbers START WITH 100", "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)")
+		if sequence != "" {
+			st = append(st, sequence, "SELECT NEXTVAL(invoice_numbers)", "SELECT NEXTVAL(invoice_numbers)",
+				// One that has cycled: its count of cycles is copied too.
+				"CREATE SEQUENCE rounds MINVALUE 1 MAXVALUE 2 NOCACHE CYCLE", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)", "SELECT NEXTVAL(rounds)")
 		}
 	} else {
 		st = append(st,
@@ -287,6 +313,99 @@ func TestPostgresAnonymize(t *testing.T) {
 	testAnonymize(t, newServer(t, Postgres, dsn))
 }
 
+// TestPostgresPublishOtherSessions: publish ends the other sessions on the
+// staging database before it renames it. The target's DSN names a role
+// that is not a superuser, which may not end a superuser's session: (a) a
+// session that ends within the server's wait (5 s) does not stop publish;
+// (b) one that stays stops it after that wait with "being accessed by
+// other users" and the permission error (42501), not at once with the
+// permission error alone.
+func TestPostgresPublishOtherSessions(t *testing.T) {
+	dsn := os.Getenv("DRIFTGATE_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("DRIFTGATE_TEST_POSTGRES not set")
+	}
+	s := newServer(t, Postgres, dsn)
+	ctx := context.Background()
+	const role, staging, target = "dgdata_pub_app", "dgdata_pub_staging", "dgdata_pub_target"
+	drop := func() {
+		s.drop(staging, target)
+		s.admin.Exec("DROP ROLE IF EXISTS " + role)
+	}
+	drop()
+	t.Cleanup(drop)
+	if _, err := s.admin.Exec("CREATE ROLE " + role + " LOGIN PASSWORD 'app' CREATEDB"); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword(role, "app")
+	app := &server{driver: Postgres, dsn: u.String()}
+	e := &engine{dl: postgresDialect{}}
+
+	// publish runs while a superuser's session on the staging database
+	// runs q; done gets the session's error.
+	publish := func(t *testing.T, q string) (took time.Duration, done chan error, err error) {
+		t.Helper()
+		s.drop(staging, target)
+		if _, err := s.admin.Exec("CREATE DATABASE " + staging + " OWNER " + role); err != nil {
+			t.Fatal(err)
+		}
+		d, err := open(s.db(staging), staging)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done = make(chan error, 1)
+		go func() {
+			_, err := d.Exec(q)
+			d.Close()
+			done <- err
+		}()
+		for i := 0; ; i++ {
+			var n int
+			s.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND query = $2", staging, q).Scan(&n)
+			if n > 0 {
+				break
+			}
+			if i == 200 {
+				t.Fatalf("no session on %s", staging)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		start := time.Now()
+		err = e.publish(ctx, app.db(staging), app.db(target), false)
+		return time.Since(start), done, err
+	}
+
+	t.Run("a session that ends", func(t *testing.T) {
+		_, done, err := publish(t, "SELECT pg_sleep(1.5)")
+		if err != nil {
+			t.Fatalf("publish over a session that ends: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("the session was ended: %v", err)
+		}
+		var n int
+		if err := s.admin.QueryRow("SELECT count(*) FROM pg_database WHERE datname = $1", target).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("target after publish: %d, %v", n, err)
+		}
+	})
+	t.Run("a session that stays", func(t *testing.T) {
+		took, done, err := publish(t, "SELECT pg_sleep(60)")
+		s.admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", staging)
+		<-done
+		pe := (*pgconn.PgError)(nil)
+		if !errors.As(err, &pe) || pe.Code != "55006" || !strings.Contains(err.Error(), "SQLSTATE 42501") {
+			t.Fatalf("publish over a superuser's session: %v", err)
+		}
+		if took > 8*time.Second {
+			t.Fatalf("the error took %v", took)
+		}
+	})
+}
+
 func testAnonymize(t *testing.T, s *server) {
 	ctx := context.Background()
 	const src, dst, loaded = "dgdata_src", "dgdata_dst", "dgdata_loaded"
@@ -295,12 +414,12 @@ func testAnonymize(t *testing.T, s *server) {
 	if s.driver == MySQL {
 		var version string
 		s.admin.QueryRow("SELECT VERSION()").Scan(&version)
-		mariadb = strings.Contains(strings.ToLower(version), "mariadb")
+		mariadb = dbx.IsMariaDB(version)
 	}
 	ps := people(testUsers())
 	s.create(t, src)
 	s.drop(dst, loaded)
-	s.exec(t, src, seedStatements(s.driver, ps, mariadb)...)
+	s.exec(t, src, seedStatements(s.driver, ps, invoiceSequence(s, mariadb))...)
 
 	rulesText := testRules
 	if s.driver == Postgres {
@@ -440,6 +559,10 @@ func testAnonymize(t *testing.T, s *server) {
 			// (next_not_cached_value): a gap, as after a server restart.
 			if n := count(tdb, "SELECT NEXTVAL(invoice_numbers)"); n != 1100 {
 				t.Errorf("sequence continues at %d", n)
+			}
+			var next, cycles int
+			if err := tdb.QueryRow("SELECT next_not_cached_value, cycle_count FROM rounds").Scan(&next, &cycles); err != nil || next != 2 || cycles != 1 {
+				t.Errorf("cycled sequence: next %d, cycles %d, %v; want 2, 1", next, cycles, err)
 			}
 		}
 	} else {

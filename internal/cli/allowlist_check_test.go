@@ -105,6 +105,17 @@ body:
 		!strings.Contains(out, "array rule 2 ($.items): no-place") || strings.Contains(out, "array rule 1") {
 		t.Errorf("array rules: %d\n%s", code, out)
 	}
+	// Init's own rules for a part the baseline does not reach (a rate
+	// limit reached) are not findings; they are listed as not checked. The
+	// same rule with the user's own reason is a finding.
+	write(t, allow, "version: 1\nheaders:\n"+strings.Replace(laravelHeaders, "seconds until the limit resets.", "mine", 1))
+	code, out, _ = runCLI(t, "allowlist", "check", "--config", cfg, "--format", "json")
+	if got := findings(out); code != ExitDrift || strings.Join(got, ",") != "header 3 no-place" {
+		t.Errorf("init's rules: exit %d %q\n%s", code, got, out)
+	}
+	if _, out, _ := runCLI(t, "allowlist", "check", "--config", cfg); !strings.Contains(out, "header rule 1 (x-ratelimit-remaining); header rule 2 (x-ratelimit-reset)") {
+		t.Errorf("init's rules not listed as not checked:\n%s", out)
+	}
 	// A rule for a request that is gone.
 	write(t, allow, "version: 1\nbody:\n  - request: gone\n    path: $.a\n    format: x\n    reason: r\n")
 	if code, out, _ := runCLI(t, "allowlist", "check", "--config", cfg, "--format", "json"); code != ExitDrift || !strings.Contains(out, `"check": "no-request"`) {

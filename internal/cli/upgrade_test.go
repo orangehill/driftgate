@@ -139,7 +139,7 @@ body:
 	}
 	cli(ExitClean, "verify", "--baseline", "local", "--migrate-state")
 	// The search runs after the write, on the data it left.
-	if out, _ := cli(ExitDrift, "run"); !strings.Contains(out, `"mutates": false`) || !strings.Contains(out[strings.Index(out, "== compare =="):], "faq-search") {
+	if out, _ := cli(ExitDrift, "run"); !strings.Contains(out, "mutates: false") || !strings.Contains(out[strings.Index(out, "== compare =="):], "faq-search") {
 		t.Fatalf("run with the search after the write:\n%s", out)
 	}
 	// The fix the run names: the search only reads.

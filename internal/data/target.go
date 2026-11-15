@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/orangehill/driftgate/internal/dbx"
 )
 
 // The target database is written under a staging name and gets its own name
@@ -132,7 +134,7 @@ func (e *engine) stage(ctx context.Context, src, dst Database, replace bool) (*D
 		return nil, err
 	}
 	defer admin.Close()
-	st, err := e.dl.inspect(ctx, admin, dst)
+	st, err := e.inspect(ctx, admin, dst)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +153,47 @@ func (e *engine) stage(ctx context.Context, src, dst Database, replace bool) (*D
 	staging := dst
 	staging.Name = name
 	return &staging, nil
+}
+
+// galeraNode reports whether the target's server is a Galera cluster node.
+func galeraNode(ctx context.Context, dst Database) (bool, error) {
+	admin, err := open(dst, "")
+	if err != nil {
+		return false, err
+	}
+	defer admin.Close()
+	return dbx.GaleraNode(ctx, admin)
+}
+
+// galeraSequences refuses a Galera target the source's sequences it would
+// refuse to create (1235), naming them, instead of the server's error once
+// the target is half written. Copied without its cache or with another
+// engine, a sequence would be another object.
+func galeraSequences(ctx context.Context, src *sql.Conn, srcName string, s *Schema, dst Database) error {
+	names := make([]string, len(s.sequences))
+	for i, q := range s.sequences {
+		names[i] = q.name
+	}
+	refused, err := dbx.GaleraRefusedSequences(ctx, src, srcName, names)
+	if err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("target %s is on a Galera cluster node, %s, so these sequences of the source cannot be copied: %s; %s in the source, or write to a server without Galera", dst.Name, dbx.GaleraSequencesWhy, strings.Join(refused, ", "), dbx.GaleraSequencesHint)
+}
+
+// inspect reads what the target holds, again when the server stops the
+// read for a lock (retryRead): it reads information_schema, whose ROUTINES
+// and EVENTS a Galera node aborts when another session creates a routine
+// or an event.
+func (e *engine) inspect(ctx context.Context, admin *sql.DB, dst Database) (st dbState, err error) {
+	err = retryRead(ctx, nil, "target", func() error {
+		st, err = e.dl.inspect(ctx, admin, dst)
+		return err
+	})
+	return st, err
 }
 
 // discard drops the staging database, also after the context of the run
@@ -175,7 +218,7 @@ func (e *engine) publish(ctx context.Context, staging, dst Database, replace boo
 		return err
 	}
 	defer admin.Close()
-	st, err := e.dl.inspect(ctx, admin, dst)
+	st, err := e.inspect(ctx, admin, dst)
 	if err != nil {
 		return err
 	}

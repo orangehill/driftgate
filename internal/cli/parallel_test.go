@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,21 +18,41 @@ func TestParallel(t *testing.T) {
 	sizes := []int64{40, 40, 40, 500, 10, 60, 30, 0, 100, 20, 300, 50}
 	var mu sync.Mutex
 	var inWork, most, large, mostLarge int64
-	beside := false // a large item worked next to smaller ones
+	firstLarge := false // item 3 works
+	// The first large item works until a smaller item starts next to it:
+	// by the order of events, not by how long a sleep lasts (under -race
+	// the smaller items around it could all start and end within one).
+	// Were it to wait for the smaller ones instead, none would start and
+	// the test fails after a while rather than hanging.
+	small := make(chan struct{})
+	var smallOnce sync.Once
+	beside := false // a smaller item started while the large one worked
 	done := make([]bool, len(sizes))
 	err := parallel(len(sizes), func(i int) int64 { return sizes[i] }, func(i int) error {
 		big := sizes[i] > 100
 		mu.Lock()
 		if big {
 			large++
-			beside = beside || inWork > 0
+			firstLarge = firstLarge || i == 3
 		} else {
 			inWork += sizes[i]
+			if firstLarge {
+				smallOnce.Do(func() { close(small) })
+			}
 		}
 		most, mostLarge = max(most, inWork), max(mostLarge, large)
 		mu.Unlock()
-		time.Sleep(5 * time.Millisecond)
+		if i == 3 {
+			select {
+			case <-small:
+				beside = true
+			case <-time.After(10 * time.Second):
+			}
+		} else {
+			time.Sleep(time.Millisecond)
+		}
 		mu.Lock()
+		firstLarge = firstLarge && i != 3
 		if big {
 			large--
 		} else {
@@ -79,5 +100,18 @@ func TestParallelCollectsAfterLargeItem(t *testing.T) {
 	runtime.ReadMemStats(&m)
 	if m.NumGC == before {
 		t.Fatal("no collection after a large item")
+	}
+}
+
+// A panic in an item is its error, with exit 3, and the process goes on.
+func TestParallelPanic(t *testing.T) {
+	err := parallel(3, func(int) int64 { return 1 }, func(i int) error {
+		if i == 1 {
+			panic("a body the code cannot handle")
+		}
+		return nil
+	})
+	if err == nil || classify(err) != ExitEnv || !strings.Contains(err.Error(), "internal error") {
+		t.Fatalf("got %v", err)
 	}
 }

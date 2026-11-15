@@ -88,6 +88,20 @@ func newOrigins(base, cur []string) *origins {
 	}
 }
 
+// ownOrigins writes both sides' origins as one neutral origin, for what
+// expectations digest; nil when no side knows its origin.
+func ownOrigins(base, cur []string) *originSide {
+	all, _ := parseOrigins(append(append([]string{}, base...), cur...))
+	if len(all) == 0 {
+		return nil
+	}
+	neutral := false
+	for _, o := range all {
+		neutral = neutral || o.scheme != all[0].scheme
+	}
+	return &originSide{list: all, neutral: neutral}
+}
+
 // parseOrigins reads a side's origins, in order and without repeats;
 // what is not an origin is left out.
 func parseOrigins(list []string) ([]origin, map[string]bool) {

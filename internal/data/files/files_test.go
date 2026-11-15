@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -582,25 +583,31 @@ func TestPDFNumbersOutOfRange(t *testing.T) {
 // from every "obj" after it.
 func TestPDFBrokenIsLinear(t *testing.T) {
 	// Linear work grows about 4 times with 4 times the input, quadratic
-	// work 16 times; a ratio holds on any machine, also a slow CI runner
-	// with the race detector, where wall-clock limits do not.
+	// work 16 times. Only the ratio is checked, never a wall-clock limit,
+	// so it holds on a slow runner, with the race detector, and under the
+	// load of a whole go test ./...: the sizes are measured in turns, each
+	// the best of several runs, and a pair that looks quadratic is measured
+	// again before it fails. Quadratic work fails every attempt.
+	const small, large = 1 << 18, 1 << 20
 	for _, unit := range []string{"1 0 obj (", "1 0 obj<<>>stream\n", "1 0 obj <", "1 0 obj [ %"} {
-		took := func(size int) time.Duration {
+		file := func(size int) []byte {
 			data := []byte("%PDF-1.4\n" + strings.Repeat(unit, size/len(unit)))
-			best := time.Duration(1 << 62)
-			for range 3 {
-				start := time.Now()
-				info, _ := place(t, "broken.pdf", data)
-				best = min(best, time.Since(start))
-				if info.Pages != 1 || info.Fallback == "" {
-					t.Fatalf("%q: info %+v", unit, info)
-				}
+			if info, _ := place(t, "broken.pdf", data); info.Pages != 1 || info.Fallback == "" {
+				t.Fatalf("%q: info %+v", unit, info)
 			}
-			return best
+			return data
 		}
-		small, large := took(1<<18), took(1<<20)
-		if large > 9*small+50*time.Millisecond {
-			t.Errorf("%q: %s for 256 KiB, %s for 1 MiB: not linear", unit, small, large)
+		s, l := file(small), file(large)
+		var ratios []string
+		linear := false
+		for attempt := 0; attempt < 3 && !linear; attempt++ {
+			ts, tl := pdfLinearBest(s, l)
+			ratio := float64(tl) / float64(ts)
+			ratios = append(ratios, fmt.Sprintf("%.1f (%v, %v)", ratio, ts, tl))
+			linear = ratio < 9 // linear: about 4; quadratic: about 16
+		}
+		if !linear {
+			t.Errorf("%q: 1 MiB takes %s times as long as 256 KiB, in 3 attempts: not linear", unit, strings.Join(ratios, ", "))
 		}
 	}
 	// A cancelled context stops the reading.
@@ -610,6 +617,43 @@ func TestPDFBrokenIsLinear(t *testing.T) {
 	if _, err := Placeholder(ctx, bytes.NewReader(data), int64(len(data)), "a.pdf", io.Discard, Options{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
 	}
+}
+
+// pdfLinearBest measures Placeholder on the small and the large file in
+// turns, and returns the best time of each over several runs: a run slowed
+// down by the scheduler or the collector does not count. Each run reads
+// the file as many times as the small one needs to take 5 ms, the same
+// count for both sizes, so a coarse clock (Windows) never measures a run
+// as zero.
+func pdfLinearBest(small, large []byte) (time.Duration, time.Duration) {
+	read := func(data []byte) {
+		Placeholder(context.Background(), bytes.NewReader(data), int64(len(data)), "broken.pdf", io.Discard, Options{})
+	}
+	reps := 1
+	for {
+		start := time.Now()
+		for range reps {
+			read(small)
+		}
+		if time.Since(start) >= 5*time.Millisecond || reps >= 1<<16 {
+			break
+		}
+		reps *= 2
+	}
+	run := func(data []byte) time.Duration {
+		runtime.GC()
+		start := time.Now()
+		for range reps {
+			read(data)
+		}
+		return time.Since(start)
+	}
+	bs, bl := time.Duration(1<<62), time.Duration(1<<62)
+	for range 7 {
+		bs = min(bs, run(small))
+		bl = min(bl, run(large))
+	}
+	return bs, bl
 }
 
 // The object streams of a file inflate to at most maxInflate bytes together.

@@ -5,12 +5,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/orangehill/driftgate/internal/allowlist"
+	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/demo"
 	"github.com/orangehill/driftgate/internal/report"
 	"github.com/orangehill/driftgate/internal/secret"
@@ -212,12 +219,25 @@ func TestCaptureRefusals(t *testing.T) {
 		t.Fatalf("remote repeat: exit %d %s", code, errOut)
 	}
 
-	// A failing guard stops before any request that changes data.
+	// A failing guard stops before any request is sent.
 	p = newDemoProject(t, "")
 	raw, _ = os.ReadFile(p.cfg)
 	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["false"]`, 1))
-	if code, out, _ := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitEnv || strings.Contains(out, "faq-create") {
+	if code, out, _ := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitEnv || strings.Contains(out, "faq-create") ||
+		regexp.MustCompile(`(?m)^\d{3} `).MatchString(out) {
 		t.Fatalf("failing guard: exit %d\n%s", code, out)
+	}
+
+	// A guard checks what restore and prepare set up (prepare writes the
+	// file the guard reads): it runs after them.
+	p = newDemoProject(t, "")
+	raw, _ = os.ReadFile(p.cfg)
+	env := filepath.Join(t.TempDir(), "env")
+	conf := strings.Replace(string(raw), `["true"]`, `["grep", "-q", "MAIL_MAILER=log", "`+env+`"]`, 1)
+	conf = strings.Replace(conf, "guards:", "prepare:\n  - [\"sh\", \"-c\", \"echo MAIL_MAILER=log > '"+env+"'\"]\nguards:", 1)
+	write(t, p.cfg, conf)
+	if code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg); code != ExitClean {
+		t.Fatalf("a guard of what prepare sets up: exit %d\n%s\n%s", code, out, errOut)
 	}
 
 	// Missing token for an identity.
@@ -248,7 +268,8 @@ func TestInit(t *testing.T) {
 }
 
 // TestInterruptedCaptureIsIncomplete: a capture that stopped half way (here
-// at a failing guard, after the read-only requests) is not compared as one
+// at a guard that passed at the start and fails when checked again, after
+// the read-only requests) is not compared as one
 // whose other requests are gone (drift, exit 1), but refused as incomplete
 // (exit 3).
 func TestInterruptedCaptureIsIncomplete(t *testing.T) {
@@ -257,9 +278,10 @@ func TestInterruptedCaptureIsIncomplete(t *testing.T) {
 		t.Fatalf("capture: %d\n%s\n%s", code, out, errOut)
 	}
 	raw, _ := os.ReadFile(p.cfg)
-	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["false"]`, 1))
-	if code, _, errOut := runCLI(t, "capture", "c2", "--config", p.cfg); code != ExitEnv {
-		t.Fatalf("failing guard: exit %d %s", code, errOut)
+	flag := filepath.Join(t.TempDir(), "checked")
+	write(t, p.cfg, strings.Replace(string(raw), `["true"]`, `["sh", "-c", "test ! -e '`+flag+`' && touch '`+flag+`'"]`, 1))
+	if code, out, errOut := runCLI(t, "capture", "c2", "--config", p.cfg); code != ExitEnv || !strings.Contains(out, "news") {
+		t.Fatalf("failing guard: exit %d %s\n%s", code, errOut, out)
 	}
 	code, _, errOut := runCLI(t, "compare", "c2", "--against", "c1", "--config", p.cfg)
 	if code != ExitEnv || !strings.Contains(errOut, "incomplete capture") {
@@ -297,12 +319,611 @@ func TestByMethodNote(t *testing.T) {
 		{"id":"login","method":"POST","path":"/api/auth/login","body":{"user":"admin"},"storage":"private"}]}`)
 	code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg, "--repeat", "2")
 	if code != ExitClean || strings.Count(out, "only by their method") != 1 || !strings.Contains(out, "1 request changes data only by their method, as the catalog does not say mutates: login") ||
-		!strings.Contains(out, `"mutates": false`) || !strings.Contains(out, "--restore once") {
+		!strings.Contains(out, "mutates: false") || !strings.Contains(out, "under requests: in driftgate.yaml") || !strings.Contains(out, "--restore once") {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
 	write(t, catalogPath, `{"version":1,"requests":[{"id":"news","method":"GET","path":"/api/news","storage":"public"},
 		{"id":"login","method":"POST","path":"/api/auth/login","body":{"user":"admin"},"mutates":false,"storage":"private"}]}`)
 	if code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg, "--force"); code != ExitClean || strings.Contains(out, "only by their method") {
 		t.Fatalf("with mutates: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestLiteralIDWarning: a request that changes data with a fixed id in
+// its path is warned of, one line per request; one whose id is a
+// parameter, or that only reads, is not.
+func TestLiteralIDWarning(t *testing.T) {
+	p := newDemoProject(t, "")
+	write(t, filepath.Join(filepath.Dir(p.cfg), "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"get-user","method":"GET","path":"/api/users/17","storage":"public"},
+		{"id":"put-user","method":"PUT","path":"/api/users/17?x=5","body":{},"mutates":true,"storage":"public"},
+		{"id":"put-param","method":"PUT","path":"/api/users/{id}","params":{"id":"17"},"body":{},"mutates":true,"storage":"public"},
+		{"id":"search","method":"POST","path":"/api/search/2","body":{},"mutates":false,"storage":"public"}]}`)
+	code, out, errOut := runCLI(t, "capture", "c1", "--config", p.cfg)
+	if code == ExitConfig || code == ExitEnv || strings.Count(out, "fixed id") != 1 ||
+		!strings.Contains(out, "warning: put-user (PUT /api/users/17?x=5) changes data with the fixed id 17 in its path") || !strings.Contains(out, "params_from") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRepeatedRunsInOtherSeconds: a run of a repeated capture writes at
+// least a second after the run before it ended, so a timestamp of the
+// second the application wrote (updated_at) differs between the runs and
+// the comparison finds it, however short the runs are.
+func TestRepeatedRunsInOtherSeconds(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = time.Second
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		mu.Lock()
+		at = append(at, now)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":1,"updated_at":%q}`, now.UTC().Format("2006-01-02 15:04:05"))
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"item","method":"GET","path":"/item","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	if code == ExitClean || !strings.Contains(out, "updated_at") {
+		t.Fatalf("the timestamp is not found volatile: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) != 2 || at[1].Sub(at[0]) < time.Second {
+		t.Fatalf("requests at %v: the second run began within a second", at)
+	}
+}
+
+// TestMarkWriters: a generated request that changed data is marked under
+// requests: by its route, once per route; one written by hand in the
+// catalog.
+func TestMarkWriters(t *testing.T) {
+	cat := &catalog.Catalog{Requests: []catalog.Request{
+		{ID: "get-api-news-id", Method: "GET", Path: "/api/news/{id}", Source: &catalog.Source{Route: "GET /api/news/{id}", Template: "ok"}},
+		{ID: "get-api-news-id-json", Method: "GET", Path: "/api/news/{id}", Source: &catalog.Source{Route: "GET /api/news/{id}", Template: "json"}},
+		{ID: "hand", Method: "GET", Path: "/api/stats"},
+	}}
+	var out strings.Builder
+	markWriters(&out, []string{"get-api-news-id", "get-api-news-id-json", "hand"}, cat)
+	want := "mark them as changing data, so they run one at a time on a known state:\n" +
+		"  in driftgate.yaml, then driftgate generate --write:\n  requests:\n    - match: \"GET /api/news/{id}\"\n      mutates: true\n" +
+		"  in the catalog, written by hand: \"mutates\": true on hand\n"
+	if out.String() != want {
+		t.Errorf("advice:\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
+// TestReadOnlyCapture: --read-only sends only what leaves data unchanged,
+// also without state:; a comparison of such a capture skips the others,
+// lists them as not covered, and calls none of their rules stale.
+func TestReadOnlyCapture(t *testing.T) {
+	var mu sync.Mutex
+	writes := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mu.Lock()
+			writes++
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1,"token":"abc"}`)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"news","method":"GET","path":"/news","storage":"public"},
+		{"id":"search","method":"POST","path":"/search","body":{},"mutates":false,"storage":"public"},
+		{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"},
+		{"id":"seq-login","method":"POST","path":"/login","body":{},"mutates":true,"storage":"public"},
+		{"id":"seq-me","method":"GET","path":"/me","storage":"public"},
+		{"id":"cmd","command":["true"],"storage":"public"},
+		{"id":"cmd-ro","command":["true"],"mutates":false,"storage":"public"}],
+		"sequences":[{"id":"s","requests":["seq-login","seq-me"]}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nbody:\n  - request: post-user\n    path: $.token\n    format: '[a-z]+'\n    reason: new token\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+
+	if code, out, errOut := runCLI(t, "capture", "full", "--config", cfg, "--allow-mutating-without-restore"); code != ExitClean {
+		t.Fatalf("full: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	writes = 0
+	mu.Unlock()
+	code, out, errOut := runCLI(t, "capture", "ro", "--config", cfg, "--read-only")
+	if code != ExitClean || !strings.Contains(out, "--read-only: 4 requests that change data") {
+		t.Fatalf("read-only: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	sent := writes
+	mu.Unlock()
+	if sent != 1 { // the search, marked mutates: false
+		t.Fatalf("%d requests other than GET sent", sent)
+	}
+	code, r := compareJSON(t, cfg, "ro", "capture:full")
+	got := map[string]string{}
+	for _, res := range r.Results {
+		got[res.ID] = res.Outcome + " " + res.Note
+	}
+	want := map[string]string{"news": "pass ", "search": "pass ", "cmd-ro": "pass ", "post-user": "skipped " + report.NoteNotSent,
+		"seq-login": "skipped " + report.NoteNotSent, "seq-me": "skipped " + report.NoteNotSent, "cmd": "skipped " + report.NoteNotSent}
+	if code != ExitClean || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("exit %d: %v", code, got)
+	}
+	// Every request the result did not compare is named under "Not
+	// covered", with what it is and why it was skipped, in every format:
+	// the read in a sequence too (seq-me), and the command step apart.
+	notSent := "skipped (" + report.NoteNotSent + "): "
+	var named []string
+	for _, s := range r.NotCovered.Skipped {
+		named = append(named, fmt.Sprintf("%s/%s:%v", s.What, s.Reason, s.Names))
+	}
+	if want := []string{"mutating/" + report.NoteNotSent + ":[post-user seq-login]", "read/" + report.NoteNotSent + ":[seq-me]", "command/" + report.NoteNotSent + ":[cmd]"}; !reflect.DeepEqual(named, want) {
+		t.Errorf("json skipped %v, want %v", named, want)
+	}
+	for _, f := range []string{"text", "markdown", "junit"} {
+		_, out, _ := runCLI(t, "compare", "ro", "--against", "capture:full", "--config", cfg, "--format", f)
+		for _, w := range []string{"2 requests that change data " + notSent + "post-user, seq-login", "1 read " + notSent + "seq-me", "1 command step " + notSent + "cmd"} {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s lacks %q:\n%s", f, w, out)
+			}
+		}
+	}
+	if len(r.UnusedRules) != 0 {
+		t.Errorf("a rule of a request not sent is called stale: %+v", r.UnusedRules)
+	}
+	// What the capture left out is recorded in it: a catalog changed
+	// since (post-user now says mutates: false) does not change which
+	// requests it did not send.
+	catPath := filepath.Join(root, "driftgate", "catalog.json")
+	raw, _ := os.ReadFile(catPath)
+	write(t, catPath, strings.Replace(string(raw), `"path":"/users","body":{},"mutates":true`, `"path":"/users","body":{},"mutates":false`, 1))
+	if code, r := compareJSON(t, cfg, "ro", "capture:full"); code != ExitClean || r.Skipped != 4 {
+		t.Fatalf("catalog changed since: exit %d, %d skipped: %+v", code, r.Skipped, r.Results)
+	}
+	write(t, catPath, string(raw))
+	// A capture that sent everything compared with a read-only one: the
+	// requests that one left out were never checked, so the result is
+	// incomplete (not new requests to accept).
+	if code, r := compareJSON(t, cfg, "full", "capture:ro"); code != ExitEnv || len(r.ReadOnlyBaseline) != 4 || len(r.NoBaseline) != 0 {
+		t.Errorf("against a read-only capture: exit %d, %+v", code, r.ReadOnlyBaseline)
+	}
+	code, out, _ = runCLI(t, "compare", "full", "--against", "capture:ro", "--config", cfg)
+	if code != ExitEnv || !strings.Contains(out, "incomplete: 4 requests not checked: capture:ro was captured with --read-only") {
+		t.Errorf("text: exit %d\n%s", code, out)
+	}
+	// Nor does a read-only capture become a baseline.
+	if code, out, errOut := runCLI(t, "run", "--config", cfg, "--allow-mutating-without-restore"); code != ExitClean {
+		t.Fatalf("run: %d\n%s\n%s", code, out, errOut)
+	}
+	code, out, errOut = runCLI(t, "baselines", "rebase", "local", "--from", "ro", "--reason", "x", "--allow-freeze", "--config", cfg)
+	if code != ExitConfig || !strings.Contains(errOut, "made with --read-only") {
+		t.Errorf("rebase from a read-only capture: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRunReadOnlyNeedsBaseline: the first run makes the baseline from
+// every request; --read-only there would leave the requests that change
+// data unchecked by every later run.
+func TestRunReadOnlyNeedsBaseline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\nstate:\n  db:\n    restore: [\"true\"]\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[
+		{"id":"news","method":"GET","path":"/news","storage":"public"},
+		{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only")
+	if code != ExitConfig || !strings.Contains(errOut, "makes it from every request") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	base := filepath.Join(root, "driftgate", "baselines", "local")
+	if _, err := os.Stat(base); err == nil {
+		t.Fatal("a baseline was made")
+	}
+}
+
+// TestReadOnlyCalibrate: the capture at the measured concurrency of
+// --calibrate keeps --read-only: no request that changes data is sent.
+func TestReadOnlyCalibrate(t *testing.T) {
+	var mu sync.Mutex
+	writes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mu.Lock()
+			writes++
+			mu.Unlock()
+		} else {
+			time.Sleep(15 * time.Millisecond) // so more at once is faster
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n  concurrency: auto\nstate:\n  db:\n    restore: [\"true\"]\n", srv.URL))
+	var reqs []string
+	for i := 0; i < 20; i++ {
+		reqs = append(reqs, fmt.Sprintf(`{"id":"g%d","method":"GET","path":"/g%d","storage":"public"}`, i, i))
+	}
+	reqs = append(reqs, `{"id":"post-user","method":"POST","path":"/users","body":{},"mutates":true,"storage":"public"}`)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[`+strings.Join(reqs, ",")+`]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "ro", "--config", cfg, "--read-only", "--calibrate")
+	mu.Lock()
+	defer mu.Unlock()
+	if writes > 0 || !strings.Contains(out, "capture at the measured concurrency") {
+		t.Fatalf("exit %d, %d requests that change data sent\n%s\n%s", code, writes, out, errOut)
+	}
+}
+
+// TestReadOnlyProjectCommands: --read-only selects requests only, so a
+// prepare: (which may write) is refused without state: to restore what it
+// writes, and a tokens.command, which runs as configured, is warned of.
+func TestReadOnlyProjectCommands(t *testing.T) {
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	base := fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"news","method":"GET","path":"/news","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+
+	write(t, cfg, base+"prepare:\n  - [\"true\"]\n")
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg, "--read-only"); code != ExitConfig || !strings.Contains(errOut, "prepare: may write, and without state: nothing restores what it writes") {
+		t.Fatalf("prepare: exit %d\n%s\n%s", code, out, errOut)
+	}
+	write(t, cfg, base+"tokens:\n  command: [\"echo\", \"{}\"]\n")
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg, "--read-only", "--repeat", "2"); code != ExitClean || strings.Count(errOut, "tokens.command runs as configured") != 1 {
+		t.Fatalf("tokens: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRunReadOnlyPrepareWithState: with state:, run --read-only takes
+// prepare:, which should write only to data the restore brings back.
+func TestRunReadOnlyPrepareWithState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	sqliteDB(t, filepath.Join(root, "app.sqlite"), "CREATE TABLE news (id INTEGER PRIMARY KEY)")
+	cfg := filepath.Join(root, "driftgate.yaml")
+	conf := fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\nstate:\n  db:\n    driver: sqlite\n    working: app.sqlite\n", srv.URL)
+	write(t, cfg, conf)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"news","method":"GET","path":"/news","storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\nheaders:\n  - name: date\n    format: '.*'\n    reason: clock\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	if code, out, errOut := runCLI(t, "run", "--config", cfg); code != ExitClean {
+		t.Fatalf("baseline: %d\n%s\n%s", code, out, errOut)
+	}
+	prepared := filepath.Join(t.TempDir(), "prepared")
+	write(t, cfg, conf+"prepare:\n  - [\"touch\", \""+prepared+"\"]\n")
+	if code, out, errOut := runCLI(t, "run", "--config", cfg, "--read-only"); code != ExitClean {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	if _, err := os.Stat(prepared); err != nil {
+		t.Fatalf("prepare did not run: %v", err)
+	}
+}
+
+// guardProject is a project whose state is a file (data) with restore and
+// fingerprint commands, a guard command and a catalog of requests.
+func guardProject(t *testing.T, guard, requests string) (cfg, root string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	root = t.TempDir()
+	write(t, filepath.Join(root, "data"), "")
+	cfg = filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n"+
+		"state:\n  db:\n    restore: [\"sh\", \"-c\", \": > data\"]\n    fingerprint: [\"cat\", \"data\"]\n"+
+		"guards:\n  - name: g\n    command: %s\n", srv.URL, guard))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[`+requests+`]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	return cfg, root
+}
+
+// TestGuardThatWrites: a guard that writes to the tracked state (it
+// should only check) does not stop the capture, and its write is part of
+// the state the read-only requests start from, never taken for theirs.
+func TestGuardThatWrites(t *testing.T) {
+	cfg, _ := guardProject(t, `["sh", "-c", "echo row >> data"]`,
+		`{"id":"news","method":"GET","path":"/news","storage":"public"},{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`)
+	code, out, errOut := runCLI(t, "capture", "c", "--config", cfg)
+	if code != ExitClean || strings.Contains(out, "read-only requests changed") || strings.Contains(out, "mutates: true") {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestGuardsChecked: the guards run before the first request, and again
+// before the first request that changes data only when read-only requests
+// ran in between.
+func TestGuardsChecked(t *testing.T) {
+	for _, c := range []struct {
+		requests string
+		runs     int
+	}{
+		{`{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`, 1},
+		{`{"id":"news","method":"GET","path":"/news","storage":"public"},{"id":"post","method":"POST","path":"/p","body":{},"mutates":true,"storage":"public"}`, 2},
+	} {
+		count := filepath.Join(t.TempDir(), "count")
+		cfg, _ := guardProject(t, `["sh", "-c", "echo x >> '`+count+`'"]`, c.requests)
+		if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg); code != ExitClean {
+			t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+		}
+		raw, _ := os.ReadFile(count)
+		if n := strings.Count(string(raw), "x"); n != c.runs {
+			t.Errorf("%s: the guard ran %d times, want %d", c.requests, n, c.runs)
+		}
+	}
+}
+
+// TestProposalWithControlCharacters: a value with a newline (the script of
+// a debug page) gets a format the allowlist takes: the newline is written
+// as a regular expression escape, not as text the regexp package rejects.
+func TestProposalWithControlCharacters(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = 0
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		v := n
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>\n    window.data = {\"seen\":%d};\n</script></body></html>", 1000+v)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"page","method":"GET","path":"/page","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	_, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	_, proposal, ok := strings.Cut(out, "Proposed allowlist entries (check every format and write the reason):\n")
+	if !ok {
+		t.Fatalf("no proposal:\n%s\n%s", out, errOut)
+	}
+	proposal, _, _ = strings.Cut(proposal, "\n\n")
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n"+strings.ReplaceAll(proposal, "TODO — ", "")+"\n")
+	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2", "--force"); code != ExitClean {
+		t.Fatalf("with the proposal written: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestProposalForOneOfTheScripts: the proposal for the script of an error
+// page that differs is for that script, not for every script of the page:
+// a stable script before it does not have its format, and the next capture
+// with the proposal written is clean.
+func TestProposalForOneOfTheScripts(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = 0
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		v := n
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>window.livewire = {\"ok\":true};</script><script>window.data = {\"seen\":%d};</script></body></html>", 1000+v)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"page","method":"GET","path":"/page","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	_, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	_, proposal, ok := strings.Cut(out, "Proposed allowlist entries (check every format and write the reason):\n")
+	if !ok {
+		t.Fatalf("no proposal:\n%s\n%s", out, errOut)
+	}
+	proposal, _, _ = strings.Cut(proposal, "\n\n")
+	if strings.Contains(proposal, "[*]") {
+		t.Errorf("the proposal reaches every script:\n%s", proposal)
+	}
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n"+strings.ReplaceAll(proposal, "TODO — ", "")+"\n")
+	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2", "--force"); code != ExitClean {
+		t.Fatalf("with the proposal written: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestProposedFormat: escapes compile and match what the format matched;
+// a format that cannot be written so is not proposed.
+func TestProposedFormat(t *testing.T) {
+	text, why := proposedFormat("a\n\u202eb\\d+")
+	if why != "" || text != `a\x{a}\x{202e}b\d+` || !regexp.MustCompile(`^(?:`+text+`)$`).MatchString("a\n\u202eb12") {
+		t.Fatalf("%q %q", text, why)
+	}
+	if text, why := proposedFormat("a\xffb"); why == "" || text != "" {
+		t.Fatalf("bytes that are not UTF-8: %q %q", text, why)
+	}
+}
+
+// TestRepeatProposesNestedLists: a list in a list whose times change at
+// both levels gets a rule per level, the inner one first: a * reaches any
+// depth, so $.entries[*].updated_at reaches the inner items too, and the
+// first rule that reaches a value decides it. The proposals pass the lint
+// as they are, and each level keeps its own format: the other level's
+// shape is a drift.
+func TestRepeatProposesNestedLists(t *testing.T) {
+	var mu sync.Mutex
+	n, outer, inner := 0, "", ""
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at, in := fmt.Sprintf("2026-01-01 10:00:%02d", n), fmt.Sprintf("10:00:%02d", n)
+		if outer != "" {
+			at = outer
+		}
+		if inner != "" {
+			in = inner
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"id":1,"updated_at":%q,"messages":[{"id":1,"updated_at":%q},{"id":2,"updated_at":%q}]},{"id":2,"updated_at":%q,"messages":[{"id":3,"updated_at":%q}]}]}`, at, in, in, at, in)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	allow := filepath.Join(root, "driftgate", "allowlist.yaml")
+	write(t, allow, "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	at := strings.Index(out, "body:\n")
+	if code != ExitDrift || at < 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	body := strings.TrimRight(out[at:], "\n") + "\n"
+	in, ou := strings.Index(body, "path: '$.entries[*].messages[*].updated_at'"), strings.Index(body, "path: '$.entries[*].updated_at'")
+	if strings.Count(body, "  - request:") != 2 || in < 0 || ou < in {
+		t.Fatalf("want the inner rule, then the outer one:\n%s", body)
+	}
+	write(t, allow, "version: 1\n"+body)
+	l, err := allowlist.Load(allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := l.Lint(); len(f) > 0 {
+		t.Fatalf("the proposals have findings: %v\n%s", f, body)
+	}
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture a: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture b: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("times of both levels drift under the proposed rules: exit %d\n%s\n%s", code, out, errOut)
+	}
+	for i, c := range []struct{ outer, inner, where string }{
+		{"", "pending", "messages[0].updated_at"},
+		{"", "2026-01-01 10:00:59", "messages[0].updated_at"},
+		{"10:00:59", "", "entries[0].updated_at"},
+	} {
+		mu.Lock()
+		outer, inner = c.outer, c.inner
+		mu.Unlock()
+		tag := fmt.Sprintf("c%d", i)
+		if code, out, errOut := runCLI(t, "capture", tag, "--config", cfg); code != ExitClean {
+			t.Fatalf("capture %s: exit %d\n%s\n%s", tag, code, out, errOut)
+		}
+		if code, out, errOut := runCLI(t, "compare", tag, "--against", "a", "--config", cfg); code != ExitDrift || !strings.Contains(out, c.where) {
+			t.Errorf("outer %q, inner %q is not a drift at %s: exit %d\n%s\n%s", c.outer, c.inner, c.where, code, out, errOut)
+		}
+	}
+}
+
+// TestRepeatKeepsStableNestedPlaces: $.entries[*].updated_at would also
+// reach the times of the inner list, which kept their values, so the outer
+// places are proposed one by one.
+func TestRepeatKeepsStableNestedPlaces(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at := fmt.Sprintf("2026-01-01 10:00:%02d", n)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"updated_at":%q,"messages":[{"updated_at":"09:00:00"}]},{"updated_at":%q,"messages":[]}]}`, at, at)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	if code != ExitDrift || strings.Contains(out, "[*]") || !strings.Contains(out, "path: '$.entries[0].updated_at'") || !strings.Contains(out, "path: '$.entries[1].updated_at'") {
+		t.Fatalf("want the outer places one by one: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRepeatOrdersAcrossRequests: the inner rule shared by feed1 and feed2
+// (feed*) goes before the outer rule of feed1 alone, since both reach the
+// inner places of feed1; otherwise the outer format would judge them.
+func TestRepeatOrdersAcrossRequests(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at := fmt.Sprintf("2026-01-01 10:00:%02d", n)
+		if r.URL.Path == "/feed2" {
+			at = fmt.Sprintf("%d", 1700000000+n)
+		}
+		in := fmt.Sprintf("10:00:%02d", n)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"updated_at":%q,"messages":[{"updated_at":%q}]}]}`, at, in)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed1","method":"GET","path":"/feed1","storage":"public"},{"id":"feed2","method":"GET","path":"/feed2","storage":"public"}]}`)
+	allow := filepath.Join(root, "driftgate", "allowlist.yaml")
+	write(t, allow, "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	at := strings.Index(out, "body:\n")
+	if code != ExitDrift || at < 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	body := strings.TrimRight(out[at:], "\n") + "\n"
+	if !strings.Contains(body, "request: 'feed*'\n    path: '$.entries[*].messages[*].updated_at'") {
+		t.Fatalf("want one inner rule for feed*:\n%s", body)
+	}
+	write(t, allow, "version: 1\n"+body)
+	for _, tag := range []string{"a", "b"} {
+		if code, out, errOut := runCLI(t, "capture", tag, "--config", cfg); code != ExitClean {
+			t.Fatalf("capture %s: exit %d\n%s\n%s", tag, code, out, errOut)
+		}
+	}
+	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("the proposed rules do not hold:\n%s\nexit %d\n%s\n%s", body, code, out, errOut)
+	}
+}
+
+// BenchmarkOrdered: 500 requests with a rule each at one path.
+func BenchmarkOrdered(b *testing.B) {
+	var rules []rule
+	var ids []string
+	for i := range 500 {
+		id := fmt.Sprintf("req-%d", i)
+		ids = append(ids, id)
+		rules = append(rules, rule{id, "$.data[*].at", `\d+`})
+	}
+	rules = append(rules, rule{"req-*", "$.data[*].items[*].at", `\d+`})
+	for b.Loop() {
+		ordered(rules, ids)
 	}
 }

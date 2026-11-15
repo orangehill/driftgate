@@ -206,6 +206,7 @@ var detectors = sync.OnceValue(func() []detector {
 			exclude: [][2]string{
 				{"/_debugbar/*", "Laravel Debugbar: a development tool."},
 				{"/_ignition/*", "Ignition error pages: a development tool."},
+				{"/_dusk/*", "Laravel Dusk routes: a testing tool that logs in as any user."},
 				{"/telescope", "Laravel Telescope: a development tool."},
 				{"/telescope/*", "Laravel Telescope: a development tool."},
 				{"/horizon", "Laravel Horizon dashboard: an operations tool, not the API."},
@@ -559,7 +560,7 @@ func detectDir(root string) detected {
 		fmt.Fprintf(&b, "  - adapter: openapi\n    file: %s\n", spec)
 	}
 	if len(d.kinds) > 0 {
-		d.block = "discover:\n" + b.String() + "\ntemplates: [ok, not-found, json]\n"
+		d.block = "discover:\n" + b.String() + "\ntemplates: " + templatesFor(d.kinds) + "\n"
 	}
 	if d.observe != "" {
 		d.block += "\nobserve:\n" + d.observe

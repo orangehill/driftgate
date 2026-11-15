@@ -42,6 +42,39 @@ type Formatter interface {
 	FingerprintAs(ctx context.Context, format int, items []string) (Fingerprint, error)
 }
 
+// PristineFingerprinter is a component that can fingerprint items of its
+// pristine copy, to tell a restore that went wrong from a pristine copy
+// that no longer matches its record.
+type PristineFingerprinter interface {
+	PristineFingerprint(ctx context.Context, items []string) (Fingerprint, error)
+}
+
+// fpMode is what a driver's fingerprint of a database reads.
+type fpMode int
+
+const (
+	fpRows        fpMode = iota // every item but the restore_only tables, with their rows
+	fpRestoreOnly               // the restore_only tables only, with their rows
+	fpSchema                    // every item Restore takes, by its definition only (Schemer)
+)
+
+// takes reports whether the mode reads a table that is restore_only (ro)
+// or one that is not.
+func (m fpMode) takes(ro bool) bool { return m == fpSchema || ro == (m == fpRestoreOnly) }
+
+// rows reports whether the mode reads rows and counters, not only
+// definitions.
+func (m fpMode) rows() bool { return m != fpSchema }
+
+// MissingAfterStop reports whether an item the working database lacks may
+// be what a restore that stopped left. It is a heuristic, the same for
+// every driver: MySQL/MariaDB drop the triggers of the tables they copy,
+// and a sequence they restore, and make them again after the copy
+// (copyObjects); on the others such an item is missing for another reason.
+func MissingAfterStop(item string) bool {
+	return strings.HasPrefix(item, "trigger:") || strings.HasPrefix(item, "sequence:")
+}
+
 // Diff lists the items whose hash differs or that exist on one side only.
 func Diff(a, b Fingerprint) []string {
 	var out []string
@@ -67,18 +100,6 @@ func (f Fingerprint) Subset(items []string) Fingerprint {
 		if v, ok := f[it]; ok {
 			out[it] = v
 		}
-	}
-	return out
-}
-
-// Merge returns f with the hashes of g written over it.
-func (f Fingerprint) Merge(g Fingerprint) Fingerprint {
-	out := Fingerprint{}
-	for k, v := range f {
-		out[k] = v
-	}
-	for k, v := range g {
-		out[k] = v
 	}
 	return out
 }
@@ -165,6 +186,41 @@ type Component interface {
 	Close() error
 }
 
+// RestoreOnly is a database component that restores tables without
+// fingerprinting them (Options.RestoreOnly): tables the application writes
+// on every request or outside requests (sessions, caches, queues) whose
+// rows should still start from the pristine copy's. Fingerprint leaves
+// them out as it leaves out excluded tables, so they are no side effect and
+// no part of the state a baseline is checked against; Restore takes their
+// items as any other.
+type RestoreOnly interface {
+	// RestoreOnlyFingerprint hashes the restore_only tables of the working
+	// state, or with pristine of the pristine copy, as the items Restore
+	// takes. It reads them every time: no fingerprint keeps them.
+	RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
+}
+
+// Schemer hashes the definitions of the items Restore takes, without rows
+// or counters: the schema a restore brings back. A working database a
+// stopped restore left unreadable gives nil; the pristine copy never does.
+type Schemer interface {
+	SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error)
+}
+
+// SchemaFormat numbers the way SchemaFingerprint hashes: a schema recorded
+// in another format is read anew. Raise it when any driver's schema mode
+// hashes differently.
+const SchemaFormat = 1
+
+// SessionEnder is a Component whose Restore may end the application's own
+// sessions with the database (SQL Server's restore of the whole database
+// takes it offline): the application's pooled connections then fail once
+// each, on their next use.
+type SessionEnder interface {
+	// EndedSessions is how many of them the last Restore ended.
+	EndedSessions() int
+}
+
 // Command is a component handled entirely by commands of the project.
 type Command struct {
 	name        string
@@ -222,11 +278,17 @@ func (c *Command) Fingerprint(ctx context.Context, items []string) (Fingerprint,
 // so a working restore or migration does not fill the report with its own
 // messages; only the end of it is kept.
 func Run(ctx context.Context, root string, argv, env []string, log io.Writer) error {
+	return RunIn(ctx, root, nil, argv, env, log)
+}
+
+// RunIn is Run from dir, with stdin (nil: none) as standard input.
+func RunIn(ctx context.Context, dir string, stdin io.Reader, argv, env []string, log io.Writer) error {
 	if len(argv) == 0 {
 		return nil
 	}
 	cmd := procx.Command(ctx, argv[0], argv[1:]...)
-	cmd.Dir = root
+	cmd.Dir = dir
+	cmd.Stdin = stdin
 	cmd.Env = append(secret.Environ(), env...)
 	out := &tail{max: 64 << 10}
 	cmd.Stdout, cmd.Stderr = out, out
@@ -238,7 +300,7 @@ func Run(ctx context.Context, root string, argv, env []string, log io.Writer) er
 		if log != nil && out.Len() > 0 {
 			fmt.Fprintln(log, strings.Join(lines, "\n"))
 		}
-		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return fmt.Errorf("%s: %w", procx.Line(argv), err)
 	}
 	return nil
 }

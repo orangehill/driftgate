@@ -8,18 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/capture"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/generate"
+	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/infer"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/report"
+	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
 )
 
@@ -37,6 +44,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	skipFP := fs.Bool("skip-fingerprint-check", false, "")
 	quiet := fs.Bool("quiet", false, "")
 	calibrate := fs.Bool("calibrate", false, "")
+	readOnly := fs.Bool("read-only", false, "")
 	targets := targetFlag(fs)
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -73,7 +81,7 @@ func captureCmd(args []string, out, errOut io.Writer) (int, error) {
 	defer unlock()
 	return captureSet(ctx, p, sel.requests(cat), allow, pos[0], captureOptions{only: *only, force: *force, allowRemote: *remote,
 		allowRemoteMutations: *remoteMut, noRestore: *noRestore, restore: *restore, repeat: *repeat, baseline: *baseline,
-		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate}, out, errOut)
+		skipFingerprint: *skipFP, quiet: *quiet, calibrate: *calibrate, readOnly: *readOnly}, out, errOut)
 }
 
 // captureOptions are the flags of capture.
@@ -89,7 +97,24 @@ type captureOptions struct {
 	skipFingerprint      bool
 	quiet                bool
 	calibrate            bool // decide concurrency: auto (after the repeats agree)
+	readOnly             bool // send only the requests that do not change data
+	// first, when set, gets the summary of the first capture (run makes
+	// the baseline from it).
+	first func(*capture.Summary)
 }
+
+// runOptions are the options of every capture.Run of a capture command:
+// what the flags select (--only, --read-only) and allow goes into each,
+// so no run of it (a repeat, the calibrated one) sends more than asked.
+func (o captureOptions) runOptions(tag string, base *snapshot.Set, out, log io.Writer) capture.Options {
+	return capture.Options{Tag: tag, Only: o.only, ReadOnly: o.readOnly, AllowRemote: o.allowRemote,
+		AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
+		Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: out, Log: log}
+}
+
+// runGap is the least time between the end of a run of a repeated capture
+// and the first write of the next (captureSet).
+var runGap = time.Second
 
 // captureSet captures the catalog under tag, repeated as the options say,
 // prints the outcome and returns its exit code.
@@ -122,7 +147,16 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		return 0, err
 	}
 
-	byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+	if o.readOnly {
+		// Once per command, however many runs it makes (--repeat).
+		if len(p.Tokens.Command) > 0 {
+			fmt.Fprintln(errOut, "warning: --read-only covers the requests only: tokens.command runs as configured and may write (a login), and connect_to does not apply to it")
+		}
+		readOnlyNote(out, cat, o.only)
+	} else {
+		byMethodNote(out, capture.ByMethod(cat, o.only), o.restore)
+		literalIDNote(out, cat, o.only)
+	}
 
 	tags := []string{tag}
 	for i := 2; i <= o.repeat; i++ {
@@ -138,13 +172,18 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 	}()
 	code := ExitClean
 	var first *capture.Summary
+	// Each run writes at least a second after the last one ended: a
+	// timestamp the application writes (updated_at) then differs between
+	// the runs, so the comparison finds it, whatever the clocks of the
+	// application and the database are set to. Two runs within one second
+	// would leave it equal, and it would drift on every later run.
+	var notBefore time.Time
 	for i, tag := range tags {
 		if len(tags) > 1 {
 			fmt.Fprintf(progress, "\n— run %d of %d —\n", i+1, len(tags))
 		}
-		opt := capture.Options{Tag: tag, Only: o.only, Force: o.force || i > 0, AllowRemote: o.allowRemote,
-			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: used}
+		opt := o.runOptions(tag, base, progress, errOut)
+		opt.Force, opt.Concurrency, opt.NotBefore = o.force || i > 0, used, notBefore
 		sum, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return 0, failed(err)
@@ -157,9 +196,13 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 				return 0, failed(err)
 			}
 		}
+		notBefore = time.Now().Add(runGap)
 		if i == 0 {
 			first = sum
-			code = summarize(out, errOut, tag, sum)
+			if o.first != nil {
+				o.first(sum)
+			}
+			code = summarize(out, errOut, tag, sum, cat)
 			if len(sum.Failed) > 0 {
 				// More runs would only fail the same way.
 				if len(sum.Failed) == sum.Requests {
@@ -170,11 +213,25 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 	}
 	if len(tags) > 1 {
-		c, err := repeatReport(out, p, cat, allow, tags)
+		if err := keepMedianTimings(p, tags); err != nil {
+			return 0, err
+		}
+		c, rows, err := repeatReport(out, p, cat, allow, tags)
 		if err != nil {
 			return 0, err
 		}
 		code = max(code, c)
+		if c == ExitClean {
+			// What the runs learned of the values of tracked rows, then
+			// that the capture was checked: a rebase takes it as run
+			// takes two equal captures.
+			if err := writeLearned(p, tags[0], rows); err != nil {
+				return 0, err
+			}
+			if err := markAgreed(p, tags[0], len(tags)); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if o.calibrate {
 		if code != ExitClean {
@@ -186,6 +243,54 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 	}
 	return code, nil
+}
+
+// keepMedianTimings gives the capture kept (the first of tags) the median
+// time of each request over all runs, so the times a comparison or a
+// baseline made by run reads are not those of one noisy run.
+func keepMedianTimings(p *config.Project, tags []string) error {
+	var runs []map[string]int64
+	for _, tag := range tags {
+		set, err := p.Capture(tag)
+		if err != nil {
+			return failed(err)
+		}
+		if t := timings(set); t != nil {
+			runs = append(runs, t)
+		}
+	}
+	if len(runs) < 2 {
+		return nil
+	}
+	set, err := p.Capture(tags[0])
+	if err != nil {
+		return failed(err)
+	}
+	if err := snapshot.WriteJSON(filepath.Join(set.Dir, "timings.json"), report.MedianTimings(runs)); err != nil {
+		return envErr(err)
+	}
+	return nil
+}
+
+// markAgreed records in a capture's meta.json how many captures of the
+// same state gave its responses.
+func markAgreed(p *config.Project, tag string, n int) error {
+	set, err := p.Capture(tag)
+	if err != nil {
+		return failed(err)
+	}
+	meta, err := set.Meta()
+	if err != nil {
+		return envErr(err)
+	}
+	if meta == nil {
+		return envErr(fmt.Errorf("capture %s has no meta.json", tag))
+	}
+	meta.Agreed = n
+	if err := set.WriteMeta(*meta); err != nil {
+		return envErr(err)
+	}
+	return nil
 }
 
 // byMethodNote names the requests that change data only by their method
@@ -203,12 +308,82 @@ func byMethodNote(out io.Writer, ids []string, restore string) {
 	}
 	fmt.Fprintf(out, "%d %s data only by their method, as the catalog does not say mutates: %s\n"+
 		"  each runs one at a time after the read-only requests, on %s;\n"+
-		"  write \"mutates\": false on those that only read (a search sent as POST), \"mutates\": true on the others\n",
+		"  say mutates: false for those that only read (a search sent as POST), mutates: true for the others,\n"+
+		"  under requests: in driftgate.yaml (match: the request ID), then driftgate generate --write; an entry written by hand says it in the catalog\n",
 		len(ids), plural(len(ids), "request changes", "requests change"), listIDs(ids), on)
 }
 
+// readOnlyNote says how many selected requests a read-only capture
+// leaves out.
+func readOnlyNote(out io.Writer, cat *catalog.Catalog, only string) {
+	n := 0
+	for id := range cat.ReadOnlySkips() {
+		if only == "" || glob.Match(only, id) {
+			n++
+		}
+	}
+	if n > 0 {
+		fmt.Fprintf(out, "--read-only: %d %s that change data (or share a sequence with one) not sent\n", n, plural(n, "request", "requests"))
+	}
+}
+
+// literalIDNote warns, one line per request, of a request that changes
+// data with a fixed id in its path (PUT /api/users/17): on another copy
+// of the data that id may be a real record, and the status would not
+// show it. An id from params_from or a parameter is not warned of.
+func literalIDNote(out io.Writer, cat *catalog.Catalog, only string) {
+	for _, r := range cat.Requests {
+		if r.Command != nil || !r.Mutating() || (only != "" && !glob.Match(only, r.ID)) {
+			continue
+		}
+		if id := catalog.LiteralID(r.Path); id != "" {
+			fmt.Fprintf(out, "warning: %s (%s %s) changes data with the fixed id %s in its path; on another copy of the data it may be a real record: take it from a response with params_from\n",
+				r.ID, r.Method, r.Path, id)
+		}
+	}
+}
+
+// markWriters says how to mark read-only requests that changed data as
+// changing it, so they run one at a time on a known state: a generated
+// one under requests: in driftgate.yaml, by its route (what generate
+// matches; generate --write then writes it), one written by hand in the
+// catalog.
+func markWriters(out io.Writer, ids []string, cat *catalog.Catalog) {
+	byID := map[string]catalog.Request{}
+	if cat != nil {
+		for _, r := range cat.Requests {
+			byID[r.ID] = r
+		}
+	}
+	var entries, hand []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		r, ok := byID[id]
+		if !ok || !generate.IsGenerated(r) {
+			hand = append(hand, id)
+			continue
+		}
+		_, path, _ := strings.Cut(r.Source.Route, " ")
+		e := fmt.Sprintf("    - match: %q\n", r.Method+" "+path)
+		if r.Target != "" {
+			e += fmt.Sprintf("      target: %s\n", r.Target)
+		}
+		if !seen[e] {
+			seen[e] = true
+			entries = append(entries, e+"      mutates: true\n")
+		}
+	}
+	fmt.Fprintln(out, "mark them as changing data, so they run one at a time on a known state:")
+	if len(entries) > 0 {
+		fmt.Fprint(out, "  in driftgate.yaml, then driftgate generate --write:\n  requests:\n"+strings.Join(entries, ""))
+	}
+	if len(hand) > 0 {
+		fmt.Fprintf(out, "  in the catalog, written by hand: \"mutates\": true on %s\n", strings.Join(hand, ", "))
+	}
+}
+
 // summarize prints the outcome of a capture and returns its exit code.
-func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
+func summarize(out, errOut io.Writer, tag string, sum *capture.Summary, cat *catalog.Catalog) int {
 	fmt.Fprintf(out, "\ncaptured %d requests into %s\n", sum.Requests, tag)
 	if t := sum.Time; t.Fingerprints > 0 {
 		fmt.Fprintf(out, "time %s: state fingerprints %s (%d, %d of them unnecessary after a check of the write counters), restores %s, the rest requests\n",
@@ -229,10 +404,15 @@ func summarize(out, errOut io.Writer, tag string, sum *capture.Summary) int {
 		for _, id := range ids {
 			fmt.Fprintf(out, "  %s → %s\n", id, strings.Join(sum.Writers[id], ", "))
 		}
-		fmt.Fprintln(out, "mark them mutates: true in the catalog, so they run one at a time on a known state")
+		markWriters(out, ids, cat)
 	}
 	if len(sum.Unattributed) > 0 {
 		fmt.Fprintf(out, "\nread-only requests changed %s, but no single request does it alone (an order effect or background work)\n", strings.Join(sum.Unattributed, ", "))
+	}
+	retriedNote(out, sum)
+	preparedNote(out, sum)
+	if sum.NoRowValues {
+		fmt.Fprintf(out, "\nrow_tracking: the values requests write were not recorded, only which rows and columns they change: no project key (%s, key: in %s, or driftgate key create)\n", secret.EnvKey, config.FileName)
 	}
 	if len(sum.Personal) > 0 {
 		ids := make([]string, 0, len(sum.Personal))
@@ -288,23 +468,26 @@ func notAnswering(p *config.Project, errOut io.Writer) {
 // repeatReport compares every repeated run with the first one. Values that
 // changed although the state was the same are not deterministic: for each,
 // it proposes an allowlist entry with a format that matches every value seen.
-func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tags []string) (int, error) {
+func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow *allowlist.List, tags []string) (int, map[string]*rowLearning, error) {
 	first, err := p.Capture(tags[0])
 	if err != nil {
-		return 0, failed(err)
+		return 0, nil, failed(err)
 	}
 	first.CacheRecords()
+	firstKeyed := keyed(first)
 	values := map[key][]string{}
 	var keys []key
 	headers := map[string][][]string{} // name → values at each position, over all runs
 	var headerNames []string
 	var other []compare.Drift
+	rows := map[string]*rowLearning{} // per request: what the runs learned of the values of tracked rows
 	for _, tag := range tags[1:] {
 		set, err := p.Capture(tag)
 		if err != nil {
-			return 0, failed(err)
+			return 0, nil, failed(err)
 		}
 		set.CacheRecords()
+		keyedSets := [2]bool{firstKeyed, keyed(set)}
 		// The requests are compared in parallel; their results are taken
 		// below in catalog order.
 		results := make([]report.Result, len(cat.Requests))
@@ -319,13 +502,16 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		}
 		if err := parallel(len(cat.Requests), size, func(i int) error {
 			var err error
-			results[i], err = compareOne(cat.Requests[i], first, set, nil, allow, compare.LevelValues, true) // infer needs the values; it prints formats only
+			results[i], err = compareToLearn(cat.Requests[i], first, set, allow)
 			return err
 		}); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		for ri, req := range cat.Requests {
 			res := results[ri]
+			if err := learnRows(rows, req.ID, first, set, keyedSets); err != nil {
+				return 0, nil, err
+			}
 			hidden := res.Drifts
 			if rec, err := first.Record(req.ID); err == nil && isPrivate(rec) {
 				hidden = append([]compare.Drift{}, res.Drifts...)
@@ -333,6 +519,8 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			}
 			for i, d := range res.Drifts {
 				switch {
+				case valuesOnly(d):
+					rows[req.ID].Volatile = mergeVolatile(rows[req.ID].Volatile, d.RowValues)
 				case d.Kind == compare.KindHeaderValue && len(d.Values[0]) == len(d.Values[1]):
 					// Values are matched by position: the n-th Set-Cookie of
 					// one run with the n-th of the other.
@@ -350,7 +538,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 						}
 					}
 				case (d.Kind == compare.KindValue || d.Kind == compare.KindText || d.Kind == compare.KindAttributeValue || d.Kind == compare.KindCell) && d.Texts != [2]string{}:
-					k := key{d.Request, indexes().ReplaceAllString(d.Where, "[*]")}
+					k := key{d.Request, d.Where}
 					if _, ok := values[k]; !ok {
 						keys = append(keys, k)
 					}
@@ -361,9 +549,22 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			}
 		}
 	}
+	keys, values = generalize(cat, first, allow, keys, values)
+	var cols []string
+	n := 0
+	for _, l := range rows {
+		if len(l.Volatile) > 0 {
+			n++
+			cols = mergeVolatile(cols, l.Volatile)
+		}
+	}
+	if n > 0 {
+		fmt.Fprintf(out, "\n%d %s wrote other values into tracked rows on the same state; those columns are not compared for them: %s\n",
+			n, plural(n, "request", "requests"), listIDs(cols))
+	}
 	if len(keys) == 0 && len(headerNames) == 0 && len(other) == 0 {
 		fmt.Fprintf(out, "\n%d runs on the same state gave the same responses ✓\n", len(tags))
-		return ExitClean, nil
+		return ExitClean, rows, nil
 	}
 	fmt.Fprintf(out, "\n%d runs on the same state gave different responses.\n", len(tags))
 	mutating := false
@@ -379,27 +580,146 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 		if len(headerNames) > 0 {
 			fmt.Fprintln(out, "headers:")
 			for _, n := range headerNames {
-				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), report.Printable(yamlQuote(headerFormat(headers[n]))), reason)
+				f, why := proposedFormat(headerFormat(n, headers[n]))
+				if why != "" {
+					fmt.Fprintf(out, "  # name: %s: no format proposed: %s\n", report.Printable(n), why)
+					continue
+				}
+				fmt.Fprintf(out, "  - name: %s\n    format: %s\n%s\n", report.Printable(n), yamlQuote(f), reason)
 			}
 		}
 		if len(keys) > 0 {
 			fmt.Fprintln(out, "body:")
 			for _, r := range mergeRules(cat, keys, values) {
-				fmt.Fprintf(out, "  - request: %s\n    path: %s\n    format: %s\n%s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), report.Printable(yamlQuote(r.format)), reason)
+				f, why := proposedFormat(r.format)
+				if why != "" {
+					fmt.Fprintf(out, "  # request: %s, path: %s: no format proposed: %s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), why)
+					continue
+				}
+				fmt.Fprintf(out, "  - request: %s\n    path: %s\n    format: %s\n%s\n", yamlQuote(r.request), report.Printable(yamlQuote(r.path)), yamlQuote(f), reason)
 			}
 		}
 	}
 	if len(other) > 0 {
 		fmt.Fprintf(out, "\nDifferences without a proposal (structure, types, side effects or a body that is neither JSON nor HTML):\n")
 		for _, d := range other {
-			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(short(d.Baseline)), report.Printable(short(d.Current)))
+			b, c := report.DriftPair(d, driftMax)
+			fmt.Fprintf(out, "  %s  %s %s  %s → %s\n", d.Request, d.Kind, report.Printable(d.Where), report.Printable(b), report.Printable(c))
 		}
 		fmt.Fprintln(out, "A response that differs by itself and cannot be allow-listed can be marked observe: true in the catalog (measured, never compared), or excluded.")
 	}
-	return ExitDrift, nil
+	return ExitDrift, rows, nil
+}
+
+// proposedFormat is a format as a proposal prints it: control and
+// direction characters as the regexp package's escapes, so that the text
+// is safe in a terminal and the allowlist takes it as it is. A format
+// that cannot be written so (bytes that are not UTF-8) is not proposed;
+// why says so.
+func proposedFormat(f string) (text, why string) {
+	if !utf8.ValidString(f) {
+		return "", "the values hold bytes that are not UTF-8, which a format cannot name; allow-list the place by hand"
+	}
+	text = report.PrintableRegexp(f)
+	if _, err := regexp.Compile(text); err != nil {
+		return "", fmt.Sprintf("the format does not compile (%v); allow-list the place by hand", err)
+	}
+	return text, ""
 }
 
 var indexes = lazy.Regexp(`\[\d+\]`)
+
+// generalize turns the proposals of places in lists (keys, by their
+// indexed paths, and their values) into proposals for every item:
+// $.data[3].at and $.data[7].at become one for $.data[*].at, with the
+// values of both. Its format is learned only from the items that
+// differed, so a path with [*] is proposed only when every place it
+// reaches in the first capture differed (compare.Places, the paths a
+// drift would have). Otherwise, as for a stable script[0] beside the
+// script[1] of an error page, the places are proposed one by one, each
+// with its own values: a later change of the stable one is its own
+// drift, not one a format learned elsewhere judges.
+func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List, keys []key, values map[key][]string) ([]key, map[key][]string) {
+	var general []key
+	gValues := map[key][]string{}
+	members := map[key][]key{}
+	learned := map[key]bool{}
+	for _, k := range keys {
+		g := key{k.request, indexes().ReplaceAllString(k.path, "[*]")}
+		if _, ok := gValues[g]; !ok {
+			general = append(general, g)
+		}
+		gValues[g] = append(gValues[g], values[k]...)
+		members[g] = append(members[g], k)
+		learned[k] = true
+	}
+	if allow == nil {
+		allow = allowlist.Empty()
+	}
+	type around struct{ prefix, suffix string } // glob.Literal of a path
+	wide := map[string]map[string]around{}      // request → generalized paths to check
+	for _, g := range general {
+		if strings.Contains(g.path, "[*]") {
+			if wide[g.request] == nil {
+				wide[g.request] = map[string]around{}
+			}
+			pre, suf := glob.Literal(g.path)
+			wide[g.request][g.path] = around{pre, suf}
+		}
+	}
+	rejected := map[key]bool{}
+	for _, req := range cat.Requests {
+		paths := wide[req.ID]
+		if paths == nil {
+			continue
+		}
+		reject := func() {
+			for path := range paths {
+				rejected[key{req.ID, path}] = true
+			}
+		}
+		rec, err := first.Record(req.ID)
+		if err != nil || rec == nil {
+			reject()
+			continue
+		}
+		raw, err := first.Body(rec)
+		if err != nil {
+			reject() // a body not read here: the places stay as they are
+			continue
+		}
+		// A list that is shorter in a later capture has items here that
+		// differed from nothing (a drift of the list, not of a value): they
+		// were not learned, so the places are proposed one by one, the
+		// stricter way.
+		compare.Places(compare.Side{Record: rec, Body: raw}, allow.ForTarget(req.Target), req.ID, func(kind compare.PlaceKind, path string) bool {
+			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
+				// A * reaches any depth: $.data[*].at reaches the at of
+				// a list inside the items too.
+				for g, a := range paths {
+					if strings.HasPrefix(path, a.prefix) && strings.HasSuffix(path, a.suffix) && glob.Match(g, path) {
+						rejected[key{req.ID, g}] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	var out []key
+	outValues := map[key][]string{}
+	for _, g := range general {
+		if rejected[g] {
+			for _, k := range members[g] {
+				out = append(out, k)
+				outValues[k] = values[k]
+			}
+			continue
+		}
+		out = append(out, g)
+		outValues[g] = gValues[g]
+	}
+	return out, outValues
+}
 
 type rule struct{ request, path, format string }
 
@@ -408,7 +728,8 @@ type key struct{ request, path string }
 
 // mergeRules turns per-request proposals into rules. Requests with the same
 // path and format share one rule when a glob over their common ID prefix
-// matches exactly them in the catalog, never more.
+// matches exactly them in the catalog, never more. The rules come in the
+// order ordered gives them.
 func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rule {
 	type group struct {
 		path, format string
@@ -454,18 +775,81 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 			out = append(out, rule{r, g.path, g.format})
 		}
 	}
+	ids := make([]string, len(cat.Requests))
+	for i, r := range cat.Requests {
+		ids[i] = r.ID
+	}
+	return ordered(out, ids)
+}
+
+// ordered puts each rule before every rule that also reaches its places
+// for some catalog request (ids). The first rule that reaches a value
+// decides it, and a * reaches any depth: $.data[*].at reaches
+// $.data[*].tags[*].at too, so the inner rule comes first and keeps its
+// own format there, while the outer one decides the places only it
+// reaches. Request globs need only share a request: an inner rule for
+// feed* goes before an outer rule for feed1.
+func ordered(rules []rule, ids []string) []rule {
+	literal := func(s string) bool { return !strings.ContainsAny(s, "*?") }
+	// share reports whether two request globs match a request in common:
+	// a literal one only itself, so the catalog is read only for two
+	// globs.
+	share := func(a, b string) bool {
+		switch {
+		case literal(a) && literal(b):
+			return a == b
+		case literal(b):
+			return glob.Match(a, b)
+		case literal(a):
+			return glob.Match(b, a)
+		}
+		for _, id := range ids {
+			if glob.Match(a, id) && glob.Match(b, id) {
+				return true
+			}
+		}
+		return false
+	}
+	reaches := func(a, b rule) bool {
+		return a != b && share(a.request, b.request) && glob.Match(a.path, b.path)
+	}
+	out := make([]rule, 0, len(rules))
+	done := make([]bool, len(rules))
+	var emit func(i int)
+	emit = func(i int) {
+		done[i] = true
+		for j := range rules {
+			if !done[j] && reaches(rules[i], rules[j]) {
+				emit(j)
+			}
+		}
+		out = append(out, rules[i])
+	}
+	for i := range rules {
+		if !done[i] {
+			emit(i)
+		}
+	}
 	return out
 }
 
 // headerFormat is one format for every value of a header: a pattern per
-// position, joined with | when they differ (one cookie name per position).
-func headerFormat(positions [][]string) string {
+// position, joined with | when they differ. A Set-Cookie header has one
+// pattern per cookie name, whatever its position.
+// A header is recorded masked where it may carry a credential (letters
+// become x and X, digits 0: httpx.MaskHeader), and no format is derived
+// from what the mask left: a cookie's value is any text up to the first
+// ;, and a header masked whole is any text.
+func headerFormat(name string, positions [][]string) string {
+	if name == "set-cookie" {
+		return strings.Join(cookieFormats(slices.Concat(positions...)), "|")
+	}
 	var parts []string
 	seen := map[string]bool{}
 	for _, vals := range positions {
-		p := infer.Pattern(vals)
-		if p == "" {
-			p = regexp.QuoteMeta(vals[0]) // this one did not change
+		p := ".+"
+		if !httpx.MasksWhole(name) {
+			p = valuesFormat(vals)
 		}
 		if !seen[p] {
 			seen[p] = true
@@ -475,15 +859,213 @@ func headerFormat(positions [][]string) string {
 	return strings.Join(parts, "|")
 }
 
-// short keeps long values readable in a list.
-func short(s string) string {
-	if len(s) <= 100 {
-		return s
+// valuesFormat is a pattern for values, or the value itself when it did
+// not change.
+func valuesFormat(vals []string) string {
+	if p := infer.Pattern(vals); p != "" {
+		return p
 	}
-	return s[:60] + " … " + s[len(s)-30:]
+	return regexp.QuoteMeta(vals[0])
 }
 
-func yamlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// cookieFormats are the formats of Set-Cookie values, one per cookie
+// group: the values of one cookie name with the same attributes in the
+// same order (their keys and flags as sent), of one kind (a cookie set, or
+// one deleted: emptied or with a Max-Age of 0 or less) and one form of
+// expiry. The name is as it is, the value (masked when recorded, which
+// keeps its length) is text without a ; of the lengths seen, and each
+// attribute takes cookieAttrFormat. A deleted cookie does not match a
+// group of set ones, nor a set one a group of deleted ones. A delete that
+// keeps a value, has no Max-Age and has an expiry in the past shares the
+// group of the set cookie, as before. Values that are not a cookie (no =)
+// are kept each as recorded.
+func cookieFormats(vals []string) []string {
+	type groupKey struct {
+		name, skeleton, expires string
+		deleted                 bool
+	}
+	type group struct {
+		groupKey
+		lo, hi int        // shortest and longest value, in characters
+		vals   []string   // as recorded
+		rests  []string   // the attributes as one text, from the first ;
+		attrs  [][]string // the attributes, split at ;
+	}
+	var groups []*group
+	var other []string // values that are not a cookie
+	index := map[groupKey]*group{}
+	for _, v := range vals {
+		cookie, value, rest, ok := httpx.SplitSetCookie(v)
+		if !ok {
+			other = append(other, v)
+			continue
+		}
+		var attrs, skeleton []string
+		if rest != "" {
+			attrs = strings.Split(rest[1:], ";")
+		}
+		k := groupKey{name: cookie, deleted: value == ""}
+		for _, a := range attrs {
+			key, val, isValue := strings.Cut(a, "=")
+			if isValue {
+				key += "="
+			}
+			skeleton = append(skeleton, key)
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "max-age=":
+				n, err := strconv.Atoi(val)
+				k.deleted = k.deleted || err == nil && n <= 0
+			case "expires=":
+				k.expires = expiresForm(val)
+			}
+		}
+		k.skeleton = strings.Join(skeleton, ";")
+		n := utf8.RuneCountInString(value)
+		g := index[k]
+		if g == nil {
+			g = &group{groupKey: k, lo: n, hi: n}
+			index[k] = g
+			groups = append(groups, g)
+		}
+		g.lo, g.hi = min(g.lo, n), max(g.hi, n)
+		g.vals, g.rests, g.attrs = append(g.vals, v), append(g.rests, rest), append(g.attrs, attrs)
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		length := fmt.Sprintf("{%d}", g.lo)
+		switch {
+		case g.hi == 0:
+			length = "{0}" // only ever empty
+		case g.lo != g.hi:
+			length = fmt.Sprintf("{%d,%d}", max(g.lo, 1), g.hi)
+		}
+		head := regexp.QuoteMeta(g.name) + "=[^;]" + length
+		var b strings.Builder
+		for i, a := range g.attrs[0] {
+			key, _, isValue := strings.Cut(a, "=")
+			b.WriteString(";" + regexp.QuoteMeta(key))
+			if !isValue {
+				continue // a flag (secure, httponly), as sent
+			}
+			col := make([]string, len(g.attrs))
+			for j, attrs := range g.attrs {
+				_, col[j], _ = strings.Cut(attrs[i], "=")
+			}
+			b.WriteString("=" + cookieAttrFormat(strings.ToLower(strings.TrimSpace(key)), col, g.expires, g.deleted))
+		}
+		f := head + b.String()
+		// Each part matches its values; should the whole still not match
+		// one, the attributes are inferred as one text.
+		re, err := regexp.Compile(`^(?:` + f + `)$`)
+		for _, v := range g.vals {
+			if err != nil || !re.MatchString(v) {
+				f = head + grouped(valuesFormat(g.rests))
+				break
+			}
+		}
+		out = append(out, f)
+	}
+	return append(out, literals(other)...) // not a cookie: each as recorded
+}
+
+// literals are the values as recorded, each once, in the order seen.
+func literals(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		if q := regexp.QuoteMeta(v); !slices.Contains(out, q) {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// cookieAttrFormat is the format of the values of one cookie attribute in
+// a group. A cookie that is set gets an expiry of its form (any HTTP date,
+// any dashed date: runs within the same second agree on it only by chance);
+// next to such a date, Max-Age is counted down from it, so it gets the
+// widths seen (one width less from a power of ten: 1000 is 999 a second
+// later), never 0 or less. Without such a date, and in a deleted cookie,
+// Max-Age is one of the values seen: a lifetime that changes is a drift,
+// and a deleted cookie never matches a set one. A deleted cookie's expiry,
+// which frameworks put a year or more before the time of the response,
+// takes its form as well. Other attributes are inferred.
+func cookieAttrFormat(key string, vals []string, expires string, deleted bool) string {
+	dated := expires == "http" || expires == "dashed"
+	switch {
+	case key == "expires" && expires == "http":
+		return httpDate
+	case key == "expires" && expires == "dashed":
+		return dashedDate
+	case key == "max-age" && (deleted || !dated):
+		return grouped(strings.Join(literals(vals), "|"))
+	case key == "max-age":
+		short, lo, hi := vals[0], len(vals[0]), 0
+		for _, v := range vals {
+			if !allDigits(v) {
+				return grouped(valuesFormat(vals))
+			}
+			if len(v) < len(short) || len(v) == len(short) && v < short {
+				short = v
+			}
+			lo, hi = min(lo, len(v)), max(hi, len(v))
+		}
+		if len(short) > 1 && strings.TrimRight(short, "0") == "1" {
+			lo-- // a power of ten
+		}
+		// The first digit is never 0, so the format never takes 0.
+		switch {
+		case hi == 1:
+			return `[1-9]`
+		case lo == hi:
+			return fmt.Sprintf(`[1-9]\d{%d}`, hi-1)
+		}
+		return fmt.Sprintf(`[1-9]\d{%d,%d}`, lo-1, hi-1)
+	}
+	return grouped(valuesFormat(vals))
+}
+
+// grouped is a format that may hold a | of its own (an alternation),
+// inside (?:…) so that the text around it stays outside it; one without
+// a | stays bare.
+func grouped(p string) string {
+	if !strings.Contains(p, "|") {
+		return p
+	}
+	return "(?:" + p + ")"
+}
+
+// expiresForm is the form of a cookie's expiry: an HTTP date, a dashed
+// date, or other.
+func expiresForm(v string) string {
+	switch {
+	case httpDateValue().MatchString(v):
+		return "http"
+	case dashedDateValue().MatchString(v):
+		return "dashed"
+	}
+	return "other"
+}
+
+// dashedDate is the format of a cookie's expiry as PHP's setcookie and
+// other Netscape-style writers send it (Thu, 01-Jan-1970 00:00:01 GMT).
+const dashedDate = `[A-Z][a-z]{2}, \d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2} GMT`
+
+var (
+	httpDateValue   = lazy.Regexp(`^(?:` + httpDate + `)$`)
+	dashedDateValue = lazy.Regexp(`^(?:` + dashedDate + `)$`)
+)
+
+// allDigits reports a run of digits only (as infer's allDigits).
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+var yamlQuote = compare.YAMLQuote
 
 func seedCmd(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
@@ -624,7 +1206,7 @@ func initCmd(args []string, out io.Writer) error {
 %s
 
 Next steps:
-  1. driftgate key create   (key for private bodies; DRIFTGATE_KEY takes precedence)
+  1. driftgate key create   (key for private bodies; DRIFTGATE_KEY takes precedence unless key: is set)
   2. check target.base_url and start the application
   3. driftgate run          (routes, catalog and the first baseline; later runs compare with it)
 `, rel(root, l.Config), rel(root, l.Catalog), rel(root, l.Allowlist), found)
@@ -649,12 +1231,15 @@ func rel(root, path string) string {
 	return path
 }
 
+// httpDate is the format of an HTTP date (Sun, 09 Nov 2026 01:23:45 GMT).
+const httpDate = `[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT`
+
 // initAllowlist allows the Date header, which every response carries and
 // which changes every second.
 const initAllowlist = `version: 1
 headers:
   - name: date
-    format: '[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT'
+    format: '` + httpDate + `'
     reason: Time of the response; changes with every request.
 body: []
 `

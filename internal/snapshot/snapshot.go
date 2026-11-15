@@ -66,12 +66,60 @@ type Record struct {
 	// Exit is the exit code of a command step; its body is the output, when
 	// the step compares it.
 	Exit *int `json:"exit,omitempty"`
+	// Resent says the request was sent again and the record is the second
+	// answer (capture's resend after a restore that ended the
+	// application's database sessions).
+	Resent *Resent `json:"resent,omitempty"`
+	// Retry is set when a read-only request was sent again after its first
+	// send failed under load. Never compared; every report shows it.
+	Retry *Retry `json:"retry,omitempty"`
+}
+
+// Resent is why a request was sent again, and the status of its first
+// answer.
+type Resent struct {
+	After string `json:"after"` // "the restore of db ended 3 database sessions of the application"
+	First int    `json:"first"` // the first answer's status
+}
+
+// Retry says a read-only request was sent again after a load failure (a
+// timeout, a reset connection, a 502, 503 or 504 status): the record is
+// the response of the last send, and this is the outcome of the first.
+// Recovered says the last send no longer failed so; a request that failed
+// in every send is never a pass after a retry.
+type Retry struct {
+	Sends     int    `json:"sends"`            // sends in all, the last one recorded
+	Status    int    `json:"status,omitempty"` // the first send's status
+	Error     string `json:"error,omitempty"`  // or its failure: timeout, connection reset
+	MS        int64  `json:"ms"`               // the first send's time
+	Recovered bool   `json:"recovered"`
+}
+
+// Passed reports a response that came only after a retry: a retry that
+// recovered. Nil and an unrecovered retry are not.
+func (r *Retry) Passed() bool { return r != nil && r.Recovered }
+
+// First is the first send's outcome, as a report shows it: "503" or
+// "timeout".
+func (r *Retry) First() string {
+	if r.Error != "" {
+		return r.Error
+	}
+	return fmt.Sprint(r.Status)
 }
 
 // SideEffects are the changes one request made to the state.
 type SideEffects struct {
 	Items []string    `json:"items"`          // <component>/<item>, e.g. db/table:faq
 	Rows  []RowChange `json:"rows,omitempty"` // rows of tables under row_tracking
+	// Volatile are the columns whose values differed between two captures
+	// of the same state (<component>/table:<name>.<column>): their values
+	// are not compared for this request.
+	Volatile []string `json:"volatile,omitempty"`
+	// Learned are the items (<component>/table:<name>) whose row values
+	// two captures of the same state recorded: only their values are
+	// compared against this record.
+	Learned []string `json:"learned,omitempty"`
 }
 
 // RowChange is one changed row of a tracked table.
@@ -80,6 +128,11 @@ type RowChange struct {
 	Key     string   `json:"key"`  // primary key as column=value pairs
 	Change  string   `json:"change"`
 	Columns []string `json:"columns,omitempty"` // for an update: the columns that changed
+	// Values names the values the request wrote (secret.RowValues): of
+	// every column of an inserted row, of the changed columns of an
+	// updated one, apart from the columns row_tracking ignores. nil when
+	// the capture recorded no values (no project key, an earlier release).
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // Meta describes a snapshot set.
@@ -95,6 +148,10 @@ type Meta struct {
 	StateFormat int `json:"state_format,omitempty"`
 	// Unreliable marks a capture made with --skip-fingerprint-check.
 	Unreliable bool `json:"unreliable,omitempty"`
+	// Agreed is how many captures of the same state gave the same
+	// responses (capture --repeat, the two of run's first baseline); 0
+	// for a capture made once.
+	Agreed int `json:"agreed,omitempty"`
 	// Incomplete marks a capture that has not finished: it is written
 	// first and replaced at the end, so an interrupted capture is not
 	// taken for one whose requests are missing.
@@ -106,6 +163,26 @@ type Meta struct {
 	// to, per service (the empty name: the only one). Responses that write
 	// absolute URLs are compared with another origin's through them.
 	Origins map[string]string `json:"origins,omitempty"`
+	// ReadOnly marks a capture that sent only the requests that do not
+	// change data (capture --read-only): a comparison skips the others.
+	ReadOnly bool `json:"read_only,omitempty"`
+	// ReadOnlySkipped are the requests a read-only capture left out (of
+	// those --only selected).
+	ReadOnlySkipped []string `json:"read_only_skipped,omitempty"`
+	// ConnectTo is, per service with target.connect_to, the address its
+	// requests were sent to instead of the one DNS gives for its origin.
+	ConnectTo map[string]string `json:"connect_to,omitempty"`
+	// Roots are the folder of the project the capture was made in and its
+	// real path: responses that write it (a debug stack trace) are
+	// compared with another checkout's through them.
+	Roots []string `json:"roots,omitempty"`
+	// RowTracking are the items whose rows the capture tracked
+	// (row_tracking: <component>/table:<name>), [] for none; nil in a
+	// capture of an earlier release, which does not say.
+	RowTracking []string `json:"row_tracking"`
+	// RowValues names the key the values of tracked rows were named under
+	// (secret.RowValues.ID); empty when the capture recorded no values.
+	RowValues string `json:"row_values,omitempty"`
 }
 
 // Concurrency is the decision of concurrency: auto for one service, with
@@ -320,6 +397,38 @@ type Set struct {
 
 	mu      sync.Mutex
 	written map[string]bool // public bodies this Set wrote
+	// read are the public bodies Body read and found to match their name.
+	read sync.Map
+	// HashReads makes Record note the SHA-256 of every record file it
+	// reads, so that a check or a digest of the set need not read it again
+	// (Known).
+	HashReads bool
+	sums      sync.Map // slash path → SHA-256
+}
+
+// Known returns the SHA-256 of a file of the set (a slash path) that was
+// read and hashed already: a record read with HashReads, a public body
+// Body read (whose name is its SHA-256).
+func (s *Set) Known(rel string) (string, bool) {
+	if name, ok := strings.CutPrefix(rel, "bodies/"); ok {
+		return name, s.ReadBody(name)
+	}
+	v, ok := s.sums.Load(rel)
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
+}
+
+// ErrBodyChanged is the error of a public body whose content does not
+// match its name.
+var ErrBodyChanged = errors.New("content does not match its name")
+
+// ReadBody reports whether Body read the public body of that name and
+// found it to match.
+func (s *Set) ReadBody(name string) bool {
+	_, ok := s.read.Load(name)
+	return ok
 }
 
 // wrote reports whether the Set wrote the public body sum before; with
@@ -387,6 +496,9 @@ func (s *Set) readRecord(id string) (*Record, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if s.HashReads {
+		s.sums.Store("responses/"+id+".json", Sum(raw))
 	}
 	var r Record
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -485,8 +597,9 @@ func (s *Set) Body(r *Record) ([]byte, error) {
 		return nil, err
 	}
 	if Sum(body) != r.Body.SHA256 {
-		return nil, fmt.Errorf("body %s: content does not match its name", r.Body.SHA256)
+		return nil, fmt.Errorf("body %s: %w", r.Body.SHA256, ErrBodyChanged)
 	}
+	s.read.Store(r.Body.SHA256, true)
 	return body, nil
 }
 

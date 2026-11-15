@@ -7,6 +7,7 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/orangehill/driftgate/internal/compare"
 	"github.com/orangehill/driftgate/internal/discover"
 	"github.com/orangehill/driftgate/internal/glob"
+	"github.com/orangehill/driftgate/internal/httpx"
 	"github.com/orangehill/driftgate/internal/lazy"
 	"github.com/orangehill/driftgate/internal/secret"
 	"github.com/orangehill/driftgate/internal/snapshot"
@@ -56,8 +58,8 @@ type Config struct {
 	Identities map[string]Identity  `yaml:"identities,omitempty"`
 	Tokens     Tokens               `yaml:"tokens,omitempty"`
 	State      map[string]Component `yaml:"state,omitempty"`
-	Seed       [][]string           `yaml:"seed,omitempty"`    // load the data into the working state; driftgate seed then copies it to the pristine one
-	Prepare    [][]string           `yaml:"prepare,omitempty"` // run after every restore (migrations and the like)
+	Seed       []Command            `yaml:"seed,omitempty"`    // load the data into the working state; driftgate seed then copies it to the pristine one
+	Prepare    []Command            `yaml:"prepare,omitempty"` // run after every restore (migrations and the like)
 	Guards     []Guard              `yaml:"guards,omitempty"`
 	PII        PII                  `yaml:"pii,omitempty"`
 	Discover   []discover.Adapter   `yaml:"discover,omitempty"`
@@ -66,6 +68,7 @@ type Config struct {
 	Params     []Param              `yaml:"params,omitempty"`
 	Storage    Storage              `yaml:"storage,omitempty"`
 	Observe    []Observe            `yaml:"observe,omitempty"`
+	Requests   []RequestSetting     `yaml:"requests,omitempty"` // whether generated requests change data, and their bodies
 	Bisect     Bisect               `yaml:"bisect,omitempty"`
 	Data       Data                 `yaml:"data,omitempty"`
 	Uploads    Uploads              `yaml:"uploads,omitempty"`
@@ -111,7 +114,7 @@ func (d Data) validate() error {
 	switch d.Driver {
 	case MySQL, "mariadb", Postgres:
 	default:
-		return fmt.Errorf("data.driver must be mysql or postgres, got %q", d.Driver)
+		return fmt.Errorf("data.driver must be mysql or postgres (the data module supports only MySQL, MariaDB and PostgreSQL for now), got %q", d.Driver)
 	}
 	if d.Source.DSN.IsZero() {
 		return errors.New("data.source needs dsn (" + dsnSources + ")")
@@ -156,6 +159,155 @@ type Observe struct {
 	Target string `yaml:"target,omitempty"` // only requests of this service
 	Match  string `yaml:"match"`            // glob over "METHOD /route/path", "/route/path" or the request ID
 	Reason string `yaml:"reason,omitempty"` // why it cannot be compared
+}
+
+// RequestSetting sets what generate writes into the requests it names, as
+// observe names them: whether they change data, and their JSON body. The
+// catalog of the next generate has it, so a request is marked once, here,
+// and stays so however often the catalog is generated again.
+type RequestSetting struct {
+	Target  string     `yaml:"target,omitempty"`  // only requests of this service
+	Match   string     `yaml:"match"`             // glob over "METHOD /route/path", "/route/path" or the request ID
+	Mutates *bool      `yaml:"mutates,omitempty"` // the request changes data (true), or only reads (false)
+	Body    *yaml.Node `yaml:"body,omitempty"`    // the JSON body, as YAML (a mapping, a list, a value; null is JSON's null)
+}
+
+// UnmarshalYAML keeps the body as its YAML node, body: null too (JSON's
+// null), which a plain decode leaves out; other keys decode as usual,
+// and a key the entry does not have is an error, as everywhere else.
+func (r *RequestSetting) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: an entry of requests is a mapping", n.Line)
+	}
+	type plain RequestSetting
+	var p plain
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		var err error
+		switch k.Value {
+		case "target":
+			err = v.Decode(&p.Target)
+		case "match":
+			err = v.Decode(&p.Match)
+		case "mutates":
+			err = v.Decode(&p.Mutates)
+		case "body":
+			// body: with nothing after it is no body; null or ~ is JSON's.
+			if v.Kind != yaml.ScalarNode || v.ShortTag() != "!!null" || v.Value != "" {
+				p.Body = v
+			}
+		default:
+			err = fmt.Errorf("line %d: field %s not found in type config.RequestSetting", k.Line, k.Value)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	*r = RequestSetting(p)
+	return nil
+}
+
+// jsonNumber is a number as JSON writes it.
+var jsonNumber = lazy.Regexp(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// JSONBody is the body as JSON, nil when none is set. It is written from
+// the YAML as written, not as YAML reads it: a number keeps its digits
+// (a large integer, 1.0), a date stays the text it is, and keys are
+// strings. A value JSON has no form for, or would read as another one
+// (0x1F, 007, .inf, a binary), is refused: quote it for a string.
+func (r RequestSetting) JSONBody() (json.RawMessage, error) {
+	if r.Body == nil || r.Body.Kind == 0 {
+		return nil, nil
+	}
+	var b bytes.Buffer
+	if err := writeJSON(&b, r.Body, 0); err != nil {
+		return nil, fmt.Errorf("body: %w", err)
+	}
+	return b.Bytes(), nil
+}
+
+// bodyMax bounds a body written from YAML: aliases repeat what they name,
+// and a few lines of them make gigabytes (yaml.v3 guards its own decoding
+// of them, not this walk).
+const bodyMax = 10 << 20
+
+func writeJSON(b *bytes.Buffer, n *yaml.Node, depth int) error {
+	if depth > 100 {
+		return errors.New("nested too deep")
+	}
+	if b.Len() > bodyMax {
+		return fmt.Errorf("larger than %d MB (aliases repeat what they name)", bodyMax>>20)
+	}
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) != 1 {
+			return errors.New("not one value")
+		}
+		return writeJSON(b, n.Content[0], depth+1)
+	case yaml.AliasNode:
+		return writeJSON(b, n.Alias, depth+1)
+	case yaml.SequenceNode:
+		b.WriteByte('[')
+		for i, c := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeJSON(b, c, depth+1); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case yaml.MappingNode:
+		b.WriteByte('{')
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: merge keys (<<) are not supported in a body: write the keys out", k.Line)
+			}
+			if k.Kind != yaml.ScalarNode || k.ShortTag() != "!!str" {
+				return fmt.Errorf("line %d: the key %q is not a string: quote it", k.Line, k.Value)
+			}
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			key, _ := json.Marshal(k.Value)
+			b.Write(key)
+			b.WriteByte(':')
+			if err := writeJSON(b, n.Content[i+1], depth+1); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case yaml.ScalarNode:
+		switch n.ShortTag() {
+		case "!!str", "!!timestamp":
+			if n.Style == 0 && n.ShortTag() == "!!str" && jsonNumber().MatchString(n.Value) {
+				b.WriteString(n.Value) // a number YAML cannot hold (1e400): JSON's, as written
+				break
+			}
+			v, _ := json.Marshal(n.Value)
+			b.Write(v)
+		case "!!int", "!!float":
+			if !jsonNumber().MatchString(n.Value) {
+				return fmt.Errorf("line %d: %s is no JSON number: write it as one, or quote it for a string", n.Line, n.Value)
+			}
+			b.WriteString(n.Value)
+		case "!!bool":
+			switch n.Value {
+			case "true", "false":
+				b.WriteString(n.Value)
+			default:
+				return fmt.Errorf("line %d: write %s as true or false, or quote it for a string", n.Line, n.Value)
+			}
+		case "!!null":
+			b.WriteString("null")
+		default:
+			return fmt.Errorf("line %d: a value tagged %s has no JSON form", n.Line, n.ShortTag())
+		}
+	default:
+		return errors.New("not a value")
+	}
+	return nil
 }
 
 // Services returns the targets by name; a configuration with one target has
@@ -230,7 +382,7 @@ type Generate struct {
 }
 
 // Templates of generated requests.
-var Templates = []string{"ok", "not-found", "invalid-param", "anonymous", "identities", "json", "empty-body"}
+var Templates = []string{"ok", "not-found", "invalid-param", "anonymous", "identities", "json", "empty-body", "json-errors"}
 
 // Param says where the value of a route parameter comes from: a fixed value,
 // a list, a read-only query on the pristine database, or another response
@@ -288,8 +440,12 @@ func (pr Param) validate() error {
 
 // Target is where requests go.
 type Target struct {
-	BaseURL         string      `yaml:"base_url,omitempty"`
-	AllowHosts      []string    `yaml:"allow_hosts,omitempty"` // host names or CIDR ranges; default: local and private
+	BaseURL    string   `yaml:"base_url,omitempty"`
+	AllowHosts []string `yaml:"allow_hosts,omitempty"` // host names or CIDR ranges; default: local and private
+	// ConnectTo sends the requests to this host or IP address (with an
+	// optional port) while they keep base_url's host name for the Host
+	// header and TLS, as curl --connect-to: DNS may name another server.
+	ConnectTo       string      `yaml:"connect_to,omitempty"`
 	UserAgent       string      `yaml:"user_agent,omitempty"`
 	Timeout         Duration    `yaml:"timeout,omitempty"`
 	Concurrency     Concurrency `yaml:"concurrency,omitempty"`
@@ -299,6 +455,41 @@ type Target struct {
 	// own URLs. A comparison of sets captured from different origins takes
 	// every side's own origin and these as the same.
 	Aliases []string `yaml:"aliases,omitempty"`
+	// Retry is how many times a read-only request that failed under load
+	// (a timeout, a reset connection, a 5xx status) is sent again; unset
+	// is DefaultRetry, 0 none (Retries).
+	Retry *int `yaml:"retry,omitempty"`
+}
+
+// Allow is the target's allow-list (allow_hosts; anyHost lifts it), with
+// its connections sent to connect_to.
+func (t Target) Allow(anyHost bool) (*httpx.Allow, error) {
+	a, err := httpx.NewAllow(t.AllowHosts, anyHost)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ConnectTo(t.BaseURL, t.ConnectTo); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// DefaultRetry is the retry of a target that sets none: once. A response
+// that came only after a retry is marked in its record and shown in every
+// report, so the retry never makes a failure pass unseen.
+const DefaultRetry = 1
+
+// MaxRetry bounds retry: more sends would hide an endpoint that fails
+// most of the time.
+const MaxRetry = 3
+
+// Retries is how many times a read-only request that failed under load is
+// sent again.
+func (t Target) Retries() int {
+	if t.Retry == nil {
+		return DefaultRetry
+	}
+	return *t.Retry
 }
 
 // Origins returns the origins of a set captured from origin: it and the
@@ -379,12 +570,16 @@ type Tokens struct {
 // with a built-in driver, or anything else through restore and fingerprint
 // commands.
 type Component struct {
-	Driver      string   `yaml:"driver,omitempty"` // mysql (also MariaDB) or postgres; empty: commands
-	DSN         Secret   `yaml:"dsn,omitempty"`
-	Working     string   `yaml:"working,omitempty"`  // database the application uses
-	Pristine    string   `yaml:"pristine,omitempty"` // its pristine copy; default <working>_pristine
-	Exclude     []string `yaml:"exclude,omitempty"`  // tables never fingerprinted or restored (globs)
-	RowTracking []string `yaml:"row_tracking,omitempty"`
+	Driver      string   `yaml:"driver,omitempty"`       // mysql (also MariaDB), postgres, sqlite or sqlserver (also mssql); empty: commands
+	DSN         Secret   `yaml:"dsn,omitempty"`          // SQLite: optional, cross-checked with working
+	Working     string   `yaml:"working,omitempty"`      // database the application uses; SQLite: its file, relative to the project root
+	Pristine    string   `yaml:"pristine,omitempty"`     // its pristine copy; default <working>_pristine (SQLite: a file of the local store)
+	Exclude     []string `yaml:"exclude,omitempty"`      // tables never fingerprinted or restored (globs)
+	RestoreOnly []string `yaml:"restore_only,omitempty"` // tables restored, their rows kept in the pristine copy, but never fingerprinted (globs)
+	// RestoreEmpty are restore_only tables restored to no rows: the
+	// pristine copy leaves their rows out, as an excluded table's (a cache).
+	RestoreEmpty []string  `yaml:"restore_empty,omitempty"`
+	RowTracking  RowTables `yaml:"row_tracking,omitempty"`
 	// AllowRemote lets the database be on a host outside target.allow_hosts.
 	// A restore rewrites its tables, so a wrong DSN must not reach a server
 	// that is not a copy.
@@ -393,26 +588,198 @@ type Component struct {
 	Fingerprint []string `yaml:"fingerprint,omitempty"`
 }
 
+// RowTables are the tables of row_tracking: each a name, or a mapping of
+// the name to the columns whose values are never compared
+// (follows: {ignore: [updated_at]}).
+type RowTables []RowTable
+
+// RowTable is one table of row_tracking.
+type RowTable struct {
+	Name string
+	// Ignore are columns (globs, without letter case) whose values are
+	// not recorded: they change by themselves in a way two captures of
+	// one state cannot show (a date). A column the table does not have
+	// is no error: a migration may drop it.
+	Ignore []string
+}
+
+// Tables is row_tracking of tables named only.
+func Tables(names ...string) RowTables {
+	out := make(RowTables, len(names))
+	for i, n := range names {
+		out[i] = RowTable{Name: n}
+	}
+	return out
+}
+
+// Names are the names of the tables.
+func (r RowTables) Names() []string {
+	if r == nil {
+		return nil
+	}
+	out := make([]string, len(r))
+	for i, t := range r {
+		out[i] = t.Name
+	}
+	return out
+}
+
+func (t *RowTable) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*t = RowTable{}
+		return n.Decode(&t.Name)
+	case yaml.MappingNode:
+		if len(n.Content) == 2 && n.Content[1].Kind == yaml.MappingNode {
+			var opts struct {
+				Ignore []string `yaml:"ignore"`
+			}
+			m := n.Content[1]
+			// A node decodes without the file's KnownFields: unknown keys
+			// are refused here.
+			for i := 0; i < len(m.Content); i += 2 {
+				if k := m.Content[i].Value; k != "ignore" {
+					return fmt.Errorf("line %d: a row_tracking table takes ignore, not %q", m.Content[i].Line, k)
+				}
+			}
+			if err := m.Decode(&opts); err != nil {
+				return err
+			}
+			*t = RowTable{Name: n.Content[0].Value, Ignore: opts.Ignore}
+			for _, c := range t.Ignore {
+				if strings.TrimSpace(c) == "" {
+					return fmt.Errorf("line %d: row_tracking table %s: an empty column in ignore", m.Line, t.Name)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("line %d: a row_tracking table is a name, or name: {ignore: [columns]}", n.Line)
+}
+
+func (t RowTable) MarshalYAML() (any, error) {
+	if len(t.Ignore) == 0 {
+		return t.Name, nil
+	}
+	return map[string]any{t.Name: map[string][]string{"ignore": t.Ignore}}, nil
+}
+
 // Drivers.
 const (
-	MySQL    = "mysql"
-	Postgres = "postgres"
+	MySQL     = "mysql"
+	Postgres  = "postgres"
+	SQLite    = "sqlite"
+	SQLServer = "sqlserver"
 )
+
+// drivers names the drivers in messages.
+const drivers = "mysql, postgres, sqlite, sqlserver"
 
 func (c Component) validate() error {
 	switch c.Driver {
 	case "":
 		switch {
 		case len(c.Restore) == 0:
-			return errors.New("needs a driver (mysql, postgres) or a restore command")
-		case !c.DSN.IsZero() || c.Working != "" || c.Pristine != "" || len(c.Exclude) > 0 || len(c.RowTracking) > 0:
-			return errors.New("dsn, working, pristine, exclude and row_tracking need a driver")
+			return errors.New("needs a driver (" + drivers + ") or a restore command")
+		case !c.DSN.IsZero() || c.Working != "" || c.Pristine != "" || len(c.Exclude) > 0 || len(c.RestoreOnly) > 0 || len(c.RestoreEmpty) > 0 || len(c.RowTracking) > 0:
+			return errors.New("dsn, working, pristine, exclude, restore_only, restore_empty and row_tracking need a driver")
 		}
 		return nil
-	case MySQL, "mariadb", Postgres:
+	case MySQL, "mariadb", Postgres, SQLServer, "mssql":
+		if err := c.validateServer(); err != nil {
+			return err
+		}
+	case SQLite:
+		if err := c.validateSQLite(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("unknown driver %q (mysql, postgres)", c.Driver)
+		return fmt.Errorf("unknown driver %q (%s)", c.Driver, drivers)
 	}
+	if len(c.Restore) > 0 || len(c.Fingerprint) > 0 {
+		return errors.New("restore and fingerprint commands are for components without a driver")
+	}
+	for _, t := range c.RowTracking.Names() {
+		if c.matches(c.Exclude, t, false) {
+			return fmt.Errorf("row_tracking table %s is excluded", t)
+		}
+		if c.matches(c.RestoreOnly, t, true) || c.matches(c.RestoreEmpty, t, true) {
+			key := "restore_only"
+			if c.matches(c.RestoreEmpty, t, true) {
+				key = "restore_empty"
+			}
+			return fmt.Errorf("row_tracking table %s is %s, whose rows are not compared", t, key)
+		}
+	}
+	// A table is in one of exclude, restore_only and restore_empty: a
+	// name of one list that a glob of another matches is refused here;
+	// tables that only two globs match are refused when the driver lists
+	// them (exclude and restore_only), or are restored to no rows.
+	lists := []struct {
+		key   string
+		globs []string
+	}{{"excluded", c.Exclude}, {"restore_only", c.RestoreOnly}, {"restore_empty", c.RestoreEmpty}}
+	for _, a := range lists {
+		for _, b := range lists {
+			if a.key == b.key {
+				continue
+			}
+			for _, t := range a.globs {
+				if c.matches(b.globs, t, true) {
+					return fmt.Errorf("%s table %s is %s too; name it in one of them", a.key, t, b.key)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// matches reports whether a glob of globs matches table t as the driver's
+// component matches it: SQLite in ASCII without case, SQL Server without
+// case and with or without the schema (dbo for a table named without
+// one), with bare also PostgreSQL with or without the schema, the others
+// as written. The drivers apply the same rules (state's tableGlobs).
+func (c Component) matches(globs []string, t string, bare bool) bool {
+	names, fold := []string{t}, func(s string) string { return s }
+	switch c.Driver {
+	case SQLite:
+		fold = asciiLower
+	case SQLServer, "mssql":
+		fold = strings.ToLower
+		schema, name, ok := strings.Cut(t, ".")
+		if !ok {
+			schema, name = "dbo", t
+		}
+		names = []string{schema + "." + name, name}
+	case Postgres:
+		if _, name, ok := strings.Cut(t, "."); ok && bare {
+			names = append(names, name)
+		}
+	}
+	for _, g := range globs {
+		for _, n := range names {
+			if glob.Match(fold(g), fold(n)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// asciiLower lowers the ASCII letters of s only, as SQLite compares names.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// validateServer checks a component of a database server: MySQL, MariaDB,
+// PostgreSQL or SQL Server, whose pristine copy is a second database on it.
+func (c Component) validateServer() error {
 	if c.DSN.IsZero() {
 		return errors.New("needs dsn (" + dsnSources + ")")
 	}
@@ -424,25 +791,17 @@ func (c Component) validate() error {
 		return errors.New("needs working (the database the application uses)")
 	case c.Pristine == c.Working, c.Driver != Postgres && strings.EqualFold(c.Pristine, c.Working):
 		// MySQL and MariaDB on macOS and Windows (lower_case_table_names 1
-		// or 2) take App and app for the same database.
-		return errors.New("pristine must differ from working (MySQL and MariaDB: also in letter case)")
-	case len(c.Restore) > 0 || len(c.Fingerprint) > 0:
-		return errors.New("restore and fingerprint commands are for components without a driver")
-	}
-	for _, t := range c.RowTracking {
-		for _, g := range c.Exclude {
-			if glob.Match(g, t) {
-				return fmt.Errorf("row_tracking table %s is excluded", t)
-			}
-		}
+		// or 2) take App and app for the same database, as SQL Server does
+		// under its default, case-insensitive collation.
+		return errors.New("pristine must differ from working (MySQL, MariaDB and SQL Server: also in letter case)")
 	}
 	return nil
 }
 
 // Guard is a command that must succeed before any request that changes data.
 type Guard struct {
-	Name    string   `yaml:"name"`
-	Command []string `yaml:"command"`
+	Name    string  `yaml:"name"`
+	Command Command `yaml:"command"`
 }
 
 // PII configures the detector of personal data in public bodies.
@@ -602,10 +961,15 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		if err := comp.validate(); err != nil {
 			return nil, fmt.Errorf("%s: state %s: %w", FileName, name, err)
 		}
-		if comp.Driver == "mariadb" {
+		switch comp.Driver {
+		case "mariadb":
 			comp.Driver = MySQL
+		case "mssql":
+			comp.Driver = SQLServer
 		}
-		if comp.Driver != "" && comp.Pristine == "" {
+		// SQLite's pristine copy defaults to a file of the local store,
+		// which the capture names (it is not a setting).
+		if comp.Driver != "" && comp.Driver != SQLite && comp.Pristine == "" {
 			comp.Pristine = comp.Working + "_pristine"
 		}
 		c.State[name] = comp
@@ -618,9 +982,9 @@ func newProject(c Config, root, mode string) (*Project, error) {
 			c.Data.Driver = MySQL
 		}
 	}
-	for _, list := range [][][]string{c.Seed, c.Prepare} {
+	for _, list := range [][]Command{c.Seed, c.Prepare} {
 		for _, cmd := range list {
-			if len(cmd) == 0 {
+			if cmd.validate() != nil {
 				return nil, fmt.Errorf("%s: seed and prepare commands must not be empty", FileName)
 			}
 		}
@@ -632,7 +996,7 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		return nil, fmt.Errorf("%s: bisect timeouts must not be negative", FileName)
 	}
 	for i, g := range c.Guards {
-		if g.Name == "" || len(g.Command) == 0 {
+		if g.Name == "" || g.Command.validate() != nil {
 			return nil, fmt.Errorf("%s: guard %d needs name and command", FileName, i+1)
 		}
 	}
@@ -660,6 +1024,17 @@ func newProject(c Config, root, mode string) (*Project, error) {
 		if t.Concurrency < 0 && !t.Concurrency.Auto() {
 			return nil, fmt.Errorf("%s: %s.concurrency must not be negative", FileName, where)
 		}
+		if t.Retry != nil && (*t.Retry < 0 || *t.Retry > MaxRetry) {
+			return nil, fmt.Errorf("%s: %s.retry must be from 0 (no retry) to %d", FileName, where, MaxRetry)
+		}
+		if t.ConnectTo != "" {
+			if t.BaseURL == "" {
+				return nil, fmt.Errorf("%s: %s.connect_to needs base_url", FileName, where)
+			}
+			if _, _, err := httpx.ParseConnectTo(t.ConnectTo); err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", FileName, where, err)
+			}
+		}
 		for _, a := range t.Aliases {
 			if err := checkOrigin(a); err != nil {
 				return nil, fmt.Errorf("%s: %s.aliases: %w", FileName, where, err)
@@ -676,6 +1051,21 @@ func newProject(c Config, root, mode string) (*Project, error) {
 			if _, err := c.TargetFor(o.Target); err != nil {
 				return nil, fmt.Errorf("%s: observe %d: %w", FileName, i+1, err)
 			}
+		}
+	}
+	for i, rs := range c.Requests {
+		if rs.Target != "" {
+			if _, err := c.TargetFor(rs.Target); err != nil {
+				return nil, fmt.Errorf("%s: requests %d: %w", FileName, i+1, err)
+			}
+		}
+		switch _, err := rs.JSONBody(); {
+		case rs.Match == "":
+			return nil, fmt.Errorf("%s: requests %d: needs match", FileName, i+1)
+		case rs.Mutates == nil && rs.Body == nil:
+			return nil, fmt.Errorf("%s: requests %d: needs mutates or body", FileName, i+1)
+		case err != nil:
+			return nil, fmt.Errorf("%s: requests %d: %v", FileName, i+1, err)
 		}
 	}
 	for i, pr := range c.Params {
@@ -886,6 +1276,9 @@ func (p *Project) LoadKey() (secret.Key, error) {
 			if n := p.sealedBodies(); n > 0 {
 				err = noKey{fmt.Errorf("no encryption key, and the store holds %d private bodies sealed with the project key (%s): put that key back (%s, DRIFTGATE_KEY or key: in %s); driftgate key create would make another key, which cannot read them", n, p.Layout.Private, keyHome(p.Layout), FileName)}
 			}
+		} else if err != nil && !keyErrNamed(p, err) {
+			// A key that is there but cannot be read: say where it is.
+			err = fmt.Errorf("%s: %w", p.KeySource(), err)
 		}
 		if err != nil {
 			return nil, err
@@ -893,6 +1286,19 @@ func (p *Project) LoadKey() (secret.Key, error) {
 		p.key = k
 	}
 	return p.key, nil
+}
+
+// keyErrNamed reports whether an error of secret.Load names the key's
+// source already: the key file's errors name the file, and op's its
+// reference; DRIFTGATE_KEY, key.env and the Keychain give none.
+func keyErrNamed(p *Project, err error) bool {
+	switch {
+	case p.Key.Op != "":
+		return strings.Contains(err.Error(), p.Key.Op)
+	case p.Key.Env != "" || os.Getenv(secret.EnvKey) != "":
+		return false
+	}
+	return p.Layout.Key != ""
 }
 
 // CreateKey makes the project key where LoadKey finds it: in the layout's
@@ -946,6 +1352,10 @@ func (p *Project) Capture(tag string) (*snapshot.Set, error) {
 func (p *Project) Baseline(name string) (*snapshot.Set, error) {
 	if !projectName.MatchString(name) {
 		return nil, invalid{fmt.Errorf("invalid baseline name %q (letters, digits, . _ -; not a name Windows reserves such as con or nul)", name)}
+	}
+	if strings.HasSuffix(name, ".expectations") {
+		// <baseline>.expectations is the folder of a baseline's expectations.
+		return nil, invalid{fmt.Errorf("invalid baseline name %q: a name ending with .expectations is the folder of a baseline's expectations", name)}
 	}
 	priv, err := p.Private()
 	if err != nil {

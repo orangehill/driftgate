@@ -119,20 +119,38 @@ func TestFromValue(t *testing.T) {
 		// The MySQL driver's own form is used as it is.
 		{"u:p@tcp(db:3306)/app?parseTime=true", MySQL, "u:p@tcp(db:3306)/app?parseTime=true", ""},
 		{"u:p@unix(/tmp/mysql.sock)/app", "", "u:p@unix(/tmp/mysql.sock)/app", ""},
+		// A user that reads like another engine's scheme is a user.
+		{"oauth2:s@tcp(127.0.0.1:3306)/app", "", "oauth2:s@tcp(127.0.0.1:3306)/app", ""},
+		{"oraclesync:s@tcp(db:3306)/app", "", "oraclesync:s@tcp(db:3306)/app", ""},
+		{"file:hunter2@tcp(127.0.0.1:3306)/app", "", "file:hunter2@tcp(127.0.0.1:3306)/app", ""},
+		{"sqlite:hunter2@unix(/tmp/mysql.sock)/app", "", "sqlite:hunter2@unix(/tmp/mysql.sock)/app", ""},
+		{"sqlite3:hunter2@tcp6([::1]:3306)/app", "", "sqlite3:hunter2@tcp6([::1]:3306)/app", ""},
+		// Not an SQLite path either, and refused without the value.
+		{"file:hunter2@tcp(db:3306)/app?x=a@b", "", "", "the connection string names no server (Server=, Host=) (the value is not shown)"},
+		{"file:hunter2@tcp/app", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		{"file:hunter2@/app", "", "file:hunter2@/app", ""},
+		{"file:hunter2@cloudsql(p:r:i)/app", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		{"file:hunter2@tcp(db:3306)/app?loc=Asia/Tokyo", "", "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
+		// A plain path whose folder ends in @ reads as the MySQL driver's
+		// form: in a DSN such a file is written file:///….
+		{"/srv/data@/app.db", "", "/srv/data@/app.db", ""},
+		{"oauth2:s@/app", "", "oauth2:s@/app", ""},
+		{"oracle:s@/app", "", "oracle:s@/app", ""},
 		// ADO.NET.
 		{"Server=db;Port=3307;Database=app;Uid=u;Pwd=p", MySQL, "mysql://u:p@db:3307/", ""},
 		{"Server=db1,db2;Database=app;User ID=u;Password=p", MySQL, "mysql://u:p@db1:3306/", ""},
 		{"Host=db;Database=app;Username=u;Password=p;Pooling=true", Postgres, "postgres://u:p@db:5432/", ""},
 		{"Host=/var/run/postgresql;Database=app;Username=u", Postgres, "postgres://u@/?host=%2Fvar%2Frun%2Fpostgresql", ""},
 		{"Server=localhost;Protocol=unix;Database=app;Uid=u", MySQL, "mysql://u@localhost:3306/", ""},
-		{"Host=db;Database=app;Username=u;Password=p", "", "", "x does not say which database it is; set the driver (mysql or postgres)"},
-		{"Server=(localdb)\\mssqllocaldb;Database=x;Trusted_Connection=True", MySQL, "", "x names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
-		{"Server=tcp:x.database.windows.net,1433;Initial Catalog=x;User ID=u;Password=p", MySQL, "", "x names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
-		{"Data Source=app.db", MySQL, "", "x names SQLite; DriftGate restores MySQL, MariaDB and PostgreSQL"},
+		{"Host=db;Database=app;Username=u;Password=p", "", "", "x does not say which database it is; set the driver (" + driverList() + ")"},
+		{"Server=(localdb)\\mssqllocaldb;Database=x;Trusted_Connection=True", MySQL, "", errSQLServerLocalDB.Error()},
+		{"Server=tcp:x.database.windows.net,1433;Initial Catalog=x;User ID=u;Password=p", MySQL, "", "x names a sqlserver database, the driver is mysql"},
+		{"Data Source=app.db", MySQL, "", "x names a sqlite database, the driver is mysql"},
+		{"Data Source=app.db", SQLite, "", ""},
 		// Others.
-		{"sqlite:///var/data.db", MySQL, "", "x names SQLite; DriftGate restores MySQL, MariaDB and PostgreSQL"},
-		{"sqlsrv://u:p@db/app", MySQL, "", "x names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
-		{"redis://u:p@db", MySQL, "", "a redis:// URL names no database DriftGate knows (mysql, postgres)"},
+		{"sqlite:///var/data.db", MySQL, "", "x names a sqlite database, the driver is mysql"},
+		{"sqlsrv://u:p@db/app", MySQL, "", "x names a sqlserver database, the driver is mysql"},
+		{"redis://u:p@db", MySQL, "", "a redis:// URL names no database DriftGate knows (" + driverList() + ")"},
 		{"mysql://u:p@db/app", Postgres, "", "x names a mysql database, the driver is postgres"},
 		{"mysql://u:p%zz@db/app", MySQL, "", errURL.Error()},
 		{"just text", MySQL, "", "not a database URL, a MySQL DSN or a connection string (the value is not shown)"},
@@ -262,9 +280,9 @@ return array(
 		t.Fatal(err)
 	}
 	want := map[string]any{
-		"a": `it's \n`, "b": "x\ty", "c": code{},
+		"a": `it's \n`, "b": "x\ty", "c": code{`"interp $x"`},
 		"d": map[string]any{"0": "1", "1": "2", "three": "true"},
-		"e": "", "f": code{}, "g": code{}, "\x00code": "k", "h": "-5",
+		"e": "", "f": code{"__DIR__ . '/x'"}, "g": code{"getenv('X')"}, "\x00code": "k", "h": "-5",
 	}
 	if !reflect.DeepEqual(v, want) {
 		t.Errorf("PHP:\n got %#v\nwant %#v", v, want)
@@ -285,7 +303,7 @@ return array(
 		t.Fatal(err)
 	}
 	want = map[string]any{"default": map[string]any{
-		"ENGINE": "django.db.backends.mysql", "NAME": `C:\db`, "USER": code{}, "PASSWORD": code{}, "HOST": "", "PORT": "3306",
+		"ENGINE": "django.db.backends.mysql", "NAME": `C:\db`, "USER": code{"f'{x}'"}, "PASSWORD": code{"os.environ.get('P', 'x')"}, "HOST": "", "PORT": "3306",
 		"TEST": map[string]any{"NAME": "t"}, "LIST": map[string]any{"0": "a", "1": map[string]any{"0": "b", "1": "c"}},
 	}}
 	if !reflect.DeepEqual(v, want) {
@@ -401,7 +419,7 @@ func TestConvert(t *testing.T) {
 		{"Server=h;Database=d;Uid=u;Pwd=p", MySQL, "mysql://u:p@h:3306/", ""},
 		{"Host=h;Database=d;Username=u;Password=p", Postgres, "postgres://u:p@h:5432/", ""},
 		{"Server=h;Uid=u;Pwd='unterminated", MySQL, "", "connection string: the value of pair 3 has no closing quote"},
-		{"Server=(localdb)\\x;Trusted_Connection=yes", MySQL, "", "the DSN names SQL Server; DriftGate restores MySQL, MariaDB and PostgreSQL"},
+		{"Server=(localdb)\\x;Trusted_Connection=yes", MySQL, "", errSQLServerLocalDB.Error()},
 	} {
 		got, err := Convert(tt.in, tt.driver)
 		if tt.err != "" {

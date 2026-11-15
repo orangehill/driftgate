@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -258,14 +259,14 @@ func TestSetupAsksWhatItCannotTell(t *testing.T) {
 	url := "http://127.0.0.1:" + closedPort(t)
 	root := setupDir(t, files)
 	code, out, errOut := runCLI(t, "setup", "--yes", "--url", url)
-	if code != ExitConfig || !strings.Contains(errOut, "pass --driver mysql or --driver postgres") {
+	if code != ExitConfig || !strings.Contains(errOut, "pass --driver with mysql, postgres, sqlite or sqlserver") {
 		t.Fatalf("setup --yes: %d\n%s\n%s", code, out, errOut)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".driftgate")); err == nil {
 		t.Error("setup wrote files before it knew the driver")
 	}
 	input(t, "oracle\npostgres\nn\n")
-	if code, out, errOut = runCLI(t, "setup", "--url", url); code != ExitConfig || !strings.Contains(errOut, "mysql or postgres") {
+	if code, out, errOut = runCLI(t, "setup", "--url", url); code != ExitConfig || !strings.Contains(errOut, "mysql, postgres, sqlite or sqlserver") {
 		t.Fatalf("setup at a terminal: %d\n%s\n%s", code, out, errOut)
 	}
 	if _, c := loadState(t, root); c.Driver != "postgres" || c.DSN.AppSettings != "src/Shop.Api/Shop.Api.csproj" {
@@ -346,6 +347,31 @@ func TestSetupAppNotAnswering(t *testing.T) {
 	}
 }
 
+// TestSetupBadKeyWritesNothing: a key that cannot be read stops setup
+// before it writes the project's files, so the next setup starts anew.
+// Only the ignore entries may be written: a key file's folder must be
+// ignored before the key is made.
+func TestSetupBadKeyWritesNothing(t *testing.T) {
+	root := setupDemo(t, "http://127.0.0.1:"+closedPort(t))
+	t.Setenv("DRIFTGATE_KEY", strings.Repeat("ab", 32))
+	code, out, errOut := runCLI(t, "setup", "--yes")
+	if code == ExitClean || !strings.Contains(errOut, "DRIFTGATE_KEY: encryption key must be 32 bytes") {
+		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
+	}
+	for _, f := range []string{"driftgate.yaml", "catalog.json", "allowlist.yaml"} {
+		if _, err := os.Stat(filepath.Join(root, ".driftgate", f)); !os.IsNotExist(err) {
+			t.Errorf("%s was written: %v\n%s", f, err, out)
+		}
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if string(raw) != ".driftgate/\n" {
+		t.Errorf(".gitignore holds more than the ignore entry: %q", raw)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, ".driftgate")); len(entries) > 0 {
+		t.Errorf(".driftgate holds %v", entries)
+	}
+}
+
 // TestSetupToBaseline: from zero to the first baseline, with the key made
 // in .driftgate/; a route without a value for its parameter is left for
 // the user to check, and does not fail the setup. A second run changes
@@ -359,7 +385,8 @@ func TestSetupToBaseline(t *testing.T) {
 	if code != ExitClean || !strings.Contains(out, "baseline local made") || !strings.Contains(out, "created a key for") {
 		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
 	}
-	for _, w := range []string{"framework:  openapi", "app:        " + srv.URL, "routes:     3 found: 2 covered, 0 excluded, 1 uncovered", "uncovered routes (1): driftgate coverage lists them", "baseline:   local in .driftgate/baselines/local", "database:   none"} {
+	for _, w := range []string{"framework:  openapi", "app:        " + srv.URL, "routes:     3 found: 2 covered, 0 excluded, 1 uncovered", "uncovered routes (1): driftgate coverage lists them", "baseline:   local in .driftgate/baselines/local", "database:   none",
+		"mode:       freeze: every drift fails, and driftgate accept is refused; mode: evolve in .driftgate/driftgate.yaml lets a drift be accepted with a reason"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("summary without %q:\n%s", w, out)
 		}
@@ -478,10 +505,10 @@ func TestSetupSettingsDisagree(t *testing.T) {
 	}
 }
 
-// TestSetupInitThenRun: init leaves state: commented out, so a run after
-// it creates no database unasked. setup asks to turn it on (no terminal:
-// it stops), and --yes turns it on in place, its comments kept, before
-// the pristine copy.
+// TestSetupInitThenRun: init leaves state: commented out, its comments in
+// line, so a run after it creates no database unasked. setup asks to turn
+// it on (no terminal: it stops), and --yes turns it on in place, its
+// comments kept, before the pristine copy.
 func TestSetupInitThenRun(t *testing.T) {
 	root := setupDir(t, map[string]string{
 		".env": "APP_URL=http://127.0.0.1:" + closedPort(t) +
@@ -490,6 +517,9 @@ func TestSetupInitThenRun(t *testing.T) {
 	})
 	if code, out, errOut := runCLI(t, "init"); code != ExitClean {
 		t.Fatalf("init: %d\n%s\n%s", code, out, errOut)
+	}
+	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); !strings.Contains(raw, "\n#     # exclude: [sessions, cache, jobs]") {
+		t.Errorf("a comment inside the commented-out block is not in line:\n%s", raw)
 	}
 	if code, out, errOut := runCLI(t, "run"); strings.Contains(out, "== seed ==") {
 		t.Errorf("run after init seeds unasked: %d\n%s\n%s", code, out, errOut)
@@ -546,9 +576,17 @@ func TestSetupChosenNotAlsoFound(t *testing.T) {
 		"Shop.Api.csproj":  `<Project Sdk="Microsoft.NET.Sdk.Web"></Project>`,
 		"appsettings.json": `{"ConnectionStrings": {"Default": "Host=127.0.0.1;Port=` + closedPort(t) + `;Database=shop;Username=shop;Password=S3cr-x"}}`,
 	})
-	runCLI(t, "setup", "--yes", "--driver", "postgres", "--url", "http://127.0.0.1:"+closedPort(t))
-	if raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml")); strings.Contains(raw, "# also found:") {
+	code, out, errOut := runCLI(t, "setup", "--yes", "--driver", "postgres", "--url", "http://127.0.0.1:"+closedPort(t))
+	raw := mustRead(t, filepath.Join(root, ".driftgate", "driftgate.yaml"))
+	if strings.Contains(raw, "# also found:") {
 		t.Errorf("the chosen setting is listed as also found:\n%s", raw)
+	}
+	// --driver says which database it is: nothing says it is unknown.
+	for _, text := range []string{out, errOut, raw} {
+		if strings.Contains(text, "driver unknown") || strings.Contains(text, "does not say which database") {
+			t.Errorf("the driver given is said to be unknown: exit %d\n%s\n%s\n%s", code, out, errOut, raw)
+			break
+		}
 	}
 }
 
@@ -604,7 +642,7 @@ func TestSetupControlCharacters(t *testing.T) {
 	var back struct {
 		State map[string]config.Component `yaml:"state"`
 	}
-	if got := stateBlock(appconfDatabase("shop: #x"), true); yaml.Unmarshal([]byte(got), &back) != nil || back.State["db"].Working != "shop: #x" {
+	if got := stateBlock(appconfDatabase("shop: #x"), true, appconf.Tables{}); yaml.Unmarshal([]byte(got), &back) != nil || back.State["db"].Working != "shop: #x" {
 		t.Errorf("the name is not quoted:\n%s", got)
 	}
 }
@@ -669,5 +707,39 @@ func TestDescribeAndServer(t *testing.T) {
 	a.Driver, b.Driver = appconf.Postgres, appconf.Postgres
 	if server(a) != server(b) {
 		t.Error("PostgreSQL localhost (TCP) not taken for 127.0.0.1")
+	}
+}
+
+// TestSetupSummaryPristine: the summary says that the data as it was
+// became the pristine copy, and the mode.
+func TestSetupSummaryPristine(t *testing.T) {
+	p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Evolve, Level: "values", Target: config.Target{BaseURL: "http://127.0.0.1:1"}}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	s := &setup{a: &asker{yes: true}, out: &out, errOut: &out, copied: "the data in the database as it was now: every capture starts from it; after the data changes, driftgate seed --skip-commands takes it as it is again (driftgate seed runs the seed: commands first)"}
+	s.summary(p, detected{})
+	for _, w := range []string{"pristine:   the data in the database as it was now: every capture starts from it", "mode:       evolve: a drift may be accepted with a reason (driftgate accept)"} {
+		if !strings.Contains(out.String(), w) {
+			t.Errorf("summary without %q:\n%s", w, out.String())
+		}
+	}
+}
+
+// TestSetupSummaryDriver: the summary names the driver of the state
+// component, which --driver set, where the setting itself names none.
+func TestSetupSummaryDriver(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "Shop.Api.csproj"), `<Project Sdk="Microsoft.NET.Sdk.Web"></Project>`)
+	write(t, filepath.Join(root, "appsettings.json"), `{"ConnectionStrings": {"Default": "Host=127.0.0.1;Port=5432;Database=shop;Username=shop;Password=S3cr-x"}}`)
+	found := appconf.Find(root, func(string) (string, bool) { return "", false })
+	if len(found.Databases) != 1 || found.Databases[0].Driver != "" {
+		t.Fatalf("found: %+v", found.Databases)
+	}
+	c := config.Component{Driver: config.Postgres, Working: "shop", DSN: config.SecretFor(found.Databases[0].Ref)}
+	d, known := setting(found, c)
+	if got := stateSummary(d, known, c); !strings.HasPrefix(got, "postgres shop on 127.0.0.1:5432") {
+		t.Errorf("summary %q", got)
 	}
 }

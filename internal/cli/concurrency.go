@@ -210,9 +210,9 @@ func calibrate(ctx context.Context, p *config.Project, cat *catalog.Catalog, all
 			}
 		}()
 		fmt.Fprintf(progress, "\n— capture at the measured concurrency —\n")
-		par, err := capture.Run(ctx, p, cat, capture.Options{Tag: ptag, Force: true, AllowRemote: o.allowRemote,
-			AllowRemoteMutations: o.allowRemoteMutations, AllowMutatingWithoutRestore: o.noRestore, Restore: o.restore,
-			Baseline: base, SkipFingerprintCheck: o.skipFingerprint, Out: progress, Log: errOut, Concurrency: tried})
+		opt := o.runOptions(ptag, base, progress, errOut)
+		opt.Force, opt.Concurrency = true, tried
+		par, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return failed(err)
 		}
@@ -289,8 +289,13 @@ func differences(p *config.Project, cat *catalog.Catalog, allow *allowlist.List,
 		if err != nil {
 			return nil, err
 		}
-		if res.Outcome == report.Drift {
+		switch {
+		case res.Outcome == report.Drift:
 			add(name, req.ID)
+		case res.Retry.Passed() && !res.BaselineRetry.Passed():
+			// A load failure the retry covered, which the sequential
+			// capture did not have, is a failure of the setting.
+			add(name, req.ID+" (failed at first: "+res.Retry.First()+")")
 		}
 	}
 	for id := range par.Writers {

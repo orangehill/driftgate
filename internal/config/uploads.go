@@ -17,7 +17,7 @@ type Uploads struct {
 }
 
 // UploadsDir returns the uploads folder: DRIFTGATE_UPLOADS, then
-// uploads.dir (relative to the folder of driftgate.yaml). A folder inside
+// uploads.dir (relative to the project folder). A folder inside
 // the git repository of the project is refused.
 func (p *Project) UploadsDir() (string, error) {
 	dir := os.Getenv(EnvUploads)

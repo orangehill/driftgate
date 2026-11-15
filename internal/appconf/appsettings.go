@@ -258,11 +258,15 @@ func readAppSettings(root, file, key string, env Lookup) (parts, error) {
 	if strings.TrimSpace(v) == "" {
 		return parts{}, fmt.Errorf("%s: %s is not set", file, key)
 	}
-	return fromValue(v)
+	p, err := fromValue(v)
+	if err != nil {
+		return parts{}, err
+	}
+	return sqlServerClientOf(root, file, p), nil
 }
 
 // csprojDriver is the database a project's packages use: mysql, postgres,
-// or another (SQL Server, SQLite); empty when none says.
+// sqlite, sqlserver, or another (detected); empty when none says.
 func csprojDriver(csproj string) (driver, other string) {
 	lc := strings.ToLower(csproj)
 	switch {
@@ -271,9 +275,9 @@ func csprojDriver(csproj string) (driver, other string) {
 	case strings.Contains(lc, `"npgsql`):
 		return Postgres, ""
 	case strings.Contains(lc, `"microsoft.entityframeworkcore.sqlserver`), strings.Contains(lc, `"microsoft.data.sqlclient`), strings.Contains(lc, `"system.data.sqlclient`):
-		return "", "SQL Server"
+		return SQLServer, ""
 	case strings.Contains(lc, `"microsoft.entityframeworkcore.sqlite`), strings.Contains(lc, `"microsoft.data.sqlite`):
-		return "", "SQLite"
+		return SQLite, ""
 	}
 	return "", ""
 }

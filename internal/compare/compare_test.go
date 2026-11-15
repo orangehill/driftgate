@@ -22,7 +22,8 @@ func run(t *testing.T, allow *allowlist.List, level Level, base, cur Side) []Dri
 	if allow == nil {
 		allow = allowlist.Empty()
 	}
-	return One("req", base, cur, allow, level)
+	ds, _ := OneWitnessed("req", base, cur, allow, level)
+	return ds
 }
 
 func has(ds []Drift, kind, where string) bool {
@@ -42,6 +43,12 @@ func TestBodyDrifts(t *testing.T) {
 		{"int to float", `{"n":1}`, `{"n":1.0}`, KindType, "$.n"},
 		{"null to empty string", `{"a":null}`, `{"a":""}`, KindType, "$.a"},
 		{"number literal", `{"n":1.0}`, `{"n":1.00}`, KindNumberLiteral, "$.n"},
+		// The examples of drift-kinds.md: a whole number that gains a
+		// fraction changes type; the same type in another spelling is a
+		// number literal.
+		{"int to float, 7 to 7.0", `{"n":7}`, `{"n":7.0}`, KindType, "$.n"},
+		{"number literal, exponent", `{"n":1250.5}`, `{"n":1.2505e3}`, KindNumberLiteral, "$.n"},
+		{"number literal, negative zero", `{"n":0}`, `{"n":-0}`, KindNumberLiteral, "$.n"},
 		{"value", `{"a":"x"}`, `{"a":"y"}`, KindValue, "$.a"},
 		{"key missing", `{"a":1,"b":2}`, `{"a":1}`, KindKeyMissing, "$.b"},
 		{"key extra", `{"a":1}`, `{"a":1,"b":2}`, KindKeyExtra, "$.b"},
@@ -61,6 +68,26 @@ func TestBodyDrifts(t *testing.T) {
 				t.Fatalf("want %s at %s, got %+v", c.kind, c.where, ds)
 			}
 		})
+	}
+}
+
+// TestKeyDriftValues: a key that is missing or new shows its value (the
+// key is in the place), an object or array cut short.
+func TestKeyDriftValues(t *testing.T) {
+	long := `"` + strings.Repeat("x", 300) + `"`
+	ds := run(t, nil, LevelValues, side(200, nil, `{"a":1,"gone":"old"}`), side(200, nil, `{"a":1,"b":{"x":[1,2]},"c":[`+long+`]}`))
+	got := map[string][2]string{}
+	for _, d := range ds {
+		got[d.Kind+" "+d.Where] = [2]string{d.Baseline, d.Current}
+	}
+	if v := got["key-missing $.gone"]; v != [2]string{`"old"`, ""} {
+		t.Errorf("missing: %q", v)
+	}
+	if v := got["key-extra $.b"]; v != [2]string{"", `{"x":[1,2]}`} {
+		t.Errorf("extra: %q", v)
+	}
+	if v := got["key-extra $.c"][1]; len([]rune(v)) != memberTextMax+1 || !strings.HasSuffix(v, "…") {
+		t.Errorf("long: %q", v)
 	}
 }
 
@@ -200,6 +227,51 @@ func TestSideEffects(t *testing.T) {
 	}
 	if d := One("x", Side{Record: rec(base)}, Side{Record: rec(cur)}, allowlist.Empty(), LevelStatus); len(d) != 0 {
 		t.Fatalf("level status: %v", d)
+	}
+}
+
+// TestRowTrackingAfterBaseline: rows of a table the baseline did not
+// track (row_tracking came after it) are not compared, and a note says
+// so once; rows both sides tracked are compared, and a baseline that does
+// not say what it tracked has its rows compared as before.
+func TestRowTrackingAfterBaseline(t *testing.T) {
+	rec := func(se *snapshot.SideEffects) *snapshot.Record {
+		return &snapshot.Record{Version: 1, ID: "x", Status: 200, Headers: [][2]string{}, Body: snapshot.Body{SHA256: "a"}, SideEffects: se}
+	}
+	base := &snapshot.SideEffects{Items: []string{"db/table:orders", "db/table:users"}, Rows: []snapshot.RowChange{{Item: "db/table:users", Key: "id=1", Change: "updated", Columns: []string{"name"}}}}
+	cur := &snapshot.SideEffects{Items: []string{"db/table:orders", "db/table:users"}, Rows: []snapshot.RowChange{
+		{Item: "db/table:orders", Key: "id=7", Change: "inserted"}, {Item: "db/table:orders", Key: "id=8", Change: "inserted"},
+		{Item: "db/table:users", Key: "id=1", Change: "updated", Columns: []string{"email"}}}}
+	b := Side{Record: rec(base), RowTables: []string{"db/table:users"}}
+	c := Side{Record: rec(cur), RowTables: []string{"db/table:orders", "db/table:users"}}
+	drifts, notes := OneNotes("x", b, c, allowlist.Empty(), LevelValues)
+	if len(drifts) != 1 || drifts[0].Where != "side-effects:db/table:users[id=1]" {
+		t.Errorf("drifts %+v", drifts)
+	}
+	if len(notes) != 1 || notes[0] != "side-effects:db/table:orders: rows not compared: not tracked in the baseline (row_tracking came after it); make the baseline again to compare them (accept keeps the baseline's tracking)" {
+		t.Errorf("notes %q", notes)
+	}
+	// Turned off since: the baseline's rows of it are not compared.
+	if drifts, notes := OneNotes("x", Side{Record: rec(cur), RowTables: c.RowTables}, Side{Record: rec(base), RowTables: b.RowTables}, allowlist.Empty(), LevelValues); len(drifts) != 1 ||
+		len(notes) != 1 || !strings.Contains(notes[0], "row_tracking no longer covers the table") {
+		t.Errorf("row_tracking removed: %+v %q", drifts, notes)
+	}
+	b.RowTables = nil
+	if drifts, notes := OneNotes("x", b, c, allowlist.Empty(), LevelValues); len(drifts) != 3 || len(notes) != 0 {
+		t.Errorf("a baseline that does not say: %+v %q", drifts, notes)
+	}
+	// The driver names the table in another letter case or schema than
+	// the configuration (SQL Server dbo.Users for users, PostgreSQL
+	// app.users for users): it is tracked on both sides, and its rows are
+	// compared.
+	for _, item := range []string{"db/table:dbo.Users", "db/table:app.users"} {
+		cfg := []string{"db/table:dbo.users", "db/table:public.users"}
+		bb := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=1", Change: "updated", Columns: []string{"name"}}}}
+		cc := &snapshot.SideEffects{Items: []string{item}, Rows: []snapshot.RowChange{{Item: item, Key: "id=2", Change: "updated", Columns: []string{"name"}}}}
+		drifts, notes := OneNotes("x", Side{Record: rec(bb), RowTables: cfg}, Side{Record: rec(cc), RowTables: cfg}, allowlist.Empty(), LevelValues)
+		if len(drifts) != 2 || len(notes) != 0 {
+			t.Errorf("%s: drifts %+v, notes %q", item, drifts, notes)
+		}
 	}
 }
 

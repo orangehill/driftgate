@@ -7,6 +7,7 @@
 package capture
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -61,11 +64,14 @@ func envErr(format string, a ...any) error {
 
 // Options of one capture.
 type Options struct {
-	Tag                         string
-	Only                        string // glob over request IDs
-	Force                       bool   // replace an existing capture with this tag
-	AllowRemote                 bool   // allow a target outside allow_hosts
-	AllowRemoteMutations        bool   // and send requests that change data to it
+	Tag  string
+	Only string // glob over request IDs
+	// ReadOnly sends only the requests that do not change data
+	// (catalog.ReadOnlySkips leaves the others out).
+	ReadOnly                    bool
+	Force                       bool // replace an existing capture with this tag
+	AllowRemote                 bool // allow a target outside allow_hosts
+	AllowRemoteMutations        bool // and send requests that change data to it
 	AllowMutatingWithoutRestore bool
 	Restore                     string        // once (default): before the run and before the requests that change data; each: also before every sequence
 	Baseline                    *snapshot.Set // the state must match the one this baseline was captured from
@@ -77,6 +83,10 @@ type Options struct {
 	// names (the decision of concurrency: auto); it applies to the
 	// read-only requests only, as every concurrency does.
 	Concurrency map[string]int
+	// NotBefore: the prepare commands and the requests start at this
+	// moment, not before (a capture repeated for the same baseline, whose
+	// timestamps must fall in other seconds than the last run's).
+	NotBefore time.Time
 }
 
 // Summary of a finished capture.
@@ -89,6 +99,17 @@ type Summary struct {
 	Writers      map[string][]string      // read-only requests that changed the state → items
 	Unattributed []string                 // items read-only requests changed that no single request explains
 	Time         Time                     // where the time went
+
+	// Retried are the read-only requests answered only after a retry (one
+	// that recovered), with the outcome of their first send.
+	Retried map[string]*snapshot.Retry
+	// Prepared are the items prepare changed after a restore: from the
+	// fingerprints taken anyway (with a tokens command, one more after
+	// the first restore, and the later restores are not checked).
+	Prepared []string
+	// NoRowValues: row_tracking is on, but no project key was at hand, so
+	// the values requests wrote into tracked rows were not recorded.
+	NoRowValues bool
 }
 
 // Time is where a capture spent its time.
@@ -108,11 +129,12 @@ type unit struct {
 	reqs []catalog.Request
 }
 
-// plan splits the selected requests into read-only requests and units.
-func plan(cat *catalog.Catalog, only string) (readonly []catalog.Request, units []unit) {
+// plan splits the selected requests into read-only requests and units;
+// skip are requests left out (a read-only capture's).
+func plan(cat *catalog.Catalog, only string, skip map[string]bool) (readonly []catalog.Request, units []unit) {
 	selected := map[string]catalog.Request{}
 	for _, r := range cat.Requests {
-		if only == "" || glob.Match(only, r.ID) {
+		if (only == "" || glob.Match(only, r.ID)) && !skip[r.ID] {
 			selected[r.ID] = r
 		}
 	}
@@ -165,41 +187,14 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	default:
 		return nil, configErr("--restore must be once or each")
 	}
-	readonly, units := plan(cat, opt.Only)
-	if len(readonly)+len(units) == 0 {
-		if opt.Only != "" {
-			return nil, configErr("no catalog request matches --only %s", opt.Only)
-		}
-		return nil, configErr("the catalog has no requests")
+	readonly, units, skip, err := selectRequests(p, cat, opt)
+	if err != nil {
+		return nil, err
 	}
-	var mutating, repeats []catalog.Request
-	for _, u := range units {
-		for _, r := range u.reqs {
-			if r.Mutating() || r.IsCommand() {
-				mutating = append(mutating, r)
-			} else if r.Repeat > 1 {
-				repeats = append(repeats, r)
-			}
-		}
+	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
+	if err := preflight(p, opt, units, all); err != nil {
+		return nil, err
 	}
-	// An uploaded real file stays in the application's data until a restore
-	// takes it out; without one it would stay there after the capture.
-	for _, r := range append(append([]catalog.Request{}, readonly...), unitRequests(units)...) {
-		if r.UsesFiles() && (len(p.State) == 0 || opt.AllowMutatingWithoutRestore) {
-			return nil, configErr("%s uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)", r.ID)
-		}
-	}
-	if len(mutating) > 0 && len(p.State) == 0 && !opt.AllowMutatingWithoutRestore {
-		return nil, configErr("the catalog has requests that change data (%s), but no state with a restore command is configured: configure state: in %s (see driftgate init)%s",
-			listRequests(mutating), configPath(p), byMethodHint(mutating))
-	}
-	// A request sent many times in a row (repeat:) is a burst, like a
-	// change of data, to a server outside allow_hosts.
-	if len(mutating)+len(repeats) > 0 && opt.AllowRemote && !opt.AllowRemoteMutations {
-		return nil, configErr("refusing to send requests that change data or are repeated (%s) to a target outside allow_hosts without --allow-remote-mutations%s",
-			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
-	}
-
 	set, err := p.Capture(opt.Tag)
 	if err != nil {
 		return nil, err // config.ErrInvalid for a tag, else the store's
@@ -229,29 +224,9 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	chaos.Point("capture.started")
-	// A client, rate limits, allowed hosts and concurrency per service. The
-	// empty name means the only service.
-	for i := range readonly {
-		readonly[i].Target = p.Canonical(readonly[i].Target)
-	}
-	for _, u := range units {
-		for i := range u.reqs {
-			u.reqs[i].Target = p.Canonical(u.reqs[i].Target)
-		}
-	}
-	services := map[string]*service{}
-	for _, req := range append(append([]catalog.Request{}, readonly...), unitRequests(units)...) {
-		if _, ok := services[req.Target]; ok || req.IsCommand() {
-			continue
-		}
-		s, err := newService(ctx, p, req, opt.AllowRemote)
-		if err != nil {
-			return nil, err
-		}
-		if n, ok := opt.Concurrency[req.Target]; ok && n > 0 {
-			s.slots = make(chan struct{}, n)
-		}
-		services[req.Target] = s
+	services, err := newServices(ctx, p, all, opt.AllowRemote, opt.Concurrency)
+	if err != nil {
+		return nil, err
 	}
 	detector, err := pii.New(p.PII.Allow)
 	if err != nil {
@@ -262,55 +237,98 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	defer tr.close()
+	noValues, err := tr.loadRowValues(p)
+	if err != nil {
+		return nil, err
+	}
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
 		timings: map[string]int64{},
-		sum:     &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{}}}
-	if r.uploads, err = prepareUploads(p, append(append([]catalog.Request{}, readonly...), unitRequests(units)...)); err != nil {
+		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
+			Retried: map[string]*snapshot.Retry{}, NoRowValues: noValues}}
+	if r.uploads, err = prepareUploads(p, all); err != nil {
 		return nil, err
 	}
 
+	// A capture stopped before it began (an interrupt, a stack that is
+	// down) fails here: the send loop below takes a cancelled context or a
+	// free worker, whichever select picks.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Every capture starts from the pristine state, so two captures of the
 	// same code see the same data.
 	if err := tr.restore(ctx); err != nil {
 		return nil, err
 	}
+	// Sessions the last restore of the previous capture ended fail now.
+	takeEnded(p, tr)
 	start, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
+	if err := tr.checkWhole(ctx, start); err != nil {
+		return nil, err
+	}
 	r.sum.Tracked = len(start) > 0
 	r.start = start
-	if opt.Baseline != nil && !opt.SkipFingerprintCheck {
-		meta, err := opt.Baseline.Meta()
-		if err != nil {
-			return nil, err
-		}
-		if meta != nil && meta.State != nil {
-			if d := flatten(diffStates(fromMeta(meta.State), start)); len(d) > 0 {
-				if meta.StateFormat != state.FingerprintFormat {
-					name := filepath.Base(opt.Baseline.Dir)
-					return nil, envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
-				}
-				return nil, envErr("the state differs from the one the baseline was captured from (%d items): %v", len(d), limit(d, 30))
-			}
+	if err := checkBaseline(p, tr, opt, start); err != nil {
+		return nil, err
+	}
+	if wait := time.Until(opt.NotBefore); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
-	if err := r.prepare(ctx); err != nil {
+	if err := r.runPrepare(ctx); err != nil {
 		return nil, err
+	}
+	// What prepare changed: the fingerprint after the tokens command is
+	// taken anyway; one between the two only when both are configured, so
+	// a tokens command that writes (a login) is not taken for prepare.
+	var mid states
+	if r.sum.Tracked && len(p.Prepare) > 0 && len(p.Tokens.Command) > 0 {
+		if mid, err = tr.fingerprint(ctx, nil); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.reloadTokens(ctx); err != nil {
+		return nil, err
+	}
+	// The guards are checked once restore and prepare have set up the
+	// environment they check, before the first request, so one that fails
+	// stops the capture in seconds, not after the read-only requests; and
+	// before the fingerprint the read-only phase starts from, so a write
+	// of one (guards only check, but a command may log itself) is part of
+	// that state and never taken for a request's.
+	if len(units) > 0 {
+		if err := checkGuards(ctx, p, opt, true); err != nil {
+			return nil, err
+		}
 	}
 	before, err := tr.fingerprint(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	tr.markDirty(diffStates(start, before))
-	all := append(append([]catalog.Request{}, readonly...), unitRequests(units)...)
+	switch {
+	case mid != nil:
+		r.prepared(diffStates(start, mid))
+	case len(p.Tokens.Command) == 0:
+		r.prepared(diffStates(start, before))
+	}
 	if err := checkIdentities(all, r.tokens); err != nil {
 		return nil, err
 	}
-
 	r.base = opt.Baseline
+	r.retry = newRetrying(readonly)
 	if err := r.byService(ctx, readonly, true); err != nil {
+		r.retry.release()
+		return nil, err
+	}
+	if err := r.retryDeferred(ctx); err != nil {
 		return nil, err
 	}
 	if r.sum.Tracked && len(readonly) > 0 {
@@ -327,11 +345,13 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 
 	if len(units) > 0 {
-		for _, g := range p.Guards {
-			if err := state.Run(ctx, p.Root, g.Command, opt.Env, opt.Log); err != nil {
-				return nil, envErr("guard %q failed: %v", g.Name, err)
+		// Again right before the requests that change data, which they
+		// guard, when read-only requests ran since the first check: that
+		// phase may take long, and the environment may change during it.
+		if len(readonly) > 0 {
+			if err := checkGuards(ctx, p, opt, false); err != nil {
+				return nil, err
 			}
-			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
 		}
 		prev, err := r.reset(ctx)
 		if err != nil {
@@ -353,30 +373,17 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 
 	// Leave the data as the capture found it after its first restore, so the
 	// working copy is ready for the application and the next capture.
+	// Every request ran on data checked before it; a pristine copy changed
+	// since is found by the next run's first restore, so this restore
+	// reads nothing more (no whole-copy read).
 	if (len(units) > 0 || len(r.sum.Writers) > 0) && len(p.State) > 0 {
 		if err := tr.restore(ctx); err != nil {
 			return nil, err
 		}
+		saveEnded(p, tr)
 	}
 
-	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck}
-	if r.sum.Tracked {
-		meta.State, meta.StateFormat = toMeta(start), state.FingerprintFormat
-	}
-	for name := range services {
-		t, _ := p.TargetFor(name)
-		if o, err := compare.Origin(t.BaseURL); err == nil {
-			if meta.Origins == nil {
-				meta.Origins = map[string]string{}
-			}
-			meta.Origins[name] = o
-		}
-	}
-	// The meta without Incomplete marks the capture whole: it is written last.
-	if err := snapshot.WriteJSON(filepath.Join(set.Dir, "timings.json"), r.timings); err != nil {
-		return nil, err
-	}
-	if err := set.WriteMeta(meta); err != nil {
+	if err := r.markComplete(opt, created, skip); err != nil {
 		return nil, err
 	}
 	chaos.Point("capture.complete")
@@ -384,6 +391,229 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	tr.time.Total = time.Since(began)
 	r.sum.Time = *tr.time
 	return r.sum, nil
+}
+
+// selectRequests selects the requests of a capture: those of the catalog
+// that --only and --read-only leave, split into read-only requests and
+// units (plan), each with its target named as the configuration names it
+// (the empty name means the only service). skip are the requests a
+// read-only capture leaves out. A selection that is empty, or a
+// configuration a read-only capture cannot keep from writing, is refused.
+func selectRequests(p *config.Project, cat *catalog.Catalog, opt Options) (readonly []catalog.Request, units []unit, skip map[string]bool, err error) {
+	if opt.ReadOnly {
+		// --read-only selects requests; the project's own commands run as
+		// configured, and connect_to does not apply to them.
+		if err := CheckReadOnly(p); err != nil {
+			return nil, nil, nil, err
+		}
+		skip = cat.ReadOnlySkips()
+	}
+	readonly, units = plan(cat, opt.Only, skip)
+	if len(readonly)+len(units) == 0 {
+		if opt.ReadOnly {
+			return nil, nil, nil, configErr("no catalog request that leaves data unchanged is selected (--read-only)")
+		}
+		if opt.Only != "" {
+			return nil, nil, nil, configErr("no catalog request matches --only %s", opt.Only)
+		}
+		return nil, nil, nil, configErr("the catalog has no requests")
+	}
+	for i := range readonly {
+		readonly[i].Target = p.Canonical(readonly[i].Target)
+	}
+	for _, u := range units {
+		for i := range u.reqs {
+			u.reqs[i].Target = p.Canonical(u.reqs[i].Target)
+		}
+	}
+	return readonly, units, skip, nil
+}
+
+// preflight refuses a capture whose requests may not run, before anything
+// is changed: a real file uploaded without a restore to take it out,
+// requests that change data without a state to restore, requests that
+// change data or are repeated sent outside allow_hosts, and a command
+// that would stop halfway (checkAllCommands). all are the read-only
+// requests and then the requests of units.
+func preflight(p *config.Project, opt Options, units []unit, all []catalog.Request) error {
+	var mutating, repeats []catalog.Request
+	for _, u := range units {
+		for _, r := range u.reqs {
+			// A command step changes data unless it says mutates: false,
+			// which only a read-only capture takes at its word (it sends
+			// no other step).
+			if r.Mutating() || r.IsCommand() && !opt.ReadOnly {
+				mutating = append(mutating, r)
+			} else if r.Repeat > 1 {
+				repeats = append(repeats, r)
+			}
+		}
+	}
+	// An uploaded real file stays in the application's data until a restore
+	// takes it out; without one it would stay there after the capture.
+	for _, r := range all {
+		if r.UsesFiles() && (len(p.State) == 0 || opt.AllowMutatingWithoutRestore) {
+			return configErr("%s uploads a file from the uploads folder, which needs a state with a restore command to take it out of the application again (also without --allow-mutating-without-restore)", r.ID)
+		}
+	}
+	if len(mutating) > 0 && len(p.State) == 0 && !opt.AllowMutatingWithoutRestore {
+		return configErr("the catalog has requests that change data (%s), but no state with a restore command is configured: configure state: in %s (see driftgate init)%s",
+			listRequests(mutating), configPath(p), byMethodHint(mutating))
+	}
+	// A request sent many times in a row (repeat:) is a burst, like a
+	// change of data, to a server outside allow_hosts.
+	if len(mutating)+len(repeats) > 0 && opt.AllowRemote && !opt.AllowRemoteMutations {
+		return configErr("refusing to send requests that change data or are repeated (%s) to a service outside allow_hosts without --allow-remote-mutations%s",
+			listRequests(append(mutating, repeats...)), byMethodHint(mutating))
+	}
+	return checkAllCommands(p, all, units)
+}
+
+// newServices makes the service of every target reqs are sent to (a
+// command step is sent to none): a client, rate limits, allowed hosts and
+// slots; concurrency sets the slots of the targets it names.
+func newServices(ctx context.Context, p *config.Project, reqs []catalog.Request, allowRemote bool, concurrency map[string]int) (map[string]*service, error) {
+	services := map[string]*service{}
+	for _, req := range reqs {
+		if _, ok := services[req.Target]; ok || req.IsCommand() {
+			continue
+		}
+		s, err := newService(ctx, p, req, allowRemote)
+		if err != nil {
+			return nil, err
+		}
+		if n, ok := concurrency[req.Target]; ok && n > 0 {
+			s.slots = make(chan struct{}, n)
+		}
+		services[req.Target] = s
+	}
+	return services, nil
+}
+
+// checkBaseline refuses a capture whose start state (the fingerprint after
+// the first restore) differs from the one opt.Baseline was captured from,
+// unless --skip-fingerprint-check: a baseline fingerprinted in an older
+// format, items that are restore_only now (the configuration as tr holds
+// it now), or other data; each message says how to go on.
+func checkBaseline(p *config.Project, tr *tracker, opt Options, start states) error {
+	if opt.Baseline == nil || opt.SkipFingerprintCheck {
+		return nil
+	}
+	meta, err := opt.Baseline.Meta()
+	if err != nil {
+		return err
+	}
+	if meta == nil || meta.State == nil {
+		return nil
+	}
+	d := flatten(diffStates(fromMeta(meta.State), start))
+	if len(d) == 0 {
+		return nil
+	}
+	name := filepath.Base(opt.Baseline.Dir)
+	if meta.StateFormat != state.FingerprintFormat {
+		return envErr("the state differs from the one the baseline was captured from (%d items: %v), and the baseline's fingerprint has an older format (the current format fingerprints these items another way): driftgate verify --baseline %s --migrate-state checks that the data is the baseline's and records the fingerprint in the new format", len(d), limit(d, 30), name)
+	}
+	run := "driftgate run"
+	if name != "local" && filepath.Dir(opt.Baseline.Dir) == filepath.Clean(p.Layout.Baselines) {
+		run += " --baseline " + name
+	}
+	if tr.restoreOnlyNow(d) {
+		return envErr("the state differs from the one the baseline was captured from (%d items): %v; they are restore_only now, which the baseline's state still holds: the configuration changed, so make the baseline again (move %s away; the next %s makes it)", len(d), limit(d, 30), opt.Baseline.Dir, run)
+	}
+	return envErr("the state differs from the one the baseline was captured from (%d items): %v; the pristine copy holds other data than the baseline's (a seed since, other seed data or migrations): seed the data the baseline was captured from, or make a new baseline of this data (move %s away; the next %s makes it); when the data changed on purpose, you can also capture twice with --skip-fingerprint-check and make that capture the baseline's content: driftgate capture <tag> --repeat 2 --skip-fingerprint-check, then driftgate baselines rebase %s --from <tag> --reason \"…\"", len(d), limit(d, 30), opt.Baseline.Dir, run, name)
+}
+
+// markComplete writes the capture's timings, then its meta without
+// Incomplete, which marks the capture whole: it is written last. created
+// is when the capture began, and skip the requests a read-only capture
+// left out (selectRequests).
+func (r *runner) markComplete(opt Options, created string, skip map[string]bool) error {
+	p := r.p
+	meta := snapshot.Meta{Tag: opt.Tag, Source: "capture", Created: created, Unreliable: opt.SkipFingerprintCheck, Roots: projectRoots(p.Root),
+		RowTracking: rowTrackingItems(p), ReadOnly: opt.ReadOnly}
+	if r.tr.values != nil {
+		meta.RowValues = r.tr.values.ID()
+	}
+	if opt.ReadOnly {
+		// What it left out, as the catalog was: a comparison reads the
+		// list, not the catalog of its own time.
+		meta.ReadOnlySkipped = []string{}
+		for id := range skip {
+			if opt.Only == "" || glob.Match(opt.Only, id) {
+				meta.ReadOnlySkipped = append(meta.ReadOnlySkipped, id)
+			}
+		}
+		sort.Strings(meta.ReadOnlySkipped)
+	}
+	if r.sum.Tracked {
+		meta.State, meta.StateFormat = toMeta(r.start), state.FingerprintFormat
+	}
+	for name := range r.services {
+		t, _ := p.TargetFor(name)
+		if o, err := compare.Origin(t.BaseURL); err == nil {
+			if meta.Origins == nil {
+				meta.Origins = map[string]string{}
+			}
+			meta.Origins[name] = o
+		}
+		if t.ConnectTo != "" {
+			if meta.ConnectTo == nil {
+				meta.ConnectTo = map[string]string{}
+			}
+			meta.ConnectTo[name] = t.ConnectTo
+		}
+	}
+	if err := snapshot.WriteJSON(filepath.Join(r.set.Dir, "timings.json"), r.timings); err != nil {
+		return err
+	}
+	return r.set.WriteMeta(meta)
+}
+
+// projectRoots are the folder of the project and, when it differs, its
+// real path (an application reports the folder it runs from resolved:
+// /private/tmp for /tmp on macOS).
+//
+// A folder in a home folder of a form the comparison knows
+// (compare.HomeRelative: /Users/<name>, /home/<name>, WSL's
+// /mnt/<drive>/Users/<name> …), with two names or more in it, is written
+// ~ and the rest: meta.json goes into the repository with baselines: git,
+// and names no user that way; the comparison takes it for that path in
+// any home folder of those forms. The home folder itself, and one name in
+// it, are not written (their path names the user), nor a folder whose
+// absolute path would name the user (namesUser); any other folder is
+// written as it is.
+func projectRoots(root string) []string {
+	out := []string{root}
+	if real, err := filepath.EvalSymlinks(root); err == nil && real != root {
+		out = append(out, real)
+	}
+	var kept []string
+	for _, r := range out {
+		switch rest, home := compare.HomeRelative(r); {
+		case rest != "":
+			kept = append(kept, "~"+rest)
+		case !home && !namesUser(r):
+			kept = append(kept, r)
+		}
+	}
+	return slices.Compact(kept)
+}
+
+// homeSpaced is a home folder of a known form whose name has a space
+// (/Users/Jane Doe, C:\Users\Jane Doe): ~/… cannot stand for it, as the
+// comparison reads a home folder's name up to white space.
+var homeSpaced = regexp.MustCompile(`(?i)^(?:/(?:Users|home)/|/mnt/[a-z]/Users/|[a-z]:\\Users\\)[^/\\]*\s`)
+
+// namesUser reports a folder not recorded as ~/… whose absolute path
+// would name the user: in a home folder of a known form whose name has a
+// space, or in this machine's home when its path has white space (the
+// comparison reads a home folder's name up to white space). It is not
+// recorded: meta.json goes into the repository with baselines: git. Its
+// traces are then compared as they are, which can only make a difference,
+// never hide one.
+func namesUser(folder string) bool {
+	return homeSpaced.MatchString(folder) || compare.InLocalHome(folder)
 }
 
 // asidePrefix starts the name of a previous capture of tag moved aside; it
@@ -530,7 +760,7 @@ func byMethodHint(reqs []catalog.Request) string {
 	if len(by) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(`; %s change data only by their method (the catalog does not say mutates): write "mutates": false on those that only read (a search sent as POST)`, listRequests(by))
+	return fmt.Sprintf(`; %s change data only by their method (the catalog does not say mutates): say mutates: false for those that only read (a search sent as POST), under requests: in driftgate.yaml, then driftgate generate --write (an entry written by hand: "mutates": false in the catalog)`, listRequests(by))
 }
 
 // ByMethod lists the selected requests (only: a glob over IDs, or empty)
@@ -543,6 +773,29 @@ func ByMethod(cat *catalog.Catalog, only string) []string {
 		}
 	}
 	return ids
+}
+
+// CheckReadOnly refuses a configuration a read-only capture cannot keep
+// from writing: --read-only selects requests, and prepare: runs as
+// configured. With state: it should write only to data the restore brings back.
+func CheckReadOnly(p *config.Project) error {
+	if len(p.Prepare) > 0 && len(p.State) == 0 {
+		return configErr("--read-only covers the requests only, not the project's commands: prepare: may write, and without state: nothing restores what it writes; leave it out of the configuration for a read-only check")
+	}
+	return nil
+}
+
+// checkGuards runs the guards; say prints each that succeeded.
+func checkGuards(ctx context.Context, p *config.Project, opt Options, say bool) error {
+	for _, g := range p.Guards {
+		if err := runCommand(ctx, p, g.Command, opt.Env, opt.Log); err != nil {
+			return envErr("guard %q failed: %v", g.Name, err)
+		}
+		if say {
+			fmt.Fprintf(opt.Out, "guard ok: %s\n", g.Name)
+		}
+	}
+	return nil
 }
 
 func unitRequests(units []unit) []catalog.Request {
@@ -561,6 +814,11 @@ type service struct {
 	// remote is a target outside its allow_hosts (--allow-remote): every
 	// send keeps the rate limits, the sends of a repeated request too.
 	remote bool
+	// retries is how many times a read-only request that failed under
+	// load is sent again (target.retry); timeout is the time limit of a
+	// request.
+	retries int
+	timeout time.Duration
 }
 
 // newService makes the client, rate limits and slots of the service of req.
@@ -570,9 +828,9 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 		return nil, configErr("%s: %v", req.ID, err)
 	}
 	if t.BaseURL == "" {
-		return nil, configErr("%s: the target has no base_url", req.ID)
+		return nil, configErr("%s: the service has no base_url", req.ID)
 	}
-	allow, err := httpx.NewAllow(t.AllowHosts, allowRemote)
+	allow, err := t.Allow(allowRemote)
 	if err != nil {
 		return nil, configErr("%v", err)
 	}
@@ -584,14 +842,15 @@ func newService(ctx context.Context, p *config.Project, req catalog.Request, all
 	}
 	remote := false
 	if allowRemote {
-		strict, err := httpx.NewAllow(t.AllowHosts, false)
+		strict, err := t.Allow(false)
 		if err != nil {
 			return nil, configErr("%v", err)
 		}
 		u, err := url.Parse(t.BaseURL)
 		remote = err != nil || strict.Check(ctx, u.Hostname()) != nil
 	}
-	return &service{client: client, limits: newLimiter(t.RateLimits), slots: make(chan struct{}, t.Concurrency.Fixed()), remote: remote}, nil
+	return &service{client: client, limits: newLimiter(t.RateLimits), slots: make(chan struct{}, t.Concurrency.Fixed()), remote: remote,
+		retries: t.Retries(), timeout: cmp.Or(t.Timeout.Duration, httpx.DefaultTimeout)}, nil
 }
 
 type runner struct {
@@ -605,6 +864,7 @@ type runner struct {
 	tokens   map[string]string
 	uploads  map[string]multipartBody // requests with files, by ID
 	tainted  bool                     // a real file was uploaded since the last restore
+	retry    *retrying                // retries of the read-only phase; nil: none
 	out, log io.Writer
 	env      []string // added to the environment of the project's commands
 
@@ -616,12 +876,43 @@ type runner struct {
 // prepare runs the prepare commands and reloads the tokens, which a restore
 // or a prepare may have changed.
 func (r *runner) prepare(ctx context.Context) error {
+	if err := r.runPrepare(ctx); err != nil {
+		return err
+	}
+	return r.reloadTokens(ctx)
+}
+
+// prepared adds what prepare changed after a restore to the summary.
+func (r *runner) prepared(changed map[string][]string) {
+	if len(r.p.Prepare) == 0 || len(changed) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	for _, it := range r.sum.Prepared {
+		seen[it] = true
+	}
+	for _, it := range flatten(changed) {
+		if !seen[it] {
+			r.sum.Prepared = append(r.sum.Prepared, it)
+		}
+	}
+	sort.Strings(r.sum.Prepared)
+}
+
+// runPrepare runs the prepare commands.
+func (r *runner) runPrepare(ctx context.Context) error {
 	for _, cmd := range r.p.Prepare {
-		fmt.Fprintf(r.out, "prepare: %s\n", cmd[0])
-		if err := state.Run(ctx, r.p.Root, cmd, r.env, r.log); err != nil {
+		fmt.Fprintf(r.out, "prepare: %s\n", commandLine(cmd))
+		if err := runCommand(ctx, r.p, cmd, r.env, r.log); err != nil {
 			return envErr("prepare: %v", err)
 		}
 	}
+	return r.tr.checkPrepared(ctx)
+}
+
+// reloadTokens reads the tokens again, which a restore or a prepare may
+// have changed.
+func (r *runner) reloadTokens(ctx context.Context) error {
 	tokens, err := loadTokens(ctx, r.p, r.env)
 	if err != nil {
 		return err
@@ -637,6 +928,18 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	if err := r.tr.restore(ctx); err != nil {
 		return nil, err
 	}
+	// A whole copy is compared with its record before prepare and the
+	// tokens command, which may write; without them, on the fingerprint
+	// read below.
+	if len(r.p.Prepare)+len(r.p.Tokens.Command) > 0 {
+		whole, err := r.tr.wholeFingerprint(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.tr.checkWhole(ctx, whole); err != nil {
+			return nil, err
+		}
+	}
 	r.tainted = false
 	if err := r.prepare(ctx); err != nil {
 		return nil, err
@@ -648,7 +951,14 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.tr.markDirty(diffStates(r.start, now))
+	if err := r.tr.checkWhole(ctx, now); err != nil {
+		return nil, err
+	}
+	changed := diffStates(r.start, now)
+	r.tr.markDirty(changed)
+	if len(r.p.Tokens.Command) == 0 {
+		r.prepared(changed) // the restore brought back r.start: prepare made the rest
+	}
 	return now, nil
 }
 
@@ -704,10 +1014,13 @@ func (r *runner) parallel(ctx context.Context, reqs []catalog.Request, workers i
 						return
 					}
 				}
-				res := r.send(ctx, req)
 				if q == nil {
-					res.Release()
+					r.send(ctx, req).Release()
 					continue
+				}
+				res, ok := r.sendRead(ctx, req)
+				if !ok {
+					continue // sent again after the read-only phase
 				}
 				if r.sum.Tracked {
 					res.Record.SideEffects = &snapshot.SideEffects{Items: []string{}}
@@ -723,6 +1036,11 @@ func (r *runner) parallel(ctx context.Context, reqs []catalog.Request, workers i
 	var firstErr error
 send:
 	for _, req := range reqs {
+		// Cancelled, no request more is handed out: select would pick a
+		// ready worker as often as the cancellation.
+		if firstErr = ctx.Err(); firstErr != nil {
+			break
+		}
 		select {
 		case jobs <- req:
 		case firstErr = <-errs:
@@ -770,7 +1088,7 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 			if err != nil {
 				return nil, err
 			}
-			se.Rows = rowChanges(rowsBefore, rowsAfter)
+			se.Rows = r.tr.rowChanges(rowsBefore, rowsAfter)
 		}
 		res.Record.SideEffects = se
 	}
@@ -778,6 +1096,37 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 	err = r.write(req, res)
 	collect(res, size)
 	return cur, err
+}
+
+// rowTable is a table of row_tracking as the driver names it: in public
+// (PostgreSQL) or dbo (SQL Server) when the configuration names no
+// schema.
+func rowTable(driver, t string) string {
+	switch {
+	case strings.Contains(t, "."):
+	case driver == config.Postgres:
+		t = "public." + t
+	case driver == config.SQLServer || driver == "mssql":
+		t = "dbo." + t
+	}
+	return t
+}
+
+// rowTrackingItems are the tables whose rows the capture tracks
+// (meta.RowTracking), from the configuration, named as the rows of a side
+// effect name them (the drivers' Rows): PostgreSQL's in public and SQL
+// Server's in dbo when row_tracking names no schema. [] for none: every
+// request, read-only or not and whichever ran, has its rows recorded of
+// these tables only.
+func rowTrackingItems(p *config.Project) []string {
+	out := []string{}
+	for name, sc := range p.State {
+		for _, t := range sc.RowTracking.Names() {
+			out = append(out, name+"/table:"+rowTable(sc.Driver, t))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // send sends a request within the rate limits. Parameters that come from an
@@ -894,6 +1243,15 @@ func (r *runner) write(req catalog.Request, res httpx.Result) error {
 	}
 	if unscanned != "" {
 		r.sum.Unscanned[req.ID] = unscanned
+	}
+	if rt := res.Record.Retry; rt != nil {
+		what := fmt.Sprintf("failed in all %d sends", rt.Sends)
+		if rt.Recovered {
+			r.sum.Retried[req.ID] = rt
+			what = "after a retry"
+		}
+		fmt.Fprintf(r.out, "%-4s %s  %dms  (%s: the first send gave %s after %dms)\n", status, req.ID, res.Duration.Milliseconds(), what, rt.First(), rt.MS)
+		return nil
 	}
 	fmt.Fprintf(r.out, "%-4s %s  %dms\n", status, req.ID, res.Duration.Milliseconds())
 	return nil

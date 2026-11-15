@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/orangehill/driftgate/internal/allowlist"
@@ -37,6 +38,16 @@ const NoteNoBaseline = "no baseline"
 // repository, and it is never compared by its ref alone.
 const NotePrivateMissing = "private body not on this machine"
 
+// NoteReadOnlyBaseline is the note of a request the set compared against
+// has no response for because it was captured with --read-only: never
+// checked, so the result is incomplete.
+const NoteReadOnlyBaseline = "not in the read-only set compared against (captured with --read-only)"
+
+// NoteNotSent is the note of a request a read-only capture (capture
+// --read-only) did not send: it changes data, or shares a sequence with
+// a request that does.
+const NoteNotSent = "not sent: capture --read-only"
+
 // Result is the outcome for one request.
 type Result struct {
 	ID      string          `json:"id"`
@@ -53,6 +64,17 @@ type Result struct {
 	// Notes say how the comparison went where that is not a drift: an
 	// array the allowlist pairs by key whose items were paired by position.
 	Notes []string `json:"notes,omitempty"`
+	// Resent: the baseline or the capture sent the request again after a
+	// restore (a note says which and the first answer).
+	Resent bool `json:"resent,omitempty"`
+	// Retry is set when the response came only after a retry (the first
+	// send failed under load), BaselineRetry when the baseline's did.
+	Retry         *snapshot.Retry `json:"retry,omitempty"`
+	BaselineRetry *snapshot.Retry `json:"baseline_retry,omitempty"`
+	// Expected are the refs of the expectations (driftgate expect) that
+	// name every drift of the request exactly, which keeps it from
+	// failing; empty when one drift or more is not expected.
+	Expected []string `json:"expected,omitempty"`
 }
 
 // Group is a set of drifts with the same signature: one cause. Explanation
@@ -81,6 +103,9 @@ type Report struct {
 	Observed int      `json:"observed"`
 	Results  []Result `json:"results"`
 	Groups   []Group  `json:"groups"`
+	// Kinds counts the drifts of all results by their kind (status,
+	// header-extra, type, …); nil without drift.
+	Kinds map[string]int `json:"kinds,omitempty"`
 	// The status changes shared by requests, the most common first: one
 	// cause, whatever drifts follow from it.
 	StatusChanges []StatusGroup `json:"status_changes,omitempty"`
@@ -92,9 +117,12 @@ type Report struct {
 	// What accept checks to know the comparison still describes the compared
 	// sets (manifest of the baseline, records of the capture), and the
 	// requests it has accepted from it since.
-	BaselineDigest string   `json:"baseline_digest,omitempty"`
-	CaptureDigest  string   `json:"capture_digest,omitempty"`
-	Accepted       []string `json:"accepted,omitempty"`
+	BaselineDigest string `json:"baseline_digest,omitempty"`
+	CaptureDigest  string `json:"capture_digest,omitempty"`
+	// AgainstDigest is the records' digest of a capture compared against
+	// (not a baseline), which review --show-private checks.
+	AgainstDigest string   `json:"against_digest,omitempty"`
+	Accepted      []string `json:"accepted,omitempty"`
 	// Requests skipped because their private body is not on this machine;
 	// the result is incomplete unless they were skipped on purpose
 	// (--skip-private).
@@ -102,6 +130,13 @@ type Report struct {
 	SkipPrivate    bool     `json:"skip_private,omitempty"`
 	// Requests skipped because the baseline has no response for them.
 	NoBaseline []string `json:"no_baseline,omitempty"`
+	// ReadOnlyBaseline are the requests the set compared against left out
+	// as a read-only capture: the result is incomplete.
+	ReadOnlyBaseline []string `json:"read_only_baseline,omitempty"`
+	// Requests the baseline's or the compared capture sent again after a
+	// restore ended the application's database sessions (each result's
+	// notes say which side and what the first answer was).
+	Resent []string `json:"resent,omitempty"`
 	// Allowlist rules that applied to no change in this comparison: a stale
 	// rule (a renamed value, a request that is gone) stays unnoticed
 	// otherwise. A warning, never a failure.
@@ -112,6 +147,24 @@ type Report struct {
 	// different origins, each taken as the other ("http://localhost:8080 ≙
 	// http://localhost:8081").
 	Origins []string `json:"origins,omitempty"`
+	// Requests that passed only after a retry, those of them that needed
+	// one in the baseline too, and compared requests whose baseline
+	// response came after one (retry.go).
+	PassedAfterRetry []string `json:"passed_after_retry,omitempty"`
+	RetriedInBoth    []string `json:"retried_in_both,omitempty"`
+	BaselineRetried  []string `json:"baseline_retried,omitempty"`
+	// Drifted requests that an expectation matched exactly (driftgate
+	// expect), by ref; and the expectations whose drift did not appear.
+	// Expected drifts do not fail the comparison (Unexpected).
+	Expected     int                `json:"expected,omitempty"`
+	ExpectedRefs []ExpectedRef      `json:"expected_refs,omitempty"`
+	Unmet        []UnmetExpectation `json:"unmet_expectations,omitempty"`
+	// What the result does not cover (routes without a request, errors
+	// the baseline holds, requests that change data not compared), and
+	// the one change almost every drifted request has: information that
+	// never changes the exit code.
+	NotCovered *NotCovered `json:"not_covered,omitempty"`
+	Dominant   *Dominant   `json:"dominant,omitempty"`
 }
 
 // Incomplete reports whether the comparison checked less than it should:
@@ -121,7 +174,18 @@ type Report struct {
 // private or observed): a green result would mean nothing was checked.
 // compare and run then exit 3.
 func (r *Report) Incomplete() bool {
-	return r.Compared == 0 || len(r.PrivateMissing) > 0 && !r.SkipPrivate
+	return r.Compared == 0 || len(r.PrivateMissing) > 0 && !r.SkipPrivate || len(r.ReadOnlyBaseline) > 0
+}
+
+// ReadOnlyBaselineNote says which requests were never checked because the
+// set compared against was captured with --read-only; empty when none.
+func (r *Report) ReadOnlyBaselineNote() string {
+	n := len(r.ReadOnlyBaseline)
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("incomplete: %s not checked: %s was captured with --read-only and has no response for %s: %s; make the baseline again from every request (move it away; the next driftgate run makes it)",
+		plural(n, "request"), r.Against, word(n, "it", "them"), listIDs(r.ReadOnlyBaseline))
 }
 
 // NothingNote says why nothing was compared; empty when something was.
@@ -147,7 +211,53 @@ func (r *Report) NoBaselineNote() string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s without a baseline, not compared: %s; new requests join the baseline with driftgate accept", plural(n, "request"), listIDs(r.NoBaseline))
+	return fmt.Sprintf("%s without a baseline, not compared: %s; %s", plural(n, "request"), listIDs(r.NoBaseline), r.JoinAdvice())
+}
+
+// JoinAdvice says how new requests join the baseline in the comparison's
+// mode. Mode freeze refuses accept: there a rebase on a capture made
+// twice adds them, with --allow-freeze; it takes the whole capture, so its
+// command is given only when nothing else drifted.
+func (r *Report) JoinAdvice() string {
+	ok := strings.HasPrefix(r.Tag, "capture:")
+	switch {
+	case r.Mode != "freeze":
+		return "new requests join the baseline with driftgate accept"
+	case r.Baseline == "" || !ok:
+		// Not a capture against a baseline (two captures, two baselines):
+		// there is nothing to rebase on, and freeze refuses accept.
+		return "in mode freeze accept is refused; new requests join a baseline with driftgate capture <tag> --repeat 2, then driftgate baselines rebase <baseline> --from <tag> --reason \"…\" --allow-freeze, after a capture compared against it shows no other drift"
+	}
+	// A rebase takes the whole capture: next to a drift it would take a
+	// regression into the baseline, so its command is given only when
+	// nothing else drifted (an expected drift included).
+	for _, res := range r.Results {
+		if res.Outcome == Drift || len(res.Drifts) > 0 {
+			return "in mode freeze accept is refused; fix or expect the drifts first, then rebase to add the new requests (driftgate baselines rebase " + r.Baseline + " --allow-freeze takes the whole capture)"
+		}
+	}
+	// A baseline takes a capture that a second one of the same state
+	// agrees with, as run makes one; run's own capture is made once.
+	rebase := `driftgate capture <tag> --repeat 2, then driftgate baselines rebase ` + r.Baseline + ` --from <tag> --reason "…" --allow-freeze`
+	if r.NotCovered != nil && r.NotCovered.Only {
+		return "in mode freeze new requests join the baseline with a rebase on a capture of the whole catalog (" + rebase + "), which takes the whole capture, its drifts too"
+	}
+	return "in mode freeze new requests join the baseline with " + rebase + ", which takes the whole capture, its drifts too"
+}
+
+// ResentNote counts the requests sent again after a restore (Resent), so
+// that a resend is seen even when the list of notes is cut; empty when
+// there are none.
+func (r *Report) ResentNote() string {
+	n := len(r.Resent)
+	if n == 0 {
+		return ""
+	}
+	verb := "were"
+	if n == 1 {
+		verb = "was"
+	}
+	return fmt.Sprintf("%s %s sent again after a restore ended the application's database sessions (their notes give the first answer): %s", plural(n, "request"), verb, listIDs(r.Resent))
 }
 
 // UnusedNote warns of the allowlist rules that applied to no change, up to
@@ -217,6 +327,19 @@ func (r *Report) PrivateNote() string {
 	return fmt.Sprintf("the result is incomplete: %s could not be compared here (the private body is not on this machine): %s; compare them where the bodies are, or use an anonymized database so responses hold no personal data (--skip-private accepts a partial check)", what, ids)
 }
 
+// HiddenNote says, when a drift shows a value of a private body as
+// (private), how to see it; empty otherwise.
+func (r *Report) HiddenNote() string {
+	for _, res := range r.Results {
+		for _, d := range res.Drifts {
+			if strings.Contains(d.Baseline, "(private)") || strings.Contains(d.Current, "(private)") || strings.Contains(d.Where, "(private)") {
+				return "values of private bodies are hidden as (private); driftgate review --show-private shows them on this machine"
+			}
+		}
+	}
+	return ""
+}
+
 // Save writes the report, as the last comparison, to path.
 func (r *Report) Save(path string) error { return snapshot.WriteJSON(path, r) }
 
@@ -267,7 +390,17 @@ func Build(tag, against string, results []Result) *Report {
 		if res.Outcome == Skipped && res.Note == NoteNoBaseline {
 			r.NoBaseline = append(r.NoBaseline, res.ID)
 		}
+		if res.Outcome == Skipped && res.Note == NoteReadOnlyBaseline {
+			r.ReadOnlyBaseline = append(r.ReadOnlyBaseline, res.ID)
+		}
+		if res.Resent {
+			r.Resent = append(r.Resent, res.ID)
+		}
 		for _, d := range res.Drifts {
+			if r.Kinds == nil {
+				r.Kinds = map[string]int{}
+			}
+			r.Kinds[d.Kind]++
 			sig := d.Signature()
 			a := groups[sig]
 			if a == nil {
@@ -298,6 +431,16 @@ func Build(tag, against string, results []Result) *Report {
 		r.Groups[i].N = i + 1
 	}
 	r.summarize()
+	// The groups the default view leaves out (only in requests whose
+	// status changed) come last, so the ones it lists are numbered from
+	// [1] on, as review and accept group:N read them.
+	if hidden := r.hiddenGroups(); len(hidden) > 0 {
+		sort.SliceStable(r.Groups, func(i, j int) bool { return !hidden[r.Groups[i].N] && hidden[r.Groups[j].N] })
+		for i := range r.Groups {
+			r.Groups[i].N = i + 1
+		}
+	}
+	r.retried()
 	return r
 }
 
@@ -361,7 +504,8 @@ func line(d compare.Drift, pad int) string {
 		s += " " + Printable(d.Where)
 	}
 	if d.Baseline != "" || d.Current != "" {
-		s += fmt.Sprintf("  %s → %s", Printable(short(d.Baseline)), Printable(short(d.Current)))
+		b, c := DriftPair(d, shortMax)
+		s += fmt.Sprintf("  %s → %s", Printable(b), Printable(c))
 	}
 	return s
 }
@@ -386,6 +530,24 @@ func Printable(s string) string {
 	return b.String()
 }
 
+// PrintableRegexp is a regular expression with the characters Printable
+// escapes written as the regexp package's escapes (\x{a} for a newline):
+// it reads as Printable's text does and matches what it matched.
+func PrintableRegexp(s string) string {
+	if strings.IndexFunc(s, unprintable) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unprintable(r) {
+			fmt.Fprintf(&b, `\x{%x}`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func unprintable(r rune) bool {
 	switch {
 	case r < 0x20, r >= 0x7f && r <= 0x9f, r == 0x2028, r == 0x2029, r == 0x200e, r == 0x200f, r == 0x061c,
@@ -403,6 +565,220 @@ func short(s string) string {
 	return s
 }
 
+const zwj = '\u200d' // zero width joiner
+
+// extends reports a rune that belongs to the character before it: a
+// combining mark, a variation selector, an emoji skin tone or a joiner.
+// It approximates grapheme cluster boundaries with the standard library
+// (no regional-indicator pairs or Hangul syllable rules).
+func extends(c rune) bool {
+	return unicode.In(c, unicode.Mn, unicode.Me, unicode.Mc) || c == zwj ||
+		c >= 0xfe00 && c <= 0xfe0f || c >= 0xe0100 && c <= 0xe01ef || c >= 0x1f3fb && c <= 0x1f3ff
+}
+
+// setCookie is where a drift of the Set-Cookie header is.
+const setCookie = "header:set-cookie"
+
+// DriftPair shortens the two values of a drift for display, like
+// ShortPair. The cookies of a Set-Cookie drift are compacted first: their
+// masked values say little more than their length, and a long one would
+// leave the cookie that changed or its attributes out of the window.
+func DriftPair(d compare.Drift, max int) (string, string) {
+	a, b := d.Baseline, d.Current
+	lead := max / 3
+	if d.Where == setCookie {
+		a, b = compactCookies(a, b)
+		// The window starts at the name of the cookie that changed when
+		// the difference still fits, with both marks and a \uXXXX after it.
+		ra := []rune(a)
+		first := firstDiff(ra, []rune(b))
+		name := first
+		for name > 0 && ra[name-1] != '"' {
+			name--
+		}
+		if n := first - name; n+8 < max {
+			lead = n
+		}
+	}
+	return shortPair(a, b, max, lead)
+}
+
+// compactCookies shortens two lists of Set-Cookie values. When both have
+// as many cookies, a cookie the same on both sides becomes …, and one that
+// differs only in its masked value is kept as it is, to show what changed
+// in it. Any other cookie becomes name=…(N), N the length of its value,
+// with its attributes in full. A value that is not such a list, such as
+// (private), is returned as it is.
+func compactCookies(a, b string) (string, string) {
+	as, aok := cookieList(a)
+	bs, bok := cookieList(b)
+	if aok && bok && len(as) == len(bs) {
+		for i := range as {
+			switch {
+			case as[i] == bs[i]:
+				as[i], bs[i] = "…", "…"
+			case !onlyValueDiffers(as[i], bs[i]):
+				as[i], bs[i] = compactCookie(as[i]), compactCookie(bs[i])
+			}
+		}
+	} else {
+		for i := range as {
+			as[i] = compactCookie(as[i])
+		}
+		for i := range bs {
+			bs[i] = compactCookie(bs[i])
+		}
+	}
+	return listOr(as, aok, a), listOr(bs, bok, b)
+}
+
+// cookieList reads a header's values, written as a JSON list.
+func cookieList(s string) ([]string, bool) {
+	var vs []string
+	return vs, json.Unmarshal([]byte(s), &vs) == nil
+}
+
+// listOr writes vs as a JSON list, the way drifts hold a header's values,
+// or returns s when s was not a list.
+func listOr(vs []string, ok bool, s string) string {
+	if !ok {
+		return s
+	}
+	b, _ := json.Marshal(vs)
+	return string(b)
+}
+
+func compactCookie(v string) string {
+	name, value, attrs, ok := splitCookie(v)
+	if !ok {
+		return v
+	}
+	return fmt.Sprintf("%s=…(%d)%s", name, utf8.RuneCountInString(value), attrs)
+}
+
+func onlyValueDiffers(x, y string) bool {
+	xn, _, xa, xok := splitCookie(x)
+	yn, _, ya, yok := splitCookie(y)
+	return xok && yok && xn == yn && xa == ya
+}
+
+// splitCookie splits a Set-Cookie value into the cookie's name, its value
+// and its attributes, from the first ";" on. ok is false when no "="
+// comes before that ";". It is httpx.SplitSetCookie's cut, with the name
+// trimmed and kept also when it is not a cookie (cookieNames counts it);
+// report does not import httpx.
+func splitCookie(v string) (name, value, attrs string, ok bool) {
+	first, _, _ := strings.Cut(v, ";")
+	name, value, ok = strings.Cut(first, "=")
+	return strings.TrimSpace(name), value, v[len(first):], ok
+}
+
+// shortMax is how many characters of a drift's values a line shows.
+const shortMax = 80
+
+// ShortPair shortens the two values of a drift alike. When either is
+// longer than max characters, both are cut to the same window around the
+// first character where they differ, with … where text is left out: two
+// long texts that differ in the middle show that difference, not two equal
+// beginnings. A quoted value keeps its quotes outside the marks: "…x…".
+// Escapes stay whole for a max of 15 or more; below it, a difference
+// inside \uXXXX can leave the window's start in that escape.
+func ShortPair(a, b string, max int) (string, string) {
+	return shortPair(a, b, max, max/3) // a third before the difference
+}
+
+// shortPair is ShortPair with lead characters before the first difference.
+func shortPair(a, b string, max, lead int) (string, string) {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) <= max && len(rb) <= max {
+		return a, b
+	}
+	first := firstDiff(ra, rb)
+	from := 0
+	if first > lead {
+		from = first - lead
+	}
+	cut := func(r []rune) string {
+		if len(r) <= max {
+			return string(r) // short enough as it is
+		}
+		start := min(from, len(r))
+		marks := 1 // room for …
+		if start > 0 {
+			marks = 2 // for both
+		}
+		quoted := len(r) >= 2 && r[0] == '"' && r[len(r)-1] == '"'
+		if quoted {
+			marks *= 2 // and the quotes kept outside them
+		}
+		end := min(len(r), start+max-marks)
+		// Not inside a character the eye sees as one: an accent, a
+		// variation selector, a skin tone or a joined emoji stays with
+		// the character it belongs to. Nor inside an escape: \" cut in
+		// two would show a quote of its own. The window narrows to the
+		// next whole one, so it stays within max, and keeps the first
+		// different character.
+		inside := func(i int) bool { return extends(r[i]) || r[i-1] == zwj || inEscape(r, i) }
+		for start > 0 && start < first && inside(start) {
+			start++
+		}
+		for end < len(r) && end > first+1 && inside(end) {
+			end--
+		}
+		s := string(r[start:end])
+		if start > 0 {
+			s = "…" + s
+			if quoted {
+				s = `"` + s
+			}
+		}
+		if end < len(r) {
+			s += "…"
+			if quoted {
+				s += `"`
+			}
+		}
+		return s
+	}
+	return cut(ra), cut(rb)
+}
+
+// firstDiff is the index of the first character where a and b differ, or
+// the length of the shorter.
+func firstDiff(a, b []rune) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+// inEscape reports that r[i] is inside a backslash escape, after its
+// backslash: the next character, or the rest of \uXXXX. An escape starts
+// at a backslash after an even number of backslashes. It applies to every
+// value, JSON or not: in another value it only moves a window's edge by a
+// few characters.
+func inEscape(r []rune, i int) bool {
+	for j := i - 1; j >= 0 && j >= i-5; j-- {
+		if r[j] != '\\' {
+			continue
+		}
+		k := j
+		for k > 0 && r[k-1] == '\\' {
+			k--
+		}
+		if (j-k)%2 != 0 {
+			continue // the second backslash of \\
+		}
+		n := 2
+		if j+1 < len(r) && r[j+1] == 'u' {
+			n = 6
+		}
+		return i < j+n
+	}
+	return false
+}
+
 // Text writes a readable report: every drifted request with up to maxDrifts
 // drifts, then the groups and a summary line.
 func (r *Report) Text(w io.Writer, maxDrifts int) {
@@ -410,12 +786,19 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		fmt.Fprintln(w, "origins: "+Printable(o)+" (own URLs compared as the same)")
 	}
 	for _, res := range r.Results {
-		if res.Outcome != Drift {
+		if !failing(res) {
 			continue
 		}
 		fmt.Fprintf(w, "DRIFT  %s\n", res.ID)
-		for _, l := range driftLines(res, maxDrifts, 15) {
+		for _, l := range failingLines(res, maxDrifts, 15) {
 			fmt.Fprintln(w, "         "+l)
+		}
+	}
+	if lines := r.ExpectedLines(); len(lines) > 0 {
+		// Expected requests do not fail: one line per ref.
+		fmt.Fprintln(w, "\nExpected (driftgate expect), not failing:")
+		for _, l := range lines {
+			fmt.Fprintln(w, "  "+Printable(l))
 		}
 	}
 	if len(r.Groups) > 0 {
@@ -426,12 +809,17 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 		if summary {
 			hidden = r.hiddenGroups()
 		}
+		expected := r.expectedGroups()
 		fmt.Fprintln(w, "\nGroups:")
 		for _, g := range r.Groups {
 			if hidden[g.N] {
 				continue
 			}
-			fmt.Fprintf(w, "  [%d] %s\n", g.N, Printable(g.text()))
+			mark := ""
+			if expected[g.N] {
+				mark = "  (expected)"
+			}
+			fmt.Fprintf(w, "  [%d] %s%s\n", g.N, Printable(g.text()), mark)
 			if len(g.Routes) > 0 {
 				line := "      " + Printable(g.Routes[0].describe("  "))
 				if g.RouteCount > 1 {
@@ -452,18 +840,40 @@ func (r *Report) Text(w io.Writer, maxDrifts int) {
 	for _, res := range r.Results {
 		switch res.Outcome {
 		case Skipped:
-			fmt.Fprintf(w, "SKIP   %s (%s)\n", res.ID, Printable(res.Note))
+			fmt.Fprintf(w, "SKIP   %s (%s%s)\n", res.ID, Printable(res.Note), res.observedRetry())
 		case Observed:
-			fmt.Fprintf(w, "OBSERVE %s (%s)\n", res.ID, Printable(res.Note))
+			fmt.Fprintf(w, "OBSERVE %s (%s%s)\n", res.ID, Printable(res.Note), res.observedRetry())
+		case Pass, Drift:
+			if line := res.passedRetryLine(); line != "" {
+				fmt.Fprintf(w, "RETRY  %s (%s)\n", res.ID, line)
+			}
 		}
 	}
-	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %d drifted, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.Drifted, r.Skipped, r.Observed)
-	for _, note := range []string{r.NoBaselineNote(), r.PrivateNote(), r.NothingNote(), r.UnusedNote(), r.ResultNotes(), r.TimingsNote()} {
+	fmt.Fprintf(w, "\n%s against %s: %d compared, %d passed, %s, %d skipped, %d observed\n", r.Tag, r.Against, r.Compared, r.Passed, r.driftedText(), r.Skipped, r.Observed)
+	for _, note := range []string{r.ReadOnlyBaselineNote(), r.NoBaselineNote(), r.PrivateNote(), r.HiddenNote(), r.NothingNote(), r.UnusedNote(), r.ResentNote(), r.ResultNotes(), r.TimingsNote(), r.RetryNote(), r.KindsNote(), r.RowValuesNote(), r.SameSecondNote(), r.DominantNote()} {
 		if note != "" {
 			fmt.Fprintln(w, Printable(note))
 		}
 	}
-	if r.Drifted == 0 && r.Compared > 0 && !r.Incomplete() {
-		fmt.Fprintln(w, "No drift ✓")
+	if note := r.UnmetNote(); note != "" {
+		fmt.Fprintln(w, Printable(note))
+	}
+	switch {
+	case r.Compared == 0 || r.Incomplete() || r.Unexpected() > 0:
+	case r.Expected > 0:
+		fmt.Fprintln(w, "No unexpected drift ✓"+r.retryVerdict())
+	case r.Drifted == 0:
+		fmt.Fprintln(w, "No drift ✓"+r.retryVerdict())
+	}
+	if n := r.NotCovered; n != nil {
+		if line := n.CatalogLine(); line != "" {
+			fmt.Fprintln(w, Printable(line))
+		}
+		if lines := n.NotCoveredLines(); len(lines) > 0 {
+			fmt.Fprintln(w, notCoveredTitle)
+			for _, l := range lines {
+				fmt.Fprintln(w, "  "+l)
+			}
+		}
 	}
 }

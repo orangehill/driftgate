@@ -710,7 +710,7 @@ func (r *Replacer) madeBeforeReserved() bool {
 // deterministic, comparing bytes, or refused by Rules.Check). The columns'
 // stand-ins then follow them (Replacer.ForColumn).
 func (r *Replacer) loadCollations(ctx context.Context, c *sql.Conn, s *Schema, rules *Rules) error {
-	if s.Driver != MySQL && s.Driver != "mariadb" {
+	if s.Driver != MySQL {
 		return nil
 	}
 	need := map[string]bool{}

@@ -12,14 +12,40 @@ import (
 
 // Drivers.
 const (
-	MySQL    = "mysql" // MySQL and MariaDB
-	Postgres = "postgres"
+	MySQL     = "mysql" // MySQL and MariaDB
+	Postgres  = "postgres"
+	SQLite    = "sqlite"
+	SQLServer = "sqlserver"
 )
+
+// restores names the databases DriftGate restores, for a message about a
+// setting of another.
+func restores() string {
+	return "DriftGate restores MySQL, MariaDB, PostgreSQL, SQLite and SQL Server"
+}
+
+// driverList names the drivers of the settings appconf reads, for a
+// message asking for one.
+func driverList() string {
+	return "mysql, postgres, sqlite or sqlserver"
+}
+
+// defaultPort is the port a driver's server listens on by default.
+func defaultPort(driver string) string {
+	switch driver {
+	case Postgres:
+		return "5432"
+	case SQLServer:
+		return "1433"
+	}
+	return "3306"
+}
 
 // parts is a database setting taken apart.
 type parts struct {
-	driver   string // MySQL, Postgres, or "" when the setting does not say
-	other    string // another kind of database the setting names (SQL Server, SQLite, …)
+	driver   string // MySQL, Postgres, SQLite, SQLServer, or "" when the setting does not say
+	other    string // another kind of database the setting names (Oracle, …)
+	file     string // SQLite: the database file, relative to the project root with / (resolveSQLite)
 	host     string
 	port     string
 	socket   string
@@ -28,11 +54,19 @@ type parts struct {
 	password string
 	opts     options // TLS and the like
 	form     string  // a DSN in the MySQL driver's own form, used as it is
+	// raw holds the keys of a setting given as separate values or as a
+	// connection string (fromFields), for a driver that takes settings
+	// the shared ones leave out (SQL Server's Encrypt).
+	raw  fields
+	note string // what to check by hand about the setting (SQLite: a relative file)
+	// mssql is what a SQL Server setting says besides the address and the
+	// credentials: its TLS and its client (sqlserver.go).
+	mssql sqlServerTLS
 }
 
 // database is p without the password.
 func (p parts) database() Database {
-	return Database{Driver: p.driver, Host: p.host, Port: p.port, Name: p.name, User: p.user}
+	return Database{Driver: p.driver, Host: p.host, Port: p.port, Name: p.name, User: p.user, Path: p.file}
 }
 
 // driverName maps the name a framework gives a database (a URL scheme, a
@@ -56,9 +90,9 @@ func driverName(name string) (driver, other string) {
 	case "":
 		return "", ""
 	case "sqlite", "sqlite3", "spatialite", "file":
-		return "", "SQLite"
+		return SQLite, ""
 	case "sqlsrv", "sqlserver", "mssql", "dblib":
-		return "", "SQL Server"
+		return SQLServer, ""
 	case "oracle", "oci", "oci8":
 		return "", "Oracle"
 	}
@@ -68,12 +102,12 @@ func driverName(name string) (driver, other string) {
 		return MySQL, ""
 	case strings.Contains(n, "postgres"):
 		return Postgres, ""
-	case strings.Contains(n, "sqlserver"):
-		return "", "SQL Server"
+	case strings.Contains(n, "sqlserver"), strings.Contains(n, "sql_server"): // Django: sql_server.pyodbc
+		return SQLServer, ""
 	case strings.Contains(n, "h2"), strings.Contains(n, "hsqldb"), strings.Contains(n, "derby"):
 		return "", "an in-memory Java database"
 	case strings.Contains(n, "sqlite"):
-		return "", "SQLite"
+		return SQLite, ""
 	case strings.Contains(n, "oracle"):
 		return "", "Oracle"
 	}
@@ -98,9 +132,28 @@ const errURL = constError("not a valid URL; percent-encode special characters su
 // Convert returns a DSN given in a form an application uses but DriftGate's
 // drivers do not take, a JDBC URL or an ADO.NET connection string, as one
 // they take (see Ref.DSN), as is libpq's host=… user=… form; any other DSN
-// comes back as it is. It serves a DSN of the environment or 1Password.
+// comes back as it is. A DSN of SQL Server is always rebuilt, also
+// go-mssqldb's own URL, so the driver gets no key DriftGate has not read
+// and an explicit encrypt. It serves a DSN of the environment or 1Password.
 func Convert(dsn, driver string) (string, error) {
 	v := strings.TrimSpace(dsn)
+	if driver == SQLServer {
+		// Every form, go-mssqldb's own URL too: the driver ignores a key it
+		// does not know (Integrated Security), and without encrypt it
+		// trusts any certificate, so the DSN is rebuilt from what DriftGate
+		// reads.
+		p, err := fromValue(v)
+		if err != nil {
+			return "", err
+		}
+		if p.mssql.goURL && p.mssql.encrypt == "" {
+			// A go-mssqldb URL here is written for DriftGate, not read from
+			// a Go application's setting: no client's default is kept, it
+			// is encrypted and verified.
+			p.mssql.client, p.mssql.loginTrust = "", false
+		}
+		return p.dsn(driver, "the DSN")
+	}
 	if !strings.HasPrefix(v, "jdbc:") && !connString(v) && (strings.Contains(v, "://") || isDriverForm(v) || !strings.Contains(v, "=")) {
 		return dsn, nil
 	}
@@ -120,6 +173,12 @@ func fromValue(v string) (parts, error) {
 	v = strings.TrimPrefix(v, "jdbc:")
 	v = strings.TrimPrefix(v, "vertx-reactive:")
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "r2dbc:"), "pool:")
+	if p, ok, err := sqlServerValue(v); ok {
+		return p, err
+	}
+	if p, ok, err := sqliteValue(v); ok {
+		return p, err
+	}
 	switch {
 	case connString(v):
 		kv, _ := parseConnString(v)
@@ -167,10 +226,10 @@ func fromValue(v string) (parts, error) {
 			err = errNoServer
 		}
 		return parts{}, err
-	case strings.HasPrefix(v, "sqlite:") || strings.HasSuffix(v, ".db") || strings.HasSuffix(v, ".sqlite") || strings.HasSuffix(v, ".sqlite3"):
-		return parts{other: "SQLite"}, nil
+	case isSQLiteValue(v):
+		return fromSQLiteValue(v)
 	}
-	return parts{}, errors.New("not a database URL, a MySQL DSN or a connection string (the value is not shown)")
+	return parts{}, errNotDSN
 }
 
 // connString reports an ADO.NET connection string that names a server: it
@@ -218,10 +277,15 @@ func fromURL(v string) (parts, error) {
 	var p parts
 	p.setDriver(u.Scheme)
 	if p.driver == "" && p.other == "" {
-		return parts{}, fmt.Errorf("a %s:// URL names no database DriftGate knows (mysql, postgres)", printable(u.Scheme))
+		return parts{}, fmt.Errorf("a %s:// URL names no database DriftGate knows (%s)", printable(u.Scheme), driverList())
 	}
-	if p.driver == "" {
+	switch p.driver {
+	case "":
 		return p, nil
+	case SQLite:
+		return fromSQLiteURL(v)
+	case SQLServer:
+		return fromSQLServerURL(v)
 	}
 	p.host, p.port = u.Hostname(), u.Port()
 	p.user = u.User.Username()
@@ -309,12 +373,13 @@ func (f fields) get(keys []string) (string, bool) {
 // comes first, and the values fill in what it leaves out (Spring's url,
 // username and password).
 func fromFields(f fields) (parts, error) {
-	var p parts
+	p := parts{raw: f}
 	if v, ok := f.get(urlKeys); ok && strings.TrimSpace(v) != "" {
 		var err error
 		if p, err = fromValue(v); err != nil {
 			return parts{}, err
 		}
+		p.raw = f
 	}
 	for _, k := range driverKeys { // Magento's engine is innodb, its model mysql4
 		if v, ok := f[k]; ok && p.driver == "" && p.other == "" {
@@ -332,6 +397,9 @@ func fromFields(f fields) (parts, error) {
 	fill(&p.name, nameKeys)
 	fill(&p.user, userKeys)
 	fill(&p.password, passwordKeys)
+	if p.driver == SQLServer || p.driver == "" && p.other == "" && p.form == "" && sqlServerServerForm(p.host) {
+		return sqlServerFields(p, f)
+	}
 	for k, v := range f {
 		if err := p.opts.set(k, v); err != nil {
 			return parts{}, err
@@ -421,13 +489,19 @@ func (p parts) dsn(driver, where string) (string, error) {
 	}
 	switch {
 	case p.other != "":
-		return "", fmt.Errorf("%s names %s; DriftGate restores MySQL, MariaDB and PostgreSQL", where, p.other)
+		return "", fmt.Errorf("%s names %s; %s", where, p.other, restores())
 	case driver == "" && p.driver == "":
-		return "", fmt.Errorf("%s does not say which database it is; set the driver (mysql or postgres)", where)
+		return "", fmt.Errorf("%s does not say which database it is; set the driver (%s)", where, driverList())
 	case driver != "" && p.driver != "" && driver != p.driver:
 		return "", fmt.Errorf("%s names a %s database, the driver is %s", where, p.driver, driver)
 	case driver == "":
 		driver = p.driver
+	}
+	switch driver {
+	case SQLite:
+		return p.sqliteDSN(where)
+	case SQLServer:
+		return p.sqlServerDSN(where)
 	}
 	if driver == MySQL && p.form != "" {
 		return p.form, nil
@@ -454,10 +528,7 @@ func (p parts) dsn(driver, where string) (string, error) {
 		host = "127.0.0.1"
 	}
 	if port == "" {
-		port = "3306"
-		if driver == Postgres {
-			port = "5432"
-		}
+		port = defaultPort(driver)
 	}
 	u := url.URL{Scheme: driver, User: userinfo(p.user, p.password), Host: net.JoinHostPort(host, port), Path: "/", RawQuery: q.Encode()}
 	return u.String(), nil

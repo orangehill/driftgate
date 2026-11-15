@@ -58,6 +58,7 @@ func bisectCmd(args []string, out, errOut io.Writer) (int, error) {
 	only := fs.String("only", "", "")
 	baselineFlag := fs.String("baseline", "", "")
 	format := fs.String("format", "text", "")
+	withExpected := fs.Bool("expected", false, "")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return 0, err
@@ -72,10 +73,25 @@ func bisectCmd(args []string, out, errOut io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// The application runs from the worktree, with the SQLite file of
+	// the worktree; a restore would reset this checkout's file, which the
+	// application does not use, and every commit would run on what the
+	// one before it wrote.
+	var sqlite []string
+	for n, sc := range p.State {
+		if sc.Driver == config.SQLite {
+			sqlite = append(sqlite, n)
+		}
+	}
+	if len(sqlite) > 0 {
+		sort.Strings(sqlite)
+		n := sqlite[0]
+		return 0, configErr("bisect does not support SQLite state yet (state %s): the application runs from the worktree in $%s with that worktree's own file, and DriftGate restores %s of this checkout, so the requests of each commit would run on what earlier ones wrote; bisect by hand with git bisect and driftgate run, or use a MySQL, PostgreSQL or SQL Server database", n, bisect.EnvDir, p.State[n].Working)
+	}
 	if len(p.Bisect.Checkout) == 0 {
 		return 0, configErr("bisect needs bisect.checkout in %s: the command that puts the application on the commit checked out in $%s (built, restarted), e.g.\n  bisect:\n    checkout: [\"sh\", \"-c\", \"cd \\\"$%s\\\" && make restart\"]\n    ready: [\"curl\", \"-sf\", \"http://localhost:8000/up\"]", *cfg, bisect.EnvDir, bisect.EnvDir)
 	}
-	ch, err := chooseChase(p, cat, groupArgs, *only, *baselineFlag)
+	ch, err := chooseChase(p, cat, groupArgs, *only, *baselineFlag, *withExpected)
 	if err != nil {
 		return 0, err
 	}
@@ -273,7 +289,7 @@ func bisectCmd(args []string, out, errOut io.Writer) (int, error) {
 // comparison: its groups that are still open (--group chooses among them)
 // and the requests that drift in them (--only narrows those). Without one,
 // --only names the requests and the groups are found at the bad commit.
-func chooseChase(p *config.Project, cat *catalog.Catalog, groupArgs []string, only, baselineName string) (*chase, error) {
+func chooseChase(p *config.Project, cat *catalog.Catalog, groupArgs []string, only, baselineName string, withExpected bool) (*chase, error) {
 	byID := map[string]catalog.Request{}
 	for _, r := range cat.Requests {
 		byID[r.ID] = r
@@ -334,8 +350,8 @@ func chooseChase(p *config.Project, cat *catalog.Catalog, groupArgs []string, on
 		}
 		for _, d := range res.Drifts {
 			sig := d.Signature()
-			if len(chosen) > 0 && !chosen[sig] {
-				continue
+			if len(chosen) > 0 && !chosen[sig] || d.Expected != "" && !withExpected {
+				continue // a drift a ticket intends is not chased, as an accepted one is not
 			}
 			present[sig] = true
 			if !seen[res.ID] {
@@ -435,6 +451,9 @@ func testCommit(ctx context.Context, p *config.Project, wt *bisect.Worktree, rep
 	origins, _, err := setOrigins(p, base, set)
 	if err != nil {
 		return bisect.Probe{}, nil, envErr(err)
+	}
+	if err := rowValuesKey(namedSet{base, "the baseline"}, namedSet{set, "capture:" + tag}); err != nil {
+		return bisect.Probe{}, nil, err
 	}
 	probe := bisect.Probe{Present: map[string]bool{}}
 	var results []report.Result

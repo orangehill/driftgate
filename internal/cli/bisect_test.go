@@ -359,3 +359,33 @@ func TestBisectNeedsCheckout(t *testing.T) {
 		t.Errorf("%d %s", code, errOut)
 	}
 }
+
+// TestBisectRefusesSQLite: the application of a bisect runs from the
+// worktree with that worktree's SQLite file, which DriftGate does not
+// restore.
+func TestBisectRefusesSQLite(t *testing.T) {
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, `version: 1
+project: lite
+target:
+  base_url: http://127.0.0.1:1
+state:
+  db:
+    driver: sqlite
+    working: database/database.sqlite
+bisect:
+  checkout: ["true"]
+`)
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), demoCatalog)
+	code, _, errOut := runCLI(t, "bisect", "HEAD~1", "HEAD", "--config", cfg)
+	if code != ExitConfig || !strings.Contains(errOut, "bisect does not support SQLite state") || !strings.Contains(errOut, "database/database.sqlite") {
+		t.Errorf("%d %s", code, errOut)
+	}
+	// Before asking for bisect.checkout, which would not help.
+	raw, _ := os.ReadFile(cfg)
+	write(t, cfg, strings.Replace(string(raw), "bisect:\n  checkout: [\"true\"]\n", "", 1))
+	if code, _, errOut := runCLI(t, "bisect", "HEAD~1", "HEAD", "--config", cfg); code != ExitConfig || !strings.Contains(errOut, "bisect does not support SQLite state") {
+		t.Errorf("without bisect.checkout: %d %s", code, errOut)
+	}
+}

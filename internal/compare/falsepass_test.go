@@ -88,3 +88,24 @@ func TestLayoutOfDeeperNesting(t *testing.T) {
 		t.Fatalf("escaped key: %+v", ds)
 	}
 }
+
+// A header value that is gone under a format rule (a cookie no longer set)
+// is still a format drift, with both lists of values for the explanation;
+// a value off the format keeps none.
+func TestHeaderRuleValueGone(t *testing.T) {
+	l := htmlAllow(t, "  - path: $.x\n    format: x\n    reason: x\n")
+	l.Headers = []allowlist.HeaderRule{{Name: "set-cookie", Format: `[a-z-]+=x+; path=/`, Reason: "session"}}
+	if err := l.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	two := [][2]string{{"content-type", "application/json"}, {"set-cookie", "xsrf-token=xx; path=/"}, {"set-cookie", "laravel-session=xxx; path=/"}}
+	one := [][2]string{{"content-type", "application/json"}, {"set-cookie", "xsrf-token=xxx; path=/"}}
+	ds := run(t, l, LevelValues, side(200, two, `{}`), side(200, one, `{}`))
+	if len(ds) != 1 || ds[0].Kind != KindFormat || len(ds[0].Values[0]) != 2 || len(ds[0].Values[1]) != 1 {
+		t.Fatalf("gone: %+v", ds)
+	}
+	off := [][2]string{{"content-type", "application/json"}, {"set-cookie", "xsrf-token=xx; path=/"}, {"set-cookie", "laravel-session=NEW; path=/"}}
+	if ds := run(t, l, LevelValues, side(200, two, `{}`), side(200, off, `{}`)); len(ds) != 1 || ds[0].Kind != KindFormat || ds[0].Values[0] != nil {
+		t.Fatalf("off the format: %+v", ds)
+	}
+}

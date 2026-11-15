@@ -1,0 +1,439 @@
+package cli
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"maps"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/orangehill/driftgate/internal/catalog"
+	"github.com/orangehill/driftgate/internal/compare"
+	"github.com/orangehill/driftgate/internal/config"
+	"github.com/orangehill/driftgate/internal/docscheck"
+)
+
+func docPages(t *testing.T) *docscheck.Pages {
+	t.Helper()
+	root, err := docscheck.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return docscheck.NewPages(root)
+}
+
+// TestHelpDocLinks: the section every command and topic links to exists
+// in the docs of this checkout.
+func TestHelpDocLinks(t *testing.T) {
+	p := docPages(t)
+	// The pages setup's messages link (setupcmd.go).
+	links := []string{commandsDoc, "databases.md", "configuration.md#seed-prepare-and-guards"}
+	for _, c := range commands {
+		if c.doc == "" {
+			t.Errorf("%s: no doc", c.name)
+		}
+		links = append(links, c.doc)
+	}
+	for _, tp := range topics {
+		links = append(links, tp.doc)
+	}
+	for _, l := range links {
+		if err := p.Resolve("docs/"+commandsDoc, l); err != nil {
+			t.Errorf("help link %s: %v", l, err)
+		}
+	}
+	_, out, _ := runCLI(t, "help", "run")
+	if !strings.Contains(out, "\nDocs: "+docsBase()+"commands.md#run\n") {
+		t.Errorf("help run has no Docs line:\n%s", out)
+	}
+}
+
+// TestDocsBase: a release links the pages of its own tag, also when only
+// the module version names it (go install …@v1.2.3); a build of a commit
+// links development; any other build main.
+func TestDocsBase(t *testing.T) {
+	defer func(v string) { Version = v }(Version)
+	for _, c := range []struct{ version, module, want string }{
+		{"v9.9.9", "(devel)", "v9.9.9"},
+		{"v1.2.3", "", "v1.2.3"},
+		{"dev", "v1.2.3", "v1.2.3"},
+		{"dev", "(devel)", "development"},
+		{"dev-1a2b3c4d5e6f", "(devel)", "development"},
+		{"dev-1a2b3c4d5e6f", "", "development"},
+		{"dev", "v0.0.0-20261105120000-1a2b3c4d5e6f", "development"},
+		{"dev", "v1.0.3-0.20261105120000-1a2b3c4d5e6f+dirty", "development"},
+		{"dev", "", "development"},
+		{"source", "(devel)", "main"},
+		{"v1.2.3-rc1", "(devel)", "main"},
+	} {
+		if got := docsRef(c.version, c.module); got != c.want {
+			t.Errorf("docsRef(%q, %q) = %s, want %s", c.version, c.module, got, c.want)
+		}
+	}
+	Version = "v9.9.9"
+	if got := docsBase(); got != "https://github.com/orangehill/driftgate/blob/v9.9.9/docs/" {
+		t.Errorf("docsBase() of v9.9.9 = %s", got)
+	}
+	if _, out, _ := runCLI(t, "help", "run"); !strings.Contains(out, "/blob/v9.9.9/docs/commands.md#run") {
+		t.Errorf("help run of v9.9.9:\n%s", out)
+	}
+}
+
+var docFlag = regexp.MustCompile("`--([a-z0-9-]+)")
+
+// TestCommandParity: the section each command's doc names is an H2 with
+// the command's name whose first table lists exactly the command's flags
+// (--config, common to all, is described once); every H2 of those pages
+// that names a command (lower case, or "driftgate …") is a command's
+// section.
+func TestCommandParity(t *testing.T) {
+	p := docPages(t)
+	sections := map[string]bool{} // page#anchor of every command
+	for _, c := range commands {
+		page, anchor, _ := strings.Cut(c.doc, "#")
+		page = "docs/" + page
+		sections[page+"#"+anchor] = true
+		d, err := p.Get(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(d.Headings, func(h docscheck.Heading) bool { return docscheck.Slug(h.Text) == anchor })
+		if i < 0 {
+			t.Errorf("%s: %s has no #%s", c.name, page, anchor)
+			continue
+		}
+		h := d.Headings[i]
+		if h.Level != 2 || h.Text != c.name && h.Text != "driftgate "+c.name {
+			t.Errorf("%s: %s:%d: the section is %q (H%d), not an H2 named after the command", c.name, page, h.Line, h.Text, h.Level)
+			continue
+		}
+		documented := tableFlags(d, h.Line)
+		var want []string
+		for _, f := range c.flags {
+			want = append(want, f.name)
+		}
+		slices.Sort(want)
+		if !slices.Equal(documented, want) {
+			t.Errorf("%s: %s:%d lists the flags %v, the command has %v", c.name, page, h.Line, documented, want)
+		}
+	}
+	pagesSeen := map[string]bool{}
+	for s := range sections {
+		page, _, _ := strings.Cut(s, "#")
+		if pagesSeen[page] {
+			continue
+		}
+		pagesSeen[page] = true
+		d, err := p.Get(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range d.Headings {
+			names := strings.HasPrefix(h.Text, "driftgate ") || h.Text != "" && h.Text[0] >= 'a' && h.Text[0] <= 'z'
+			if h.Level == 2 && names && !sections[page+"#"+docscheck.Slug(h.Text)] {
+				t.Errorf("%s:%d: section %q names no command of driftgate help", page, h.Line, h.Text)
+			}
+		}
+	}
+}
+
+// tableFlags lists the flags in the first column of the first table after
+// the heading on line, up to the next H2, sorted; a cell may name several.
+func tableFlags(d *docscheck.Doc, line int) []string {
+	var out []string
+	inTable := false
+	for _, l := range d.Lines[line:] {
+		if strings.HasPrefix(l, "## ") || inTable && !strings.HasPrefix(l, "|") {
+			break
+		}
+		if !strings.HasPrefix(l, "|") {
+			continue
+		}
+		inTable = true
+		// An escaped \| is part of a cell (local\|git), not its end.
+		first, _, _ := strings.Cut(strings.ReplaceAll(strings.TrimPrefix(l, "|"), `\|`, "/"), "|")
+		for _, m := range docFlag.FindAllStringSubmatch(first, -1) {
+			out = append(out, m[1])
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// TestDriftKinds: the drift kinds of internal/compare (its constants named
+// Kind…), compare.Kinds() (the text of driftgate help kinds), the kinds
+// docs/review.md describes (the first column of its kind
+// tables) and the output of driftgate help kinds are one set; the page's
+// Meaning of each kind is its text in compare.Kinds().
+func TestDriftKinds(t *testing.T) {
+	root, err := docscheck.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := codeKinds(t, filepath.Join(root, "internal", "compare"))
+	if len(code) == 0 {
+		t.Fatal("internal/compare has no Kind constants")
+	}
+	d, err := docPages(t).Get("docs/review.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	page, meanings := tableKinds(d)
+	for _, k := range compare.Kinds() {
+		listed = append(listed, k.Name)
+		if k.Text == "" {
+			t.Errorf("compare.Kinds(): %s has no text", k.Name)
+		}
+		if m, ok := meanings[k.Name]; ok && m != k.Text {
+			t.Errorf("docs/review.md: the meaning of %s is %q, compare.Kinds() has %q", k.Name, m, k.Text)
+		}
+	}
+	_, out, _ := runCLI(t, "help", "kinds")
+	var help []string
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && len(f) > 0 {
+			help = append(help, f[0])
+		}
+	}
+	for _, c := range []struct {
+		where string
+		kinds []string
+	}{{"compare.Kinds()", listed}, {"docs/review.md", page}, {"driftgate help kinds", help}} {
+		for _, k := range code {
+			if !slices.Contains(c.kinds, k) {
+				t.Errorf("%s does not list the drift kind %s", c.where, k)
+			}
+		}
+		for _, k := range c.kinds {
+			if !slices.Contains(code, k) {
+				t.Errorf("%s lists %s, which is no drift kind of internal/compare", c.where, k)
+			}
+		}
+		if dup := len(c.kinds) - len(slices.Compact(slices.Sorted(slices.Values(c.kinds)))); dup > 0 {
+			t.Errorf("%s lists %d kinds twice", c.where, dup)
+		}
+	}
+}
+
+// codeKinds lists the values of the string constants named Kind… in the
+// package in dir, without its tests.
+func codeKinds(t *testing.T, dir string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			g, ok := decl.(*ast.GenDecl)
+			if !ok || g.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range g.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, n := range vs.Names {
+					if !strings.HasPrefix(n.Name, "Kind") || i >= len(vs.Values) {
+						continue
+					}
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						v, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						out = append(out, v)
+					}
+				}
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+var codeWord = regexp.MustCompile("^`([a-z-]+)`$")
+
+// tableKinds lists the kinds in the first column of the kind tables of a
+// page, those whose header row starts with "| Kind |", outside fenced
+// blocks: one kind, a code span, per row; and the second column of each
+// (its meaning), without the backquotes of code spans.
+func tableKinds(d *docscheck.Doc) ([]string, map[string]string) {
+	code := map[int]bool{}
+	for _, b := range d.Blocks {
+		for n := b.Line; n <= b.End; n++ {
+			code[n] = true
+		}
+	}
+	var out []string
+	meanings := map[string]string{}
+	inTable := false
+	for i, l := range d.Lines {
+		if code[i+1] || !strings.HasPrefix(l, "|") {
+			inTable = false
+			continue
+		}
+		if strings.HasPrefix(l, "| Kind |") {
+			inTable = true
+			continue
+		}
+		if !inTable {
+			continue
+		}
+		cells := strings.Split(strings.TrimPrefix(l, "|"), "|")
+		if m := codeWord.FindStringSubmatch(strings.TrimSpace(cells[0])); m != nil {
+			out = append(out, m[1])
+			if len(cells) > 1 {
+				meanings[m[1]] = strings.ReplaceAll(strings.TrimSpace(cells[1]), "`", "")
+			}
+		}
+	}
+	return out, meanings
+}
+
+// TestDocsParity: every command driftgate help lists has an H2 of its own
+// in docs/commands.md; every key of driftgate.yaml (config.Config, nested
+// keys too) is named in a heading or the first column of a table of
+// docs/configuration.md, and every key of catalog.json so in docs/catalog.md.
+func TestDocsParity(t *testing.T) {
+	p := docPages(t)
+	d, err := p.Get("docs/commands.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := map[string]bool{}
+	for _, h := range d.Headings {
+		if h.Level == 2 {
+			h2[h.Text] = true
+		}
+	}
+	_, out, _ := runCLI(t, "help")
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(line, "  driftgate ")
+		if !ok {
+			continue
+		}
+		var name []string
+		for _, w := range strings.Fields(rest) {
+			if strings.ContainsAny(w, "[<-|\"") {
+				break
+			}
+			name = append(name, w)
+		}
+		n++
+		if !h2[strings.Join(name, " ")] {
+			t.Errorf("docs/commands.md has no section for the command %q of driftgate help", strings.Join(name, " "))
+		}
+	}
+	if n != len(commands) {
+		t.Errorf("found %d commands in driftgate help, the help has %d", n, len(commands))
+	}
+	for _, c := range []struct {
+		page string
+		ty   reflect.Type
+		tag  string
+	}{
+		{"docs/configuration.md", reflect.TypeOf(config.Config{}), "yaml"},
+		{"docs/catalog.md", reflect.TypeOf(catalog.Catalog{}), "json"},
+	} {
+		named := namedWords(t, p, c.page)
+		for _, k := range nestedKeys(c.ty, c.tag) {
+			if !named[k] {
+				t.Errorf("the key %s is named in no heading or first table column of %s", k, c.page)
+			}
+		}
+	}
+}
+
+var word = regexp.MustCompile(`[A-Za-z0-9_]+`)
+
+// namedWords are the words a page names keys with, outside fenced
+// blocks: those of its headings (in lower case) and of the code spans in
+// the first column of its tables. A nested key is named by its own name,
+// written alone or after its parent (data.source.dsn, params[].from).
+func namedWords(t *testing.T, p *docscheck.Pages, page string) map[string]bool {
+	t.Helper()
+	d, err := p.Get(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, h := range d.Headings {
+		for _, w := range word.FindAllString(strings.ToLower(h.Text), -1) {
+			out[w] = true
+		}
+	}
+	code := map[int]bool{}
+	for _, b := range d.Blocks {
+		for n := b.Line; n <= b.End; n++ {
+			code[n] = true
+		}
+	}
+	for i, l := range d.Lines {
+		if code[i+1] || !strings.HasPrefix(l, "|") {
+			continue
+		}
+		first, _, _ := strings.Cut(strings.ReplaceAll(strings.TrimPrefix(l, "|"), `\|`, "/"), "|")
+		for _, span := range codeSpan.FindAllString(first, -1) {
+			for _, w := range word.FindAllString(span, -1) {
+				out[w] = true
+			}
+		}
+	}
+	return out
+}
+
+var codeSpan = regexp.MustCompile("`[^`]+`")
+
+// nestedKeys are the names of the fields of a struct under a tag, and of
+// the structs they hold (through pointers, lists and maps), sorted.
+func nestedKeys(ty reflect.Type, tag string) []string {
+	seen := map[reflect.Type]bool{}
+	keys := map[string]bool{}
+	var walk func(reflect.Type)
+	walk = func(ty reflect.Type) {
+		for ty.Kind() == reflect.Pointer || ty.Kind() == reflect.Slice || ty.Kind() == reflect.Array || ty.Kind() == reflect.Map {
+			ty = ty.Elem()
+		}
+		if ty.Kind() != reflect.Struct || seen[ty] {
+			return
+		}
+		seen[ty] = true
+		for _, k := range yamlKeys(ty, tag) {
+			keys[k] = true
+		}
+		for i := range ty.NumField() {
+			if f := ty.Field(i); f.IsExported() {
+				walk(f.Type)
+			}
+		}
+	}
+	walk(ty)
+	return slices.Sorted(maps.Keys(keys))
+}
+
+// yamlKeys are the names of the fields of a struct under a tag.
+func yamlKeys(ty reflect.Type, tag string) []string {
+	var out []string
+	for i := range ty.NumField() {
+		if name, _, _ := strings.Cut(ty.Field(i).Tag.Get(tag), ","); name != "" && name != "-" {
+			out = append(out, name)
+		}
+	}
+	return out
+}

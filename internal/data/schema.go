@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
-
 	"github.com/orangehill/driftgate/internal/dbdsn"
 	"github.com/orangehill/driftgate/internal/dbx"
 )
@@ -45,7 +43,7 @@ func (d Database) Hosts() ([]string, error) {
 // PostgreSQL the database of the DSN).
 func open(d Database, db string) (*sql.DB, error) {
 	switch d.Driver {
-	case MySQL, "mariadb":
+	case MySQL:
 		return dbx.OpenMySQL(d.DSN, db, d.Dial)
 	case Postgres:
 		return dbx.OpenPostgres(d.DSN, db, d.Dial)
@@ -142,8 +140,8 @@ type Schema struct {
 // on the target after the rows.
 type sequence struct {
 	name string
-	read string                  // query for the value (one row)
-	set  func(v []string) string // statement that sets it
+	read string                    // query for the value (one row)
+	set  func(v []string) []string // statements that set it
 	uses []string
 }
 
@@ -251,7 +249,7 @@ type dialect interface {
 
 func dialectFor(driver string) (dialect, error) {
 	switch driver {
-	case MySQL, "mariadb":
+	case MySQL:
 		return mysqlDialect{}, nil
 	case Postgres:
 		return postgresDialect{}, nil

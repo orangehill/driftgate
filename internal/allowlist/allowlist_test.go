@@ -346,4 +346,28 @@ func TestUnused(t *testing.T) {
 	if l.Unused(false) != nil {
 		t.Fatal("an untracked list")
 	}
+
+	// At a level that does not reach values (shape), header and value
+	// rules had no chance: none is called stale. A rule that matches no
+	// request still is, and an any_length rule with no change too.
+	loose := l.Track()
+	for _, id := range []string{"a", "b"} {
+		loose.ForTarget("").ForRequest(id).Done(id, false, true)
+	}
+	got = map[int]key{}
+	for _, u := range loose.Unused(false) {
+		got[u.Rule*10+len(u.Kind)] = key{u.Kind, u.Why}
+	}
+	want = map[int]key{34: {"body", "no request"}, 44: {"body", "no change"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("shape: got %v", got)
+	}
+	// Bodies not on this machine: body rules had no chance either.
+	nobody := l.Track()
+	nobody.ForTarget("").ForRequest("a").Done("a", true, false)
+	for _, u := range nobody.Unused(false) {
+		if u.Kind == "body" && u.Why != "no request" {
+			t.Fatalf("no bodies: %+v", u)
+		}
+	}
 }

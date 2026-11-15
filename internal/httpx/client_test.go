@@ -3,7 +3,12 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -168,5 +173,172 @@ func TestReadBodySize(t *testing.T) {
 		if !chunked && cap(res.Body) > len(body)+bytes.MinRead {
 			t.Fatalf("a body of %d bytes held in %d", len(body), cap(res.Body))
 		}
+	}
+}
+
+// TestConnectTo: connect_to sends the requests to a fixed address while
+// they keep the URL's host name; the allow-list applies to the address
+// connected to, not to the name.
+func TestConnectTo(t *testing.T) {
+	var host string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { host = r.Host }))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]
+	base := "http://shop.example:" + port
+
+	// The name does not resolve; the request goes to 127.0.0.1 (allowed
+	// by default) with the name in the Host header.
+	a, err := NewAllow(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ConnectTo(base, "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{BaseURL: base, Allow: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, "")
+	if res.Record.Error != "" || host != "shop.example:"+port {
+		t.Fatalf("error %q, host %q", res.Record.Error, host)
+	}
+	if err := a.Check(context.Background(), "shop.example"); err != nil {
+		t.Errorf("check of the name sent to an allowed address: %v", err)
+	}
+	// The name never goes where DNS says: without a port of its own,
+	// every port of it goes to connect_to's host.
+	var looked []string
+	a.LookupIP = func(_ context.Context, _, host string) ([]net.IP, error) {
+		looked = append(looked, host)
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	if conn, err := a.Dial(context.Background(), "tcp", "shop.example:"+port); err != nil {
+		t.Errorf("base_url's port: %v", err)
+	} else {
+		conn.Close()
+	}
+	a.Dial(context.Background(), "tcp", "shop.example:1") // refused by 127.0.0.1, or reached there
+	for _, h := range looked {
+		if h != "127.0.0.1" {
+			t.Errorf("%s was looked up: a port of the name went where DNS says", h)
+		}
+	}
+	a.LookupIP = nil
+
+	// A port of its own replaces the URL's.
+	b, _ := NewAllow(nil, false)
+	if err := b.ConnectTo("http://shop.example:1", "127.0.0.1:"+port); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = New(Options{BaseURL: "http://shop.example:1", Allow: b})
+	if res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, ""); res.Record.Error != "" {
+		t.Fatalf("port: %s", res.Record.Error)
+	}
+	// With a port of its own, another port of the name is refused.
+	if _, err := b.Dial(context.Background(), "tcp", "shop.example:2"); err == nil || !strings.Contains(err.Error(), "connect_to covers shop.example:1 only") {
+		t.Errorf("another port: %v", err)
+	}
+
+	// The name is allowed, the address it is sent to is not: refused
+	// without a connection.
+	named, _ := NewAllow([]string{"shop.example"}, false)
+	if err := named.ConnectTo(base, "203.0.113.10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := named.Check(context.Background(), "shop.example"); !errors.Is(err, ErrHostNotAllowed) {
+		t.Errorf("check: %v", err)
+	}
+	c, _ = New(Options{BaseURL: base, Allow: named})
+	if res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, ""); !strings.Contains(res.Record.Error, ErrHostNotAllowed.Error()) {
+		t.Fatalf("connection to an address outside the allow-list: %q", res.Record.Error)
+	}
+}
+
+func TestParseConnectTo(t *testing.T) {
+	for in, want := range map[string]string{"203.0.113.10": "203.0.113.10|", "203.0.113.10:8443": "203.0.113.10|8443",
+		"shop-new.internal": "shop-new.internal|", "[2001:db8::1]:443": "2001:db8::1|443", "[2001:db8::1]": "2001:db8::1|", "2001:db8::1": "2001:db8::1|"} {
+		h, p, err := ParseConnectTo(in)
+		if err != nil || h+"|"+p != want {
+			t.Errorf("%s: %s|%s %v", in, h, p, err)
+		}
+	}
+	for _, in := range []string{"", "http://203.0.113.10", "203.0.113.10:0", "203.0.113.10:x", "a/b", ":80", "user@host"} {
+		if _, _, err := ParseConnectTo(in); err == nil {
+			t.Errorf("%q accepted", in)
+		}
+	}
+}
+
+// TestConnectToTLS: with connect_to the TLS server name and the
+// certificate check are of base_url's host name, not of the address
+// connected to: a certificate for the name passes, one for another name
+// fails.
+func TestConnectToTLS(t *testing.T) {
+	var sni, host string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sni, host = r.TLS.ServerName, r.Host
+	}))
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshake
+	srv.StartTLS()
+	defer srv.Close()
+	port := srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate()) // names example.com and 127.0.0.1
+	send := func(base string) Result {
+		a, err := NewAllow(nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.ConnectTo(base, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+		c, err := New(Options{BaseURL: base, Allow: a})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.http.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: roots}
+		return c.Do(context.Background(), catalog.Request{ID: "x", Method: "GET", Path: "/", Storage: "public"}, "")
+	}
+	if res := send("https://example.com:" + port); res.Record.Error != "" || sni != "example.com" || host != "example.com:"+port {
+		t.Fatalf("the certificate's name: error %q, server name %q, host %q", res.Record.Error, sni, host)
+	}
+	if res := send("https://shop.example:" + port); !strings.Contains(res.Record.Error, "certificate") {
+		t.Fatalf("another name than the certificate's: %q", res.Record.Error)
+	}
+}
+
+// TestConnectToRedirect: a redirect of the server connect_to names to
+// another port of the same host name (http to https, here a 308 that
+// sends the POST again) never reaches the server DNS names for it.
+func TestConnectToRedirect(t *testing.T) {
+	var oldHit, newHit int
+	oldSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { oldHit++ }))
+	defer oldSrv.Close()
+	oldPort := oldSrv.URL[strings.LastIndexByte(oldSrv.URL, ':')+1:]
+	newSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		newHit++
+		http.Redirect(w, r, "http://shop.example:"+oldPort+r.URL.Path, http.StatusPermanentRedirect)
+	}))
+	defer newSrv.Close()
+	newPort := newSrv.URL[strings.LastIndexByte(newSrv.URL, ':')+1:]
+	base := "http://shop.example:" + newPort
+	a, _ := NewAllow(nil, false)
+	a.LookupIP = func(_ context.Context, _, host string) ([]net.IP, error) {
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil // DNS: the old server
+	}
+	if err := a.ConnectTo(base, "127.0.0.1:"+newPort); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := New(Options{BaseURL: base, Allow: a, FollowRedirects: true})
+	res := c.Do(context.Background(), catalog.Request{ID: "x", Method: "POST", Path: "/users", Body: []byte(`{}`), Storage: "public"}, "")
+	if oldHit > 0 || newHit != 1 || !strings.Contains(res.Record.Error, "connect_to covers") {
+		t.Fatalf("error %q, new server %d, old server %d", res.Record.Error, newHit, oldHit)
 	}
 }

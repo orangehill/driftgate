@@ -231,7 +231,7 @@ func lintPlaces(p *config.Project, cat *catalog.Catalog, allow *allowlist.List, 
 	}
 
 	var out []allowlist.Finding
-	var unchecked []string
+	var unchecked, defaults []string
 	add := func(ref allowlist.RuleRef, u ruleUse, what string) {
 		switch {
 		case u.requests == 0:
@@ -242,6 +242,10 @@ func lintPlaces(p *config.Project, cat *catalog.Catalog, allow *allowlist.List, 
 			// It may reach something in a body not read here, or its
 			// requests have no response in the baseline yet.
 			unchecked = append(unchecked, ref.String())
+		case isInitDefault(allow, ref):
+			// init's default for a part the baseline need not show (a
+			// rate limit reached), as unused rules are not warned about.
+			defaults = append(defaults, ref.String())
 		default:
 			out = append(out, allowlist.Finding{RuleRef: ref, Check: allowlist.CheckNoPlace,
 				Detail: fmt.Sprintf("the baseline's responses to its %d %s have no %s it reaches (renamed or removed?)", u.seen, plural(u.seen, "request", "requests"), what)})
@@ -276,6 +280,9 @@ func lintPlaces(p *config.Project, cat *catalog.Catalog, allow *allowlist.List, 
 	}
 	if len(unchecked) > 0 {
 		notes = append(notes, fmt.Sprintf("not checked against the baseline (bodies of their requests not read, or no response yet): %s", strings.Join(unchecked, "; ")))
+	}
+	if len(defaults) > 0 {
+		notes = append(notes, fmt.Sprintf("not checked: rules init wrote for what the baseline need not show, such as a rate limit reached: %s", strings.Join(defaults, "; ")))
 	}
 	return out, notes, nil
 }

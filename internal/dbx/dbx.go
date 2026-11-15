@@ -1,9 +1,12 @@
 // Package dbx holds what the state components (internal/state) and the data
 // module (internal/data) both do with MySQL/MariaDB and PostgreSQL servers:
 // connecting, quoting names, setting up a session, telling MariaDB from
-// MySQL, reading SHOW CREATE, filtering PostgreSQL's system schemas, and
-// checking that a database is on a host DriftGate may rewrite. Reading a
-// DSN stays in internal/dbdsn, which keeps every error free of the DSN.
+// MySQL, reading SHOW CREATE, filtering PostgreSQL's system schemas,
+// checking that a database is on a host DriftGate may rewrite, trying a
+// MySQL step again when the server stopped it for a lock, finding the
+// sequences a Galera node refuses to create, and running a PostgreSQL
+// statement that needs a database to have no other sessions. Reading a DSN
+// stays in internal/dbdsn, which keeps every error free of the DSN.
 //
 // Where the two callers differ on purpose, the difference is a parameter
 // here, with the reason at the parameter.
@@ -51,6 +54,26 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // application. A dial function other than nil makes every connection
 // (AllowDial).
 func OpenMySQL(dsn, db string, dial DialFunc) (*sql.DB, error) {
+	return OpenMySQLWith(dsn, db, dial, MySQLOpen{})
+}
+
+// MySQLOpen are the options of OpenMySQLWith.
+type MySQLOpen struct {
+	// MultiStatements lets one query hold several statements, and turns
+	// the client-side interpolation of parameters off: a query on such a
+	// connection takes no parameters, so nothing is ever interpolated into
+	// a text the server splits into statements, and none is prepared on
+	// the server. Only quoted names (QuoteMySQL) go into its queries.
+	MultiStatements bool
+	// Init runs once on every new connection, before the pool hands it
+	// out: it sets the session up for good, so that is not done again each
+	// time the connection is taken from the pool. Its error closes the
+	// connection.
+	Init func(ctx context.Context, c driver.ExecerContext, conn driver.Conn) error
+}
+
+// OpenMySQLWith is OpenMySQL with options.
+func OpenMySQLWith(dsn, db string, dial DialFunc, o MySQLOpen) (*sql.DB, error) {
 	cfg, err := dbdsn.MySQLConfig(dsn)
 	if err != nil {
 		return nil, err
@@ -59,20 +82,25 @@ func OpenMySQL(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	if dial != nil {
 		cfg.DialFunc = dial
 	}
+	if o.MultiStatements {
+		cfg.MultiStatements = true
+		cfg.InterpolateParams = false
+	}
 	conn, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return sql.OpenDB(mysqlConnector{conn, cfg.Addr}), nil
+	return sql.OpenDB(mysqlConnector{conn, cfg.Addr, o.Init}), nil
 }
 
 // mysqlConnector turns a panic of the MySQL driver while it connects into
 // an error: the driver reads the server's first packet without checking
 // its length, and a server that is not MySQL (its X protocol, on port
-// 33060) makes it slice past the end.
+// 33060) makes it slice past the end. It runs init on every new connection.
 type mysqlConnector struct {
 	driver.Connector
 	addr string
+	init func(ctx context.Context, c driver.ExecerContext, conn driver.Conn) error
 }
 
 func (c mysqlConnector) Connect(ctx context.Context) (conn driver.Conn, err error) {
@@ -81,7 +109,20 @@ func (c mysqlConnector) Connect(ctx context.Context) (conn driver.Conn, err erro
 			conn, err = nil, fmt.Errorf("the server at %s did not answer as MySQL; is it the X protocol port (33060) instead of the classic one (3306)?", c.addr)
 		}
 	}()
-	return c.Connector.Connect(ctx)
+	conn, err = c.Connector.Connect(ctx)
+	if err != nil || c.init == nil {
+		return conn, err
+	}
+	ex, ok := conn.(driver.ExecerContext)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("the MySQL driver cannot run a statement on a new connection")
+	}
+	if err := c.init(ctx, ex, conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // PostgresDSN is the connection string for the pgx driver: the postgres://
@@ -102,22 +143,41 @@ func PostgresDSN(dsn, db string) (string, error) {
 // the host by name: pgx's own lookup is turned off, so the name is
 // resolved once, by the dial function, which checks the address it
 // connects to.
+//
+// Every query runs in one round trip (pgx's QueryExecModeExec, whatever
+// the DSN's default_query_exec_mode): it is sent with its parameters,
+// which stay bind parameters whose types the server infers, as it did when
+// the statement was prepared first (two round trips; each database/sql
+// pool is short-lived, so the statement cache never saved one). Parameters
+// go as text: a string as it is, a []string as an array literal pgx
+// quotes. Results come as text too; DriftGate's own queries read strings,
+// counts and booleans, which read the same in either format, and a query
+// that reads a user's columns of any type passes PostgresDescribed.
 func OpenPostgres(dsn, db string, dial DialFunc) (*sql.DB, error) {
 	cs, err := PostgresDSN(dsn, db)
 	if err != nil {
 		return nil, err
 	}
-	if dial == nil {
-		return sql.Open("pgx", cs)
-	}
 	cfg, err := pgx.ParseConfig(cs)
 	if err != nil {
 		return nil, errors.New("the PostgreSQL DSN cannot be read") // pgx's error quotes the DSN
 	}
-	cfg.DialFunc = pgconn.DialFunc(dial)
-	cfg.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
+	if dial != nil {
+		cfg.DialFunc = pgconn.DialFunc(dial)
+		cfg.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	}
 	return stdlib.OpenDB(*cfg), nil
 }
+
+// PostgresDescribed, passed as the first argument of a query on a
+// connection from OpenPostgres, runs that query described first (two round
+// trips, as before exec mode): its bool, bytea, date, float, int and
+// timestamp columns then come in binary, so the Go value read from them
+// does not depend on the session's DateStyle, bytea_output or
+// extra_float_digits, which text results would. For queries that read
+// columns of any type: row tracking and check queries.
+const PostgresDescribed = pgx.QueryExecModeDescribeExec
 
 // AllowDial returns a dial function that connects only to a host one of
 // the allow lists (config.Config.AllowHostLists) allows, as AllowHost
@@ -209,11 +269,21 @@ func (s MySQLSession) Statements() []string {
 	if s.UTF8UTC {
 		out = append(out, "SET NAMES utf8mb4", "SET time_zone = '+00:00'")
 	}
-	return append(out,
-		"SET foreign_key_checks = 0",
-		"SET unique_checks = 0",
-		"SET sql_mode = '"+strings.ReplaceAll(s.SQLMode, "'", "''")+"'",
-	)
+	for _, a := range s.Assignments() {
+		out = append(out, "SET "+a)
+	}
+	return out
+}
+
+// Assignments are the session's settings other than UTF8UTC's (SET NAMES
+// cannot share a SET statement) and FreshStats, as one SET statement takes
+// them, separated by commas.
+func (s MySQLSession) Assignments() []string {
+	return []string{
+		"foreign_key_checks = 0",
+		"unique_checks = 0",
+		"sql_mode = '" + strings.ReplaceAll(s.SQLMode, "'", "''") + "'",
+	}
 }
 
 // Apply runs the session's statements on c.
@@ -240,24 +310,75 @@ func (s MySQLSession) Apply(ctx context.Context, c *sql.Conn) error {
 // listed, and one that is gone means the source changed under the read,
 // which must not end in a copy without it.
 func ShowCreate(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (map[string]string, error) {
-	rows, err := q.QueryContext(ctx, "SHOW CREATE "+kind+" "+QuoteMySQL(db)+"."+QuoteMySQL(name))
+	rows, err := q.QueryContext(ctx, ShowCreateQuery(kind, db, name))
 	if err != nil {
-		var me *mysql.MySQLError
-		if missingOK && errors.As(err, &me) && (me.Number == 1146 || me.Number == 1360) { // no such table, no such trigger
+		if missingOK && ShowCreateMissing(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("SHOW CREATE %s %s: %w", kind, name, err)
 	}
 	defer rows.Close()
+	out, err := ShowCreateRow(rows)
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		if missingOK {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("SHOW CREATE %s %s: no row", kind, name)
+	}
+	return out, rows.Err()
+}
+
+// showCreateColumn is the column of SHOW CREATE that holds the statement.
+var showCreateColumn = map[string]string{"TABLE": "Create Table", "VIEW": "Create View", "SEQUENCE": "Create Table"}
+
+// ShowCreateSQL returns the CREATE statement of a table, view or sequence;
+// "" for one that does not exist with missingOK (see ShowCreate).
+func ShowCreateSQL(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (string, error) {
+	r, err := ShowCreate(ctx, q, kind, db, name, missingOK)
+	if err != nil {
+		return "", err
+	}
+	return ShowCreateStatement(kind, name, r)
+}
+
+// ShowCreateStatement is the CREATE statement in a row of SHOW CREATE kind
+// (ShowCreate's columns by name): "" for nil, an object that does not exist.
+func ShowCreateStatement(kind, name string, r map[string]string) (string, error) {
+	if r == nil {
+		return "", nil
+	}
+	col := showCreateColumn[kind]
+	def, ok := r[col]
+	if !ok {
+		return "", fmt.Errorf("SHOW CREATE %s %s: no column %q", kind, name, col)
+	}
+	return def, nil
+}
+
+// ShowCreateQuery is the statement ShowCreate runs.
+func ShowCreateQuery(kind, db, name string) string {
+	return "SHOW CREATE " + kind + " " + QuoteMySQL(db) + "." + QuoteMySQL(name)
+}
+
+// ShowCreateMissing reports whether err is SHOW CREATE's error for an
+// object that does not exist (no such table or view, no such trigger).
+func ShowCreateMissing(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && (me.Number == 1146 || me.Number == 1360)
+}
+
+// ShowCreateRow reads the current result set of SHOW CREATE as ShowCreate
+// returns it: its columns by name, or nil when it has no row.
+func ShowCreateRow(rows *sql.Rows) (map[string]string, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
 	if !rows.Next() {
-		if err := rows.Err(); err != nil || missingOK {
-			return nil, err
-		}
-		return nil, fmt.Errorf("SHOW CREATE %s %s: no row", kind, name)
+		return nil, rows.Err()
 	}
 	vals := make([]sql.NullString, len(cols))
 	ptrs := make([]any, len(cols))
@@ -271,25 +392,7 @@ func ShowCreate(ctx context.Context, q Querier, kind, db, name string, missingOK
 	for i, col := range cols {
 		out[col] = vals[i].String
 	}
-	return out, rows.Err()
-}
-
-// showCreateColumn is the column of SHOW CREATE that holds the statement.
-var showCreateColumn = map[string]string{"TABLE": "Create Table", "VIEW": "Create View", "SEQUENCE": "Create Table"}
-
-// ShowCreateSQL returns the CREATE statement of a table, view or sequence;
-// "" for one that does not exist with missingOK (see ShowCreate).
-func ShowCreateSQL(ctx context.Context, q Querier, kind, db, name string, missingOK bool) (string, error) {
-	r, err := ShowCreate(ctx, q, kind, db, name, missingOK)
-	if err != nil || r == nil {
-		return "", err
-	}
-	col := showCreateColumn[kind]
-	def, ok := r[col]
-	if !ok {
-		return "", fmt.Errorf("SHOW CREATE %s %s: no column %q", kind, name, col)
-	}
-	return def, nil
+	return out, nil
 }
 
 // MySQLDatabaseExists tells whether the server has the database.
@@ -328,16 +431,28 @@ func MySQLObjects(ctx context.Context, q Querier, db string) ([]MySQLObject, err
 	return out, rows.Err()
 }
 
+// MySQLProbe reports a name of the short-lived objects the state module
+// makes to try whether a login may use a DEFINER: dgt_probe_ and 16
+// lower-case hexadecimal digits. Such an object is never the application's.
+func MySQLProbe(name string) bool {
+	const prefix = "dgt_probe_"
+	if len(name) != len(prefix)+16 || !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	return strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
+}
+
 // MySQLTrigger is a trigger and its place among the triggers of its table.
 type MySQLTrigger struct {
 	Name, Table, Timing, Event string
 	Order                      int
+	Definer                    string // user@host, as CURRENT_USER() writes it
 }
 
 // MySQLTriggers lists the triggers of a database in firing order per
 // table, the order they are created again in.
 func MySQLTriggers(ctx context.Context, q Querier, db string) ([]MySQLTrigger, error) {
-	rows, err := q.QueryContext(ctx, `SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER
+	rows, err := q.QueryContext(ctx, `SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER, DEFINER
 		FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?
 		ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER`, db)
 	if err != nil {
@@ -347,7 +462,7 @@ func MySQLTriggers(ctx context.Context, q Querier, db string) ([]MySQLTrigger, e
 	var out []MySQLTrigger
 	for rows.Next() {
 		var t MySQLTrigger
-		if err := rows.Scan(&t.Name, &t.Table, &t.Timing, &t.Event, &t.Order); err != nil {
+		if err := rows.Scan(&t.Name, &t.Table, &t.Timing, &t.Event, &t.Order, &t.Definer); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -415,4 +530,95 @@ func AllowHosts(ctx context.Context, driver, dsn string, lists [][]string, hint 
 		}
 	}
 	return nil
+}
+
+// MySQLCreateTable returns the statement that makes a table again from its
+// SHOW CREATE TABLE (a state copy, a dump), so the new table prints the
+// same. MySQL 8 marks a column
+// whose collation a statement names, and prints it as CHARACTER SET cs
+// COLLATE x; a column that takes the table's collation without naming it
+// prints as COLLATE x when x is not its character set's default. Run as
+// printed, that COLLATE names the collation: the copy's column then prints
+// with CHARACTER SET, and its fingerprint differs from the source's
+// (measured on MySQL 8.0 and 8.4; a restore left the table different from
+// the pristine copy's record). So a column's COLLATE that is the table's
+// own collation, without a CHARACTER SET before it, is left out: the column
+// takes the same collation from the table. Nothing in quotes, backquotes or
+// parentheses (enum values, defaults, comments, expressions) is changed.
+// MariaDB records no such mark: where it prints such a COLLATE, leaving it
+// out changes nothing either.
+func MySQLCreateTable(def string) string {
+	type word struct {
+		s          string
+		start, end int
+		depth      int
+	}
+	var words []word
+	depth := 0
+	for i := 0; i < len(def); {
+		switch ch := def[i]; {
+		case ch == '\'' || ch == '"' || ch == '`':
+			// SHOW CREATE TABLE doubles a quote in a string and escapes a
+			// backslash with one (the session has no NO_BACKSLASH_ESCAPES).
+			for i++; i < len(def); i++ {
+				if def[i] == '\\' && ch != '`' {
+					i++
+				} else if def[i] == ch {
+					if i+1 < len(def) && def[i+1] == ch {
+						i++
+						continue
+					}
+					break
+				}
+			}
+			i++
+		case ch == '(':
+			depth++
+			i++
+		case ch == ')':
+			depth--
+			i++
+		case ch == '_' || ch == '$' || ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z':
+			j := i
+			for j < len(def) && (def[j] == '_' || def[j] == '$' || def[j] >= '0' && def[j] <= '9' || def[j] >= 'a' && def[j] <= 'z' || def[j] >= 'A' && def[j] <= 'Z') {
+				j++
+			}
+			words = append(words, word{def[i:j], i, j, depth})
+			i = j
+		default:
+			i++
+		}
+	}
+	// The table's collation: COLLATE=x among its options, after the columns.
+	table := ""
+	for k, w := range words {
+		if w.depth == 0 && w.s == "COLLATE" && k+1 < len(words) && words[k+1].start == w.end+1 && def[w.end] == '=' {
+			table = words[k+1].s
+		}
+	}
+	if table == "" {
+		return def
+	}
+	var b strings.Builder
+	last := 0
+	for k, w := range words {
+		if w.depth != 1 || w.s != "COLLATE" || k+1 >= len(words) || k < 3 {
+			continue
+		}
+		x := words[k+1]
+		if x.s != table || x.depth != 1 || x.start != w.end+1 || def[w.end] != ' ' || def[w.start-1] != ' ' ||
+			x.end < len(def) && !strings.ContainsRune(" ,\n", rune(def[x.end])) {
+			continue
+		}
+		if words[k-2].s == "SET" && words[k-3].s == "CHARACTER" {
+			continue
+		}
+		b.WriteString(def[last : w.start-1])
+		last = x.end
+	}
+	if last == 0 {
+		return def
+	}
+	b.WriteString(def[last:])
+	return b.String()
 }

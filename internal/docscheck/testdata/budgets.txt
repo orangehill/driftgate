@@ -1,0 +1,17 @@
+# The most lines each page of the documentation may have, code included,
+# and TOTAL, the most for all of them together (docs/ and README.md).
+# Every page needs a budget here. TestBudgets warns about a page over its
+# budget or without one, and fails in strict mode (DRIFTGATE_DOCS_STRICT=1).
+README.md 90
+docs/getting-started.md 170
+docs/how-it-works.md 120
+docs/configuration.md 250
+docs/catalog.md 160
+docs/review.md 170
+docs/databases.md 200
+docs/frameworks.md 130
+docs/workflows.md 250
+docs/commands.md 220
+docs/security.md 120
+docs/troubleshooting.md 150
+TOTAL 2000

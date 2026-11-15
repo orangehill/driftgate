@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -66,6 +67,9 @@ type Acceptance struct {
 	Signatures []string `json:"signatures"`
 	Capture    string   `json:"capture"`
 	Commit     string   `json:"commit,omitempty"`
+	// Kind is "rebase" for a baseline that took a whole capture
+	// (driftgate baselines rebase); empty for an acceptance.
+	Kind string `json:"kind,omitempty"`
 	// Prev is the SHA-256 of the line before (empty on the first line), so
 	// an edited, removed or inserted line breaks the chain.
 	Prev string `json:"prev,omitempty"`
@@ -78,6 +82,15 @@ func ignored(name string) bool { return name == ".DS_Store" }
 // Sums returns the SHA-256 of every file under dir by slash path, without
 // the manifest and the log.
 func Sums(dir string) (map[string]string, error) {
+	rels, err := files(dir)
+	if err != nil {
+		return nil, err
+	}
+	return sumFiles(dir, rels)
+}
+
+// files lists the files under dir the manifest lists, by slash path.
+func files(dir string) ([]string, error) {
 	// A baseline is plain files in a folder of the repository: a symbolic
 	// link could point anywhere and change without the repository changing.
 	if fi, err := os.Lstat(dir); err != nil {
@@ -109,11 +122,33 @@ func Sums(dir string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sumFiles(dir, rels)
+	return rels, nil
 }
 
 // listed reports whether the manifest lists a file: all but itself and the log.
 func listed(rel string) bool { return rel != ManifestFile && rel != LogFile }
+
+// sumKnown is sumFiles that takes what known has.
+func sumKnown(dir string, rels []string, known func(string) (string, bool)) (map[string]string, error) {
+	if known == nil {
+		return sumFiles(dir, rels)
+	}
+	got := map[string]string{}
+	var rest []string
+	for _, rel := range rels {
+		if sum, ok := known(rel); ok {
+			got[rel] = sum
+		} else {
+			rest = append(rest, rel)
+		}
+	}
+	sums, err := sumFiles(dir, rest)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(got, sums)
+	return got, nil
+}
 
 // sumFiles hashes the files (slash paths under dir) in parallel, each read
 // as a stream.
@@ -213,7 +248,12 @@ func Digest(dir string) (string, error) {
 // SetDigest identifies the content of a capture: its records and meta.json.
 // Bodies are named by their hash (or ref) in the records, so the records
 // cover them, and are not read.
-func SetDigest(dir string) (string, error) {
+func SetDigest(dir string) (string, error) { return SetDigestKnown(dir, nil) }
+
+// SetDigestKnown is SetDigest that takes the SHA-256 of the files read and
+// hashed already from known (snapshot.Set.Known) instead of reading them
+// again.
+func SetDigestKnown(dir string, known func(string) (string, bool)) (string, error) {
 	if fi, err := os.Lstat(dir); err != nil {
 		return "", err
 	} else if fi.Mode()&fs.ModeSymlink != 0 {
@@ -255,7 +295,7 @@ func SetDigest(dir string) (string, error) {
 			return "", err
 		}
 	}
-	sums, err := sumFiles(dir, rels)
+	sums, err := sumKnown(dir, rels, known)
 	if err != nil {
 		return "", err
 	}
@@ -310,13 +350,75 @@ func (r *Result) OK() bool { return len(r.Problems) == 0 }
 // and the acceptance log against its chain and the manifest. A missing
 // manifest returns ErrNoManifest.
 func Verify(dir string) (*Result, error) {
-	m, err := Read(dir)
+	res, _, err := verify(dir, false)
+	return res, err
+}
+
+// VerifyDeferred is Verify that leaves the files a comparison reads anyway
+// to that reading: the records and the public bodies (whose manifest entry
+// is their own name, and whose content snapshot.Set.Body checks against
+// it). It returns them with their manifest SHA-256; the caller checks
+// them with CheckDeferred, from what it read and hashed (snapshot.Set
+// with HashReads), before it uses any result.
+func VerifyDeferred(dir string) (*Result, map[string]string, error) { return verify(dir, true) }
+
+// CheckDeferred checks the files VerifyDeferred left: the SHA-256 known
+// from reading them, else of the file, against the manifest. It returns
+// the slash paths of those that differ.
+func CheckDeferred(dir string, deferred map[string]string, known func(string) (string, bool)) ([]string, error) {
+	got := map[string]string{}
+	var rels []string
+	for rel := range deferred {
+		if sum, ok := known(rel); ok {
+			got[rel] = sum
+		} else {
+			rels = append(rels, rel)
+		}
+	}
+	sums, err := sumFiles(dir, rels)
 	if err != nil {
 		return nil, err
 	}
-	sums, err := Sums(dir)
+	maps.Copy(got, sums)
+	var bad []string
+	for rel, want := range deferred {
+		if got[rel] != want {
+			bad = append(bad, rel)
+		}
+	}
+	sort.Strings(bad)
+	return bad, nil
+}
+
+func verify(dir string, deferRead bool) (*Result, map[string]string, error) {
+	m, err := Read(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	rels, err := files(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var deferred map[string]string
+	var hashed []string
+	for _, rel := range rels {
+		want, listed := m.Files[rel]
+		name, body := strings.CutPrefix(rel, "bodies/")
+		if deferRead && listed && (body && want == name || strings.HasPrefix(rel, "responses/")) {
+			if deferred == nil {
+				deferred = map[string]string{}
+			}
+			deferred[rel] = want
+			continue
+		}
+		hashed = append(hashed, rel)
+	}
+	sums, err := sumFiles(dir, hashed)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rel, want := range deferred {
+		sums[rel] = want // checked as they are read, or by CheckDeferred
 	}
 	res := &Result{Files: len(m.Files)}
 	var changed, crlf, missing, extra []string
@@ -350,7 +452,7 @@ func Verify(dir string) (*Result, error) {
 	lines, err := readLines(dir)
 	if err != nil {
 		res.Problems = append(res.Problems, err.Error())
-		return res, nil
+		return res, deferred, nil
 	}
 	res.Acceptances = len(lines)
 	res.Problems = append(res.Problems, checkChain(lines)...)
@@ -360,7 +462,7 @@ func Verify(dir string) (*Result, error) {
 	case len(lines) > 0 && snapshot.Sum(lines[len(lines)-1]) != m.Log.Last:
 		res.Problems = append(res.Problems, fmt.Sprintf("%s: line %d (the last) differs from the manifest", LogFile, len(lines)))
 	}
-	return res, nil
+	return res, deferred, nil
 }
 
 // crlfOnly reports whether the file at path, with CRLF written as LF, has

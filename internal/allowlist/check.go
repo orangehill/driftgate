@@ -20,6 +20,11 @@ const (
 	CheckDuplicate  = "duplicate"           // the same rule again
 )
 
+// fix says how to mend a shadowed rule; its verbs are the earlier rule's
+// number (1) and kind (2). The first rule that reaches a place decides
+// it, so the later one applies only once it comes first.
+const fix = ": remove %[2]s rule %[1]d, or move this one above it"
+
 // Finding is one problem of a rule.
 type Finding struct {
 	RuleRef
@@ -41,7 +46,7 @@ func (l *List) Lint() []Finding {
 			if !strings.EqualFold(a.Name, r.Name) || !covers(a.Target, a.Request, r.Target, r.Request) {
 				continue
 			}
-			f := Finding{RuleRef: headerRef(i, r), Check: CheckShadowed, Detail: fmt.Sprintf("header rule %d comes first for every request this one applies to, so this one never decides", j+1)}
+			f := Finding{RuleRef: headerRef(i, r), Check: CheckShadowed, Detail: fmt.Sprintf("header rule %[1]d comes first for every request this one applies to, so this one never decides"+fix, j+1, "header")}
 			if a.Target == r.Target && a.Request == r.Request && a.Format == r.Format && a.IgnoreCase == r.IgnoreCase {
 				f.Check, f.Detail = CheckDuplicate, fmt.Sprintf("the same rule as header rule %d", j+1)
 			}
@@ -71,7 +76,7 @@ func (l *List) Lint() []Finding {
 			if !covers(a.Target, a.Request, r.Target, r.Request) || !pathCovers(a.Path, r.Path) {
 				continue
 			}
-			f := Finding{RuleRef: arrayRef(i, r), Check: CheckShadowed, Detail: fmt.Sprintf("array rule %d comes first for every array this one reaches, so this one never decides", j+1)}
+			f := Finding{RuleRef: arrayRef(i, r), Check: CheckShadowed, Detail: fmt.Sprintf("array rule %[1]d comes first for every array this one reaches, so this one never decides"+fix, j+1, "array")}
 			if a.Target == r.Target && a.Request == r.Request && a.Path == r.Path && a.Key == r.Key && a.AnyOrder == r.AnyOrder {
 				f.Check, f.Detail = CheckDuplicate, fmt.Sprintf("the same rule as array rule %d", j+1)
 			}
@@ -152,7 +157,12 @@ func (l *List) shadowed(i int) (Finding, bool) {
 	by := max(format, length)
 	a := &l.Body[by]
 	f := Finding{RuleRef: bodyRef(i, r), Check: CheckShadowed,
-		Detail: fmt.Sprintf("body rule %d decides first everywhere this one applies, so this one never decides", by+1)}
+		Detail: fmt.Sprintf("body rule %[1]d decides first everywhere this one applies, so this one never decides"+fix, by+1, "body")}
+	if r.Parts {
+		// Order does not help: a rule with parts applies only where no
+		// whole-value rule matches, wherever that rule is.
+		f.Detail = fmt.Sprintf("body rule %[1]d decides first everywhere this one applies, so this one never decides: remove or narrow body rule %[1]d, since a rule with parts applies only where no whole-value rule matches", by+1)
+	}
 	if a.Target == r.Target && a.Request == r.Request && a.Path == r.Path && a.Format == r.Format && a.AnyLength == r.AnyLength && a.Parts == r.Parts {
 		f.Check, f.Detail = CheckDuplicate, fmt.Sprintf("the same rule as body rule %d", by+1)
 	}

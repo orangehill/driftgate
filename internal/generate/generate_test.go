@@ -3,8 +3,13 @@ package generate
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/config"
@@ -206,6 +211,86 @@ func TestMethodsAndObserve(t *testing.T) {
 	}
 }
 
+// TestRequestSettings: requests: in the configuration says which
+// generated requests change data and gives their bodies, by route or by
+// ID; the last entry that names a request wins, and empty-body keeps {}.
+func TestRequestSettings(t *testing.T) {
+	yes, no := true, false
+	p := project(t, config.Config{Templates: []string{"ok", "empty-body"}, Params: []config.Param{{Name: "id", Value: "1"}},
+		Requests: []config.RequestSetting{
+			{Match: "GET /items/*", Mutates: &yes},
+			{Match: "POST /search", Mutates: &no, Body: yamlBody(t, "{q: news, page: 1}")},
+			{Match: "post-items", Body: yamlBody(t, "[a]")},
+			{Match: "post-items", Body: yamlBody(t, "{name: x}")},
+		}})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"GET"}, Path: "/items/{id}"},
+		{Methods: []string{"GET", "POST"}, Path: "/items", BodyType: "application/x-www-form-urlencoded", Body: json.RawMessage(`{"name":"sample"}`)},
+		{Methods: []string{"POST"}, Path: "/search", Body: json.RawMessage(`{"q":"sample"}`)},
+	}}
+	inv.Sort()
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range res.Catalog.Requests {
+		m := "-"
+		if r.Mutates != nil {
+			m = fmt.Sprint(*r.Mutates)
+		}
+		got[r.ID] = fmt.Sprintf("%s %s %v", m, string(r.Body), r.Headers)
+	}
+	want := map[string]string{
+		"get-items-id":           "true  []",
+		"get-items":              "-  []",
+		"post-items":             `true {"name":"x"} []`,
+		"post-items-empty-body":  "true {} [[content-type application/x-www-form-urlencoded]]",
+		"post-search":            `false {"q":"news","page":1} []`,
+		"post-search-empty-body": "false {} []",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests:\n got %v\nwant %v", got, want)
+	}
+}
+
+func yamlBody(t *testing.T, text string) *yaml.Node {
+	t.Helper()
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &n); err != nil {
+		t.Fatal(err)
+	}
+	return n.Content[0]
+}
+
+// TestRequestSettingsRefused: mutates: false of a DELETE, PUT or PATCH,
+// or of requests of more than one route, is refused; an entry that names
+// no generated request is listed.
+func TestRequestSettingsRefused(t *testing.T) {
+	no := false
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"POST", "PUT"}, Path: "/items"},
+		{Methods: []string{"POST"}, Path: "/search"},
+		{Methods: []string{"PURGE"}, Path: "/cache"},
+	}}
+	inv.Sort()
+	for _, c := range []struct{ match, err string }{
+		{"PURGE /cache", "mutates: false names a PURGE request"},
+		{"PUT /items", "requests 1 (match \"PUT /items\"): mutates: false names a PUT request"},
+		{"POST *", "requests 1 (match \"POST *\"): mutates: false names requests of 2 routes"},
+		{"POST /search", ""},
+	} {
+		p := project(t, config.Config{Requests: []config.RequestSetting{{Match: c.match, Mutates: &no}, {Match: "GET /none", Mutates: &no}}})
+		res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+		switch {
+		case c.err != "" && (err == nil || !errors.Is(err, ErrSetting) || !strings.Contains(err.Error(), c.err)):
+			t.Errorf("%s: %v", c.match, err)
+		case c.err == "" && (err != nil || !reflect.DeepEqual(res.Unused, []string{`requests 2 (match "GET /none")`})):
+			t.Errorf("%s: %v %+v", c.match, err, res)
+		}
+	}
+}
+
 // TestPerMethod: a hand-written GET does not stop POST of the same route from
 // being generated, and excluding POST does not exclude GET.
 func TestPerMethod(t *testing.T) {
@@ -224,7 +309,7 @@ func TestPerMethod(t *testing.T) {
 	if res.Generated != 1 || res.Catalog.Requests[0].ID != "get-items" {
 		t.Fatalf("with POST excluded: %+v", res.Catalog.Requests)
 	}
-	c := routes.Check(inv, res.Catalog, excl)
+	c := routes.CheckWith(inv, res.Catalog, excl, nil)
 	if !reflect.DeepEqual(c.Covered, []string{"GET /items"}) || c.Excluded["POST /items"] != "x" {
 		t.Fatalf("coverage per method: %+v", c)
 	}
@@ -242,5 +327,175 @@ func TestRequiredQuery(t *testing.T) {
 	}
 	if r := routes.Match(inv, res.Catalog.Requests[0]); r == nil {
 		t.Fatal("a request with a query does not reach its route")
+	}
+}
+
+// TestJSONErrors: json-errors adds an Accept: application/json twin after
+// each error variant, never after the ok request, and the twins do not
+// cover a route.
+func TestJSONErrors(t *testing.T) {
+	p := project(t, config.Config{
+		Templates:  []string{"ok", "not-found", "anonymous", "empty-body", "json-errors"},
+		Identities: map[string]config.Identity{"admin": {Env: "X"}},
+		Generate:   config.Generate{Identity: "admin"},
+		Params:     []config.Param{{Name: "id", Value: "1"}},
+	})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"PUT"}, Path: "/api/items/{id}", Auth: true, Body: json.RawMessage(`{"name":"x"}`), BodyType: "application/json"},
+	}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	got := map[string]catalog.Request{}
+	for _, r := range res.Catalog.Requests {
+		ids, got[r.ID] = append(ids, r.ID), r
+	}
+	want := []string{"put-api-items-id",
+		"put-api-items-id-not-found", "put-api-items-id-not-found-json",
+		"put-api-items-id-anonymous", "put-api-items-id-anonymous-json",
+		"put-api-items-id-empty-body", "put-api-items-id-empty-body-json"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ids\n got %v\nwant %v", ids, want)
+	}
+	j := got["put-api-items-id-anonymous-json"]
+	if j.Identity != "" || j.Source.Template != "json-errors" || string(j.Body) != `{"name":"x"}` ||
+		!reflect.DeepEqual(j.Headers, [][2]string{{"accept", "application/json"}, {"content-type", "application/json"}}) {
+		t.Errorf("anonymous json twin: %+v", j)
+	}
+	if got["put-api-items-id-not-found"].Headers[0][0] == "accept" {
+		t.Error("the error variant itself changed")
+	}
+	// A route that takes files: the empty-body twin sends an empty form too.
+	inv.Routes[0].Files = []routes.FileField{{Field: "photo", Kind: "png"}}
+	withFiles, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range withFiles.Catalog.Requests {
+		if r.Multipart == nil || strings.Contains(r.ID, "empty-body") != (len(r.Multipart.Files) == 0) {
+			t.Errorf("multipart of %s: %+v", r.ID, r.Multipart)
+		}
+	}
+	// Only the ok request covers the route.
+	res.Catalog.Requests = res.Catalog.Requests[1:]
+	if c := routes.CheckWith(inv, res.Catalog, &routes.Exclusions{}, nil); len(c.Covered) != 0 {
+		t.Errorf("an error variant covers: %+v", c)
+	}
+}
+
+// TestJSONErrorsWithoutValue: a route without a parameter value skips the
+// templates that need one, but not json-errors, whose twins of not-found
+// and invalid-param are still made.
+func TestJSONErrorsWithoutValue(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "invalid-param", "json", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped, ids []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template)
+	}
+	for _, r := range res.Catalog.Requests {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"ok", "json"}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped %v, want %v", skipped, want)
+	}
+	if want := []string{"get-api-items-id-not-found", "get-api-items-id-not-found-json", "get-api-items-id-invalid-param", "get-api-items-id-invalid-param-json"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids\n got %v\nwant %v", ids, want)
+	}
+}
+
+// TestJSONErrorsWithoutTwins: without a parameter value and without
+// not-found or invalid-param, json-errors makes nothing, and is listed as
+// skipped, with the reason.
+func TestJSONErrorsWithoutTwins(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "json-errors"}})
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/items/{id}"}}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Template+": "+s.Reason)
+	}
+	if want := []string{"ok: no value for {id}", "json-errors: no value for {id}"}; !reflect.DeepEqual(skipped, want) || len(res.Catalog.Requests) != 0 {
+		t.Errorf("skipped %v, want %v; requests %v", skipped, want, res.Catalog.Requests)
+	}
+}
+
+// TestJSONErrorsNothingToFollow: a route where no error template makes a
+// request (no parameter, as GET /api/news with init's templates) lists
+// nothing as skipped; json-errors without any error template is noted once,
+// for the configuration.
+func TestJSONErrorsNothingToFollow(t *testing.T) {
+	inv := &routes.Inventory{Routes: []routes.Route{{Methods: []string{"GET"}, Path: "/api/news"}, {Methods: []string{"GET"}, Path: "/api/items"}}}
+	for _, c := range []struct {
+		templates []string
+		notes     int
+	}{{[]string{"ok", "not-found", "json", "json-errors"}, 0}, {[]string{"ok", "json-errors"}, 1}} {
+		p := project(t, config.Config{Templates: c.templates})
+		res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: &catalog.Catalog{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Skipped) != 0 || len(res.Notes) != c.notes || c.notes == 1 && !strings.Contains(res.Notes[0], "json-errors repeats the requests of not-found, invalid-param, anonymous, empty-body") {
+			t.Errorf("%v: skipped %+v, notes %q", c.templates, res.Skipped, res.Notes)
+		}
+	}
+}
+
+// TestReplacedByHand: a route method an entry written by hand reaches gets
+// no generated requests, and the result names them with the entries that
+// take their place; the IDs and the rest of the catalog are as without
+// the note. --all generates them and replaces nothing.
+func TestReplacedByHand(t *testing.T) {
+	p := project(t, config.Config{Templates: []string{"ok", "not-found", "json", "json-errors"},
+		Params:   []config.Param{{Name: "id", Value: "1"}},
+		Requests: []config.RequestSetting{{Match: "GET /limited", Mutates: new(bool)}}})
+	inv := &routes.Inventory{Routes: []routes.Route{
+		{Methods: []string{"GET"}, Path: "/limited"},
+		{Methods: []string{"GET"}, Path: "/items/{id}"},
+		{Methods: []string{"GET"}, Path: "/nothing/{slug}"}, // no value: generate makes only not-found…
+	}}
+	inv.Sort()
+	manual := &catalog.Catalog{Requests: []catalog.Request{
+		{ID: "limited-throttle", Method: "GET", Path: "/limited", Repeat: 6, Storage: "public"},
+		{ID: "limited-throttle-json", Method: "GET", Path: "/limited", Repeat: 6, Storage: "public"},
+		{ID: "item-by-hand", Method: "GET", Path: "/items/{id}", Params: map[string]string{"id": "2"}, Storage: "public"},
+	}}
+	res, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: manual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Replaced{
+		{Route: "GET /items/{id}", ByHand: []string{"item-by-hand"}, Generated: []string{"get-items-id", "get-items-id-not-found", "get-items-id-not-found-json", "get-items-id-json"}},
+		{Route: "GET /limited", ByHand: []string{"limited-throttle", "limited-throttle-json"}, Generated: []string{"get-limited", "get-limited-json"}},
+	}
+	if !reflect.DeepEqual(res.Replaced, want) {
+		t.Errorf("replaced\n got %+v\nwant %+v", res.Replaced, want)
+	}
+	var ids []string
+	for _, r := range res.Catalog.Requests {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"limited-throttle", "limited-throttle-json", "item-by-hand", "get-nothing-slug-not-found", "get-nothing-slug-not-found-json"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("catalog %v, want %v", ids, want)
+	}
+	// The setting that names the replaced route only is still reported as unused.
+	if len(res.Unused) != 1 {
+		t.Errorf("unused %v", res.Unused)
+	}
+	all, err := Run(context.Background(), Options{Project: p, Inventory: inv, Exclusions: &routes.Exclusions{}, Existing: manual, All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Replaced) != 0 || all.Generated != 8 {
+		t.Errorf("--all: replaced %v, generated %d", all.Replaced, all.Generated)
 	}
 }

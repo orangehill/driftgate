@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
 
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/dbdsn"
@@ -26,11 +27,17 @@ import (
 // large database. PostgreSQL cannot read across databases, so a restore always
 // covers the whole database (Partial is false).
 type Postgres struct {
-	o     Options
+	o Options
+	// g matches table names as written, with and without the schema:
+	// PostgreSQL compares names case-sensitively once unquoted.
+	g     *tableGlobs
 	admin *sql.DB // the database named in the DSN, for CREATE and DROP DATABASE
 	// dropping ends with the drop of the database the last copy replaced
 	// (copyDatabase); nil when there is none to wait for.
 	dropping chan error
+	// run runs the queries of a fingerprint: dbx.PostgresPipeline; tests
+	// put the same queries sent one by one in its place.
+	run func(context.Context, *sql.Conn, []dbx.PostgresStatement) []dbx.PostgresResult
 }
 
 // NewPostgres connects to the server. The DSN is a postgres:// URL; its
@@ -50,7 +57,7 @@ func NewPostgres(o Options) (*Postgres, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Postgres{o: o, admin: admin}, nil
+	return &Postgres{o: o, g: newTableGlobs(o, nil), admin: admin, run: dbx.PostgresPipeline}, nil
 }
 
 func (p *Postgres) Name() string  { return p.o.Name }
@@ -75,7 +82,249 @@ func (p *Postgres) open(db string) (*sql.DB, error) {
 
 func (p *Postgres) excludedQualified(name string) bool {
 	_, table, _ := strings.Cut(name, ".")
-	return p.o.excluded(name) || p.o.excluded(table)
+	return p.g.excluded(name) || p.g.excluded(table)
+}
+
+// restoreEmptyQualified is excludedQualified for restore_empty.
+func (p *Postgres) restoreEmptyQualified(name string) bool {
+	_, table, _ := strings.Cut(name, ".")
+	return p.g.restoreEmpty(name) || p.g.restoreEmpty(table)
+}
+
+// emptyTables are the restore_empty tables of the database d is
+// connected to, with the sequences they own (theirs: sequence → table).
+func (p *Postgres) emptyTables(ctx context.Context, d *sql.DB) (tables []string, theirs map[string]string, err error) {
+	theirs = map[string]string{}
+	if len(p.g.empty) == 0 {
+		return nil, theirs, nil
+	}
+	all, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname")+` ORDER BY 1`)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, t := range all {
+		if p.restoreEmptyQualified(t) && !p.excludedQualified(t) {
+			tables = append(tables, t)
+		}
+	}
+	rows, err := d.QueryContext(ctx, `SELECT sn.nspname || '.' || s.relname, tn.nspname || '.' || t.relname
+		   FROM pg_depend d JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S' JOIN pg_namespace sn ON sn.oid = s.relnamespace
+		   JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace
+		  WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq, table string
+		if err := rows.Scan(&seq, &table); err != nil {
+			return nil, nil, err
+		}
+		if slices.Contains(tables, table) {
+			theirs[seq] = table
+		}
+	}
+	return tables, theirs, rows.Err()
+}
+
+// pgLockWait is how long the in-place emptying of restore_empty tables
+// waits for a lock a session of the application holds (a transaction
+// left open after it read a cache): then the whole database is copied,
+// which ends those sessions.
+var pgLockWait = 2 * time.Second
+
+// errLocked is a TRUNCATE that waited longer than pgLockWait.
+var errLocked = errors.New("locked")
+
+// truncate empties tables of the database d is connected to, their
+// sequences starting again (TRUNCATE … RESTART IDENTITY: no row trigger
+// fires, and a table a foreign key refers to is refused), in one
+// transaction that waits at most pgLockWait for a lock (errLocked).
+func truncate(ctx context.Context, d *sql.DB, tables []string) error {
+	if len(tables) == 0 {
+		return nil
+	}
+	q := make([]string, len(tables))
+	for i, t := range tables {
+		schema, name, _ := strings.Cut(t, ".")
+		q[i] = qp(schema) + "." + qp(name)
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", pgLockWait.Milliseconds())); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "TRUNCATE "+strings.Join(q, ", ")+" RESTART IDENTITY"); err != nil {
+		if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "55P03" { // lock_not_available
+			return fmt.Errorf("%w: %v", errLocked, err)
+		}
+		return err
+	}
+	return tx.Commit()
+}
+
+// unemptiable says why TRUNCATE cannot be what empties tables, "" when it
+// can: a TRUNCATE trigger of one of them would run the application's
+// logic (and may write a tracked table), and a table that inherits from
+// one, neither restore_empty nor excluded, would lose its rows with it.
+func (p *Postgres) unemptiable(ctx context.Context, d *sql.DB, tables []string) (string, error) {
+	var trig, table string
+	err := d.QueryRowContext(ctx, `SELECT n.nspname || '.' || c.relname, t.tgname
+		   FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE NOT t.tgisinternal AND (t.tgtype & 32) <> 0 AND n.nspname || '.' || c.relname = ANY($1) ORDER BY 1, 2 LIMIT 1`, tables).Scan(&table, &trig)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("table %s has a TRUNCATE trigger (%s)", table, trig), nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", err
+	}
+	rows, err := d.QueryContext(ctx, `SELECT pn.nspname || '.' || pc.relname, cn.nspname || '.' || cc.relname
+		   FROM pg_inherits i JOIN pg_class pc ON pc.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+		   JOIN pg_class cc ON cc.oid = i.inhrelid JOIN pg_namespace cn ON cn.oid = cc.relnamespace
+		  WHERE pn.nspname || '.' || pc.relname = ANY($1) ORDER BY 1, 2`, tables)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var parent, child string
+		if err := rows.Scan(&parent, &child); err != nil {
+			return "", err
+		}
+		if !slices.Contains(tables, child) && !p.excludedQualified(child) {
+			return fmt.Sprintf("table %s inherits from %s and is neither restore_empty nor excluded", child, parent), nil
+		}
+	}
+	return "", rows.Err()
+}
+
+// restoreEmpty restores items that are all restore_empty tables and the
+// sequences they own without a copy of the whole database: it empties
+// them in the working database, which is what the pristine copy holds of
+// them, and checks them against it. ok is false when items are other
+// ones, or a table cannot be emptied or then still differs (its
+// definition changed): the whole database is copied then.
+func (p *Postgres) restoreEmpty(ctx context.Context, items []string) (ok bool, err error) {
+	d, err := p.open(p.o.Working)
+	if err != nil {
+		return false, err
+	}
+	defer d.Close()
+	tables, theirs, err := p.emptyTables(ctx, d)
+	if err != nil {
+		return false, err
+	}
+	var empty []string
+	for _, it := range items {
+		kind, name, _ := strings.Cut(it, ":")
+		switch {
+		case kind == "table" && slices.Contains(tables, name):
+			empty = append(empty, name)
+		case kind == "sequence" && theirs[name] != "":
+			empty = append(empty, theirs[name])
+		default:
+			return false, nil
+		}
+	}
+	slices.Sort(empty)
+	empty = slices.Compact(empty)
+	if why, err := p.unemptiable(ctx, d, empty); err != nil || why != "" {
+		if err == nil {
+			fmt.Fprintf(p.o.Log, "state %s: restore_empty tables not emptied in place (%s): the whole database is copied\n", p.o.Name, why)
+		}
+		return false, err
+	}
+	if err := truncate(ctx, d, empty); err != nil {
+		fmt.Fprintf(p.o.Log, "state %s: restore_empty tables not emptied (%v): the whole database is copied\n", p.o.Name, err)
+		return false, nil
+	}
+	got, err := p.fingerprint(ctx, p.o.Working, items, FingerprintFormat, fpRestoreOnly)
+	if err != nil {
+		return false, err
+	}
+	want, err := p.RestoreOnlyFingerprint(ctx, true)
+	if err != nil {
+		return false, err
+	}
+	return len(Diff(got, want.Subset(items))) == 0, nil
+}
+
+// restoreOnlyQualified is excludedQualified for restore_only.
+func (p *Postgres) restoreOnlyQualified(name string) bool {
+	_, table, _ := strings.Cut(name, ".")
+	return p.g.restoreOnly(name) || p.g.restoreOnly(table)
+}
+
+// pgOwnedSequences lists the sequences of serial and identity columns with
+// their table.
+var pgOwnedSequences = `SELECT sn.nspname || '.' || s.relname, tn.nspname || '.' || t.relname
+	   FROM pg_depend d JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S' JOIN pg_namespace sn ON sn.oid = s.relnamespace
+	   JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace
+	  WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') AND ` + schemaFilter("sn.nspname")
+
+// ownedSequences are the sequences of serial and identity columns of
+// restore_only tables, read at i of s (pgOwnedSequences; -1: there are no
+// restore_only tables): they move with every row the application adds, so
+// they are restore_only too.
+func (p *Postgres) ownedSequences(s *pgStage, i int) (map[string]bool, error) {
+	out := map[string]bool{}
+	if i < 0 {
+		return out, nil
+	}
+	rows, err := s.rows(i, -1)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if p.restoreOnlyQualified(r[1]) && !p.excludedQualified(r[1]) {
+			out[r[0]] = true
+		}
+	}
+	return out, nil
+}
+
+// RestoreOnlyFingerprint hashes the restore_only tables of the working
+// database, or of the pristine one, with the sequences they own
+// (RestoreOnly).
+func (p *Postgres) RestoreOnlyFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return orEmpty(p.read(ctx, pristine, nil, FingerprintFormat, fpRestoreOnly))
+}
+
+// read fingerprints items of the working database, or of the pristine one
+// while it accepts connections, as mode reads them. A working database
+// that does not exist has none: nil.
+func (p *Postgres) read(ctx context.Context, pristine bool, items []string, format int, mode fpMode) (Fingerprint, error) {
+	if pristine {
+		if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS true"); err != nil {
+			return nil, fmt.Errorf("pristine database %s: %w (run driftgate seed)", p.o.Pristine, err)
+		}
+		defer p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(p.o.Pristine)+" ALLOW_CONNECTIONS false")
+		return p.fingerprint(ctx, p.o.Pristine, items, format, mode)
+	}
+	f, err := p.fingerprint(ctx, p.o.Working, items, format, mode)
+	if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "3D000" { // invalid_catalog_name
+		return nil, nil
+	}
+	return f, err
+}
+
+// SchemaFingerprint hashes the definitions of the working database, or of
+// the pristine one (Schemer); nil for a working database that does not
+// exist.
+func (p *Postgres) SchemaFingerprint(ctx context.Context, pristine bool) (Fingerprint, error) {
+	return p.read(ctx, pristine, nil, FingerprintFormat, fpSchema)
+}
+
+// orEmpty gives a working database that does not exist no items, so a
+// restore brings back every item of the pristine copy.
+func orEmpty(f Fingerprint, err error) (Fingerprint, error) {
+	if f == nil && err == nil {
+		f = Fingerprint{}
+	}
+	return f, err
 }
 
 // Fingerprint hashes the working database. A working database that does not
@@ -92,11 +341,7 @@ func (p *Postgres) Fingerprint(ctx context.Context, items []string) (Fingerprint
 // view's, only the last value of a sequence, and no functions, types,
 // schemas or materialized views.
 func (p *Postgres) FingerprintAs(ctx context.Context, format int, items []string) (Fingerprint, error) {
-	f, err := p.fingerprint(ctx, p.o.Working, items, format)
-	if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "3D000" { // invalid_catalog_name
-		return Fingerprint{}, nil
-	}
-	return f, err
+	return orEmpty(p.read(ctx, false, items, format, fpRows))
 }
 
 // schemaFilter keeps the schemas of the database itself
@@ -104,23 +349,226 @@ func (p *Postgres) FingerprintAs(ctx context.Context, format int, items []string
 // their rows can change, and a restore copies the whole database.
 func schemaFilter(col string) string { return dbx.PostgresUserSchema(col) }
 
-func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int) (Fingerprint, error) {
+// pgStage is queries of a fingerprint sent together, in one round trip
+// (Postgres.run); add gives the index a query's result is read at.
+type pgStage struct {
+	stmts []dbx.PostgresStatement
+	res   []dbx.PostgresResult
+}
+
+func (s *pgStage) add(query string, args ...any) int {
+	s.stmts = append(s.stmts, dbx.PostgresStatement{SQL: query, Args: args})
+	return len(s.stmts) - 1
+}
+
+func (s *pgStage) addAll(queries []string, args ...any) []int {
+	out := make([]int, len(queries))
+	for i, q := range queries {
+		out[i] = s.add(q, args...)
+	}
+	return out
+}
+
+// rows are the rows of the query at i, or its error. A NULL is an error
+// but in column null (-1: none), where it is "": read as "", it would make
+// a fingerprint that passes where it should not.
+func (s *pgStage) rows(i, null int) ([][]string, error) {
+	r := s.res[i]
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	out := make([][]string, len(r.Rows))
+	for j, row := range r.Rows {
+		out[j] = make([]string, len(row))
+		for k, v := range row {
+			if !v.Valid && k != null {
+				return nil, fmt.Errorf("NULL in column %d of row %d", k+1, j+1)
+			}
+			out[j][k] = v.String
+		}
+	}
+	return out, nil
+}
+
+// pgRowsQuery reads the rows of a table or materialized view: their number
+// and a hash of them.
+func pgRowsQuery(rel string) string {
+	schema, name, _ := strings.Cut(rel, ".")
+	return `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(name) + " AS r"
+}
+
+// rowsOf is the result of the pgRowsQuery at i of s, the number of rows and
+// their hash, or its error, which names rel.
+func rowsOf(s *pgStage, i int, rel string) (string, error) {
+	rows, err := s.rows(i, -1)
+	if err == nil && len(rows) != 1 {
+		err = fmt.Errorf("%d rows", len(rows))
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", rel, err)
+	}
+	return rows[0][0] + "\x00" + rows[0][1], nil
+}
+
+// fingerprint hashes items (nil: all) of db; with fpRestoreOnly only the
+// restore_only tables and their sequences, which it otherwise leaves out.
+// It reads db in two round trips: the catalog (one), then the rows of the
+// tables and materialized views and the values of sequences not called
+// yet, which the catalog names (two). Each query runs on its own, as it
+// would sent alone. An error is returned where the query's result is read:
+// the catalog's first, then those of the second round trip.
+func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, format int, mode fpMode) (Fingerprint, error) {
 	d, err := p.open(db)
 	if err != nil {
 		return nil, err
 	}
 	defer d.Close()
+	c, err := d.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
 	want := func(item string) bool { return items == nil || contains(items, item) }
+	keepExcluded := mode == fpSchema // excluded objects count by their definition
+	var one, two pgStage
+	tablesAt := one.add(`SELECT schemaname || '.' || tablename FROM pg_tables WHERE ` + schemaFilter("schemaname") + ` ORDER BY 1`)
+	// The restore_only tables are read on their own at every restore: the
+	// definitions are then read of them only, by their names, so after the
+	// table list.
+	var defsAt []int
+	if mode != fpRestoreOnly {
+		defsAt = one.addAll(pgDefinitions(format, mode, false))
+	}
+	ownedAt, viewsAt := -1, -1
+	if len(p.g.only) > 0 {
+		ownedAt = one.add(pgOwnedSequences)
+	}
+	if mode != fpRestoreOnly {
+		viewsAt = one.add(`SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE ` + schemaFilter("schemaname"))
+	}
+	seqAt := one.add(pgSequences(format, mode))
+	var itemsAt []int
+	if format >= 2 && mode != fpRestoreOnly {
+		itemsAt = one.addAll(pgSchemaItems(mode))
+	}
+	one.res = p.run(ctx, c, one.stmts)
 
+	rows, err := one.rows(tablesAt, -1)
+	if err != nil {
+		return nil, err
+	}
+	tables := make([]string, len(rows))
+	for i, r := range rows {
+		tables[i] = r[0]
+	}
 	// Definitions: columns, constraints, indexes and triggers per table.
-	// What only some tables or columns have is added only where they have
-	// it, so the hash of any other table stays what it was (format 1).
 	defs := map[string]*strings.Builder{}
-	add := func(rel, text string) {
-		if defs[rel] == nil {
-			defs[rel] = &strings.Builder{}
+	if mode == fpRestoreOnly {
+		var rels []string
+		for _, t := range tables {
+			if p.restoreOnlyQualified(t) && !p.excludedQualified(t) {
+				rels = append(rels, t)
+			}
 		}
-		defs[rel].WriteString(text + "\n")
+		if len(rels) > 0 {
+			defsAt = two.addAll(pgDefinitions(format, mode, true), rels)
+		}
+	} else if err := addDefinitions(&one, defsAt, defs); err != nil {
+		return nil, err
+	}
+	var hashed []string // the tables the fingerprint has
+	counts := map[string]int{}
+	for _, t := range tables {
+		if p.excludedQualified(t) {
+			if p.restoreOnlyQualified(t) {
+				return nil, p.o.bothErr(t)
+			}
+			if !keepExcluded {
+				continue
+			}
+		}
+		if !mode.takes(p.restoreOnlyQualified(t)) || !want("table:"+t) {
+			continue
+		}
+		hashed = append(hashed, t)
+		if mode.rows() {
+			counts[t] = two.add(pgRowsQuery(t))
+		}
+	}
+	owned, err := p.ownedSequences(&one, ownedAt)
+	if err != nil {
+		return nil, err
+	}
+	f := Fingerprint{}
+	if mode != fpRestoreOnly {
+		if err := p.views(&one, viewsAt, f, want, keepExcluded, defs); err != nil {
+			return nil, err
+		}
+	}
+	unused, err := p.sequences(&one, seqAt, f, func(item string) bool {
+		if mode == fpRestoreOnly {
+			return want(item) && owned[strings.TrimPrefix(item, "sequence:")]
+		}
+		return want(item) && (mode == fpSchema || !owned[strings.TrimPrefix(item, "sequence:")])
+	}, keepExcluded)
+	if err != nil {
+		return nil, err
+	}
+	unusedAt := -1
+	if len(unused) > 0 {
+		unusedAt = two.add(strings.Join(unused, " UNION ALL "))
+	}
+	var itemDefs map[string]string
+	matviews := map[string]int{} // populated, by item
+	if itemsAt != nil {
+		if itemDefs, err = p.schemaItems(&one, itemsAt, want, keepExcluded); err != nil {
+			return nil, err
+		}
+		for _, item := range slices.Sorted(maps.Keys(itemDefs)) {
+			if name, ok := strings.CutPrefix(item, "matview:"); ok && mode.rows() && strings.HasSuffix(itemDefs[item], " true") {
+				matviews[item] = two.add(pgRowsQuery(name))
+			}
+		}
+	}
+	two.res = p.run(ctx, c, two.stmts)
+
+	if mode == fpRestoreOnly {
+		if err := addDefinitions(&two, defsAt, defs); err != nil {
+			return nil, err
+		}
+	}
+	for _, t := range hashed {
+		def := ""
+		if defs[t] != nil {
+			def = defs[t].String()
+		}
+		if mode.rows() {
+			sum, err := rowsOf(&two, counts[t], t)
+			if err != nil {
+				return nil, err
+			}
+			def += "\x00" + sum
+		}
+		f["table:"+t] = hash([]byte(def))
+	}
+	if err := nextValues(&two, unusedAt, f); err != nil {
+		return nil, err
+	}
+	if err := hashSchemaItems(&two, f, itemDefs, matviews, mode, defs); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// pgDefinitions are the queries of the definitions of tables (and of the
+// rules, privileges and comments of views): per relation, a line each.
+// What only some tables or columns have is added only where they have it,
+// so the hash of any other table stays what it was (format 1). With only,
+// they read the tables named by $1 only.
+func pgDefinitions(format int, mode fpMode, only bool) []string {
+	where := func(string) string { return "" }
+	if only {
+		where = func(rel string) string { return " AND " + rel + " = ANY($1)" }
 	}
 	// A column's collation (format_type leaves it out), privileges and
 	// comment, where it has them (format 2).
@@ -139,123 +587,105 @@ func (p *Postgres) fingerprint(ctx context.Context, db string, items []string, f
 		   LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> ty.typcollation
 		   LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
 		   LEFT JOIN pg_description ds ON ds.objoid = a.attrelid AND ds.classoid = 'pg_class'::regclass AND ds.objsubid = a.attnum
-		  WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND ` + schemaFilter("n.nspname") + `
+		  WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + `
 		  ORDER BY 1, a.attnum`,
 		`SELECT n.nspname || '.' || c.relname, 'constraint ' || con.conname || ' ' || pg_get_constraintdef(con.oid)
 		   FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE ` + schemaFilter("n.nspname") + ` ORDER BY 1, 2`,
-		`SELECT schemaname || '.' || tablename, 'index ' || indexdef FROM pg_indexes WHERE ` + schemaFilter("schemaname") + ` ORDER BY 1, 2`,
+		  WHERE ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
+		`SELECT schemaname || '.' || tablename, 'index ' || indexdef FROM pg_indexes WHERE ` + schemaFilter("schemaname") + where("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
 		`SELECT n.nspname || '.' || c.relname, 'trigger ' || pg_get_triggerdef(t.oid)
 		   FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE NOT t.tgisinternal AND ` + schemaFilter("n.nspname") + ` ORDER BY 1, 2`,
+		  WHERE NOT t.tgisinternal AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 		// Row security and its policies, only where a table has them, so
 		// the hash of any other table stays what it was.
 		`SELECT n.nspname || '.' || c.relname, 'row security ' || c.relrowsecurity::text || ' ' || c.relforcerowsecurity::text
 		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND ` + schemaFilter("n.nspname") + ` ORDER BY 1, 2`,
+		  WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 		`SELECT schemaname || '.' || tablename, 'policy ' || policyname || ' ' || permissive || ' ' || roles::text || ' ' || cmd || ' ' ||
 		        coalesce(qual, '') || ' ' || coalesce(with_check, '')
-		   FROM pg_policies WHERE ` + schemaFilter("schemaname") + ` ORDER BY 1, 2`,
+		   FROM pg_policies WHERE ` + schemaFilter("schemaname") + where("schemaname || '.' || tablename") + ` ORDER BY 1, 2`,
 		// Rules (CREATE RULE) of tables and views (a view's own rule is its
 		// definition); and of tables and views, UNLOGGED, the replica
 		// identity, privileges and the comment where they are not the
 		// default. One query: most databases have none of them.
 		`SELECT n.nspname || '.' || c.relname, 'rule ' || pg_get_ruledef(r.oid)
 		   FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE r.rulename <> '_RETURN' AND ` + schemaFilter("n.nspname") + `
+		  WHERE r.rulename <> '_RETURN' AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + `
 		 UNION ALL
 		 SELECT n.nspname || '.' || c.relname, 'relation ' || c.relpersistence::text || ' ' || c.relreplident::text ||
 		        coalesce(' acl ' || c.relacl::text, '') || coalesce(' comment ' || quote_literal(ds.description), '')
 		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		   LEFT JOIN pg_description ds ON ds.objoid = c.oid AND ds.classoid = 'pg_class'::regclass AND ds.objsubid = 0
 		  WHERE c.relkind IN ('r', 'p', 'v') AND (c.relpersistence <> 'p' OR (c.relkind <> 'v' AND c.relreplident <> 'd') OR c.relacl IS NOT NULL OR ds.description IS NOT NULL)
-		    AND ` + schemaFilter("n.nspname") + ` ORDER BY 1, 2`,
+		    AND ` + schemaFilter("n.nspname") + where("n.nspname || '.' || c.relname") + ` ORDER BY 1, 2`,
 	}
 	if format < 2 {
 		queries = queries[:4] // no row security, policies, rules, privileges…
 	}
-	for _, q := range queries {
-		rows, err := d.QueryContext(ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var rel, text string
-			if err := rows.Scan(&rel, &text); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			add(rel, text)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
+	if mode == fpSchema {
+		// What a migration changes that the fingerprint leaves to the rows:
+		// a trigger disabled, a partition's bounds, storage options (of a
+		// materialized view too, whose definition schemaItems adds).
+		queries = append(queries,
+			`SELECT n.nspname || '.' || c.relname, 'trigger ' || t.tgname || ' enabled ' || t.tgenabled::text
+			   FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE NOT t.tgisinternal AND t.tgenabled <> 'O' AND `+schemaFilter("n.nspname")+` ORDER BY 1, 2`,
+			`SELECT n.nspname || '.' || c.relname, coalesce('partition ' || pg_get_expr(c.relpartbound, c.oid), '') || coalesce(' options ' || array_to_string(c.reloptions, ','), '')
+			   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE c.relkind IN ('r', 'p', 'v', 'm') AND (c.relispartition OR c.reloptions IS NOT NULL) AND `+schemaFilter("n.nspname")+` ORDER BY 1, 2`)
 	}
+	return queries
+}
 
-	f := Fingerprint{}
-	tables, err := names(ctx, d, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE `+schemaFilter("schemaname")+` ORDER BY 1`)
+// addDefinitions adds the lines the pgDefinitions queries at at of s read to
+// the definition of their relation.
+func addDefinitions(s *pgStage, at []int, defs map[string]*strings.Builder) error {
+	for _, i := range at {
+		rows, err := s.rows(i, -1)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if defs[r[0]] == nil {
+				defs[r[0]] = &strings.Builder{}
+			}
+			defs[r[0]].WriteString(r[1] + "\n")
+		}
+	}
+	return nil
+}
+
+// views hashes the views, read at i of s, by their definition with their
+// rules, privileges and comment (defs).
+func (p *Postgres) views(s *pgStage, i int, f Fingerprint, want func(string) bool, keepExcluded bool, defs map[string]*strings.Builder) error {
+	rows, err := s.rows(i, -1)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	for _, t := range tables {
-		if p.excludedQualified(t) || !want("table:"+t) {
-			continue
-		}
-		schema, name, _ := strings.Cut(t, ".")
-		var count int64
-		var sum string
-		q := `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(name) + " AS r"
-		if err := d.QueryRowContext(ctx, q).Scan(&count, &sum); err != nil {
-			return nil, fmt.Errorf("%s: %w", t, err)
-		}
-		def := ""
-		if defs[t] != nil {
-			def = defs[t].String()
-		}
-		f["table:"+t] = hash([]byte(fmt.Sprintf("%s\x00%d\x00%s", def, count, sum)))
-	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || viewname, definition FROM pg_views WHERE `+schemaFilter("schemaname"))
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var v, def string
-		if err := rows.Scan(&v, &def); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if !p.excludedQualified(v) && want("view:"+v) {
+	for _, r := range rows {
+		v, def := r[0], r[1]
+		if (keepExcluded || !p.excludedQualified(v)) && want("view:"+v) {
 			if defs[v] != nil {
 				def += "\x00" + defs[v].String()
 			}
 			f["view:"+v] = hash([]byte(def))
 		}
 	}
-	rows.Close()
-	if err := p.sequences(ctx, d, f, want, format); err != nil {
-		return nil, err
-	}
-	if format < 2 {
-		return f, nil
-	}
-	if err := p.schemaItems(ctx, d, f, want); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return nil
 }
 
-// sequences hashes the sequences: the last value, or "not called", and,
-// where they are not those CREATE SEQUENCE gives a sequence of its type,
-// its parameters (ALTER SEQUENCE … INCREMENT, MAXVALUE…) and the value
-// setval(…, false) left for the first nextval. (Its type alone is left
-// out: a sequence of serial and one of CREATE SEQUENCE differ in it, and
-// their hash stays that of format 1.) pg_sequences shows no
-// value for a sequence not called yet; that value is read from the
-// sequence itself, in one query for all of them.
-// Format 1 has the last value only.
-func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool, format int) error {
-	params, own := "''", "NULL"
+// pgSequences is the query of the sequences: the last value, or "not
+// called", and, where they are not those CREATE SEQUENCE gives a sequence
+// of its type, its parameters (ALTER SEQUENCE … INCREMENT, MAXVALUE…) and
+// the value setval(…, false) left for the first nextval. (Its type alone
+// is left out: a sequence of serial and one of CREATE SEQUENCE differ in
+// it, and their hash stays that of format 1.) pg_sequences shows no value
+// for a sequence not called yet; the third column is then a SELECT of
+// that value from the sequence itself (NULL for the others), all of them
+// run as one query (nextValues). Format 1 has the last value only; fpSchema
+// the parameters only, of excluded sequences too.
+func pgSequences(format int, mode fpMode) string {
+	value, params, own := "coalesce(last_value::text, 'not called') || ", "''", "NULL"
 	if format >= 2 {
 		params = `CASE WHEN start_value = 1 AND min_value = 1 AND increment_by = 1 AND NOT cycle AND cache_size = 1 AND
 		                 max_value = CASE data_type WHEN 'smallint'::regtype THEN 32767 WHEN 'integer'::regtype THEN 2147483647 ELSE 9223372036854775807 END
@@ -264,48 +694,44 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 		own = `CASE WHEN last_value IS NULL THEN format('SELECT %L, %s FROM %I.%I WHERE last_value <> %s',
 		            schemaname || '.' || sequencename, 'last_value', schemaname, sequencename, start_value) END`
 	}
-	rows, err := d.QueryContext(ctx, `SELECT schemaname || '.' || sequencename, coalesce(last_value::text, 'not called') || `+params+`, `+own+`
-		  FROM pg_sequences WHERE `+schemaFilter("schemaname"))
-	if err != nil {
-		return err
+	if !mode.rows() {
+		value, own = "", "NULL"
 	}
-	var unused []string // not called yet: SELECTs of their own value
-	for rows.Next() {
-		var s, v string
-		var q sql.NullString
-		if err := rows.Scan(&s, &v, &q); err != nil {
-			rows.Close()
-			return err
-		}
-		if p.excludedQualified(s) || !want("sequence:"+s) {
+	return `SELECT schemaname || '.' || sequencename, ` + value + params + `, ` + own + `
+		  FROM pg_sequences WHERE ` + schemaFilter("schemaname")
+}
+
+// sequences puts the sequences want takes, read at i of s (pgSequences),
+// in f, unhashed (nextValues hashes them), and returns the SELECTs of the
+// values of those not called yet.
+func (p *Postgres) sequences(s *pgStage, i int, f Fingerprint, want func(string) bool, keepExcluded bool) (unused []string, err error) {
+	rows, err := s.rows(i, 2)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if (!keepExcluded && p.excludedQualified(r[0])) || !want("sequence:"+r[0]) {
 			continue
 		}
-		f["sequence:"+s] = v // hashed below, with the value of unused
-		if q.Valid {
-			unused = append(unused, q.String)
+		f["sequence:"+r[0]] = r[1]
+		if r[2] != "" {
+			unused = append(unused, r[2])
 		}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(unused) > 0 {
-		rows, err := d.QueryContext(ctx, strings.Join(unused, " UNION ALL "))
+	return unused, nil
+}
+
+// nextValues adds to the sequences of f not called yet the value they
+// start from, read at i of s (-1: there are none), and hashes the
+// sequences.
+func nextValues(s *pgStage, i int, f Fingerprint) error {
+	if i >= 0 {
+		rows, err := s.rows(i, -1)
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var s string
-			var last int64
-			if err := rows.Scan(&s, &last); err != nil {
-				rows.Close()
-				return err
-			}
-			f["sequence:"+s] += fmt.Sprintf(" next %d", last)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
+		for _, r := range rows {
+			f["sequence:"+r[0]] += " next " + r[1]
 		}
 	}
 	for item, v := range f {
@@ -316,15 +742,22 @@ func (p *Postgres) sequences(ctx context.Context, d *sql.DB, f Fingerprint, want
 	return nil
 }
 
-// schemaItems hashes the objects of the schema that hold no rows of a
-// table but change what the application gets: functions and procedures
-// (CREATE OR REPLACE), enum types with their labels in order (ALTER TYPE …
-// ADD VALUE), domains with their constraints, composite types with their
-// attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other than public, and
-// materialized views with their rows (REFRESH). Objects of extensions
-// are left out: CREATE EXTENSION makes them, and a library such as PostGIS
-// has thousands.
-func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, want func(string) bool) error {
+// pgSchemaItems are the queries of the objects of the schema that hold no
+// rows of a table but change what the application gets: functions and
+// procedures (CREATE OR REPLACE), enum types with their labels in order
+// (ALTER TYPE … ADD VALUE), domains with their constraints, composite
+// types with their attributes (ALTER TYPE … ADD ATTRIBUTE), schemas other
+// than public, and materialized views with whether they are populated
+// (their rows are read after, rowsOf). Objects of extensions are left out:
+// CREATE EXTENSION makes them, and a library such as PostGIS has
+// thousands. fpSchema adds aggregates and every extension with its version
+// (CREATE EXTENSION), and reads a materialized view by its definition only
+// (hashSchemaItems).
+func pgSchemaItems(mode fpMode) []string {
+	matview := "definition || ' ' || ispopulated::text"
+	if !mode.rows() {
+		matview = "definition"
+	}
 	queries := []string{
 		`SELECT 'function:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')', pg_get_functiondef(f.oid)
 		   FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
@@ -345,49 +778,63 @@ func (p *Postgres) schemaItems(ctx context.Context, d *sql.DB, f Fingerprint, wa
 		  WHERE ` + schemaFilter("n.nspname") + ` AND ` + dbx.PostgresNotExtension("t.oid", "pg_type") + ` GROUP BY 1`,
 		`SELECT 'schema:' || n.nspname, '' FROM pg_namespace n
 		  WHERE n.nspname <> 'public' AND ` + schemaFilter("n.nspname") + ` AND ` + dbx.PostgresNotExtension("n.oid", "pg_namespace"),
-		`SELECT 'matview:' || schemaname || '.' || matviewname, definition || ' ' || ispopulated::text FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
+		`SELECT 'matview:' || schemaname || '.' || matviewname, ` + matview + ` FROM pg_matviews WHERE ` + schemaFilter("schemaname"),
 	}
+	if mode == fpSchema {
+		queries = append(queries, `SELECT 'extension:' || extname, extversion FROM pg_extension`,
+			`SELECT 'aggregate:' || n.nspname || '.' || f.proname || '(' || pg_get_function_identity_arguments(f.oid) || ')',
+			        format('%s %s %s %s %s %s', a.aggkind, a.aggtransfn, a.aggfinalfn, a.aggcombinefn, format_type(a.aggtranstype, NULL), a.agginitval)
+			   FROM pg_aggregate a JOIN pg_proc f ON f.oid = a.aggfnoid JOIN pg_namespace n ON n.oid = f.pronamespace
+			  WHERE `+schemaFilter("n.nspname")+` AND `+dbx.PostgresNotExtension("f.oid", "pg_proc"))
+	}
+	return queries
+}
+
+// schemaItems are the definitions of the schema items want takes, read at
+// at of s (pgSchemaItems), by item.
+func (p *Postgres) schemaItems(s *pgStage, at []int, want func(string) bool, keepExcluded bool) (map[string]string, error) {
 	defs := map[string]string{}
-	for _, q := range queries {
-		rows, err := d.QueryContext(ctx, q)
+	for _, i := range at {
+		rows, err := s.rows(i, -1)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		for rows.Next() {
-			var item, def string
-			if err := rows.Scan(&item, &def); err != nil {
-				rows.Close()
-				return err
-			}
+		for _, r := range rows {
+			item, def := r[0], r[1]
 			if !want(item) {
 				continue
 			}
 			kind, name, _ := strings.Cut(item, ":")
-			if kind == "matview" && p.excludedQualified(name) {
+			if kind == "matview" && !keepExcluded && p.excludedQualified(name) {
 				continue
 			}
 			defs[item] = def
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
 	}
-	for item, def := range defs {
+	return defs, nil
+}
+
+// hashSchemaItems hashes the schema items (defs, by item), a populated
+// materialized view with its rows, read at matviews[item] of s; fpSchema
+// hashes a materialized view, excluded too, by its definition with its
+// indexes and options (rels, by relation), not its rows or whether it is
+// populated.
+func hashSchemaItems(s *pgStage, f Fingerprint, defs map[string]string, matviews map[string]int, mode fpMode, rels map[string]*strings.Builder) error {
+	for _, item := range slices.Sorted(maps.Keys(defs)) {
+		def := defs[item]
 		kind, name, _ := strings.Cut(item, ":")
 		sum := ""
-		if kind == "matview" {
-			sum = "not populated"
-			if strings.HasSuffix(def, " true") {
-				schema, rel, _ := strings.Cut(name, ".")
-				var count int64
-				var rowsSum string
-				q := `SELECT count(*), coalesce(md5(string_agg(md5(r::text), '' ORDER BY md5(r::text))), '') FROM ` + qp(schema) + "." + qp(rel) + " AS r"
-				if err := d.QueryRowContext(ctx, q).Scan(&count, &rowsSum); err != nil {
-					return fmt.Errorf("%s: %w", name, err)
-				}
-				sum = fmt.Sprintf("%d\x00%s", count, rowsSum)
+		if kind == "matview" && !mode.rows() {
+			if rels[name] != nil {
+				sum = rels[name].String()
 			}
+		} else if i, ok := matviews[item]; ok {
+			var err error
+			if sum, err = rowsOf(s, i, name); err != nil {
+				return err
+			}
+		} else if kind == "matview" {
+			sum = "not populated"
 		}
 		f[item] = hash([]byte(def + "\x00" + sum))
 	}
@@ -471,14 +918,8 @@ func (p *Postgres) copyDatabase(ctx context.Context, src, dst string, prepare fu
 	if p.fileCopy(ctx, src) {
 		create += " STRATEGY FILE_COPY"
 	}
-	for attempt := 0; attempt < 5; attempt++ {
-		// Sessions on the source block the copy; end them and try again.
-		p.admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", src)
-		if _, err = p.admin.ExecContext(ctx, create); err == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	// Sessions on the source block the copy.
+	err = dbx.PostgresAlone(ctx, p.admin, src, create)
 	if err == nil && keep != nil {
 		err = p.keep(ctx, tmp, keep)
 	}
@@ -515,17 +956,7 @@ func (p *Postgres) swap(ctx context.Context, tmp, dst, old string, keep *pgDatab
 		if _, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS false"); err != nil {
 			return err
 		}
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			p.admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", dst)
-			if _, err = p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err == nil {
-				break
-			}
-			if pe := (*pgconn.PgError)(nil); !errors.As(err, &pe) || pe.Code != "55006" { // object_in_use
-				break
-			}
-		}
-		if err != nil {
+		if err := dbx.PostgresAlone(ctx, p.admin, dst, "ALTER DATABASE "+qp(dst)+" RENAME TO "+qp(old)); err != nil {
 			p.admin.ExecContext(context.Background(), "ALTER DATABASE "+qp(dst)+" ALLOW_CONNECTIONS "+strconv.FormatBool(keep.AllowConn))
 			return err
 		}
@@ -739,6 +1170,20 @@ func (p *Postgres) Restore(ctx context.Context, items []string) error {
 	if !ok {
 		return fmt.Errorf("state %s: pristine database %s does not exist; run driftgate seed", p.o.Name, p.o.Pristine)
 	}
+	if items != nil && len(p.g.empty) > 0 {
+		// Whatever stops the emptying in place (a working database that is
+		// missing, as a copy stopped between its renames leaves it), the
+		// copy of the whole database restores it.
+		ok, err := p.restoreEmpty(ctx, items)
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case err != nil:
+			fmt.Fprintf(p.o.Log, "state %s: restore_empty tables not emptied in place (%v): the whole database is copied\n", p.o.Name, err)
+		case ok:
+			return nil
+		}
+	}
 	return p.copyDatabase(ctx, p.o.Pristine, p.o.Working, nil, nil)
 }
 
@@ -763,13 +1208,87 @@ func (p *Postgres) Seed(ctx context.Context) error {
 	if err := p.checkPristine(ctx); err != nil {
 		return err
 	}
+	working, err := p.database(ctx, p.o.Working)
+	if err != nil {
+		return err
+	}
 	return p.copyDatabase(ctx, p.o.Working, p.o.Pristine, func(tmp string) error {
+		if err := p.settings(ctx, tmp, working.Settings); err != nil {
+			return err
+		}
 		if _, err := p.admin.ExecContext(ctx, "COMMENT ON DATABASE "+qp(tmp)+" IS "+pgLiteral(pristineComment+" of "+p.o.Working+", made by driftgate seed and replaced by the next one")); err != nil {
+			return err
+		}
+		if err := p.leaveOutEmpty(ctx, tmp); err != nil {
 			return err
 		}
 		_, err := p.admin.ExecContext(ctx, "ALTER DATABASE "+qp(tmp)+" ALLOW_CONNECTIONS false")
 		return err
 	}, p.o.Replacing)
+}
+
+// leaveOutEmpty empties the restore_empty tables of db, a new pristine
+// copy, their sequences starting again.
+func (p *Postgres) leaveOutEmpty(ctx context.Context, db string) error {
+	if len(p.g.empty) == 0 {
+		return nil
+	}
+	d, err := p.open(db)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	tables, _, err := p.emptyTables(ctx, d)
+	if err != nil {
+		return err
+	}
+	if why, err := p.unemptiable(ctx, d, tables); err != nil {
+		return err
+	} else if why != "" {
+		return fmt.Errorf("state %s: the restore_empty tables cannot be emptied in the pristine copy: %s; make them restore_only or exclude them", p.o.Name, why)
+	}
+	if err := truncate(ctx, d, tables); err != nil {
+		return fmt.Errorf("state %s: leaving the rows of restore_empty tables out of the pristine copy: %w (a table that refers to them by a foreign key keeps them: drop the key, or make them restore_only)", p.o.Name, err)
+	}
+	return nil
+}
+
+// settings gives db the settings of the working database (ALTER DATABASE …
+// SET, ALTER ROLE … IN DATABASE … SET) in place of those it has, the
+// replaced pristine database's (keep): the time zone, DateStyle and
+// search_path change how the fingerprint prints values and names, so the
+// pristine database is read as the working one is.
+func (p *Postgres) settings(ctx context.Context, db string, settings []pgSetting) error {
+	d, err := p.database(ctx, db)
+	if err != nil {
+		return err
+	}
+	if d == nil {
+		return fmt.Errorf("database %s does not exist", db)
+	}
+	stmts := []string{"ALTER DATABASE " + qp(db) + " RESET ALL"}
+	reset := map[string]bool{}
+	for _, s := range d.Settings {
+		if s.Role != "" && !reset[s.Role] {
+			reset[s.Role] = true
+			stmts = append(stmts, "ALTER ROLE "+qp(s.Role)+" IN DATABASE "+qp(db)+" RESET ALL")
+		}
+	}
+	for _, q := range stmts {
+		if _, err := p.admin.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	return p.keep(ctx, db, &pgDatabase{Owner: d.Owner, Settings: settings})
+}
+
+// SeededFingerprint is the fingerprint of the pristine database, what a
+// seed records: the copy is the working database at one moment, which the
+// application may have changed since. The pristine database has the
+// working database's settings (see settings) and accepts connections only
+// while it is read.
+func (p *Postgres) SeededFingerprint(ctx context.Context) (Fingerprint, error) {
+	return p.read(ctx, true, nil, FingerprintFormat, fpRows)
 }
 
 // checkPristine refuses to replace a pristine database that Seed did not
@@ -850,7 +1369,7 @@ func (p *Postgres) Rows(ctx context.Context, items []string) (Rows, error) {
 		if len(pk) == 0 {
 			return nil, fmt.Errorf("state %s: row_tracking table %s has no primary key", p.o.Name, t)
 		}
-		r, err := readRows(ctx, c, "SELECT * FROM "+rel, pk)
+		r, err := readRows(ctx, c, "SELECT * FROM "+rel, pk, dbx.PostgresDescribed)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", t, err)
 		}
@@ -879,7 +1398,7 @@ func (p *Postgres) Query(ctx context.Context, query string) ([]string, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, query)
+	rows, err := tx.QueryContext(ctx, query, dbx.PostgresDescribed)
 	if err != nil {
 		return nil, err
 	}

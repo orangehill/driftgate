@@ -76,6 +76,7 @@ type SchemaRule struct {
 }
 
 func (c *SchemaRule) UnmarshalYAML(n *yaml.Node) error {
+	n = resolve(n)
 	if n.Kind == yaml.SequenceNode {
 		*c = SchemaRule{}
 		return n.Decode(&c.Kinds)
@@ -125,15 +126,15 @@ type TableRule struct {
 type ColumnRule struct {
 	Kind     string            `yaml:"kind"`
 	Strategy string            `yaml:"strategy,omitempty"`
-	Paths    map[string]string `yaml:"paths,omitempty"`   // json: JSON path glob → strategy (or keep)
-	Other    string            `yaml:"other,omitempty"`   // json: strings under no path; default free-text
-	Action   string            `yaml:"action,omitempty"`  // serialized-php: empty-table (default) or null
-	Options  map[string]string `yaml:"options,omitempty"` // file: passed to the FilePlaceholder
+	Paths    map[string]string `yaml:"paths,omitempty"`  // json: JSON path glob → strategy (or keep)
+	Other    string            `yaml:"other,omitempty"`  // json: strings under no path; default free-text
+	Action   string            `yaml:"action,omitempty"` // serialized-php: empty-table (default) or null
 	Reason   string            `yaml:"reason,omitempty"`
 	Proposed bool              `yaml:"proposed,omitempty"` // written by data classify; a person removes it
 }
 
 func (c *ColumnRule) UnmarshalYAML(n *yaml.Node) error {
+	n = resolve(n)
 	if n.Kind == yaml.ScalarNode {
 		switch n.Value {
 		case "":
@@ -151,6 +152,23 @@ func (c *ColumnRule) UnmarshalYAML(n *yaml.Node) error {
 		return err
 	}
 	*c = ColumnRule(p)
+	// action: null written without quotes is the action null, as nullable
+	// reads it (decoding it into a string would give "", the default
+	// empty-table, and empty the table instead). action: with nothing after
+	// it, or an empty string, names no action and is refused: read as the
+	// default, it would drop every row. Only a missing action is the default.
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k, v := n.Content[i], resolve(n.Content[i+1]); k.Value == "action" && v.Kind == yaml.ScalarNode {
+				switch {
+				case v.Tag == "!!null" && v.Value != "":
+					c.Action = SerializedNull
+				case v.Value == "":
+					return fmt.Errorf("line %d: an empty action names none (%s or %s)", v.Line, SerializedEmptyTable, SerializedNull)
+				}
+			}
+		}
+	}
 	if c.Kind == "" && c.Strategy != "" {
 		c.Kind = KindPersonal
 	}
@@ -175,7 +193,7 @@ func (t *TableRule) UnmarshalYAML(n *yaml.Node) error {
 		t.Columns = map[string]*ColumnRule{}
 	}
 	for name, v := range p.Columns {
-		v := v
+		v := *resolve(&v)
 		if v.Kind == yaml.ScalarNode && v.Tag == "!!null" && v.Value != "" {
 			t.Columns[name] = &ColumnRule{Kind: KindPersonal, Strategy: StrategyNull}
 			continue
@@ -192,6 +210,7 @@ func (t *TableRule) UnmarshalYAML(n *yaml.Node) error {
 // strictDecode decodes a mapping and rejects keys the struct does not have
 // (Node.Decode alone ignores them).
 func strictDecode(n *yaml.Node, v any) error {
+	n = resolve(n)
 	if n.Kind == yaml.MappingNode {
 		known := map[string]bool{}
 		rt := reflect.TypeOf(v).Elem()
@@ -200,6 +219,11 @@ func strictDecode(n *yaml.Node, v any) error {
 			known[name] = true
 		}
 		for i := 0; i+1 < len(n.Content); i += 2 {
+			// A key written as an alias (*a) would be checked by its anchor's
+			// name but decoded as its value, so no check would see it.
+			if n.Content[i].Kind == yaml.AliasNode {
+				return fmt.Errorf("line %d: a key may not be an alias", n.Content[i].Line)
+			}
 			if k := n.Content[i].Value; !known[k] {
 				return fmt.Errorf("line %d: unknown key %q", n.Content[i].Line, k)
 			}
@@ -210,7 +234,7 @@ func strictDecode(n *yaml.Node, v any) error {
 
 // short is the one-word form of a rule, or "" when it needs a mapping.
 func (c *ColumnRule) short() string {
-	if c.Paths != nil || c.Other != "" || c.Action != "" || c.Options != nil || c.Reason != "" || c.Proposed {
+	if c.Paths != nil || c.Other != "" || c.Action != "" || c.Reason != "" || c.Proposed {
 		return ""
 	}
 	if c.Kind == KindPersonal {
@@ -317,24 +341,21 @@ func (c *ColumnRule) validate() error {
 		if c.Strategy != "" || c.Paths != nil || c.Other != "" || c.Action != "" {
 			return fmt.Errorf("kind %s takes no strategy, paths, other or action", c.Kind)
 		}
-		if c.Options != nil {
-			return fmt.Errorf("kind %s takes no options", c.Kind)
-		}
 	case KindSerializedPHP:
 		switch c.Action {
 		case "", SerializedEmptyTable, SerializedNull:
 		default:
 			return fmt.Errorf("serialized-php action must be %s or %s", SerializedEmptyTable, SerializedNull)
 		}
-		if c.Strategy != "" || c.Paths != nil || c.Other != "" || c.Options != nil {
+		if c.Strategy != "" || c.Paths != nil || c.Other != "" {
 			return errors.New("kind serialized-php takes only action")
 		}
 	case KindPersonal:
 		if !knownStrategy(c.Strategy) {
 			return fmt.Errorf("unknown strategy %q (%s)", c.Strategy, strings.Join(strategies, ", "))
 		}
-		if c.Action != "" || c.Options != nil {
-			return errors.New("a personal column takes no action or options")
+		if c.Action != "" {
+			return errors.New("a personal column takes no action")
 		}
 		if c.Strategy != StrategyJSON && (c.Paths != nil || c.Other != "") {
 			return errors.New("paths and other are for strategy json")
@@ -539,7 +560,7 @@ func sameRule(child, parent *ColumnRule) bool {
 		return true
 	}
 	return child.Kind == parent.Kind && child.Strategy == parent.Strategy && child.Action == parent.Action &&
-		reflect.DeepEqual(child.Paths, parent.Paths) && child.Other == parent.Other && reflect.DeepEqual(child.Options, parent.Options)
+		reflect.DeepEqual(child.Paths, parent.Paths) && child.Other == parent.Other
 }
 
 func (c *ColumnRule) describe() string {
@@ -678,4 +699,14 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// resolve follows an alias (*name) to the node it names, so that a check of
+// a node's kind or tag sees the value written at the anchor: an alias of a
+// bare null is that null, not a node of another kind.
+func resolve(n *yaml.Node) *yaml.Node {
+	for n != nil && n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	return n
 }

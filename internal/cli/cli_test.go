@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,9 +121,30 @@ body:
 
 func runCLI(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
-	var out, errOut bytes.Buffer
+	var out, errOut syncBuffer
 	code := Main(args, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+// syncBuffer is a bytes.Buffer that several goroutines may write: a
+// command's own lines and the note of the signal handler (signalContext)
+// can reach one writer at the same time. A terminal's file is safe for
+// that; a bytes.Buffer is not.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // TestCompareSets compares two captures with a baseline: drifts of public
@@ -212,6 +234,42 @@ func TestCompareSets(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // no Keychain entry for this project
 	if code, _, errOut := runCLI(t, "compare", "l56", "--config", cfg); code != ExitEnv {
 		t.Fatalf("without key: exit %d %s", code, errOut)
+	}
+}
+
+// TestCompareReadsNoState: compare, report and review read captures
+// only, so a state: whose DSN cannot be read on this machine (a variable
+// not set, a file of the project not there, a command's variables) does
+// not stop them; only the YAML itself is checked.
+func TestCompareReadsNoState(t *testing.T) {
+	_, cfg := setsFixture(t)
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DG_TEST_NO_DSN", "")
+	write(t, cfg, string(raw)+`state:
+  db:
+    driver: mysql
+    dsn:
+      env: DG_TEST_NO_DSN
+    working: app
+  pg:
+    driver: postgres
+    dsn:
+      dotenv: missing/.env
+      key: DATABASE_URL
+    working: app
+  cache:
+    restore: ["sh", "-c", "redis-cli -u \"$DG_TEST_NO_DSN\" flushall"]
+`)
+	if code, out, errOut := runCLI(t, "compare", "l56", "--against", "capture:l55", "--config", cfg); code != ExitDrift {
+		t.Fatalf("compare: exit %d\n%s%s", code, out, errOut)
+	}
+	for _, args := range [][]string{{"report", "--config", cfg}, {"review", "--config", cfg}} {
+		if code, out, errOut := runCLI(t, args...); code == ExitConfig || code == ExitEnv {
+			t.Errorf("%v: exit %d\n%s%s", args, code, out, errOut)
+		}
 	}
 }
 

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("0&7C$8CC2CC0008000000121")

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,7 +29,9 @@ func TestStateValidation(t *testing.T) {
 		{Component{Driver: "postgres", DSN: Secret{Env: "X"}, Working: "App", Pristine: "app"}, ""},
 		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Restore: []string{"x"}}, "without a driver"},
 		{Component{Restore: []string{"x"}, Working: "app"}, "need a driver"},
-		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"sess*"}, RowTracking: []string{"sessions"}}, "is excluded"},
+		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"sess*"}, RowTracking: Tables("sessions")}, "is excluded"},
+		{Component{Driver: "mysql", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"Sessions"}, RowTracking: Tables("sessions")}, ""}, // as written
+		{Component{Driver: "postgres", DSN: Secret{Env: "X"}, Working: "app", Exclude: []string{"Sessions"}, RowTracking: Tables("sessions")}, ""},
 	}
 	for i, c := range cases {
 		cfg := base
@@ -50,9 +53,23 @@ func TestStateValidation(t *testing.T) {
 		}
 	}
 	cfg := base
-	cfg.Prepare = [][]string{{}}
+	cfg.Prepare = []Command{{}}
 	if _, err := New(cfg, t.TempDir()); err == nil {
 		t.Error("empty prepare command accepted")
+	}
+}
+
+// TestDataDriver: data.driver mariadb becomes mysql, the only MySQL driver
+// name data opens.
+func TestDataDriver(t *testing.T) {
+	cfg := Config{Version: Version, Project: "p", Mode: Freeze, Level: "values",
+		Data: Data{Driver: "mariadb", Source: DataDB{DSN: Secret{Env: "X"}, Database: "a"}, Target: DataDB{Database: "b"}}}
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Data.Driver != MySQL {
+		t.Errorf("data.driver %q not normalized", p.Data.Driver)
 	}
 }
 
@@ -207,8 +224,9 @@ func TestStoreInRepository(t *testing.T) {
 	}
 }
 
-// TestLoadRefuses: a negative timeout (http.Client would wait forever) and
-// a second YAML document (ignored, with every setting in it).
+// TestLoadRefuses: a negative timeout (http.Client would wait forever), a
+// retry out of its range and a second YAML document (ignored, with every
+// setting in it).
 func TestLoadRefuses(t *testing.T) {
 	base := "version: 1\nproject: p\n"
 	for cfg, want := range map[string]string{
@@ -217,6 +235,16 @@ func TestLoadRefuses(t *testing.T) {
 		base + "---\nstore: /tmp/elsewhere\n":          "only one YAML document",
 		base + "---\n":                                 "",
 		base + "target:\n  timeout: 0s\n":              "",
+		base + "target:\n  retry: 4\n":                 "target.retry must be from 0 (no retry) to 3",
+		base + "targets:\n  api:\n    retry: -1\n":     "targets.api.retry must be from 0",
+		base + "target:\n  retry: 0\n":                 "",
+		base + "target:\n  connect_to: 203.0.113.10\n": "target.connect_to needs base_url",
+		base + "target:\n  base_url: https://shop.example\n  connect_to: 203.0.113.10:8443\n":                      "",
+		base + "targets:\n  api:\n    base_url: https://shop.example\n    connect_to: https://x\n":                 "targets.api: connect_to",
+		base + "requests:\n  - match: get-news\n":                                                                  "requests 1: needs mutates or body",
+		base + "requests:\n  - mutates: true\n":                                                                    "requests 1: needs match",
+		base + "requests:\n  - match: \"GET /news\"\n    target: web\n    mutates: true\n":                         "requests 1: ",
+		base + "requests:\n  - match: \"POST /search\"\n    mutates: false\n    body: { q: news, tags: [a, b] }\n": "",
 	} {
 		path := filepath.Join(t.TempDir(), FileName)
 		if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
@@ -249,5 +277,92 @@ func TestHomeRelative(t *testing.T) {
 	t.Setenv(EnvUploads, "")
 	if dir, err := p.UploadsDir(); err != nil || !strings.HasPrefix(dir, home) {
 		t.Errorf("uploads ~\\: %s %v", dir, err)
+	}
+}
+
+// TestRequestBody: a body is written as JSON from the YAML as written:
+// numbers keep their digits, a date stays its text, null is JSON's null;
+// what JSON would read as another value, and keys that are no strings,
+// are refused.
+func TestRequestBody(t *testing.T) {
+	base := "version: 1\nproject: p\nrequests:\n  - match: post-x\n    body: "
+	for body, want := range map[string]string{
+		`{n: 12345678901234567890, f: 1.0, d: 2024-01-02, s: "007", b: true, l: [a, ~]}`: `{"n":12345678901234567890,"f":1.0,"d":"2024-01-02","s":"007","b":true,"l":["a",null]}`,
+		"null":                   "null",
+		"007":                    "error: 007 is no JSON number",
+		"0x1F":                   "error: 0x1F is no JSON number",
+		"{a: {1: x}}":            `error: the key "1" is not a string`,
+		"{a: !!binary aGk=}":     "error: a value tagged !!binary has no JSON form",
+		"{n: 1e400, s: '1e400'}": `{"n":1e400,"s":"1e400"}`,
+		"{<<: {a: 1}, b: 2}":     "error: merge keys (<<) are not supported in a body",
+		"~":                      "null",
+	} {
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(path, []byte(base+body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(path)
+		if e, ok := strings.CutPrefix(want, "error: "); ok {
+			if err == nil || !strings.Contains(err.Error(), e) {
+				t.Errorf("%s: %v, want %q", body, err, e)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		if got, err := p.Requests[0].JSONBody(); err != nil || string(got) != want {
+			t.Errorf("%s: %s %v, want %s", body, got, err, want)
+		}
+	}
+	// body: with nothing after it is no body.
+	path := filepath.Join(t.TempDir(), FileName)
+	os.WriteFile(path, []byte("version: 1\nproject: p\nrequests:\n  - match: x\n    mutates: true\n    body:\n"), 0o644)
+	if p, err := Load(path); err != nil || p.Requests[0].Body != nil {
+		t.Errorf("an empty body: %v", err)
+	}
+	// Aliases that repeat a value into gigabytes are refused.
+	bomb := "version: 1\nproject: p\nrequests:\n  - match: x\n    body:\n      a: &a [\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]\n"
+	prev := "a"
+	for _, k := range []string{"b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s"} {
+		bomb += fmt.Sprintf("      %s: &%s [*%s, *%s, *%s, *%s]\n", k, k, prev, prev, prev, prev)
+		prev = k
+	}
+	os.WriteFile(path, []byte(bomb), 0o644)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "larger than 10 MB") {
+		t.Errorf("aliases repeated into a large body: %v", err)
+	}
+	os.WriteFile(path, []byte("version: 1\nproject: p\nrequests:\n  - match: x\n    mutate: true\n"), 0o644)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "field mutate not found") {
+		t.Errorf("an unknown key of an entry: %v", err)
+	}
+}
+
+// TestUploadsRelativeToProject: in the local layout, where driftgate.yaml
+// is in .driftgate/, a relative uploads.dir is relative to the project
+// folder, not to the folder of driftgate.yaml.
+func TestUploadsRelativeToProject(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "shop")
+	if err := os.MkdirAll(filepath.Join(root, ".driftgate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, ".driftgate", FileName)
+	if err := os.WriteFile(cfg, []byte("version: 1\nproject: shop\ntarget:\n  base_url: http://localhost:8000\nuploads:\n  dir: ../shop-uploads\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvUploads, "")
+	p, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.UploadsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(base)
+	if g, _ := filepath.EvalSymlinks(filepath.Dir(got)); g != want || filepath.Base(got) != "shop-uploads" {
+		t.Errorf("uploads.dir ../shop-uploads in the local layout is %s, want %s", got, filepath.Join(base, "shop-uploads"))
 	}
 }

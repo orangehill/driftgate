@@ -1,7 +1,7 @@
 # DriftGate as a container image: one static binary on a minimal base.
 #
 #   docker build -t driftgate \
-#     --build-arg VERSION=v1.0.2 --build-arg COMMIT=$(git rev-parse HEAD) \
+#     --build-arg VERSION=v1.1.0 --build-arg COMMIT=$(git rev-parse HEAD) \
 #     --build-arg DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 #   docker run --rm -v "$PWD:/work" --network host driftgate run
 #
@@ -12,9 +12,9 @@
 
 # Base images are pinned by digest (the tag says which version it is); update
 # the tag and the digest together:
-#   docker buildx imagetools inspect golang:1.27.3-alpine
+#   docker buildx imagetools inspect golang:1.27.4-alpine
 
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

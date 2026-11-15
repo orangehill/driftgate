@@ -50,3 +50,26 @@ func TestRepeatKeepsRateLimitsOnRemoteTargets(t *testing.T) {
 		})
 	}
 }
+
+// TestConnectToDecidesRemote: a target is remote by the address its
+// requests go to (connect_to), not by the host name allow_hosts names, so
+// requests that change data need --allow-remote-mutations there.
+func TestConnectToDecidesRemote(t *testing.T) {
+	ctx := context.Background()
+	req := catalog.Request{ID: "x", Method: "GET", Path: "/x", Storage: snapshot.Public}
+	for _, tc := range []struct {
+		connectTo string
+		remote    bool
+	}{{"", false}, {"203.0.113.10", true}, {"127.0.0.1", false}} {
+		p := &config.Project{Config: config.Config{Target: config.Target{BaseURL: "https://shop.example", AllowHosts: []string{"shop.example", "127.0.0.0/8"}, ConnectTo: tc.connectTo}}}
+		s, err := newService(ctx, p, req, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.remote != tc.remote {
+			t.Errorf("connect_to %q: remote %v", tc.connectTo, s.remote)
+		}
+	}
+	// Without --allow-remote the address outside allow_hosts is refused
+	// when connected to (httpx.TestConnectTo).
+}

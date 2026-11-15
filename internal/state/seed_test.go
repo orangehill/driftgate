@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/orangehill/driftgate/internal/dbx"
 )
 
@@ -368,6 +371,105 @@ func TestPostgresSafeCopy(t *testing.T) {
 	}
 }
 
+// TestPostgresOtherSessions: a copy ends the other sessions on the
+// database it copies or renames away. A role that is not a superuser may
+// not end a superuser's: when the session stays, it gets that error (42501)
+// after one wait of the server (5 s), not after five; when the session ends
+// within that wait, the copy succeeds. dbx.PostgresAlone's own test covers
+// the tries, the filter and a cancel.
+func TestPostgresOtherSessions(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_term", "dgt_term_pristine"
+	su, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine, newName(work), oldName(work)} {
+			su.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+		su.admin.Exec("DROP ROLE IF EXISTS dgt_term_app")
+	}
+	drop()
+	t.Cleanup(func() {
+		drop()
+		su.Close()
+	})
+	mustExec(t, su.admin, "CREATE ROLE dgt_term_app LOGIN PASSWORD 'app' CREATEDB",
+		"CREATE DATABASE "+work+" OWNER dgt_term_app", "CREATE DATABASE "+pristine+" OWNER dgt_term_app")
+	u, _ := url.Parse(dsn)
+	u.User = url.UserPassword("dgt_term_app", "app")
+	p, err := NewPostgres(Options{Name: "db", DSN: u.String(), Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// hold opens a superuser session on db that runs q; done gets its error.
+	hold := func(db, q string) (done chan error, release func()) {
+		t.Helper()
+		d, err := su.open(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done = make(chan error, 1)
+		go func() {
+			_, err := d.Exec(q)
+			d.Close()
+			done <- err
+		}()
+		for i := 0; ; i++ {
+			var n int
+			su.admin.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND query = $2", db, q).Scan(&n)
+			if n > 0 {
+				break
+			}
+			if i == 200 {
+				t.Fatalf("no session on %s", db)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return done, func() {
+			su.admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", db)
+			<-done
+		}
+	}
+	// The copy (CREATE DATABASE … TEMPLATE pristine) and the rename of work.
+	for _, db := range []string{pristine, work} {
+		t.Run(db, func(t *testing.T) {
+			// A session that stays: the error that says why it stays.
+			_, release := hold(db, "SELECT pg_sleep(60)")
+			start := time.Now()
+			err := p.copyDatabase(ctx, pristine, work, nil, nil)
+			took := time.Since(start)
+			release()
+			pe := (*pgconn.PgError)(nil)
+			if !errors.As(err, &pe) || pe.Code != "55006" || !strings.Contains(err.Error(), "SQLSTATE 42501") {
+				t.Fatalf("copy over a superuser's session: %v", err)
+			}
+			if took > 8*time.Second {
+				t.Fatalf("the error took %v", took)
+			}
+			var allow bool
+			if err := su.admin.QueryRow("SELECT datallowconn FROM pg_database WHERE datname = $1", work).Scan(&allow); err != nil || !allow {
+				t.Fatalf("working database after the failed copy: %v, %v", allow, err)
+			}
+
+			// A session that ends within the server's wait: the copy succeeds.
+			done, _ := hold(db, "SELECT pg_sleep(1.5)")
+			if err := p.copyDatabase(ctx, pristine, work, nil, nil); err != nil {
+				t.Fatalf("copy over a session that ends: %v", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("the session was ended: %v", err)
+			}
+			p.wait()
+		})
+	}
+
+}
+
 func TestNewName(t *testing.T) {
 	long := strings.Repeat("ž", 40) // 80 bytes
 	if got := newName(long); len(got) > 63 || !strings.HasSuffix(got, newSuffix) || !strings.HasPrefix(long, strings.TrimSuffix(got, newSuffix)) {
@@ -466,6 +568,87 @@ func TestPostgresKeepsDatabase(t *testing.T) {
 	}
 }
 
+// TestPostgresSeedSettings: the pristine database gets the working
+// database's settings, not those of the copy it replaces, so its
+// fingerprint, which a seed records, prints times, dates, intervals and
+// names as the working database's does; every restore then matches it.
+func TestPostgresSeedSettings(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_settings", "dgt_settings_pristine"
+	p, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine, newName(work), oldName(work), newName(pristine), oldName(pristine)} {
+			p.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+	}
+	drop()
+	t.Cleanup(func() {
+		p.Close()
+		drop()
+	})
+	settings := func(db string) string {
+		t.Helper()
+		var s sql.NullString
+		if err := p.admin.QueryRow(`SELECT string_agg(CASE WHEN s.setrole = 0 THEN '' ELSE 'role ' END || array_to_string(s.setconfig, ';'), ' ' ORDER BY s.setrole)
+			FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = $1`, db).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s.String
+	}
+	mustExec(t, p.admin, "CREATE DATABASE "+work)
+	db, err := p.open(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, "CREATE SCHEMA app", "CREATE SEQUENCE app.s",
+		"CREATE TABLE app.t (id int DEFAULT nextval('app.s'), at timestamptz, day date, took interval)",
+		"CREATE VIEW app.v AS SELECT id, at FROM app.t",
+		"INSERT INTO app.t (at, day, took) VALUES ('2026-01-01 00:00:00+00', '2026-02-03', '1 day 2 hours')")
+	db.Close()
+	// A pristine copy of earlier settings, which the next one must not keep.
+	if err := p.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, p.admin,
+		"ALTER DATABASE "+pristine+" SET timezone TO 'America/New_York'",
+		"ALTER ROLE CURRENT_USER IN DATABASE "+pristine+" SET extra_float_digits TO 1",
+		"ALTER DATABASE "+work+" SET timezone TO 'Asia/Tokyo'",
+		"ALTER DATABASE "+work+" SET search_path TO app, public",
+		"ALTER DATABASE "+work+" SET datestyle TO 'SQL, DMY'",
+		"ALTER ROLE CURRENT_USER IN DATABASE "+work+" SET intervalstyle TO 'iso_8601'")
+	if err := p.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := settings(pristine), settings(work); got != want {
+		t.Fatalf("settings of the pristine database %q, want the working database's %q", got, want)
+	}
+	working, err := p.Fingerprint(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := p.SeededFingerprint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(working, seeded); len(d) > 0 {
+		t.Fatalf("the seeded fingerprint differs from the working database's: %v", d)
+	}
+	if err := p.Restore(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := p.Fingerprint(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := Diff(restored, seeded); len(d) > 0 {
+		t.Fatalf("after the restore the working database differs from the seeded fingerprint: %v", d)
+	}
+}
+
 func TestPgSettingValue(t *testing.T) {
 	for _, c := range []struct{ name, value, want string }{
 		{"timezone", "Europe/Belgrade", `'Europe/Belgrade'`},
@@ -478,5 +661,63 @@ func TestPgSettingValue(t *testing.T) {
 		if got := pgSettingValue(c.name, c.value); got != c.want {
 			t.Errorf("%s=%s: %s, want %s", c.name, c.value, got, c.want)
 		}
+	}
+}
+
+// TestPostgresOutputSettings: tracked rows and a check query read the same
+// values, without an error, when the database's own settings print dates,
+// bytea and floats in other formats than the defaults.
+func TestPostgresOutputSettings(t *testing.T) {
+	dsn := postgresServer(t)
+	ctx := context.Background()
+	work, pristine := "dgt_output", "dgt_output_pristine"
+	p, err := NewPostgres(Options{Name: "db", DSN: dsn, Working: work, Pristine: pristine, RowTracking: []string{"t"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func() {
+		for _, db := range []string{work, pristine} {
+			p.admin.Exec("DROP DATABASE IF EXISTS " + qp(db) + " WITH (FORCE)")
+		}
+	}
+	drop()
+	t.Cleanup(func() {
+		p.Close()
+		drop()
+	})
+	mustExec(t, p.admin, "CREATE DATABASE "+work)
+	db, err := p.open(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, "CREATE TABLE t (id int PRIMARY KEY, at timestamptz, ts timestamp, day date, b bytea, f float8, r real)",
+		`INSERT INTO t VALUES (1, '2026-01-02 03:04:05.678901+00', '2026-01-02 03:04:05', '2026-02-03', '\x00ff27', 0.1 + 0.2, 1.1)`)
+	db.Close()
+	read := func() (Rows, []string) {
+		t.Helper()
+		if err := p.Seed(ctx); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := p.Rows(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := p.Query(ctx, "SELECT at, ts, day, b, f, r FROM t")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows, got
+	}
+	rows0, query0 := read()
+	mustExec(t, p.admin,
+		"ALTER DATABASE "+work+" SET datestyle TO 'SQL, DMY'",
+		"ALTER DATABASE "+work+" SET bytea_output TO 'escape'",
+		"ALTER DATABASE "+work+" SET extra_float_digits TO -3")
+	rows1, query1 := read()
+	if d := RowDiff(rows0, rows1); len(d) > 0 {
+		t.Errorf("tracked rows read differently under other output settings: %+v", d)
+	}
+	if !reflect.DeepEqual(query0, query1) {
+		t.Errorf("check query %q, under other output settings %q", query0, query1)
 	}
 }

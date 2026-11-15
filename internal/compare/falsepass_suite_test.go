@@ -210,10 +210,10 @@ var fpCases = []fpCase{
 	{class: "item added", doc: "users", mutate: replace(`],"first_page_url"`, `,{"id":4,"name":"Novi"}],"first_page_url"`), kind: KindArrayLength, where: "$.data", level: LevelShape, keyed: keyedAt(KindKeyExtra, "$.data[id=4]")},
 	{class: "item removed", doc: "tags", mutate: replace(`,{"id":2,"slug":"sport","count":3}`, ``), kind: KindArrayLength, where: "$", level: LevelShape},
 	{class: "any_length list: item added, one changed", doc: "users", mutate: replace(`"roles":["viewer"]`, `"roles":["admin","viewer"]`), kind: KindValue, where: "$.data[1].roles[0]", level: LevelValues, keyed: keyedAt("", "$.data[id=2].roles[0]")},
-	{class: "items reordered", doc: "users", mutate: replace(`"roles":["admin","editor"]`, `"roles":["editor","admin"]`), kind: KindValue, where: "$.data[0].roles[0]", level: LevelValues, keyed: keyedAt("", "$.data[id=1].roles[0]")},
+	{class: "items reordered", doc: "users", mutate: replace(`"roles":["admin","editor"]`, `"roles":["editor","admin"]`), kind: KindItemOrder, where: "$.data[0].roles", level: LevelValues, keyed: keyedAt("", "$.data[id=1].roles")},
 	{class: "keyed items reordered", doc: "order", mutate: replace(`{"sku": "A-1", "qty": 2, "price": 499.95},
             {"sku": "B-2", "qty": 1, "price": 500.0}`, `{"sku": "B-2", "qty": 1, "price": 500.0},
-            {"sku": "A-1", "qty": 2, "price": 499.95}`), kind: KindValue, where: "$.order.lines[0].sku", level: LevelValues, keyed: keyedAt(KindItemOrder, "$.order.lines")},
+            {"sku": "A-1", "qty": 2, "price": 499.95}`), kind: KindItemOrder, where: "$.order.lines", level: LevelValues, keyed: keyedAt(KindItemOrder, "$.order.lines")},
 	{class: "keyed item replaced", doc: "order", mutate: replace(`"sku": "B-2"`, `"sku": "B-3"`), kind: KindValue, where: "$.order.lines[1].sku", level: LevelValues, keyed: keyedAt(KindKeyMissing, `$.order.lines[sku="B-2"]`)},
 	// Encoding of the same values.
 	{class: "escaping: slash unescaped", doc: "users", mutate: replace(`"https:\/\/cdn.example.com\/a\/1.png"`, `"https://cdn.example.com/a/1.png"`), kind: KindEncoding, where: "$.data[0].profile.avatar", level: LevelValues, keyed: keyedAt("", "$.data[id=1].profile.avatar")},
