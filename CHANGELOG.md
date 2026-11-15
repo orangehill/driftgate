@@ -8,6 +8,8 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-15
+
 ### Upgrading
 
 - With `row_tracking`, the values requests write are compared once you make the baseline again (move it away and `driftgate run`). Put a column that changes only between days, such as a date, under `ignore`. A request accepted later keeps this only while it changes the same rows the same way; otherwise the result lists it until `capture --repeat 2` and `baselines rebase`. ([#65](https://github.com/orangehill/driftgate/pull/65))
@@ -156,6 +158,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 - First public release.
 
-[Unreleased]: https://github.com/orangehill/driftgate/compare/v1.0.2...development
+[Unreleased]: https://github.com/orangehill/driftgate/compare/v1.1.0...development
+[1.1.0]: https://github.com/orangehill/driftgate/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/orangehill/driftgate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/orangehill/driftgate/releases/tag/v1.0.1

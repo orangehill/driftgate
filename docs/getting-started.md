@@ -6,7 +6,7 @@ DriftGate is one static binary for Linux, macOS and Windows, on amd64 and
 arm64. Download a release with its checksums:
 
 ```sh
-gh release download v1.0.2 --repo orangehill/driftgate \
+gh release download v1.1.0 --repo orangehill/driftgate \
   --pattern driftgate-linux-amd64 --pattern 'SHA256SUMS*'
 ```
 
@@ -18,7 +18,7 @@ Verify the signature of `SHA256SUMS`, then the binary, then install it:
 
 ```sh
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
+  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.1.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
