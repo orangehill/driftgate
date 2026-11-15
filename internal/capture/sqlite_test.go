@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/chaos"
@@ -686,5 +687,71 @@ func TestProjectRootsInHome(t *testing.T) {
 		if c[1] == "" && len(got) != 0 || c[1] != "" && (len(got) != 1 || got[0] != c[1]) {
 			t.Errorf("HOME %s: %s: %v, want %q", home, c[0], got, c[1])
 		}
+	}
+}
+
+// TestWriteGap: on one state (--restore once), a request that changes data
+// is sent no sooner than writeGap after the response of the last request
+// that changed it, so a timestamp of one second always moves on; a read
+// between them is not delayed, and --restore each delays nothing.
+func TestWriteGap(t *testing.T) {
+	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=")
+	defer func(d time.Duration) { writeGap = d }(writeGap)
+	writeGap = 400 * time.Millisecond
+	for _, restore := range []string{"once", "each"} {
+		t.Run(restore, func(t *testing.T) {
+			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
+			root := t.TempDir()
+			file := filepath.Join(root, "database", "app.sqlite")
+			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			app := newSQLiteApp(t, file, "wal")
+			var mu sync.Mutex
+			arrived, done := map[string]time.Time{}, map[string]time.Time{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				k := r.Method + " " + r.URL.Path
+				mu.Lock()
+				arrived[k] = time.Now()
+				mu.Unlock()
+				app.ServeHTTP(w, r)
+				mu.Lock()
+				done[k] = time.Now()
+				mu.Unlock()
+			}))
+			t.Cleanup(srv.Close)
+			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
+				Target: config.Target{BaseURL: srv.URL},
+				State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "database/app.sqlite", Exclude: []string{"sessions"}}}}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			var out bytes.Buffer
+			if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
+				t.Fatal(err)
+			}
+			post := json.RawMessage(`{"email":"c@x"}`)
+			cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{
+				{ID: "add", Method: "POST", Path: "/users", Body: post, Headers: [][2]string{{"Content-Type", "application/json"}}, Storage: snapshot.Public},
+				{ID: "list", Method: "GET", Path: "/users", Storage: snapshot.Public},
+				{ID: "remove", Method: "DELETE", Path: "/users/1", Storage: snapshot.Public},
+			}, Sequences: []catalog.Sequence{{ID: "s", Requests: []string{"add", "list", "remove"}}}}
+			if _, err := Run(ctx, p, cat, Options{Tag: "a", Restore: restore, Out: &out}); err != nil {
+				t.Fatalf("capture: %v\n%s", err, out.String())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if d := arrived["GET /users"].Sub(done["POST /users"]); d >= writeGap/2 {
+				t.Errorf("the read waited %v after the write", d)
+			}
+			d := arrived["DELETE /users/1"].Sub(done["POST /users"])
+			switch {
+			case restore == "once" && d < writeGap:
+				t.Errorf("the second write came %v after the first, want %v or more", d, writeGap)
+			case restore == "each" && d >= writeGap:
+				t.Errorf("--restore each: the second write waited %v", d)
+			}
+		})
 	}
 }

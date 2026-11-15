@@ -72,6 +72,7 @@ versioning. Read **Upgrading** before you update an existing project.
 
 ### Fixed
 
+- With `--restore once`, a request that changes data now waits for what is left of 1 s since the last response that changed the state. Before, two requests that touch the same row (`touch()`, `updated_at`) gave `side-effect … unchanged → changed` when they happened to fall into the same second. Reads and `--restore each` are not delayed.
 - A proposal for a place in a list (`html>body>script[*]`, `$.data[*].at`) is made only when every item the path reaches differed between the captures it was learned from. Otherwise each place is proposed with its own path and values. Before, the format of the script of an error page also judged a stable script beside it, and the next run stopped with `format` on `script[0]`.
 - A proposed format for a number written with an exponent (`4.6e-5`) is now any number with an optional exponent of the sign and case seen. Before, the `6e` read as hex and the format (`4\.[0-9a-f]{2}-5`) stopped the next run.
 - `row_tracking` now compares the values a request writes into tracked rows, not only which rows and columns change. Before, a request that wrote another value into the same row than in the baseline passed. See [row tracking](docs/databases.md#row-tracking). ([#65](https://github.com/orangehill/driftgate/pull/65))
