@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/capture"
 	"github.com/orangehill/driftgate/internal/chaos"
 	"github.com/orangehill/driftgate/internal/cli"
 )
@@ -45,6 +46,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(m.Run())
 	}
+	// The binary's writes on one state follow each other after a short
+	// gap; the capture package tests the real one.
+	capture.WriteGap = 10 * time.Millisecond
 	if spec := os.Getenv("DG_E2E_CRASH"); spec != "" {
 		chaos.At = crashAt(spec)
 	}

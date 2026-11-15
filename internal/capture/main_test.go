@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// TestMain shortens the gap between writes on one state (writeGap): the
+// TestMain shortens the gap between writes on one state (WriteGap): the
 // tests capture many writes, and only TestWriteGap is about the gap.
 func TestMain(m *testing.M) {
-	writeGap = 10 * time.Millisecond
+	WriteGap = 10 * time.Millisecond
 	os.Exit(m.Run())
 }

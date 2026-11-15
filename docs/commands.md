@@ -96,7 +96,7 @@ A recording proxy on `127.0.0.1`. Use the application through it, and it propose
 |---|---|
 | `--only <glob>`, `--baseline <name>`, `--target <service>` | [common flags](#common-flags); the state must match the baseline's |
 | `--force`, `--quiet` | replace an existing capture of this tag; print no progress |
-| `--restore once\|each` | restore once (default), or also before every sequence; without a restore between them, a request that changes data waits for what is left of 1 s since the last response that changed the state, so a timestamp of one second (`updated_at`) always moves on (a GET that writes, such as a view counter, needs `mutates: true`) |
+| `--restore once\|each` | restore once (default), or also before every sequence; without a restore between them, a request that changes data waits for what is left of 1 s since the last response that changed the rows (or tables) its baseline record changed, or any data without such a record, so a timestamp of one second (`updated_at`) always moves on (a GET that writes, such as a view counter, needs `mutates: true`) |
 | `--repeat N` | capture N times and propose allowlist rules for values that differ |
 | `--allow-remote`, `--allow-remote-mutations` | allow a service outside `allow_hosts`; the second also sends it requests that change data |
 | `--allow-mutating-without-restore` | send requests that change data without a state restore |

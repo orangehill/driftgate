@@ -75,10 +75,15 @@ type Options struct {
 	AllowMutatingWithoutRestore bool
 	Restore                     string        // once (default): before the run and before the requests that change data; each: also before every sequence
 	Baseline                    *snapshot.Set // the state must match the one this baseline was captured from
-	SkipFingerprintCheck        bool
-	Out                         io.Writer // progress
-	Log                         io.Writer // output of hook commands
-	Env                         []string  // added to the environment of the project's commands (bisect: the commit)
+	// Expect is a capture of the same catalog whose records say what each
+	// request changes, for the gap between writes (runner.lastWrite):
+	// the first run of a repeated capture without a baseline. Baseline
+	// when nil.
+	Expect               *snapshot.Set
+	SkipFingerprintCheck bool
+	Out                  io.Writer // progress
+	Log                  io.Writer // output of hook commands
+	Env                  []string  // added to the environment of the project's commands (bisect: the commit)
 	// Concurrency replaces the configured concurrency of the services it
 	// names (the decision of concurrency: auto); it applies to the
 	// read-only requests only, as every concurrency does.
@@ -243,7 +248,7 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 	}
 	began := time.Now()
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
-		timings: map[string]int64{}, gap: writeGap,
+		timings: map[string]int64{}, gap: WriteGap,
 		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
 			Retried: map[string]*snapshot.Retry{}, NoRowValues: noValues}}
 	if r.uploads, err = prepareUploads(p, all); err != nil {
@@ -323,6 +328,14 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	r.base = opt.Baseline
+	r.expect = opt.Expect
+	if r.expect == nil {
+		r.expect = opt.Baseline
+	}
+	r.rowTracked = map[string]bool{}
+	for _, it := range rowTrackingItems(p) {
+		r.rowTracked[it] = true
+	}
 	r.retry = newRetrying(readonly)
 	if err := r.byService(ctx, readonly, true); err != nil {
 		r.retry.release()
@@ -864,14 +877,17 @@ type runner struct {
 	tokens   map[string]string
 	uploads  map[string]multipartBody // requests with files, by ID
 	tainted  bool                     // a real file was uploaded since the last restore
-	// wrote is when the response of the last request that changed the
-	// state arrived, since the last restore (zero: none); gap: see
-	// writeAfter.
-	wrote    time.Time
-	gap      time.Duration
-	retry    *retrying // retries of the read-only phase; nil: none
-	out, log io.Writer
-	env      []string // added to the environment of the project's commands
+	// wroteItems and wroteRows are when the last response that changed
+	// an item (db/table:users) or a tracked row of it (db/table:users[id=7])
+	// arrived, since the last restore; gap and rowTracked (the tables
+	// whose rows this capture tracks): see writeAfter.
+	wroteItems, wroteRows map[string]time.Time
+	gap                   time.Duration
+	rowTracked            map[string]bool
+	expect                *snapshot.Set // Options.Expect, else the baseline
+	retry                 *retrying     // retries of the read-only phase; nil: none
+	out, log              io.Writer
+	env                   []string // added to the environment of the project's commands
 
 	mu      sync.Mutex
 	timings map[string]int64
@@ -933,7 +949,7 @@ func (r *runner) reset(ctx context.Context) (states, error) {
 	if err := r.tr.restore(ctx); err != nil {
 		return nil, err
 	}
-	r.wrote = time.Time{}
+	r.wroteItems, r.wroteRows = nil, nil
 	// A whole copy is compared with its record before prepare and the
 	// tokens command, which may write; without them, on the fingerprint
 	// read below.
@@ -1070,24 +1086,29 @@ send:
 	return firstErr
 }
 
-// writeGap is the least time between the response of a request that
-// changed the state and the next request that changes data on the same
+// WriteGap is the least time between the response of a request that
+// changed data and the next request that changes the same data on the same
 // state, without a restore between them. A timestamp of one second, such as
 // Laravel's updated_at, then always gets another value: two requests that
 // touch the same row in the same second would leave it unchanged by the
 // second one in one capture and changed in the next. A full second holds
-// whatever the application's clock is set to.
-var writeGap = time.Second
+// whatever the application's clock is set to. Tests shorten it.
+var WriteGap = time.Second
 
 // writeAfter waits, before a request that changes data, for what is left
-// of the gap since the last response that changed the state. A request
-// the catalog says only reads, and the first request after a restore
-// (reset clears wrote), is not delayed.
+// of the gap since the last response that changed what the request is
+// expected to change (lastWrite). A request the catalog says only reads,
+// and the first request after a restore (reset clears what was written),
+// is not delayed.
 func (r *runner) writeAfter(ctx context.Context, req catalog.Request) error {
-	if r.gap <= 0 || r.wrote.IsZero() || !req.Mutating() {
+	if r.gap <= 0 || len(r.wroteItems) == 0 || !req.Mutating() {
 		return nil
 	}
-	wait := time.Until(r.wrote.Add(r.gap))
+	last := r.lastWrite(req)
+	if last.IsZero() {
+		return nil
+	}
+	wait := time.Until(last.Add(r.gap))
 	if wait <= 0 {
 		return nil
 	}
@@ -1098,6 +1119,75 @@ func (r *runner) writeAfter(ctx context.Context, req catalog.Request) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// lastWrite is when what req is expected to change was last changed
+// (zero: not since the restore). What it changes is taken from its record
+// in the baseline, or the first run of a repeated capture (expect): the rows of a table both
+// that record and this capture track rows of, else the tables. Without a
+// record that tracked the state (the first baseline, a new request) it is
+// everything, so the gap follows the last change of any data. A wrong
+// expectation (the request now changes other rows) can only bring back
+// the same-second case the gap prevents: a side effect that flips between
+// captures, a stop. It cannot hide a change: a write the request makes
+// is a change of data whenever it happens, and a write of the very value
+// a row already holds is none.
+func (r *runner) lastWrite(req catalog.Request) time.Time {
+	var latest time.Time
+	var rec *snapshot.Record
+	if r.expect != nil {
+		rec, _ = r.expect.Record(req.ID)
+	}
+	if rec == nil || rec.SideEffects == nil {
+		for _, t := range r.wroteItems {
+			latest = later(latest, t)
+		}
+		return latest
+	}
+	se := rec.SideEffects
+	for _, it := range se.Items {
+		t, ok := r.wroteItems[it]
+		if !ok {
+			continue
+		}
+		rows := false
+		if r.rowTracked[it] {
+			for _, rc := range se.Rows {
+				if rc.Item == it {
+					rows = true
+					latest = later(latest, r.wroteRows[it+"["+rc.Key+"]"])
+				}
+			}
+		}
+		if !rows {
+			latest = later(latest, t)
+		}
+	}
+	return latest
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// wrote notes, at the time the response arrived, what a request changed:
+// its items and the rows of tracked tables.
+func (r *runner) wrote(at time.Time, se *snapshot.SideEffects) {
+	if len(se.Items) == 0 {
+		return
+	}
+	if r.wroteItems == nil {
+		r.wroteItems, r.wroteRows = map[string]time.Time{}, map[string]time.Time{}
+	}
+	for _, it := range se.Items {
+		r.wroteItems[it] = at
+	}
+	for _, rc := range se.Rows {
+		r.wroteRows[rc.Item+"["+rc.Key+"]"] = at
 	}
 }
 
@@ -1122,9 +1212,6 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 			return nil, err
 		}
 		changed := diffStates(prev, cur)
-		if len(changed) > 0 {
-			r.wrote = answered
-		}
 		r.tr.markDirty(changed)
 		se := &snapshot.SideEffects{Items: flatten(changed)}
 		if len(changed) > 0 && rowsBefore != nil {
@@ -1135,6 +1222,7 @@ func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (st
 			se.Rows = r.tr.rowChanges(rowsBefore, rowsAfter)
 		}
 		res.Record.SideEffects = se
+		r.wrote(answered, se)
 	}
 	size := int64(len(res.Body))
 	err = r.write(req, res)
