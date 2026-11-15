@@ -279,7 +279,7 @@ func MiddlewareName(m string) (full, base string) {
 // without the namespace, or its name as listed. It never matches a part of a
 // name, so api does not match every route of the api group. route:list
 // --json lists an alias as its class and a middleware group by its name
-// (web, api, adminpanel): only -vv expands groups, as RouteListCommand
+// (web, api, members): only -vv expands groups, as RouteListCommand
 // flushes them otherwise. A group is named as listed.
 func named(names []string, m string) bool {
 	full, base := MiddlewareName(m)
@@ -354,7 +354,7 @@ func SuspectAuth(rs []routes.Route, excluded func(routes.Route) bool) []string {
 // Laravel routes that do not need authentication, apart from Laravel's
 // own web and api: route:list --json lists a group by its name, not its
 // middleware, so an application's own sign-in can hide in one
-// (adminpanel). A group is an entry without a namespace: aliases are
+// (members). A group is an entry without a namespace: aliases are
 // listed as classes. Routes excluded reports (nil: none) do not count.
 func CustomGroups(rs []routes.Route, excluded func(routes.Route) bool) []string {
 	seen := map[string]bool{}

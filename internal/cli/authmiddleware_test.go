@@ -81,14 +81,14 @@ func TestIdentityUnusedAllTargets(t *testing.T) {
 func TestAuthMiddlewareGroup(t *testing.T) {
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")
-	write(t, filepath.Join(root, "routes-src.json"), `[{"method":"GET|HEAD","uri":"api/profile","middleware":["api","adminpanel"]},`+
+	write(t, filepath.Join(root, "routes-src.json"), `[{"method":"GET|HEAD","uri":"api/profile","middleware":["api","members"]},`+
 		`{"method":"GET|HEAD","uri":"horizon/api/stats","middleware":["web","Laravel\\Horizon\\Http\\Middleware\\Authenticate"]}]`)
 	base := "version: 1\nproject: shop\ntarget:\n  base_url: http://localhost:8000\nidentities:\n  admin: {}\ngenerate:\n  identity: admin\ndiscover:\n  - adapter: laravel\n    command: [\"cat\", \"routes-src.json\"]\n"
 	write(t, cfg, base)
 	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[]}`)
 	write(t, filepath.Join(root, "driftgate", "exclusions.yaml"), "version: 1\nroutes:\n  - route: GET /horizon/api/stats\n    reason: Laravel Horizon dashboard.\n")
 	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
-	const group = "note: routes with the middleware group adminpanel get no identity; route:list --json lists a group by its name, not its middleware: if one signs a user in, name it under discover[].auth (e.g. auth: [adminpanel])"
+	const group = "note: routes with the middleware group members get no identity; route:list --json lists a group by its name, not its middleware: if one signs a user in, name it under discover[].auth (e.g. auth: [members])"
 	if code, out, errOut := runCLI(t, "discover", "--write", "--config", cfg); code != 0 || !strings.Contains(out, group) || strings.Contains(out, "group api") {
 		t.Fatalf("discover --write: %d\n%s\n%s", code, out, errOut)
 	}
@@ -96,7 +96,7 @@ func TestAuthMiddlewareGroup(t *testing.T) {
 	if _, out, errOut := runCLI(t, "generate", "--config", cfg); !strings.Contains(out, unused) {
 		t.Errorf("generate with only an excluded route behind auth:\n%s\n%s", out, errOut)
 	}
-	write(t, cfg, base+"    auth: [adminpanel]\n")
+	write(t, cfg, base+"    auth: [members]\n")
 	if code, out, errOut := runCLI(t, "discover", "--write", "--config", cfg); code != 0 || strings.Contains(out, "note:") {
 		t.Errorf("discover --write with the group: %d\n%s\n%s", code, out, errOut)
 	}

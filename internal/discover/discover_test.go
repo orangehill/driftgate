@@ -510,7 +510,7 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 		t.Errorf("suspects: %s", got)
 	}
 
-	src.Auth = []string{"getuserfromtoken", "adminpanel", "App\\Http\\Middleware\\VerifyJwtToken"}
+	src.Auth = []string{"getuserfromtoken", "members", "App\\Http\\Middleware\\VerifyJwtToken"}
 	rs = run(t, src)
 	for _, k := range []string{"GET /api/profile", "GET /api/admin/stats", "GET /api/report", "GET /api/me"} {
 		if !find(t, rs, k).Auth {
@@ -528,7 +528,7 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 			t.Errorf("%s: auth %v with a part of a name", r.Key(), r.Auth)
 		}
 	}
-	if got := UnmatchedAuth([]string{"GetUserFromToken", "jwt.auth", "adminpanel"}, run(t, src)); strings.Join(got, ",") != "jwt.auth" {
+	if got := UnmatchedAuth([]string{"GetUserFromToken", "jwt.auth", "members"}, run(t, src)); strings.Join(got, ",") != "jwt.auth" {
 		t.Errorf("unmatched: %v", got)
 	}
 	if err := (Adapter{Adapter: "openapi", File: "x.json", Auth: []string{"jwt"}}).Validate(); err == nil || !strings.Contains(err.Error(), "auth is for adapter laravel") {
@@ -542,8 +542,8 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 // authentication or is excluded.
 func TestCustomGroups(t *testing.T) {
 	rs := []routes.Route{
-		{Source: "laravel", Methods: []string{"GET"}, Path: "/a", Middleware: []string{"web", "api", "Closure", "adminpanel", `App\Http\Middleware\GetUserFromToken`}},
-		{Source: "laravel", Methods: []string{"GET"}, Path: "/b", Middleware: []string{"adminpanel", "tenant:acme"}},
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/a", Middleware: []string{"web", "api", "Closure", "members", `App\Http\Middleware\GetUserFromToken`}},
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/b", Middleware: []string{"members", "tenant:acme"}},
 		{Source: "laravel", Methods: []string{"GET"}, Path: "/c", Auth: true, Middleware: []string{"signedin"}},
 		{Source: "laravel", Methods: []string{"GET"}, Path: "/horizon/api", Middleware: []string{"horizonpanel"}},
 		{Source: "command", Methods: []string{"GET"}, Path: "/d", Middleware: []string{"other"}},
@@ -552,8 +552,8 @@ func TestCustomGroups(t *testing.T) {
 		excluded func(routes.Route) bool
 		want     string
 	}{
-		{nil, "adminpanel, horizonpanel, tenant"},
-		{func(r routes.Route) bool { return strings.HasPrefix(r.Path, "/horizon") }, "adminpanel, tenant"},
+		{nil, "horizonpanel, members, tenant"},
+		{func(r routes.Route) bool { return strings.HasPrefix(r.Path, "/horizon") }, "members, tenant"},
 	}
 	for _, c := range cases {
 		if got := strings.Join(CustomGroups(rs, c.excluded), ", "); got != c.want {
