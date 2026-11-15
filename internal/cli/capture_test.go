@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/demo"
 	"github.com/orangehill/driftgate/internal/report"
@@ -760,5 +761,95 @@ func TestProposedFormat(t *testing.T) {
 	}
 	if text, why := proposedFormat("a\xffb"); why == "" || text != "" {
 		t.Fatalf("bytes that are not UTF-8: %q %q", text, why)
+	}
+}
+
+// TestRepeatProposesNestedLists: a list in a list whose times change at
+// both levels gets one rule, since $.entries[*].updated_at reaches the
+// inner items too; the proposals pass the lint as they are, and a value
+// of a shape neither level showed is still a drift.
+func TestRepeatProposesNestedLists(t *testing.T) {
+	var mu sync.Mutex
+	n, inner := 0, ""
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at, in := fmt.Sprintf("2026-01-01 10:00:%02d", n), fmt.Sprintf("10:00:%02d", n)
+		if inner != "" {
+			in = inner
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"id":1,"updated_at":%q,"messages":[{"id":1,"updated_at":%q},{"id":2,"updated_at":%q}]},{"id":2,"updated_at":%q,"messages":[{"id":3,"updated_at":%q}]}]}`, at, in, in, at, in)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	allow := filepath.Join(root, "driftgate", "allowlist.yaml")
+	write(t, allow, "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	at := strings.Index(out, "body:\n")
+	if code != ExitDrift || at < 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	body := strings.TrimRight(out[at:], "\n") + "\n"
+	if got := strings.Count(body, "  - request:"); got != 1 || !strings.Contains(body, "path: '$.entries[*].updated_at'") {
+		t.Fatalf("want one rule for $.entries[*].updated_at:\n%s", body)
+	}
+	write(t, allow, "version: 1\n"+body)
+	l, err := allowlist.Load(allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := l.Lint(); len(f) > 0 {
+		t.Fatalf("the proposals have findings: %v\n%s", f, body)
+	}
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture a: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture b: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("times of both levels drift under the proposed rule: exit %d\n%s\n%s", code, out, errOut)
+	}
+	mu.Lock()
+	inner = "pending"
+	mu.Unlock()
+	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture c: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "compare", "c", "--against", "a", "--config", cfg); code != ExitDrift || !strings.Contains(out, "messages[0].updated_at") {
+		t.Fatalf("a value neither level showed is not a drift: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRepeatKeepsStableNestedPlaces: $.entries[*].updated_at would also
+// reach the times of the inner list, which kept their values, so the outer
+// places are proposed one by one.
+func TestRepeatKeepsStableNestedPlaces(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at := fmt.Sprintf("2026-01-01 10:00:%02d", n)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"updated_at":%q,"messages":[{"updated_at":"09:00:00"}]},{"updated_at":%q,"messages":[]}]}`, at, at)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	if code != ExitDrift || strings.Contains(out, "[*]") || !strings.Contains(out, "path: '$.entries[0].updated_at'") || !strings.Contains(out, "path: '$.entries[1].updated_at'") {
+		t.Fatalf("want the outer places one by one: exit %d\n%s\n%s", code, out, errOut)
 	}
 }

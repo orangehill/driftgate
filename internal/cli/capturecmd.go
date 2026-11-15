@@ -692,8 +692,12 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 		// stricter way.
 		compare.Places(compare.Side{Record: rec, Body: raw}, allow.ForTarget(req.Target), req.ID, func(kind compare.PlaceKind, path string) bool {
 			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
-				if g := indexes().ReplaceAllString(path, "[*]"); paths[g] {
-					rejected[key{req.ID, g}] = true
+				// A * reaches any depth: $.data[*].at reaches the at of
+				// a list inside the items too.
+				for g := range paths {
+					if glob.Match(g, path) {
+						rejected[key{req.ID, g}] = true
+					}
 				}
 			}
 			return true
@@ -711,6 +715,40 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 		}
 		out = append(out, g)
 		outValues[g] = gValues[g]
+	}
+	return fold(out, outValues)
+}
+
+// fold turns the proposals of a request whose path another one's glob
+// reaches into that one: the first rule that reaches a value decides it,
+// so a rule for $.data[*].tags[*].at after one for $.data[*].at would
+// never apply. The glob's format is learned from the values of both.
+func fold(keys []key, values map[key][]string) ([]key, map[key][]string) {
+	owner := func(k key) key {
+		seen := map[key]bool{k: true}
+		for {
+			next := k
+			for _, a := range keys {
+				if a.request == k.request && !seen[a] && strings.Contains(a.path, "*") && glob.Match(a.path, k.path) {
+					next = a
+					break
+				}
+			}
+			if next == k {
+				return k
+			}
+			k = next
+			seen[k] = true
+		}
+	}
+	var out []key
+	outValues := map[key][]string{}
+	for _, k := range keys {
+		o := owner(k)
+		if _, ok := outValues[o]; !ok {
+			out = append(out, o)
+		}
+		outValues[o] = append(outValues[o], values[k]...)
 	}
 	return out, outValues
 }

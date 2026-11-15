@@ -347,6 +347,22 @@ func TestSetupAppNotAnswering(t *testing.T) {
 	}
 }
 
+// TestSetupBadKeyWritesNothing: a key that cannot be read stops setup
+// before it writes the project's files, so the next setup starts anew.
+func TestSetupBadKeyWritesNothing(t *testing.T) {
+	root := setupDemo(t, "http://127.0.0.1:"+closedPort(t))
+	t.Setenv("DRIFTGATE_KEY", strings.Repeat("ab", 32))
+	code, out, errOut := runCLI(t, "setup", "--yes")
+	if code == ExitClean || !strings.Contains(errOut, "encryption key") {
+		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
+	}
+	for _, f := range []string{"driftgate.yaml", "catalog.json", "allowlist.yaml"} {
+		if _, err := os.Stat(filepath.Join(root, ".driftgate", f)); !os.IsNotExist(err) {
+			t.Errorf("%s was written: %v\n%s", f, err, out)
+		}
+	}
+}
+
 // TestSetupToBaseline: from zero to the first baseline, with the key made
 // in .driftgate/; a route without a value for its parameter is left for
 // the user to check, and does not fail the setup. A second run changes
