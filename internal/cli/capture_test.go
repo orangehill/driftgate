@@ -713,6 +713,44 @@ func TestProposalWithControlCharacters(t *testing.T) {
 	}
 }
 
+// TestProposalForOneOfTheScripts: the proposal for the script of an error
+// page that differs is for that script, not for every script of the page:
+// a stable script before it does not have its format, and the next capture
+// with the proposal written is clean.
+func TestProposalForOneOfTheScripts(t *testing.T) {
+	defer func(d time.Duration) { runGap = d }(runGap)
+	runGap = 0
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		v := n
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>window.livewire = {\"ok\":true};</script><script>window.data = {\"seen\":%d};</script></body></html>", 1000+v)
+	}))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"page","method":"GET","path":"/page","storage":"public"}]}`)
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	_, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2")
+	_, proposal, ok := strings.Cut(out, "Proposed allowlist entries (check every format and write the reason):\n")
+	if !ok {
+		t.Fatalf("no proposal:\n%s\n%s", out, errOut)
+	}
+	proposal, _, _ = strings.Cut(proposal, "\n\n")
+	if strings.Contains(proposal, "[*]") {
+		t.Errorf("the proposal reaches every script:\n%s", proposal)
+	}
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n"+strings.ReplaceAll(proposal, "TODO — ", "")+"\n")
+	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg, "--repeat", "2", "--force"); code != ExitClean {
+		t.Fatalf("with the proposal written: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
 // TestProposedFormat: escapes compile and match what the format matched;
 // a format that cannot be written so is not proposed.
 func TestProposedFormat(t *testing.T) {
