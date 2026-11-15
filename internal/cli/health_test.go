@@ -27,7 +27,7 @@ import (
 // the fixed response clears it.
 func TestBaselineHoldsABug(t *testing.T) {
 	var fixed atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch {
 		case r.URL.Path == "/api/tree" && !fixed.Load():
@@ -39,7 +39,7 @@ func TestBaselineHoldsABug(t *testing.T) {
 		default:
 			fmt.Fprint(w, `{"ok":true}`)
 		}
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")

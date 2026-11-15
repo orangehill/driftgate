@@ -688,14 +688,14 @@ func TestProposalWithControlCharacters(t *testing.T) {
 	runGap = 0
 	var mu sync.Mutex
 	n := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		v := n
 		mu.Unlock()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>\n    window.data = {\"seen\":%d};\n</script></body></html>", 1000+v)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")
@@ -723,14 +723,14 @@ func TestProposalForOneOfTheScripts(t *testing.T) {
 	runGap = 0
 	var mu sync.Mutex
 	n := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		v := n
 		mu.Unlock()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, "<!doctype html><html><body><p>Error</p><script>window.livewire = {\"ok\":true};</script><script>window.data = {\"seen\":%d};</script></body></html>", 1000+v)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	cfg := filepath.Join(root, "driftgate.yaml")
