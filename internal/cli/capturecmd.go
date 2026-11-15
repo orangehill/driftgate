@@ -184,13 +184,6 @@ func captureSet(ctx context.Context, p *config.Project, cat *catalog.Catalog, al
 		}
 		opt := o.runOptions(tag, base, progress, errOut)
 		opt.Force, opt.Concurrency, opt.NotBefore = o.force || i > 0, used, notBefore
-		if i > 0 && base == nil {
-			// The first run says what each request changes: the later
-			// ones wait between writes only where they meet.
-			if set, err := p.Capture(tags[0]); err == nil {
-				opt.Expect = set
-			}
-		}
 		sum, err := capture.Run(ctx, p, cat, opt)
 		if err != nil {
 			return 0, failed(err)

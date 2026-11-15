@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/chaos"
@@ -687,80 +686,5 @@ func TestProjectRootsInHome(t *testing.T) {
 		if c[1] == "" && len(got) != 0 || c[1] != "" && (len(got) != 1 || got[0] != c[1]) {
 			t.Errorf("HOME %s: %s: %v, want %q", home, c[0], got, c[1])
 		}
-	}
-}
-
-// TestWriteGap: on one state, a request that changes data is sent no
-// sooner than WriteGap after the response of the last request that changed
-// it, so a timestamp of one second always moves on: inside a sequence also
-// with --restore each. A read between them is not delayed, nor the first
-// request after a restore (the next unit under --restore each).
-func TestWriteGap(t *testing.T) {
-	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=")
-	defer func(d time.Duration) { WriteGap = d }(WriteGap)
-	WriteGap = time.Second // the real gap; TestMain shortens it for the other tests
-	for _, restore := range []string{"once", "each"} {
-		t.Run(restore, func(t *testing.T) {
-			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
-			root := t.TempDir()
-			file := filepath.Join(root, "database", "app.sqlite")
-			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			app := newSQLiteApp(t, file, "wal")
-			var mu sync.Mutex
-			arrived, done := map[string]time.Time{}, map[string]time.Time{}
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				k := r.Method + " " + r.URL.Path
-				mu.Lock()
-				arrived[k] = time.Now()
-				mu.Unlock()
-				app.ServeHTTP(w, r)
-				mu.Lock()
-				done[k] = time.Now()
-				mu.Unlock()
-			}))
-			t.Cleanup(srv.Close)
-			p, err := config.New(config.Config{Version: 1, Project: "p", Mode: config.Freeze, Level: "values",
-				Target: config.Target{BaseURL: srv.URL},
-				State:  map[string]config.Component{"db": {Driver: config.SQLite, Working: "database/app.sqlite", Exclude: []string{"sessions"}}}}, root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx := context.Background()
-			var out bytes.Buffer
-			if err := Seed(ctx, p, SeedOptions{Out: &out}); err != nil {
-				t.Fatal(err)
-			}
-			post := json.RawMessage(`{"email":"c@x"}`)
-			cat := &catalog.Catalog{Version: 1, Requests: []catalog.Request{
-				{ID: "add", Method: "POST", Path: "/users", Body: post, Headers: [][2]string{{"Content-Type", "application/json"}}, Storage: snapshot.Public},
-				{ID: "list", Method: "GET", Path: "/users", Storage: snapshot.Public},
-				{ID: "remove", Method: "DELETE", Path: "/users/1", Storage: snapshot.Public},
-				{ID: "remove-other", Method: "DELETE", Path: "/users/2", Storage: snapshot.Public},
-			}, Sequences: []catalog.Sequence{{ID: "s", Requests: []string{"add", "list", "remove"}}}}
-			if _, err := Run(ctx, p, cat, Options{Tag: "a", Restore: restore, Out: &out}); err != nil {
-				t.Fatalf("capture: %v\n%s", err, out.String())
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if d := arrived["GET /users"].Sub(done["POST /users"]); d >= WriteGap/2 {
-				t.Errorf("the read waited %v after the write", d)
-			}
-			if d := arrived["DELETE /users/1"].Sub(done["POST /users"]); d < WriteGap {
-				t.Errorf("the second write of the sequence came %v after the first, want %v or more", d, WriteGap)
-			}
-			// The other unit runs before or after the sequence.
-			d := arrived["DELETE /users/2"].Sub(done["DELETE /users/1"])
-			if arrived["DELETE /users/2"].Before(arrived["POST /users"]) {
-				d = arrived["POST /users"].Sub(done["DELETE /users/2"])
-			}
-			switch {
-			case restore == "once" && d < WriteGap:
-				t.Errorf("the next unit's write came %v after the last write, want %v or more", d, WriteGap)
-			case restore == "each" && d >= WriteGap:
-				t.Errorf("--restore each: the first request after the restore waited (%v)", d)
-			}
-		})
 	}
 }

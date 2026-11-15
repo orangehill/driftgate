@@ -224,6 +224,31 @@ func (r *Report) RowValuesNote() string {
 	return ""
 }
 
+// SameSecondNote is the hint for a table that a request changed in one
+// capture and left unchanged in the other, with no other difference of
+// its side effects on that table (no row of it differs): two writes to the
+// same row within one second can leave a timestamp the same. The drift
+// still fails; empty otherwise.
+func (r *Report) SameSecondNote() string {
+	for _, res := range r.Results {
+		for _, d := range res.Drifts {
+			item, ok := strings.CutPrefix(d.Where, "side-effects:")
+			if d.Kind != compare.KindSideEffect || d.Expected != "" || !ok || strings.Contains(item, "[") ||
+				!(d.Baseline == "changed" && d.Current == "unchanged" || d.Baseline == "unchanged" && d.Current == "changed") {
+				continue
+			}
+			alone := true
+			for _, o := range res.Drifts {
+				alone = alone && !(o.Kind == compare.KindSideEffect && strings.HasPrefix(o.Where, d.Where+"["))
+			}
+			if alone {
+				return "table changed in one capture only: two writes to the same row within one second can leave a timestamp unchanged in one capture and changed in the other; if the request's own change is the same, run its unit with --restore each, or track the table with row_tracking to see which columns changed"
+			}
+		}
+	}
+	return ""
+}
+
 // KindsNote counts the drifts by kind, the most first ("kinds:
 // header-extra 622, array-length 188, status 6"); empty without drift.
 func (r *Report) KindsNote() string {
