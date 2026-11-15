@@ -775,17 +775,31 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 			out = append(out, rule{r, g.path, g.format})
 		}
 	}
-	return ordered(out)
+	ids := make([]string, len(cat.Requests))
+	for i, r := range cat.Requests {
+		ids[i] = r.ID
+	}
+	return ordered(out, ids)
 }
 
-// ordered puts each rule before every rule whose request and path globs
-// also reach its places. The first rule that reaches a value decides it,
-// and a * reaches any depth: $.data[*].at reaches $.data[*].tags[*].at
-// too, so the inner rule comes first and keeps its own format there,
-// while the outer one decides the places only it reaches.
-func ordered(rules []rule) []rule {
+// ordered puts each rule before every rule that also reaches its places
+// for some catalog request (ids). The first rule that reaches a value
+// decides it, and a * reaches any depth: $.data[*].at reaches
+// $.data[*].tags[*].at too, so the inner rule comes first and keeps its
+// own format there, while the outer one decides the places only it
+// reaches. Request globs need only share a request: an inner rule for
+// feed* goes before an outer rule for feed1.
+func ordered(rules []rule, ids []string) []rule {
 	reaches := func(a, b rule) bool {
-		return a != b && strings.ContainsAny(a.request+a.path, "*?") && glob.Match(a.request, b.request) && glob.Match(a.path, b.path)
+		if a == b || !glob.Match(a.path, b.path) {
+			return false
+		}
+		for _, id := range ids {
+			if glob.Match(a.request, id) && glob.Match(b.request, id) {
+				return true
+			}
+		}
+		return false
 	}
 	out := make([]rule, 0, len(rules))
 	done := make([]bool, len(rules))

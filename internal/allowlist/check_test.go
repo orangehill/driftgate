@@ -227,6 +227,15 @@ func TestShadowedSaysHowToFix(t *testing.T) {
     key: slug
     reason: r
 `, "array rule 1 comes first for every array this one reaches, so this one never decides: remove array rule 1, or move this one above it"},
+		{`body:
+  - path: $.page.title
+    format: '\w+ \d+'
+    parts: true
+    reason: the number
+  - path: $.page.title
+    format: '.+'
+    reason: any title
+`, "body rule 2 decides first everywhere this one applies, so this one never decides: remove or narrow body rule 2, since a rule with parts applies only where no whole-value rule matches"},
 	}
 	for _, c := range cases {
 		l, err := Parse([]byte("version: 1\n" + c.yaml))

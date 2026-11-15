@@ -79,3 +79,35 @@ func TestKeyConflict(t *testing.T) {
 	}
 	os.Remove(p.Layout.Key)
 }
+
+// TestKeyErrorNamesSource: a key that cannot be read is named once: by
+// its source for DRIFTGATE_KEY, by the key file's own error for the file.
+func TestKeyErrorNamesSource(t *testing.T) {
+	t.Setenv(EnvStore, "")
+	t.Setenv(secret.EnvKey, strings.Repeat("ab", 32))
+	p, err := New(Config{Version: Version, Project: "shop", Mode: Freeze, Level: "values", Baselines: BaselinesLocal}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.LoadKey(); err == nil || !strings.HasPrefix(err.Error(), secret.EnvKey+": ") {
+		t.Fatalf("DRIFTGATE_KEY: %v", err)
+	}
+	t.Setenv(secret.EnvKey, "")
+	p, err = New(Config{Version: Version, Project: "shop", Mode: Freeze, Level: "values", Baselines: BaselinesLocal}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Layout.Key == "" {
+		t.Skip("no key file in this layout")
+	}
+	if err := os.MkdirAll(filepath.Dir(p.Layout.Key), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Layout.Key, []byte("not a key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.LoadKey()
+	if err == nil || strings.Count(err.Error(), filepath.Join(".driftgate", "key")) != 1 {
+		t.Fatalf("key file: %v", err)
+	}
+}

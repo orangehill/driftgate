@@ -158,6 +158,11 @@ func (l *List) shadowed(i int) (Finding, bool) {
 	a := &l.Body[by]
 	f := Finding{RuleRef: bodyRef(i, r), Check: CheckShadowed,
 		Detail: fmt.Sprintf("body rule %[1]d decides first everywhere this one applies, so this one never decides"+fix, by+1, "body")}
+	if r.Parts {
+		// Order does not help: a rule with parts applies only where no
+		// whole-value rule matches, wherever that rule is.
+		f.Detail = fmt.Sprintf("body rule %[1]d decides first everywhere this one applies, so this one never decides: remove or narrow body rule %[1]d, since a rule with parts applies only where no whole-value rule matches", by+1)
+	}
 	if a.Target == r.Target && a.Request == r.Request && a.Path == r.Path && a.Format == r.Format && a.AnyLength == r.AnyLength && a.Parts == r.Parts {
 		f.Check, f.Detail = CheckDuplicate, fmt.Sprintf("the same rule as body rule %d", by+1)
 	}

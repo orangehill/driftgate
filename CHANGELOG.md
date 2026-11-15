@@ -73,7 +73,7 @@ versioning. Read **Upgrading** before you update an existing project.
 ### Fixed
 
 - Proposals for a list inside a list now put the inner rule (`$.entries[*].messages[*].updated_at`) before the outer one (`$.entries[*].updated_at`), so each level keeps its own format. A `*` reaches any depth, so before, the inner rule never applied and `allowlist check` called it shadowed. A `[*]` path is also no longer proposed when it reaches a deeper place that did not differ.
-- A shadowed rule's finding now says how to fix it: remove the earlier rule, or move this one above it.
+- A shadowed rule's finding now says how to fix it: remove the earlier rule, or move this one above it. For a rule with parts, which applies only where no whole-value rule matches, it says to remove or narrow that rule.
 - `setup` for a new project checks or makes the key before it writes `driftgate.yaml`, the catalog and the allowlist. Before, a key that could not be read left those files, and the next `setup` treated the project as existing.
 - An error about a key that cannot be read now names where the key comes from (`DRIFTGATE_KEY`, `key.env`, `key.op` or the key file).
 - A table that a request changed in one capture only, with no row of it that differs, now gets a hint in the report: two writes to the same row within one second can leave a timestamp unchanged. It names `--restore each` and `row_tracking`. The drift still stops the run. ([#66](https://github.com/orangehill/driftgate/pull/66))
