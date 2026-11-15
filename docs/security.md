@@ -90,7 +90,7 @@ provenance. Verify the signature of `SHA256SUMS` first, then the binary:
 
 ```sh
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.0.2 \
+  --certificate-identity https://github.com/orangehill/driftgate/.github/workflows/release.yml@refs/tags/v1.1.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
@@ -102,7 +102,7 @@ Verify the build provenance of a file:
 gh attestation verify driftgate-linux-amd64 --repo orangehill/driftgate
 ```
 
-The GitHub Action verifies the signature and checksum for `version: v1.0.2`
+The GitHub Action verifies the signature and checksum for `version: v1.1.0`
 or `version: latest`. It installs nothing when either fails.
 
 Builds are reproducible. Rebuilding a tag with the Go version from
@@ -111,7 +111,7 @@ Builds are reproducible. Rebuilding a tag with the Go version from
 ```sh
 pkg=github.com/orangehill/driftgate/internal/cli
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w \
-  -X $pkg.Version=v1.0.2 -X $pkg.Commit=$(git rev-parse HEAD) \
+  -X $pkg.Version=v1.1.0 -X $pkg.Commit=$(git rev-parse HEAD) \
   -X $pkg.Date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" \
   -o driftgate-linux-amd64 ./cmd/driftgate
 ```

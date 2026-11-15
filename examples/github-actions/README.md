@@ -142,7 +142,7 @@ hash alone:
 
 <!-- check: yaml -->
 ```yaml
-- uses: orangehill/driftgate@v1.0.2
+- uses: orangehill/driftgate@v1.1.0
   with:
     # Private requests are checked locally; CI checks the public ones.
     args: --skip-private

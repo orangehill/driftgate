@@ -157,9 +157,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # install and start the application on 127.0.0.1
-      - uses: orangehill/driftgate@v1.0.2
+      - uses: orangehill/driftgate@v1.1.0
         with:
-          version: v1.0.2
+          version: v1.1.0
           args: --skip-private
           junit: driftgate-junit.xml
 ```
