@@ -1276,6 +1276,9 @@ func (p *Project) LoadKey() (secret.Key, error) {
 			if n := p.sealedBodies(); n > 0 {
 				err = noKey{fmt.Errorf("no encryption key, and the store holds %d private bodies sealed with the project key (%s): put that key back (%s, DRIFTGATE_KEY or key: in %s); driftgate key create would make another key, which cannot read them", n, p.Layout.Private, keyHome(p.Layout), FileName)}
 			}
+		} else if err != nil && !keyErrNamed(p, err) {
+			// A key that is there but cannot be read: say where it is.
+			err = fmt.Errorf("%s: %w", p.KeySource(), err)
 		}
 		if err != nil {
 			return nil, err
@@ -1283,6 +1286,19 @@ func (p *Project) LoadKey() (secret.Key, error) {
 		p.key = k
 	}
 	return p.key, nil
+}
+
+// keyErrNamed reports whether an error of secret.Load names the key's
+// source already: the key file's errors name the file, and op's its
+// reference; DRIFTGATE_KEY, key.env and the Keychain give none.
+func keyErrNamed(p *Project, err error) bool {
+	switch {
+	case p.Key.Op != "":
+		return strings.Contains(err.Error(), p.Key.Op)
+	case p.Key.Env != "" || os.Getenv(secret.EnvKey) != "":
+		return false
+	}
+	return p.Layout.Key != ""
 }
 
 // CreateKey makes the project key where LoadKey finds it: in the layout's

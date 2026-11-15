@@ -195,3 +195,56 @@ func TestRuleRefString(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+// TestShadowedSaysHowToFix: a broader format added later for the place of
+// a proposed rule never applies there, since the first rule decides; the
+// finding says so and how to fix it.
+func TestShadowedSaysHowToFix(t *testing.T) {
+	cases := []struct{ yaml, want string }{
+		{`body:
+  - request: feed
+    path: $.entries[*].updated_at
+    format: '\d{2}:\d{2}'
+    reason: proposed
+  - request: feed
+    path: $.entries[*].updated_at
+    format: '[\d :-]+'
+    reason: added later
+`, "body rule 1 decides first everywhere this one applies, so this one never decides: remove body rule 1, or move this one above it"},
+		{`headers:
+  - name: ETag
+    format: '"\w+"'
+    reason: r
+  - name: etag
+    format: 'W/"\w+"'
+    reason: r
+`, "header rule 1 comes first for every request this one applies to, so this one never decides: remove header rule 1, or move this one above it"},
+		{`arrays:
+  - path: $.data
+    key: id
+    reason: r
+  - path: $.data
+    key: slug
+    reason: r
+`, "array rule 1 comes first for every array this one reaches, so this one never decides: remove array rule 1, or move this one above it"},
+		{`body:
+  - path: $.page.title
+    format: '\w+ \d+'
+    parts: true
+    reason: the number
+  - path: $.page.title
+    format: '.+'
+    reason: any title
+`, "body rule 2 decides first everywhere this one applies, so this one never decides: remove or narrow body rule 2, since a rule with parts applies only where no whole-value rule matches"},
+	}
+	for _, c := range cases {
+		l, err := Parse([]byte("version: 1\n" + c.yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := l.Lint()
+		if len(f) != 1 || f[0].Check != CheckShadowed || f[0].Detail != c.want {
+			t.Errorf("findings %v\nwant one shadowed: %s", f, c.want)
+		}
+	}
+}

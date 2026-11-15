@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orangehill/driftgate/internal/allowlist"
 	"github.com/orangehill/driftgate/internal/catalog"
 	"github.com/orangehill/driftgate/internal/demo"
 	"github.com/orangehill/driftgate/internal/report"
@@ -760,5 +761,169 @@ func TestProposedFormat(t *testing.T) {
 	}
 	if text, why := proposedFormat("a\xffb"); why == "" || text != "" {
 		t.Fatalf("bytes that are not UTF-8: %q %q", text, why)
+	}
+}
+
+// TestRepeatProposesNestedLists: a list in a list whose times change at
+// both levels gets a rule per level, the inner one first: a * reaches any
+// depth, so $.entries[*].updated_at reaches the inner items too, and the
+// first rule that reaches a value decides it. The proposals pass the lint
+// as they are, and each level keeps its own format: the other level's
+// shape is a drift.
+func TestRepeatProposesNestedLists(t *testing.T) {
+	var mu sync.Mutex
+	n, outer, inner := 0, "", ""
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at, in := fmt.Sprintf("2026-01-01 10:00:%02d", n), fmt.Sprintf("10:00:%02d", n)
+		if outer != "" {
+			at = outer
+		}
+		if inner != "" {
+			in = inner
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"id":1,"updated_at":%q,"messages":[{"id":1,"updated_at":%q},{"id":2,"updated_at":%q}]},{"id":2,"updated_at":%q,"messages":[{"id":3,"updated_at":%q}]}]}`, at, in, in, at, in)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	allow := filepath.Join(root, "driftgate", "allowlist.yaml")
+	write(t, allow, "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	at := strings.Index(out, "body:\n")
+	if code != ExitDrift || at < 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	body := strings.TrimRight(out[at:], "\n") + "\n"
+	in, ou := strings.Index(body, "path: '$.entries[*].messages[*].updated_at'"), strings.Index(body, "path: '$.entries[*].updated_at'")
+	if strings.Count(body, "  - request:") != 2 || in < 0 || ou < in {
+		t.Fatalf("want the inner rule, then the outer one:\n%s", body)
+	}
+	write(t, allow, "version: 1\n"+body)
+	l, err := allowlist.Load(allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := l.Lint(); len(f) > 0 {
+		t.Fatalf("the proposals have findings: %v\n%s", f, body)
+	}
+	if code, out, errOut := runCLI(t, "capture", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture a: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "capture", "b", "--config", cfg); code != ExitClean {
+		t.Fatalf("capture b: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("times of both levels drift under the proposed rules: exit %d\n%s\n%s", code, out, errOut)
+	}
+	for i, c := range []struct{ outer, inner, where string }{
+		{"", "pending", "messages[0].updated_at"},
+		{"", "2026-01-01 10:00:59", "messages[0].updated_at"},
+		{"10:00:59", "", "entries[0].updated_at"},
+	} {
+		mu.Lock()
+		outer, inner = c.outer, c.inner
+		mu.Unlock()
+		tag := fmt.Sprintf("c%d", i)
+		if code, out, errOut := runCLI(t, "capture", tag, "--config", cfg); code != ExitClean {
+			t.Fatalf("capture %s: exit %d\n%s\n%s", tag, code, out, errOut)
+		}
+		if code, out, errOut := runCLI(t, "compare", tag, "--against", "a", "--config", cfg); code != ExitDrift || !strings.Contains(out, c.where) {
+			t.Errorf("outer %q, inner %q is not a drift at %s: exit %d\n%s\n%s", c.outer, c.inner, c.where, code, out, errOut)
+		}
+	}
+}
+
+// TestRepeatKeepsStableNestedPlaces: $.entries[*].updated_at would also
+// reach the times of the inner list, which kept their values, so the outer
+// places are proposed one by one.
+func TestRepeatKeepsStableNestedPlaces(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at := fmt.Sprintf("2026-01-01 10:00:%02d", n)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"updated_at":%q,"messages":[{"updated_at":"09:00:00"}]},{"updated_at":%q,"messages":[]}]}`, at, at)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed","method":"GET","path":"/feed","storage":"public"}]}`)
+	write(t, filepath.Join(root, "driftgate", "allowlist.yaml"), "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	if code != ExitDrift || strings.Contains(out, "[*]") || !strings.Contains(out, "path: '$.entries[0].updated_at'") || !strings.Contains(out, "path: '$.entries[1].updated_at'") {
+		t.Fatalf("want the outer places one by one: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// TestRepeatOrdersAcrossRequests: the inner rule shared by feed1 and feed2
+// (feed*) goes before the outer rule of feed1 alone, since both reach the
+// inner places of feed1; otherwise the outer format would judge them.
+func TestRepeatOrdersAcrossRequests(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		at := fmt.Sprintf("2026-01-01 10:00:%02d", n)
+		if r.URL.Path == "/feed2" {
+			at = fmt.Sprintf("%d", 1700000000+n)
+		}
+		in := fmt.Sprintf("10:00:%02d", n)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"entries":[{"updated_at":%q,"messages":[{"updated_at":%q}]}]}`, at, in)
+	})))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	cfg := filepath.Join(root, "driftgate.yaml")
+	write(t, cfg, fmt.Sprintf("version: 1\nproject: p\nmode: freeze\nlevel: values\ntarget:\n  base_url: %s\n", srv.URL))
+	write(t, filepath.Join(root, "driftgate", "catalog.json"), `{"version":1,"requests":[{"id":"feed1","method":"GET","path":"/feed1","storage":"public"},{"id":"feed2","method":"GET","path":"/feed2","storage":"public"}]}`)
+	allow := filepath.Join(root, "driftgate", "allowlist.yaml")
+	write(t, allow, "version: 1\n")
+	t.Setenv("DRIFTGATE_STORE", filepath.Join(t.TempDir(), "store"))
+	code, out, errOut := runCLI(t, "capture", "r", "--config", cfg, "--repeat", "2")
+	at := strings.Index(out, "body:\n")
+	if code != ExitDrift || at < 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	body := strings.TrimRight(out[at:], "\n") + "\n"
+	if !strings.Contains(body, "request: 'feed*'\n    path: '$.entries[*].messages[*].updated_at'") {
+		t.Fatalf("want one inner rule for feed*:\n%s", body)
+	}
+	write(t, allow, "version: 1\n"+body)
+	for _, tag := range []string{"a", "b"} {
+		if code, out, errOut := runCLI(t, "capture", tag, "--config", cfg); code != ExitClean {
+			t.Fatalf("capture %s: exit %d\n%s\n%s", tag, code, out, errOut)
+		}
+	}
+	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
+		t.Fatalf("the proposed rules do not hold:\n%s\nexit %d\n%s\n%s", body, code, out, errOut)
+	}
+}
+
+// BenchmarkOrdered: 500 requests with a rule each at one path.
+func BenchmarkOrdered(b *testing.B) {
+	var rules []rule
+	var ids []string
+	for i := range 500 {
+		id := fmt.Sprintf("req-%d", i)
+		ids = append(ids, id)
+		rules = append(rules, rule{id, "$.data[*].at", `\d+`})
+	}
+	rules = append(rules, rule{"req-*", "$.data[*].items[*].at", `\d+`})
+	for b.Loop() {
+		ordered(rules, ids)
 	}
 }

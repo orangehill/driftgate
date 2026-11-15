@@ -656,13 +656,15 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 	if allow == nil {
 		allow = allowlist.Empty()
 	}
-	wide := map[string]map[string]bool{} // request → generalized paths to check
+	type around struct{ prefix, suffix string } // glob.Literal of a path
+	wide := map[string]map[string]around{}      // request → generalized paths to check
 	for _, g := range general {
 		if strings.Contains(g.path, "[*]") {
 			if wide[g.request] == nil {
-				wide[g.request] = map[string]bool{}
+				wide[g.request] = map[string]around{}
 			}
-			wide[g.request][g.path] = true
+			pre, suf := glob.Literal(g.path)
+			wide[g.request][g.path] = around{pre, suf}
 		}
 	}
 	rejected := map[key]bool{}
@@ -692,8 +694,12 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 		// stricter way.
 		compare.Places(compare.Side{Record: rec, Body: raw}, allow.ForTarget(req.Target), req.ID, func(kind compare.PlaceKind, path string) bool {
 			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
-				if g := indexes().ReplaceAllString(path, "[*]"); paths[g] {
-					rejected[key{req.ID, g}] = true
+				// A * reaches any depth: $.data[*].at reaches the at of
+				// a list inside the items too.
+				for g, a := range paths {
+					if strings.HasPrefix(path, a.prefix) && strings.HasSuffix(path, a.suffix) && glob.Match(g, path) {
+						rejected[key{req.ID, g}] = true
+					}
 				}
 			}
 			return true
@@ -722,7 +728,8 @@ type key struct{ request, path string }
 
 // mergeRules turns per-request proposals into rules. Requests with the same
 // path and format share one rule when a glob over their common ID prefix
-// matches exactly them in the catalog, never more.
+// matches exactly them in the catalog, never more. The rules come in the
+// order ordered gives them.
 func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rule {
 	type group struct {
 		path, format string
@@ -766,6 +773,61 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 		}
 		for _, r := range g.requests {
 			out = append(out, rule{r, g.path, g.format})
+		}
+	}
+	ids := make([]string, len(cat.Requests))
+	for i, r := range cat.Requests {
+		ids[i] = r.ID
+	}
+	return ordered(out, ids)
+}
+
+// ordered puts each rule before every rule that also reaches its places
+// for some catalog request (ids). The first rule that reaches a value
+// decides it, and a * reaches any depth: $.data[*].at reaches
+// $.data[*].tags[*].at too, so the inner rule comes first and keeps its
+// own format there, while the outer one decides the places only it
+// reaches. Request globs need only share a request: an inner rule for
+// feed* goes before an outer rule for feed1.
+func ordered(rules []rule, ids []string) []rule {
+	literal := func(s string) bool { return !strings.ContainsAny(s, "*?") }
+	// share reports whether two request globs match a request in common:
+	// a literal one only itself, so the catalog is read only for two
+	// globs.
+	share := func(a, b string) bool {
+		switch {
+		case literal(a) && literal(b):
+			return a == b
+		case literal(b):
+			return glob.Match(a, b)
+		case literal(a):
+			return glob.Match(b, a)
+		}
+		for _, id := range ids {
+			if glob.Match(a, id) && glob.Match(b, id) {
+				return true
+			}
+		}
+		return false
+	}
+	reaches := func(a, b rule) bool {
+		return a != b && share(a.request, b.request) && glob.Match(a.path, b.path)
+	}
+	out := make([]rule, 0, len(rules))
+	done := make([]bool, len(rules))
+	var emit func(i int)
+	emit = func(i int) {
+		done[i] = true
+		for j := range rules {
+			if !done[j] && reaches(rules[i], rules[j]) {
+				emit(j)
+			}
+		}
+		out = append(out, rules[i])
+	}
+	for i := range rules {
+		if !done[i] {
+			emit(i)
 		}
 	}
 	return out

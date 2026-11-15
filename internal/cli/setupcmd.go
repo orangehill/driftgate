@@ -144,6 +144,7 @@ type setup struct {
 	adopted  string   // the main worktree whose project this run took (relative), if any
 	copied   string   // what became of the pristine copy, for the summary
 	answered []string // what answered at each address
+	keyed    bool     // the key step ran already, before a new project was written
 }
 
 func setupCmd(args []string, out, errOut io.Writer) (int, error) {
@@ -213,9 +214,11 @@ func (s *setup) run(cfg, project, mode, driver, database, appURL string) (int, e
 		return 0, configErr("%v", err)
 	}
 	d, _ := detect(p.Root, p.Project, nil)
-	s.step("key")
-	if err := s.key(p); err != nil {
-		return 0, err
+	if !s.keyed {
+		s.step("key")
+		if err := s.key(p); err != nil {
+			return 0, err
+		}
 	}
 	if p, err = s.ownDatabase(p, path); err != nil {
 		return 0, err
@@ -321,6 +324,18 @@ func (s *setup) project(ctx context.Context, cfg, project, mode, driver, databas
 	for _, c := range s.chosen {
 		fmt.Fprintln(s.out, "chosen: "+c)
 	}
+	// The key step runs before the project's files are written, so a key
+	// that cannot be read or made leaves none of them behind. The ignore
+	// entries come first and may stay: a key file's folder must be ignored
+	// before the key is made.
+	if err := dr.p.Layout.WriteIgnores(); err != nil {
+		return "", envErr(err)
+	}
+	s.step("key")
+	if err := s.key(dr.p); err != nil {
+		return "", err
+	}
+	s.keyed = true
 	if err := dr.write(); err != nil {
 		return "", envErr(err)
 	}
