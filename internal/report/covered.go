@@ -233,13 +233,17 @@ func (r *Report) SameSecondNote() string {
 	for _, res := range r.Results {
 		for _, d := range res.Drifts {
 			item, ok := strings.CutPrefix(d.Where, "side-effects:")
-			if d.Kind != compare.KindSideEffect || d.Expected != "" || !ok || strings.Contains(item, "[") ||
+			if d.Kind != compare.KindSideEffect || d.Expected != "" || !ok || !strings.Contains(item, "/table:") || strings.Contains(item, "[") ||
 				!(d.Baseline == "changed" && d.Current == "unchanged" || d.Baseline == "unchanged" && d.Current == "changed") {
 				continue
 			}
+			// Alone: no row of the table differs, and no sequence, view or
+			// trigger moved with it (a sequence that moves is a real write).
 			alone := true
 			for _, o := range res.Drifts {
-				alone = alone && !(o.Kind == compare.KindSideEffect && strings.HasPrefix(o.Where, d.Where+"["))
+				other, ok := strings.CutPrefix(o.Where, "side-effects:")
+				alone = alone && !(o.Kind == compare.KindSideEffect && ok &&
+					(strings.HasPrefix(o.Where, d.Where+"[") || !strings.Contains(other, "/table:")))
 			}
 			if alone {
 				return "table changed in one capture only: two writes to the same row within one second can leave a timestamp unchanged in one capture and changed in the other; if the request's own change is the same, run its unit with --restore each, or track the table with row_tracking to see which columns changed"

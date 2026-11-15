@@ -170,7 +170,9 @@ func TestSameSecondNote(t *testing.T) {
 	expected := flip
 	expected.Expected = "ref"
 	other := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/table:tickets[id=1]", Baseline: "updated status", Current: "inserted"}
-	for name, ds := range map[string][]compare.Drift{"with a row": {flip, row}, "expected": {expected}, "a row only": {other}} {
+	seq := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/sequence:orders_id_seq", Baseline: "changed", Current: "unchanged"}
+	for name, ds := range map[string][]compare.Drift{"with a row": {flip, row}, "expected": {expected}, "a row only": {other},
+		"a sequence alone": {seq}, "a table with its sequence": {flip, seq}} {
 		if n := build(ds...).SameSecondNote(); n != "" {
 			t.Errorf("%s: %s", name, n)
 		}
