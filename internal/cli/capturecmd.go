@@ -790,16 +790,28 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 // reaches. Request globs need only share a request: an inner rule for
 // feed* goes before an outer rule for feed1.
 func ordered(rules []rule, ids []string) []rule {
-	reaches := func(a, b rule) bool {
-		if a == b || !glob.Match(a.path, b.path) {
-			return false
+	literal := func(s string) bool { return !strings.ContainsAny(s, "*?") }
+	// share reports whether two request globs match a request in common:
+	// a literal one only itself, so the catalog is read only for two
+	// globs.
+	share := func(a, b string) bool {
+		switch {
+		case literal(a) && literal(b):
+			return a == b
+		case literal(b):
+			return glob.Match(a, b)
+		case literal(a):
+			return glob.Match(b, a)
 		}
 		for _, id := range ids {
-			if glob.Match(a.request, id) && glob.Match(b.request, id) {
+			if glob.Match(a, id) && glob.Match(b, id) {
 				return true
 			}
 		}
 		return false
+	}
+	reaches := func(a, b rule) bool {
+		return a != b && share(a.request, b.request) && glob.Match(a.path, b.path)
 	}
 	out := make([]rule, 0, len(rules))
 	done := make([]bool, len(rules))

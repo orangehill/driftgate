@@ -912,3 +912,18 @@ func TestRepeatOrdersAcrossRequests(t *testing.T) {
 		t.Fatalf("the proposed rules do not hold:\n%s\nexit %d\n%s\n%s", body, code, out, errOut)
 	}
 }
+
+// BenchmarkOrdered: 500 requests with a rule each at one path.
+func BenchmarkOrdered(b *testing.B) {
+	var rules []rule
+	var ids []string
+	for i := range 500 {
+		id := fmt.Sprintf("req-%d", i)
+		ids = append(ids, id)
+		rules = append(rules, rule{id, "$.data[*].at", `\d+`})
+	}
+	rules = append(rules, rule{"req-*", "$.data[*].items[*].at", `\d+`})
+	for b.Loop() {
+		ordered(rules, ids)
+	}
+}
