@@ -1276,6 +1276,9 @@ func (p *Project) LoadKey() (secret.Key, error) {
 			if n := p.sealedBodies(); n > 0 {
 				err = noKey{fmt.Errorf("no encryption key, and the store holds %d private bodies sealed with the project key (%s): put that key back (%s, DRIFTGATE_KEY or key: in %s); driftgate key create would make another key, which cannot read them", n, p.Layout.Private, keyHome(p.Layout), FileName)}
 			}
+		} else if err != nil {
+			// A key that is there but cannot be read: say where it is.
+			err = fmt.Errorf("%s: %w", p.KeySource(), err)
 		}
 		if err != nil {
 			return nil, err

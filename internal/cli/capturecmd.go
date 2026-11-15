@@ -656,13 +656,15 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 	if allow == nil {
 		allow = allowlist.Empty()
 	}
-	wide := map[string]map[string]bool{} // request → generalized paths to check
+	type around struct{ prefix, suffix string } // glob.Literal of a path
+	wide := map[string]map[string]around{}      // request → generalized paths to check
 	for _, g := range general {
 		if strings.Contains(g.path, "[*]") {
 			if wide[g.request] == nil {
-				wide[g.request] = map[string]bool{}
+				wide[g.request] = map[string]around{}
 			}
-			wide[g.request][g.path] = true
+			pre, suf := glob.Literal(g.path)
+			wide[g.request][g.path] = around{pre, suf}
 		}
 	}
 	rejected := map[key]bool{}
@@ -694,8 +696,8 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
 				// A * reaches any depth: $.data[*].at reaches the at of
 				// a list inside the items too.
-				for g := range paths {
-					if glob.Match(g, path) {
+				for g, a := range paths {
+					if strings.HasPrefix(path, a.prefix) && strings.HasSuffix(path, a.suffix) && glob.Match(g, path) {
 						rejected[key{req.ID, g}] = true
 					}
 				}
@@ -716,40 +718,6 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 		out = append(out, g)
 		outValues[g] = gValues[g]
 	}
-	return fold(out, outValues)
-}
-
-// fold turns the proposals of a request whose path another one's glob
-// reaches into that one: the first rule that reaches a value decides it,
-// so a rule for $.data[*].tags[*].at after one for $.data[*].at would
-// never apply. The glob's format is learned from the values of both.
-func fold(keys []key, values map[key][]string) ([]key, map[key][]string) {
-	owner := func(k key) key {
-		seen := map[key]bool{k: true}
-		for {
-			next := k
-			for _, a := range keys {
-				if a.request == k.request && !seen[a] && strings.Contains(a.path, "*") && glob.Match(a.path, k.path) {
-					next = a
-					break
-				}
-			}
-			if next == k {
-				return k
-			}
-			k = next
-			seen[k] = true
-		}
-	}
-	var out []key
-	outValues := map[key][]string{}
-	for _, k := range keys {
-		o := owner(k)
-		if _, ok := outValues[o]; !ok {
-			out = append(out, o)
-		}
-		outValues[o] = append(outValues[o], values[k]...)
-	}
 	return out, outValues
 }
 
@@ -760,7 +728,8 @@ type key struct{ request, path string }
 
 // mergeRules turns per-request proposals into rules. Requests with the same
 // path and format share one rule when a glob over their common ID prefix
-// matches exactly them in the catalog, never more.
+// matches exactly them in the catalog, never more. The rules come in the
+// order ordered gives them.
 func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rule {
 	type group struct {
 		path, format string
@@ -804,6 +773,35 @@ func mergeRules(cat *catalog.Catalog, keys []key, values map[key][]string) []rul
 		}
 		for _, r := range g.requests {
 			out = append(out, rule{r, g.path, g.format})
+		}
+	}
+	return ordered(out)
+}
+
+// ordered puts each rule before every rule whose request and path globs
+// also reach its places. The first rule that reaches a value decides it,
+// and a * reaches any depth: $.data[*].at reaches $.data[*].tags[*].at
+// too, so the inner rule comes first and keeps its own format there,
+// while the outer one decides the places only it reaches.
+func ordered(rules []rule) []rule {
+	reaches := func(a, b rule) bool {
+		return a != b && strings.ContainsAny(a.request+a.path, "*?") && glob.Match(a.request, b.request) && glob.Match(a.path, b.path)
+	}
+	out := make([]rule, 0, len(rules))
+	done := make([]bool, len(rules))
+	var emit func(i int)
+	emit = func(i int) {
+		done[i] = true
+		for j := range rules {
+			if !done[j] && reaches(rules[i], rules[j]) {
+				emit(j)
+			}
+		}
+		out = append(out, rules[i])
+	}
+	for i := range rules {
+		if !done[i] {
+			emit(i)
 		}
 	}
 	return out

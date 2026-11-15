@@ -349,17 +349,26 @@ func TestSetupAppNotAnswering(t *testing.T) {
 
 // TestSetupBadKeyWritesNothing: a key that cannot be read stops setup
 // before it writes the project's files, so the next setup starts anew.
+// Only the ignore entries may be written: a key file's folder must be
+// ignored before the key is made.
 func TestSetupBadKeyWritesNothing(t *testing.T) {
 	root := setupDemo(t, "http://127.0.0.1:"+closedPort(t))
 	t.Setenv("DRIFTGATE_KEY", strings.Repeat("ab", 32))
 	code, out, errOut := runCLI(t, "setup", "--yes")
-	if code == ExitClean || !strings.Contains(errOut, "encryption key") {
+	if code == ExitClean || !strings.Contains(errOut, "DRIFTGATE_KEY: encryption key must be 32 bytes") {
 		t.Fatalf("setup: %d\n%s\n%s", code, out, errOut)
 	}
 	for _, f := range []string{"driftgate.yaml", "catalog.json", "allowlist.yaml"} {
 		if _, err := os.Stat(filepath.Join(root, ".driftgate", f)); !os.IsNotExist(err) {
 			t.Errorf("%s was written: %v\n%s", f, err, out)
 		}
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if string(raw) != ".driftgate/\n" {
+		t.Errorf(".gitignore holds more than the ignore entry: %q", raw)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, ".driftgate")); len(entries) > 0 {
+		t.Errorf(".driftgate holds %v", entries)
 	}
 }
 

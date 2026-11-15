@@ -765,16 +765,21 @@ func TestProposedFormat(t *testing.T) {
 }
 
 // TestRepeatProposesNestedLists: a list in a list whose times change at
-// both levels gets one rule, since $.entries[*].updated_at reaches the
-// inner items too; the proposals pass the lint as they are, and a value
-// of a shape neither level showed is still a drift.
+// both levels gets a rule per level, the inner one first: a * reaches any
+// depth, so $.entries[*].updated_at reaches the inner items too, and the
+// first rule that reaches a value decides it. The proposals pass the lint
+// as they are, and each level keeps its own format: the other level's
+// shape is a drift.
 func TestRepeatProposesNestedLists(t *testing.T) {
 	var mu sync.Mutex
-	n, inner := 0, ""
+	n, outer, inner := 0, "", ""
 	srv := httptest.NewServer(noDate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		at, in := fmt.Sprintf("2026-01-01 10:00:%02d", n), fmt.Sprintf("10:00:%02d", n)
+		if outer != "" {
+			at = outer
+		}
 		if inner != "" {
 			in = inner
 		}
@@ -796,8 +801,9 @@ func TestRepeatProposesNestedLists(t *testing.T) {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
 	body := strings.TrimRight(out[at:], "\n") + "\n"
-	if got := strings.Count(body, "  - request:"); got != 1 || !strings.Contains(body, "path: '$.entries[*].updated_at'") {
-		t.Fatalf("want one rule for $.entries[*].updated_at:\n%s", body)
+	in, ou := strings.Index(body, "path: '$.entries[*].messages[*].updated_at'"), strings.Index(body, "path: '$.entries[*].updated_at'")
+	if strings.Count(body, "  - request:") != 2 || in < 0 || ou < in {
+		t.Fatalf("want the inner rule, then the outer one:\n%s", body)
 	}
 	write(t, allow, "version: 1\n"+body)
 	l, err := allowlist.Load(allow)
@@ -814,16 +820,23 @@ func TestRepeatProposesNestedLists(t *testing.T) {
 		t.Fatalf("capture b: exit %d\n%s\n%s", code, out, errOut)
 	}
 	if code, out, errOut := runCLI(t, "compare", "b", "--against", "a", "--config", cfg); code != ExitClean {
-		t.Fatalf("times of both levels drift under the proposed rule: exit %d\n%s\n%s", code, out, errOut)
+		t.Fatalf("times of both levels drift under the proposed rules: exit %d\n%s\n%s", code, out, errOut)
 	}
-	mu.Lock()
-	inner = "pending"
-	mu.Unlock()
-	if code, out, errOut := runCLI(t, "capture", "c", "--config", cfg); code != ExitClean {
-		t.Fatalf("capture c: exit %d\n%s\n%s", code, out, errOut)
-	}
-	if code, out, errOut := runCLI(t, "compare", "c", "--against", "a", "--config", cfg); code != ExitDrift || !strings.Contains(out, "messages[0].updated_at") {
-		t.Fatalf("a value neither level showed is not a drift: exit %d\n%s\n%s", code, out, errOut)
+	for i, c := range []struct{ outer, inner, where string }{
+		{"", "pending", "messages[0].updated_at"},
+		{"", "2026-01-01 10:00:59", "messages[0].updated_at"},
+		{"10:00:59", "", "entries[0].updated_at"},
+	} {
+		mu.Lock()
+		outer, inner = c.outer, c.inner
+		mu.Unlock()
+		tag := fmt.Sprintf("c%d", i)
+		if code, out, errOut := runCLI(t, "capture", tag, "--config", cfg); code != ExitClean {
+			t.Fatalf("capture %s: exit %d\n%s\n%s", tag, code, out, errOut)
+		}
+		if code, out, errOut := runCLI(t, "compare", tag, "--against", "a", "--config", cfg); code != ExitDrift || !strings.Contains(out, c.where) {
+			t.Errorf("outer %q, inner %q is not a drift at %s: exit %d\n%s\n%s", c.outer, c.inner, c.where, code, out, errOut)
+		}
 	}
 }
 

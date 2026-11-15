@@ -324,9 +324,10 @@ func (s *setup) project(ctx context.Context, cfg, project, mode, driver, databas
 	for _, c := range s.chosen {
 		fmt.Fprintln(s.out, "chosen: "+c)
 	}
-	// The key comes before the project's files, so a key that cannot be
-	// read or made leaves none behind; a key file needs its folder ignored
-	// first.
+	// The key step runs before the project's files are written, so a key
+	// that cannot be read or made leaves none of them behind. The ignore
+	// entries come first and may stay: a key file's folder must be ignored
+	// before the key is made.
 	if err := dr.p.Layout.WriteIgnores(); err != nil {
 		return "", envErr(err)
 	}
