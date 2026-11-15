@@ -329,12 +329,13 @@ var (
 // SuspectAuth lists, once each and sorted, the middleware of routes that do
 // not need authentication whose name looks like it signs a user in: an
 // application's own middleware that needsAuth does not know and the
-// adapter's auth does not name.
-func SuspectAuth(rs []routes.Route) []string {
+// adapter's auth does not name. Routes excluded reports (nil: none) do
+// not count.
+func SuspectAuth(rs []routes.Route, excluded func(routes.Route) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range rs {
-		if r.Auth || r.Source != "laravel" {
+		if r.Auth || r.Source != "laravel" || excluded != nil && excluded(r) {
 			continue
 		}
 		for _, m := range r.Middleware {
@@ -354,12 +355,12 @@ func SuspectAuth(rs []routes.Route) []string {
 // own web and api: route:list --json lists a group by its name, not its
 // middleware, so an application's own sign-in can hide in one
 // (adminpanel). A group is an entry without a namespace: aliases are
-// listed as classes.
-func CustomGroups(rs []routes.Route) []string {
+// listed as classes. Routes excluded reports (nil: none) do not count.
+func CustomGroups(rs []routes.Route, excluded func(routes.Route) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range rs {
-		if r.Auth || r.Source != "laravel" {
+		if r.Auth || r.Source != "laravel" || excluded != nil && excluded(r) {
 			continue
 		}
 		for _, m := range r.Middleware {

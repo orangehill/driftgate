@@ -658,7 +658,7 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 	}
 	wide := map[string]map[string]bool{} // request → generalized paths to check
 	for _, g := range general {
-		if len(members[g]) > 1 || members[g][0] != g {
+		if strings.Contains(g.path, "[*]") {
 			if wide[g.request] == nil {
 				wide[g.request] = map[string]bool{}
 			}
@@ -686,6 +686,10 @@ func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List
 			reject() // a body not read here: the places stay as they are
 			continue
 		}
+		// A list that is shorter in a later capture has items here that
+		// differed from nothing (a drift of the list, not of a value): they
+		// were not learned, so the places are proposed one by one, the
+		// stricter way.
 		compare.Places(compare.Side{Record: rec, Body: raw}, allow.ForTarget(req.Target), req.ID, func(kind compare.PlaceKind, path string) bool {
 			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
 				if g := indexes().ReplaceAllString(path, "[*]"); paths[g] {

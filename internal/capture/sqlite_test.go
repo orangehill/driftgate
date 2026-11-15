@@ -690,14 +690,15 @@ func TestProjectRootsInHome(t *testing.T) {
 	}
 }
 
-// TestWriteGap: on one state (--restore once), a request that changes data
-// is sent no sooner than writeGap after the response of the last request
-// that changed it, so a timestamp of one second always moves on; a read
-// between them is not delayed, and --restore each delays nothing.
+// TestWriteGap: on one state, a request that changes data is sent no
+// sooner than writeGap after the response of the last request that changed
+// it, so a timestamp of one second always moves on: inside a sequence also
+// with --restore each. A read between them is not delayed, nor the first
+// request after a restore (the next unit under --restore each).
 func TestWriteGap(t *testing.T) {
 	t.Setenv(secret.EnvKey, "c2VjcmV0LWtleS1mb3ItYS10ZXN0LW9ubHktMDAwMDA=")
 	defer func(d time.Duration) { writeGap = d }(writeGap)
-	writeGap = 400 * time.Millisecond
+	writeGap = time.Second // the real gap; TestMain shortens it for the other tests
 	for _, restore := range []string{"once", "each"} {
 		t.Run(restore, func(t *testing.T) {
 			t.Setenv(config.EnvStore, filepath.Join(t.TempDir(), "store"))
@@ -736,6 +737,7 @@ func TestWriteGap(t *testing.T) {
 				{ID: "add", Method: "POST", Path: "/users", Body: post, Headers: [][2]string{{"Content-Type", "application/json"}}, Storage: snapshot.Public},
 				{ID: "list", Method: "GET", Path: "/users", Storage: snapshot.Public},
 				{ID: "remove", Method: "DELETE", Path: "/users/1", Storage: snapshot.Public},
+				{ID: "remove-other", Method: "DELETE", Path: "/users/2", Storage: snapshot.Public},
 			}, Sequences: []catalog.Sequence{{ID: "s", Requests: []string{"add", "list", "remove"}}}}
 			if _, err := Run(ctx, p, cat, Options{Tag: "a", Restore: restore, Out: &out}); err != nil {
 				t.Fatalf("capture: %v\n%s", err, out.String())
@@ -745,12 +747,19 @@ func TestWriteGap(t *testing.T) {
 			if d := arrived["GET /users"].Sub(done["POST /users"]); d >= writeGap/2 {
 				t.Errorf("the read waited %v after the write", d)
 			}
-			d := arrived["DELETE /users/1"].Sub(done["POST /users"])
+			if d := arrived["DELETE /users/1"].Sub(done["POST /users"]); d < writeGap {
+				t.Errorf("the second write of the sequence came %v after the first, want %v or more", d, writeGap)
+			}
+			// The other unit runs before or after the sequence.
+			d := arrived["DELETE /users/2"].Sub(done["DELETE /users/1"])
+			if arrived["DELETE /users/2"].Before(arrived["POST /users"]) {
+				d = arrived["POST /users"].Sub(done["DELETE /users/2"])
+			}
 			switch {
 			case restore == "once" && d < writeGap:
-				t.Errorf("the second write came %v after the first, want %v or more", d, writeGap)
+				t.Errorf("the next unit's write came %v after the last write, want %v or more", d, writeGap)
 			case restore == "each" && d >= writeGap:
-				t.Errorf("--restore each: the second write waited %v", d)
+				t.Errorf("--restore each: the first request after the restore waited (%v)", d)
 			}
 		})
 	}

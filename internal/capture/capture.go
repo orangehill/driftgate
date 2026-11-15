@@ -242,12 +242,8 @@ func Run(ctx context.Context, p *config.Project, cat *catalog.Catalog, opt Optio
 		return nil, err
 	}
 	began := time.Now()
-	gap := writeGap
-	if opt.Restore == "each" {
-		gap = 0 // every unit starts from a restored state
-	}
 	r := &runner{p: p, set: set, services: services, detector: detector, out: opt.Out, log: opt.Log, env: opt.Env, tr: tr,
-		timings: map[string]int64{}, gap: gap,
+		timings: map[string]int64{}, gap: writeGap,
 		sum: &Summary{Personal: map[string][]pii.Finding{}, Unscanned: map[string]string{}, Writers: map[string][]string{},
 			Retried: map[string]*snapshot.Retry{}, NoRowValues: noValues}}
 	if r.uploads, err = prepareUploads(p, all); err != nil {
@@ -869,8 +865,8 @@ type runner struct {
 	uploads  map[string]multipartBody // requests with files, by ID
 	tainted  bool                     // a real file was uploaded since the last restore
 	// wrote is when the response of the last request that changed the
-	// state arrived, since the last restore (zero: none); gap is
-	// writeGap, or 0 with --restore each (writeAfter).
+	// state arrived, since the last restore (zero: none); gap: see
+	// writeAfter.
 	wrote    time.Time
 	gap      time.Duration
 	retry    *retrying // retries of the read-only phase; nil: none
@@ -1074,10 +1070,9 @@ send:
 	return firstErr
 }
 
-// step sends one request of a unit and records what it changed in the state.
 // writeGap is the least time between the response of a request that
-// changed the state and the next request that changes data, when they run
-// on one state (--restore once). A timestamp of one second, such as
+// changed the state and the next request that changes data on the same
+// state, without a restore between them. A timestamp of one second, such as
 // Laravel's updated_at, then always gets another value: two requests that
 // touch the same row in the same second would leave it unchanged by the
 // second one in one capture and changed in the next. A full second holds
@@ -1086,7 +1081,8 @@ var writeGap = time.Second
 
 // writeAfter waits, before a request that changes data, for what is left
 // of the gap since the last response that changed the state. A request
-// that only reads, and every request after a restore, is not delayed.
+// the catalog says only reads, and the first request after a restore
+// (reset clears wrote), is not delayed.
 func (r *runner) writeAfter(ctx context.Context, req catalog.Request) error {
 	if r.gap <= 0 || r.wrote.IsZero() || !req.Mutating() {
 		return nil
@@ -1105,6 +1101,7 @@ func (r *runner) writeAfter(ctx context.Context, req catalog.Request) error {
 	}
 }
 
+// step sends one request of a unit and records what it changed in the state.
 func (r *runner) step(ctx context.Context, req catalog.Request, prev states) (states, error) {
 	var rowsBefore map[string]state.Rows
 	var err error

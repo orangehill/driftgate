@@ -142,12 +142,21 @@ func authNotes(out io.Writer, p *config.Project, adapters []discover.Adapter, in
 			fmt.Fprintf(out, "note: discover[].auth %s matches no middleware of a route; route:list --json lists an alias as its class and a middleware group by its name, so name the class as it shows there (with or without its namespace), or the group it is in\n", n)
 		}
 	}
-	if ms := discover.SuspectAuth(inv.Routes); len(ms) > 0 {
+	// Excluded routes get no request, so their middleware say nothing
+	// (Horizon's own Authenticate).
+	var excluded func(routes.Route) bool
+	if excl, err := routes.LoadExclusions(p.Path("exclusions.yaml")); err == nil {
+		for i := range excl.Routes {
+			excl.Routes[i].Target = p.Canonical(excl.Routes[i].Target)
+		}
+		excluded = func(r routes.Route) bool { return excl.Excluded(r) != nil }
+	}
+	if ms := discover.SuspectAuth(inv.Routes, excluded); len(ms) > 0 {
 		_, base := discover.MiddlewareName(ms[0])
 		fmt.Fprintf(out, "note: routes with %s get no identity; if it signs a user in, name its class under discover[].auth (e.g. auth: [%s]) and run driftgate discover --write\n",
 			strings.Join(ms, ", "), base)
 	}
-	if gs := discover.CustomGroups(inv.Routes); len(gs) > 0 {
+	if gs := discover.CustomGroups(inv.Routes, excluded); len(gs) > 0 {
 		fmt.Fprintf(out, "note: routes with the middleware %s %s get no identity; route:list --json lists a group by its name, not its middleware: if one signs a user in, name it under discover[].auth (e.g. auth: [%s]) and run driftgate discover --write\n",
 			plural(len(gs), "group", "groups"), strings.Join(gs, ", "), gs[0])
 	}
