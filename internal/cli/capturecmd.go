@@ -538,7 +538,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 						}
 					}
 				case (d.Kind == compare.KindValue || d.Kind == compare.KindText || d.Kind == compare.KindAttributeValue || d.Kind == compare.KindCell) && d.Texts != [2]string{}:
-					k := key{d.Request, indexes().ReplaceAllString(d.Where, "[*]")}
+					k := key{d.Request, d.Where}
 					if _, ok := values[k]; !ok {
 						keys = append(keys, k)
 					}
@@ -549,6 +549,7 @@ func repeatReport(out io.Writer, p *config.Project, cat *catalog.Catalog, allow 
 			}
 		}
 	}
+	keys, values = generalize(cat, first, allow, keys, values)
 	var cols []string
 	n := 0
 	for _, l := range rows {
@@ -627,6 +628,92 @@ func proposedFormat(f string) (text, why string) {
 }
 
 var indexes = lazy.Regexp(`\[\d+\]`)
+
+// generalize turns the proposals of places in lists (keys, by their
+// indexed paths, and their values) into proposals for every item:
+// $.data[3].at and $.data[7].at become one for $.data[*].at, with the
+// values of both. Its format is learned only from the items that
+// differed, so a path with [*] is proposed only when every place it
+// reaches in the first capture differed (compare.Places, the paths a
+// drift would have). Otherwise, as for a stable script[0] beside the
+// script[1] of an error page, the places are proposed one by one, each
+// with its own values: a later change of the stable one is its own
+// drift, not one a format learned elsewhere judges.
+func generalize(cat *catalog.Catalog, first *snapshot.Set, allow *allowlist.List, keys []key, values map[key][]string) ([]key, map[key][]string) {
+	var general []key
+	gValues := map[key][]string{}
+	members := map[key][]key{}
+	learned := map[key]bool{}
+	for _, k := range keys {
+		g := key{k.request, indexes().ReplaceAllString(k.path, "[*]")}
+		if _, ok := gValues[g]; !ok {
+			general = append(general, g)
+		}
+		gValues[g] = append(gValues[g], values[k]...)
+		members[g] = append(members[g], k)
+		learned[k] = true
+	}
+	if allow == nil {
+		allow = allowlist.Empty()
+	}
+	wide := map[string]map[string]bool{} // request → generalized paths to check
+	for _, g := range general {
+		if strings.Contains(g.path, "[*]") {
+			if wide[g.request] == nil {
+				wide[g.request] = map[string]bool{}
+			}
+			wide[g.request][g.path] = true
+		}
+	}
+	rejected := map[key]bool{}
+	for _, req := range cat.Requests {
+		paths := wide[req.ID]
+		if paths == nil {
+			continue
+		}
+		reject := func() {
+			for path := range paths {
+				rejected[key{req.ID, path}] = true
+			}
+		}
+		rec, err := first.Record(req.ID)
+		if err != nil || rec == nil {
+			reject()
+			continue
+		}
+		raw, err := first.Body(rec)
+		if err != nil {
+			reject() // a body not read here: the places stay as they are
+			continue
+		}
+		// A list that is shorter in a later capture has items here that
+		// differed from nothing (a drift of the list, not of a value): they
+		// were not learned, so the places are proposed one by one, the
+		// stricter way.
+		compare.Places(compare.Side{Record: rec, Body: raw}, allow.ForTarget(req.Target), req.ID, func(kind compare.PlaceKind, path string) bool {
+			if kind == compare.PlaceValue && !learned[key{req.ID, path}] {
+				if g := indexes().ReplaceAllString(path, "[*]"); paths[g] {
+					rejected[key{req.ID, g}] = true
+				}
+			}
+			return true
+		})
+	}
+	var out []key
+	outValues := map[key][]string{}
+	for _, g := range general {
+		if rejected[g] {
+			for _, k := range members[g] {
+				out = append(out, k)
+				outValues[k] = values[k]
+			}
+			continue
+		}
+		out = append(out, g)
+		outValues[g] = gValues[g]
+	}
+	return out, outValues
+}
 
 type rule struct{ request, path, format string }
 

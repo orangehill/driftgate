@@ -278,7 +278,9 @@ func MiddlewareName(m string) (full, base string) {
 // named reports whether middleware m is one of names: by its class, with or
 // without the namespace, or its name as listed. It never matches a part of a
 // name, so api does not match every route of the api group. route:list
-// --json lists aliases and groups resolved to classes.
+// --json lists an alias as its class and a middleware group by its name
+// (web, api, members): only -vv expands groups, as RouteListCommand
+// flushes them otherwise. A group is named as listed.
 func named(names []string, m string) bool {
 	full, base := MiddlewareName(m)
 	for _, n := range names {
@@ -290,8 +292,9 @@ func named(names []string, m string) bool {
 }
 
 // UnmatchedAuth lists the names of auth that match no middleware of rs, the
-// routes of that adapter: an alias or a group name, which route:list --json
-// lists as classes, or a misspelt class.
+// routes of that adapter: an alias, which route:list --json lists as its
+// class, a class inside a group, which it lists by the group's name, or a
+// misspelt name.
 func UnmatchedAuth(auth []string, rs []routes.Route) []string {
 	var out []string
 	for _, n := range auth {
@@ -326,17 +329,47 @@ var (
 // SuspectAuth lists, once each and sorted, the middleware of routes that do
 // not need authentication whose name looks like it signs a user in: an
 // application's own middleware that needsAuth does not know and the
-// adapter's auth does not name.
-func SuspectAuth(rs []routes.Route) []string {
+// adapter's auth does not name. Routes excluded reports (nil: none) do
+// not count.
+func SuspectAuth(rs []routes.Route, excluded func(routes.Route) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range rs {
-		if r.Auth || r.Source != "laravel" {
+		if r.Auth || r.Source != "laravel" || excluded != nil && excluded(r) {
 			continue
 		}
 		for _, m := range r.Middleware {
 			full, _ := MiddlewareName(m)
 			if !seen[full] && authLike.MatchString(full) && !notAuth.MatchString(full) {
+				seen[full] = true
+				out = append(out, full)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CustomGroups lists, once each and sorted, the middleware groups of
+// Laravel routes that do not need authentication, apart from Laravel's
+// own web and api: route:list --json lists a group by its name, not its
+// middleware, so an application's own sign-in can hide in one
+// (members). A group is an entry without a namespace: aliases are
+// listed as classes. Routes excluded reports (nil: none) do not count.
+func CustomGroups(rs []routes.Route, excluded func(routes.Route) bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range rs {
+		if r.Auth || r.Source != "laravel" || excluded != nil && excluded(r) {
+			continue
+		}
+		for _, m := range r.Middleware {
+			full, _ := MiddlewareName(m)
+			switch strings.ToLower(full) {
+			case "web", "api", "closure", "":
+				continue
+			}
+			if !seen[full] && !strings.Contains(full, `\`) {
 				seen[full] = true
 				out = append(out, full)
 			}

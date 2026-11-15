@@ -143,6 +143,42 @@ func TestKindsNote(t *testing.T) {
 	}
 }
 
+// TestSameSecondNote: a table changed in one capture only, with no row of
+// it that differs, gets the hint on two writes within one second, in text
+// and markdown; a row that differs too, an expected drift or another side
+// effect does not.
+func TestSameSecondNote(t *testing.T) {
+	flip := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/table:tickets", Baseline: "changed", Current: "unchanged"}
+	build := func(ds ...compare.Drift) *Report {
+		return Build("capture:c", "baseline:local", []Result{{ID: "touch", Outcome: Drift, Drifts: ds}})
+	}
+	const hint = "two writes to the same row within one second"
+	var b bytes.Buffer
+	build(flip).Text(&b, DefaultDrifts)
+	if !strings.Contains(b.String(), hint) {
+		t.Errorf("no hint in text:\n%s", b.String())
+	}
+	if md := build(flip).Markdown(DefaultDrifts); !strings.Contains(md, hint) {
+		t.Errorf("no hint in markdown:\n%s", md)
+	}
+	back := flip
+	back.Baseline, back.Current = "unchanged", "changed"
+	if build(back).SameSecondNote() == "" {
+		t.Error("no hint for unchanged → changed")
+	}
+	row := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/table:tickets[id=1]", Baseline: "updated updated_at", Current: "unchanged"}
+	expected := flip
+	expected.Expected = "ref"
+	other := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/table:tickets[id=1]", Baseline: "updated status", Current: "inserted"}
+	seq := compare.Drift{Request: "touch", Kind: compare.KindSideEffect, Where: "side-effects:db/sequence:orders_id_seq", Baseline: "changed", Current: "unchanged"}
+	for name, ds := range map[string][]compare.Drift{"with a row": {flip, row}, "expected": {expected}, "a row only": {other},
+		"a sequence alone": {seq}, "a table with its sequence": {flip, seq}} {
+		if n := build(ds...).SameSecondNote(); n != "" {
+			t.Errorf("%s: %s", name, n)
+		}
+	}
+}
+
 // TestRowValuesNote: a stop on another value of a tracked row says how to
 // leave out a column that changes by itself between days; an expected
 // one, or another side effect, does not.

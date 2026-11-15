@@ -506,19 +506,19 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 	if !find(t, rs, "GET /api/me").Auth || !find(t, rs, "GET /api/orders").Auth || find(t, rs, "GET /api/profile").Auth {
 		t.Errorf("without auth: %+v", rs)
 	}
-	if got := strings.Join(SuspectAuth(rs), ", "); got != `App\Http\Middleware\GetUserFromToken, App\Http\Middleware\VerifyJwtToken` {
+	if got := strings.Join(SuspectAuth(rs, nil), ", "); got != `App\Http\Middleware\GetUserFromToken, App\Http\Middleware\VerifyJwtToken` {
 		t.Errorf("suspects: %s", got)
 	}
 
-	src.Auth = []string{"getuserfromtoken", "adminpanel", "App\\Http\\Middleware\\VerifyJwtToken"}
+	src.Auth = []string{"getuserfromtoken", "members", "App\\Http\\Middleware\\VerifyJwtToken"}
 	rs = run(t, src)
 	for _, k := range []string{"GET /api/profile", "GET /api/admin/stats", "GET /api/report", "GET /api/me"} {
 		if !find(t, rs, k).Auth {
 			t.Errorf("%s not marked as needing auth", k)
 		}
 	}
-	if find(t, rs, "POST /login").Auth || len(SuspectAuth(rs)) != 0 {
-		t.Errorf("with auth: %+v, suspects %v", rs, SuspectAuth(rs))
+	if find(t, rs, "POST /login").Auth || len(SuspectAuth(rs, nil)) != 0 {
+		t.Errorf("with auth: %+v, suspects %v", rs, SuspectAuth(rs, nil))
 	}
 
 	// A part of a name matches nothing: api is a group of every route.
@@ -528,10 +528,36 @@ func TestLaravelAuthMiddleware(t *testing.T) {
 			t.Errorf("%s: auth %v with a part of a name", r.Key(), r.Auth)
 		}
 	}
-	if got := UnmatchedAuth([]string{"GetUserFromToken", "jwt.auth", "adminpanel"}, run(t, src)); strings.Join(got, ",") != "jwt.auth" {
+	if got := UnmatchedAuth([]string{"GetUserFromToken", "jwt.auth", "members"}, run(t, src)); strings.Join(got, ",") != "jwt.auth" {
 		t.Errorf("unmatched: %v", got)
 	}
 	if err := (Adapter{Adapter: "openapi", File: "x.json", Auth: []string{"jwt"}}).Validate(); err == nil || !strings.Contains(err.Error(), "auth is for adapter laravel") {
 		t.Errorf("auth on openapi: %v", err)
+	}
+}
+
+// TestCustomGroups: the middleware groups of routes that get no identity,
+// once each and sorted: not Laravel's web and api, nor a Closure, nor an
+// alias (listed as its namespaced class), nor a route that needs
+// authentication or is excluded.
+func TestCustomGroups(t *testing.T) {
+	rs := []routes.Route{
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/a", Middleware: []string{"web", "api", "Closure", "members", `App\Http\Middleware\GetUserFromToken`}},
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/b", Middleware: []string{"members", "tenant:acme"}},
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/c", Auth: true, Middleware: []string{"signedin"}},
+		{Source: "laravel", Methods: []string{"GET"}, Path: "/horizon/api", Middleware: []string{"horizonpanel"}},
+		{Source: "command", Methods: []string{"GET"}, Path: "/d", Middleware: []string{"other"}},
+	}
+	cases := []struct {
+		excluded func(routes.Route) bool
+		want     string
+	}{
+		{nil, "horizonpanel, members, tenant"},
+		{func(r routes.Route) bool { return strings.HasPrefix(r.Path, "/horizon") }, "members, tenant"},
+	}
+	for _, c := range cases {
+		if got := strings.Join(CustomGroups(rs, c.excluded), ", "); got != c.want {
+			t.Errorf("CustomGroups = %q, want %q", got, c.want)
+		}
 	}
 }

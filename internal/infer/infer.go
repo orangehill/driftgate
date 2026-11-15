@@ -287,6 +287,9 @@ func Pattern(values []string) string {
 	case decimals:
 		return `\d+(?:\.\d+)?`
 	}
+	if f := exponentFormat(values, negative); f != "" {
+		return f
+	}
 	toks := make([][]token, len(values))
 	for i, v := range values {
 		toks[i] = tokens(v)
@@ -468,7 +471,54 @@ var (
 	digitRun = lazy.Regexp(`\d+`)
 	integer  = lazy.Regexp(`^-?\d+$`)
 	decimal  = lazy.Regexp(`^-?\d+(?:\.\d+)?$`)
+	// scientific is a number with an exponent, as JSON and PHP write a
+	// small or large float (4.6e-5, 1.0E+25).
+	scientific = lazy.Regexp(`^-?\d+(?:\.\d+)?(?:([eE])([-+]?)\d+)?$`)
 )
+
+// exponentFormat is the format of numbers of which at least one has an
+// exponent (a timing of 4.6e-5 s): any number, its exponent optional, as
+// the same quantity is written without one once it is large enough
+// (0.00012). The exponent keeps the letter case and the sign the samples
+// have (e-, E+); a class only where they differ. "" when a value is no
+// number or none has an exponent.
+func exponentFormat(values []string, negative bool) string {
+	cases, signs := map[string]bool{}, map[string]bool{}
+	for _, v := range values {
+		m := scientific().FindStringSubmatch(v)
+		if m == nil {
+			return ""
+		}
+		if m[1] != "" {
+			cases[m[1]] = true
+			signs[m[2]] = true
+		}
+	}
+	if len(signs) == 0 {
+		return ""
+	}
+	e := "e"
+	switch {
+	case cases["e"] && cases["E"]:
+		e = "[eE]"
+	case cases["E"]:
+		e = "E"
+	}
+	sign := ""
+	switch {
+	case len(signs) > 1:
+		sign = "[-+]?"
+	case signs["-"]:
+		sign = "-"
+	case signs["+"]:
+		sign = `\+`
+	}
+	f := `\d+(?:\.\d+)?(?:` + e + sign + `\d+)?`
+	if negative {
+		f = "-?" + f
+	}
+	return f
+}
 
 // jwtFormat is the format of the JSON Web Tokens at token j: any claims
 // and signature in base64url, and the header as it is when every sample

@@ -229,6 +229,20 @@ func TestPatternNext(t *testing.T) {
 			change: []string{"attachment; filename=summary-20261115-090000.json", "attachment; filename=report-20261115-090000.csv"},
 		},
 		{
+			// A timing written with an exponent: any number, never hex
+			// (4\.[0-9a-f]{2}-5 took the 6e of 4.6e-5 for hex).
+			name:   "a small float with an exponent",
+			values: []string{"4.6e-5", "1.2e-5"},
+			next:   []string{"9.9e-6", "0.00012", "3e-5", "1.25e-10"},
+			change: []string{"4.6e+5", "4.6E-5", "4.6e-", "abc", "-4.6e-5"},
+		},
+		{
+			name:   "floats with an exponent of either sign and case",
+			values: []string{"1.5E+25", "-2.5e-3"},
+			next:   []string{"7E-1", "-3.0e+2", "12"},
+			change: []string{"1.5x+25", "0x1f"},
+		},
+		{
 			// Eight digits that are not a date stay as they are.
 			name:   "a number of eight digits that is no date",
 			values: []string{"ref 20261399 build 7", "ref 20261399 build 8"},
